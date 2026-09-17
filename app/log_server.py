@@ -12,7 +12,7 @@ _print_lock = threading.Lock()
 class LogServerHandler(BaseHTTPRequestHandler):
     """Prints each received log line verbatim (display only, no persistence)."""
 
-    def do_POST(self):  # noqa: N802 - stdlib handler API
+    def do_POST(self):
         length = int(self.headers.get("Content-Length") or 0)
         line = self.rfile.read(length).decode("utf-8", "replace").rstrip("\n")
         with _print_lock:
@@ -21,7 +21,7 @@ class LogServerHandler(BaseHTTPRequestHandler):
         self.end_headers()
 
     @override
-    def log_message(self, format: str, *args: object) -> None:  # noqa: A002
+    def log_message(self, format: str, *args: object) -> None:
         pass  # suppress default request-line noise
 
 

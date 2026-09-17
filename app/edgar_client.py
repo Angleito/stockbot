@@ -10,7 +10,7 @@ import json
 import logging
 import os
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import datetime
 from decimal import Decimal
 from typing import TYPE_CHECKING
 
@@ -70,7 +70,7 @@ SEC_RESULT_CACHE_TTL_SECONDS = 86_400
 
 
 def _utc_now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(_dt.UTC).isoformat()
 
 
 def _result_content_hash(payload: dict[str, object]) -> str:
@@ -82,7 +82,7 @@ def _companyfacts_url(cik: object) -> str | None:
     if isinstance(cik, (int, float, str, bytes)):
         try:
             return f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json"
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
     return None
 
@@ -93,7 +93,7 @@ def _filing_dir_url(cik: object, accession: object) -> str | None:
     try:
         acc = str(accession).replace("-", "")
         return f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc}/"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -152,9 +152,7 @@ def _dedup_latest(frame: pd.DataFrame) -> pd.DataFrame:
     approximated by the largest fiscal_year (restatements are tagged with
     the year they were reported in).
     """
-    return frame.sort_values(["period_end", "fiscal_year"]).drop_duplicates(
-        subset=["period_end"], keep="last"
-    )
+    return frame.sort_values(["period_end", "fiscal_year"]).drop_duplicates(subset=["period_end"], keep="last")
 
 
 def _quarters_with_derived_q4(quarterly: pd.DataFrame, full_facts: pd.DataFrame, concept: str) -> pd.DataFrame:
@@ -189,9 +187,7 @@ def _derive_q4_from_facts(full_facts: pd.DataFrame, concept: str, fy_end: pd.Tim
     """Derive Q4 EPS = FY_total - YTD_through_Q3 for the fiscal year ending fy_end."""
     import pandas as pd
 
-    facts = full_facts[
-        full_facts["concept"].isin([concept, concept.split(":")[-1]])
-    ].copy()
+    facts = full_facts[full_facts["concept"].isin([concept, concept.split(":")[-1]])].copy()
     facts["duration_days"] = _fact_duration_days(facts)
     fy_end = pd.Timestamp(fy_end)
     fy = facts[(facts["duration_days"].between(*_FY_DAYS)) & (pd.to_datetime(facts["period_end"]) == fy_end)]
@@ -218,14 +214,17 @@ _DIVIDEND_SOURCE = "SEC EDGAR company facts (Declared dividends per share)"
 _DIVIDEND_TTM_MAX_AGE_DAYS = 180
 
 
-def _is_recent_dividend_period(period_end: object, as_of: _dt.date, max_age_days: int = _DIVIDEND_TTM_MAX_AGE_DAYS) -> bool:
+def _is_recent_dividend_period(
+    period_end: object, as_of: _dt.date, max_age_days: int = _DIVIDEND_TTM_MAX_AGE_DAYS
+) -> bool:
     """True only when period_end is on/before as_of and within max_age_days."""
     try:
         end = _dt.date.fromisoformat(str(period_end)[:10])
-    except (TypeError, ValueError, AttributeError):
+    except TypeError, ValueError, AttributeError:
         return False
     delta = (as_of - end).days
     return 0 <= delta <= max_age_days
+
 
 def _null_dividend_payload(ticker: str) -> dict[str, object]:
     """Coverage uncertainty: concept absence is not proof of a nonpayer."""
@@ -252,7 +251,7 @@ def _has_contiguous_gaps(period_ends: list[object], day_range: tuple[int, int], 
         return False
     try:
         ends = sorted(_dt.date.fromisoformat(str(p)[:10]) for p in period_ends)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return False
     return all(day_range[0] <= (b - a).days <= day_range[1] for a, b in itertools.pairwise(ends))
 
@@ -264,7 +263,12 @@ def _has_contiguous_quarters(period_ends: list[object]) -> bool:
 
 def _dividend_growth(annual: dict[int, float]) -> dict[str, float | None]:
     """Exact-gap growth/CAGR over annual totals; missing gaps stay null."""
-    out: dict[str, float | None] = {"growth_1y": None, "growth_3y_cagr": None, "growth_5y_cagr": None, "growth_10y_cagr": None}
+    out: dict[str, float | None] = {
+        "growth_1y": None,
+        "growth_3y_cagr": None,
+        "growth_5y_cagr": None,
+        "growth_10y_cagr": None,
+    }
     if not annual:
         return out
     latest_year = max(annual)
@@ -305,7 +309,7 @@ def _dividend_ttm_float(ttm: object) -> float | None:
         if isinstance(ttm, (int, float, str, bytes)):
             return float(ttm)
         return float(str(ttm))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -313,6 +317,7 @@ def _dividend_live_quote(ticker: str) -> dict[str, object] | None:
     """Live quote dict or None when unavailable/not a dict."""
     try:
         from . import valuation as _valuation
+
         quote = _valuation.get_live_quote(ticker)
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
@@ -323,13 +328,19 @@ def _dividend_quote_price(quote: dict[str, object]) -> object:
     """Quote price or None when the lookup itself fails."""
     try:
         return quote.get("price") if quote.get("price") is not None else None
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
 def _dividend_valuation(ticker: str, ttm: object, *, include_price: bool) -> dict[str, object]:
     """Point-in-time valuation: stale/absent TTM or historical requests expose no price."""
-    nulls = {"ttm_dividend_yield": None, "price": None, "price_source": None, "price_retrieved_at": None, **_dividend_valuation_stub()}
+    nulls = {
+        "ttm_dividend_yield": None,
+        "price": None,
+        "price_source": None,
+        "price_retrieved_at": None,
+        **_dividend_valuation_stub(),
+    }
     if not include_price or ttm is None:
         return dict(nulls)
     ttm_f = _dividend_ttm_float(ttm)
@@ -341,7 +352,13 @@ def _dividend_valuation(ticker: str, ttm: object, *, include_price: bool) -> dic
     price = _dividend_quote_price(quote)
     if not isinstance(price, (int, float)) or price <= 0:
         return dict(nulls)
-    return {"ttm_dividend_yield": round(ttm_f / price, 4), "price": price, "price_source": "yahoo", "price_retrieved_at": quote.get("retrieved_at"), **_dividend_valuation_stub()}
+    return {
+        "ttm_dividend_yield": round(ttm_f / price, 4),
+        "price": price,
+        "price_source": "yahoo",
+        "price_retrieved_at": quote.get("retrieved_at"),
+        **_dividend_valuation_stub(),
+    }
 
 
 def _dividend_annual_history(
@@ -356,7 +373,7 @@ def _dividend_annual_history(
         try:
             end = _dt.date.fromisoformat(str(r.get("period_end"))[:10])
             val = float(raw_value)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         prev = by_year.get(end.year)
         if prev is None or str(r.get("period_end")) > prev[0]:
@@ -388,12 +405,17 @@ def get_fundamentals(ticker: str, metric: str, *, include_dividend_price: bool =
         result = dict(result)
         latest_end = result.pop("_latest_dividend_period_end", None)
         if result.get("dividend_status") != "insufficient_data":
-            if result.get("ttm_dividend_per_share") is None or not _is_recent_dividend_period(latest_end, _dt.date.today()):  # noqa: DTZ011 - trading-calendar local date has no tz meaning
+            if result.get("ttm_dividend_per_share") is None or not _is_recent_dividend_period(
+                latest_end,
+                _dt.date.today(),  # noqa: DTZ011 - trading-calendar local date has no tz meaning
+            ):
                 result["ttm_dividend_per_share"] = None
                 result["dividend_status"] = "unknown"
             else:
                 result["dividend_status"] = "paying"
-        result.update(_dividend_valuation(ticker, result.get("ttm_dividend_per_share"), include_price=include_dividend_price))
+        result.update(
+            _dividend_valuation(ticker, result.get("ttm_dividend_per_share"), include_price=include_dividend_price)
+        )
     return result
 
 
@@ -442,9 +464,15 @@ def _fundamentals_shares(ticker: str, company: Company, cik: object, facts_url: 
     if facts is None:
         return _no_data(ticker, "company facts not available")
     df = facts.to_dataframe()
-    shares = df[df["concept"].isin(
-        ["us-gaap:CommonStockSharesOutstanding", "CommonStockSharesOutstanding", "dei:EntityCommonStockSharesOutstanding"]
-    )]
+    shares = df[
+        df["concept"].isin(
+            [
+                "us-gaap:CommonStockSharesOutstanding",
+                "CommonStockSharesOutstanding",
+                "dei:EntityCommonStockSharesOutstanding",
+            ]
+        )
+    ]
     if shares.empty:
         return _no_data(ticker, "shares outstanding not found in company facts")
     latest = shares.sort_values("period_end").iloc[-1]
@@ -459,7 +487,11 @@ def _fundamentals_shares(ticker: str, company: Company, cik: object, facts_url: 
         out["cik"] = cik
     if facts_url:
         out["source_url"] = facts_url
-    for k, v in (("accession", _fact_field(latest, "accession", "accn")), ("form", _fact_field(latest, "form")), ("filed", _fact_field(latest, "filed", "filed_at"))):
+    for k, v in (
+        ("accession", _fact_field(latest, "accession", "accn")),
+        ("form", _fact_field(latest, "form")),
+        ("filed", _fact_field(latest, "filed", "filed_at")),
+    ):
         if v:
             out[k] = v
     return out
@@ -471,10 +503,7 @@ def _recent_quarterly_facts(df: pd.DataFrame, concept: str) -> pd.DataFrame | No
     if subset.empty:
         return None
     subset["duration_days"] = _fact_duration_days(subset)
-    q = subset[
-        (subset["duration_days"] >= _QUARTER_DAYS[0])
-        & (subset["duration_days"] <= _QUARTER_DAYS[1])
-    ].copy()
+    q = subset[(subset["duration_days"] >= _QUARTER_DAYS[0]) & (subset["duration_days"] <= _QUARTER_DAYS[1])].copy()
     if q.empty:
         return q
     q = _dedup_latest(q).sort_values("period_end")
@@ -501,7 +530,14 @@ def _merge_eps_quarters(recent_diluted: pd.DataFrame, recent_basic: pd.DataFrame
     return quarterly_eps
 
 
-def _eps_result(ticker: str, quarterly_eps: list[dict[str, object]], recent_diluted: pd.DataFrame, recent_basic: pd.DataFrame | None, cik: object, facts_url: str | None) -> dict[str, object]:
+def _eps_result(
+    ticker: str,
+    quarterly_eps: list[dict[str, object]],
+    recent_diluted: pd.DataFrame,
+    recent_basic: pd.DataFrame | None,
+    cik: object,
+    facts_url: str | None,
+) -> dict[str, object]:
     """EPS payload with TTM totals once four quarters are present."""
     result: dict[str, object] = {
         "ticker": ticker,
@@ -548,10 +584,7 @@ def _dividends_ttm(recent: pd.DataFrame) -> float | None:
 
 def _dividends_fy_rows(div: pd.DataFrame) -> list[dict[str, str | float]]:
     """Full-year dividend facts as period_end/value rows."""
-    fy = div[
-        (div["duration_days"] >= _FY_DAYS[0])
-        & (div["duration_days"] <= _FY_DAYS[1])
-    ].copy()
+    fy = div[(div["duration_days"] >= _FY_DAYS[0]) & (div["duration_days"] <= _FY_DAYS[1])].copy()
     if fy.empty:
         return []
     fy = _dedup_latest(fy)
@@ -564,21 +597,14 @@ def _fundamentals_dividends(ticker: str, company: Company) -> dict[str, object]:
     if facts is None:
         return _no_data(ticker, "company facts not available")
     df = facts.to_dataframe()
-    div = df[df["concept"].isin(
-        ["us-gaap:" + _DIVIDEND_CONCEPT, _DIVIDEND_CONCEPT]
-    )].copy()
+    div = df[df["concept"].isin(["us-gaap:" + _DIVIDEND_CONCEPT, _DIVIDEND_CONCEPT])].copy()
     if div.empty:
         return _null_dividend_payload(ticker)
     div["duration_days"] = _fact_duration_days(div)
-    q = div[
-        (div["duration_days"] >= _QUARTER_DAYS[0])
-        & (div["duration_days"] <= _QUARTER_DAYS[1])
-    ].copy()
+    q = div[(div["duration_days"] >= _QUARTER_DAYS[0]) & (div["duration_days"] <= _QUARTER_DAYS[1])].copy()
     if not q.empty:
         q = _dedup_latest(q).sort_values("period_end")
-        recent = _quarters_with_derived_q4(
-            q, df, "us-gaap:" + _DIVIDEND_CONCEPT
-        )
+        recent = _quarters_with_derived_q4(q, df, "us-gaap:" + _DIVIDEND_CONCEPT)
     else:
         recent = q
     ttm = _dividends_ttm(recent)
@@ -645,7 +671,6 @@ def _fetch_fundamentals(ticker: str, metric: str) -> dict[str, object]:
         return _no_data(ticker, f"error retrieving {metric}: {e}")
 
 
-
 _OWNERSHIP_FEED_FORMS = ("SC 13D", "SC 13D/A", "SC 13G", "SC 13G/A")
 _OWNERSHIP_FEED_TTL_SECONDS = 3600  # SEC current-filings feed covers ~24h
 _OWNERSHIP_TICKER_TTL_SECONDS = 7 * 86400  # ponytail: cached CIK->ticker map, refreshes weekly
@@ -699,7 +724,7 @@ def _ownership_percent(doc: object) -> float | None:
         return None
     try:
         return round(float(getattr(doc, "total_percent")), 2)  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -709,7 +734,7 @@ def _ownership_shares(doc: object) -> int | None:
         return None
     try:
         return int(getattr(doc, "total_shares"))  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -795,7 +820,7 @@ def _attach_ownership_tickers(rows: list[dict[str, object]], limit: int) -> list
         if issuer_cik:
             try:
                 row["ticker"] = _resolve_issuer_ticker(int(str(issuer_cik)))
-            except (TypeError, ValueError):
+            except TypeError, ValueError:
                 row["ticker"] = None
     return trimmed
 
@@ -835,7 +860,6 @@ def _fetch_recent_ownership_filings(form_type: str, limit: object) -> dict[str, 
     except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("get_recent_ownership_filings(%s) failed: %s", form_type, e)
         return {"error": f"No data found: error retrieving recent {label} filings: {e}"}
-
 
 
 def get_latest_earnings_release(ticker: str) -> dict[str, object]:
@@ -950,15 +974,21 @@ def _risk_pair_texts(company: Company) -> list[tuple[Filing, str]]:
 
 def _risk_diff_text(latest: Filing, latest_text: str, prior: Filing, prior_text: str) -> str:
     """Unified diff of prior vs latest risk-factor text (sentinel when unchanged)."""
-    diff = "\n".join(difflib.unified_diff(
-        prior_text.splitlines(), latest_text.splitlines(),
-        fromfile=f"{prior.form} filed {prior.filing_date}", tofile=f"{latest.form} filed {latest.filing_date}",
-        lineterm="",
-    ))
+    diff = "\n".join(
+        difflib.unified_diff(
+            prior_text.splitlines(),
+            latest_text.splitlines(),
+            fromfile=f"{prior.form} filed {prior.filing_date}",
+            tofile=f"{latest.form} filed {latest.filing_date}",
+            lineterm="",
+        )
+    )
     return diff if diff.strip() else "No changes in risk factors language between the two filings."
 
 
-def _risk_diff_payload(ticker: str, latest: Filing, latest_text: str, prior: Filing, prior_text: str, cik: object) -> dict[str, object]:
+def _risk_diff_payload(
+    ticker: str, latest: Filing, latest_text: str, prior: Filing, prior_text: str, cik: object
+) -> dict[str, object]:
     """Risk-diff payload with filing provenance and source URLs."""
     out: dict[str, object] = {
         "ticker": ticker,
@@ -972,7 +1002,11 @@ def _risk_diff_payload(ticker: str, latest: Filing, latest_text: str, prior: Fil
     }
     _urls = []
     for _f in (prior, latest):
-        _u = getattr(_f, "filing_url", None) or getattr(_f, "url", None) or _filing_dir_url(cik, getattr(_f, "accession_no", None))
+        _u = (
+            getattr(_f, "filing_url", None)
+            or getattr(_f, "url", None)
+            or _filing_dir_url(cik, getattr(_f, "accession_no", None))
+        )
         if _u:
             _urls.append(str(_u))
     if _urls:
@@ -1011,7 +1045,11 @@ def _select_statement(financials: object, statement_type: str) -> tuple[object |
     if statement_type == "balance_sheet":
         return getattr(financials, "balance_sheet", getattr(financials, "balance", None)), None
     if statement_type == "cash_flow":
-        return getattr(financials, "cash_flow_statement", getattr(financials, "cashflow_statement", getattr(financials, "cash_flow", None))), None
+        return getattr(
+            financials,
+            "cash_flow_statement",
+            getattr(financials, "cashflow_statement", getattr(financials, "cash_flow", None)),
+        ), None
     return None, {"error": f"Unknown statement type '{statement_type}'"}
 
 
@@ -1142,7 +1180,9 @@ def _fetch_xbrl_facts(ticker: str, concept: str) -> dict[str, object]:
         if matching.empty:
             return _no_data(ticker, f"no XBRL facts found for concept '{concept}'")
         if matching["concept"].nunique() > 1:
-            return _no_data(ticker, f"ambiguous XBRL concept for '{concept}': {sorted(matching['concept'].unique().tolist())[:8]}")
+            return _no_data(
+                ticker, f"ambiguous XBRL concept for '{concept}': {sorted(matching['concept'].unique().tolist())[:8]}"
+            )
         result_list = _xbrl_result_rows(matching)
         _cik = getattr(company, "cik", None)
         _facts_url = _companyfacts_url(_cik)

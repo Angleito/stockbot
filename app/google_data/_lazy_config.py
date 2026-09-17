@@ -1,4 +1,5 @@
 """Typed access to app.config with env fallback; never raises on ImportError."""
+
 from __future__ import annotations
 
 import os
@@ -17,6 +18,7 @@ def google_data_enabled() -> bool:
             return False
     return os.getenv("GOOGLE_DATA_ENABLED", "").strip().lower() in ("1", "true", "yes")
 
+
 def get_datacommons_api_key() -> str | None:
     try:
         from .. import config as _cfg
@@ -30,6 +32,7 @@ def get_datacommons_api_key() -> str | None:
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
             pass
     return (os.getenv("DATACOMMONS_API_KEY") or "").strip() or None
+
 
 def get_data_root_or_cwd() -> Path:
     try:

@@ -16,9 +16,7 @@ def _write(root: Path, rel: str, text: str) -> Path:
     return p
 
 
-def test_clean_tree_passes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_clean_tree_passes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     _write(tmp_path, "app/foo.py", "x = 1\n")
     assert v.scan(tmp_path) == []
     monkeypatch.setattr(v, "ROOT", tmp_path)
@@ -26,9 +24,7 @@ def test_clean_tree_passes(
     assert "type escapes: 0" in capsys.readouterr().out
 
 
-def test_cast_fails(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_cast_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     _write(tmp_path, "app/foo.py", "x = " + "cast" + "(int, y)\n")
     hits = v.scan(tmp_path)
     assert len(hits) == 1
@@ -94,6 +90,7 @@ def test_star_import_fails(tmp_path: Path) -> None:
     assert len(hits) == 1
     assert "app/foo.py" in hits[0]
     assert "from typing import *" in hits[0]
+
 
 def test_module_alias_cast_fails(tmp_path: Path) -> None:
     _write(tmp_path, "app/foo.py", "import typing as t\nv = t." + "cast" + "(str, x)\n")

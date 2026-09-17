@@ -1,4 +1,4 @@
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 
 from app.analytics.portfolio import largest_positions, portfolio_concentration
@@ -18,7 +18,7 @@ def _snapshot(
     last: Decimal | None = Decimal(100),
     bid: Decimal | None = Decimal("99.5"),
     ask: Decimal | None = Decimal("100.5"),
-    retrieved_at: datetime = datetime(2026, 8, 25, tzinfo=timezone.utc),
+    retrieved_at: datetime = datetime(2026, 8, 25, tzinfo=UTC),
     source: str = "robinhood_mcp",
     security_id: str | None = None,
 ) -> Quote:

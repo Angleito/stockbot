@@ -33,7 +33,7 @@ None
 ## Required arguments
 
 - `kind` (string): Resource store to read.
-- `resource_id` (string): Evidence, freeze, dossier, job, or session ID.
+- `resource_id` (string): Evidence, freeze, dossier, coverage-artifact, job, or session ID.
 - `session_id` (string): Research session ID.
 
 ## Optional arguments

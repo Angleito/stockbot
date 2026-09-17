@@ -6,7 +6,7 @@ Network-free and agent-free: raw payloads in, normalized rows out.
 from __future__ import annotations
 
 import re
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 
 from .domain.market import ids
 
@@ -32,11 +32,17 @@ _DIVIDEND_EVENT_DATE_ROLES: dict[str, str] = {
 CANONICAL_CONCEPTS: dict[str, tuple[str, ...]] = {
     "Revenue": ("RevenueFromContractWithCustomerExcludingAssessedTax", "Revenues"),
     "NetIncomeLoss": ("NetIncomeLoss",),
-    "CashAndCashEquivalents": ("CashAndCashEquivalentsAtCarryingValue", "CashAndCashEquivalentsAtCarryingValueIncludingDiscontinuedOperations"),
+    "CashAndCashEquivalents": (
+        "CashAndCashEquivalentsAtCarryingValue",
+        "CashAndCashEquivalentsAtCarryingValueIncludingDiscontinuedOperations",
+    ),
     "LongTermDebt": ("LongTermDebtCurrentAndNoncurrent", "LongTermDebtNoncurrent", "LongTermDebt"),
     "OperatingCashFlow": ("NetCashProvidedByUsedInOperatingActivities",),
     "CapEx": ("PaymentsToAcquirePropertyPlantAndEquipment",),
-    "DividendsPaid": ("PaymentsOfDividendsCommonStock", "PaymentsOfDividends",),
+    "DividendsPaid": (
+        "PaymentsOfDividendsCommonStock",
+        "PaymentsOfDividends",
+    ),
 }
 
 
@@ -53,6 +59,7 @@ def _coerce_number_text(value: object) -> str | int | float | bytes:
         return value
     raise TypeError(f"non-numeric CIK/amount: {value!r}")
 
+
 def _ticker_cik(item: dict[str, object]) -> tuple[str, int | None]:
     """Upper-cased ticker + int CIK from one tickers row (None CIK when bad)."""
     ticker = str(item.get("ticker") or "").strip().upper()
@@ -61,13 +68,14 @@ def _ticker_cik(item: dict[str, object]) -> tuple[str, int | None]:
         return "", None
     try:
         cik = int(_coerce_number_text(cik_raw))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "", None
     return ticker, cik
 
 
-
-def _ticker_rows(item: dict[str, object], ticker: str, cik: int, retrieved_at: str, content_hash: str) -> tuple[dict[str, object], dict[str, object]]:
+def _ticker_rows(
+    item: dict[str, object], ticker: str, cik: int, retrieved_at: str, content_hash: str
+) -> tuple[dict[str, object], dict[str, object]]:
     """Entity + alias rows for one validated ticker/CIK pair."""
     entity_id = ids.sec_entity_id(cik)
     return {
@@ -93,6 +101,7 @@ def _ticker_rows(item: dict[str, object], ticker: str, cik: int, retrieved_at: s
         "content_hash": content_hash,
         "parser_version": COMPANY_TICKERS_PARSER_VERSION,
     }
+
 
 def normalize_sec_tickers(raw: object, *, retrieved_at: str, content_hash: str) -> dict[str, list[dict[str, object]]]:
     entities: list[dict[str, object]] = []
@@ -157,11 +166,21 @@ def _unit_facts(payload: object, unit: str) -> list[object]:
 def _canonical_name(tag: object) -> str | None:
     """Canonical concept name for a tag (None when the tag is unknown)."""
     return next((name for name, aliases in CANONICAL_CONCEPTS.items() if tag in aliases), None)
-def _collect_entries(entries: list[tuple[str, str, str, dict[str, object]]], name: str, namespace: object, tag: object, unit: str, facts: list[object]) -> None:
+
+
+def _collect_entries(
+    entries: list[tuple[str, str, str, dict[str, object]]],
+    name: str,
+    namespace: object,
+    tag: object,
+    unit: str,
+    facts: list[object],
+) -> None:
     """Append (name, original, unit, fact) rows for dict facts only."""
     for fact in facts:
         if isinstance(fact, dict):
             entries.append((name, f"{namespace}:{tag}", unit, fact))
+
 
 def _extract_canonical_facts(raw: object) -> list[tuple[str, str, str, dict[str, object]]]:
     entries: list[tuple[str, str, str, dict[str, object]]] = []
@@ -172,6 +191,7 @@ def _extract_canonical_facts(raw: object) -> list[tuple[str, str, str, dict[str,
                 continue
             _collect_entries(entries, canonical, namespace, tag, "USD", _unit_facts(payload, "USD"))
     return entries
+
 
 def _extract_eps_facts(raw: object) -> list[tuple[str, str, str, dict[str, object]]]:
     """Per-share earnings facts, accepted only under the ``USD/shares`` unit."""
@@ -208,8 +228,7 @@ def _event_namespaces(raw: object) -> dict[object, object]:
 def _amount_unit_choice(units: dict[object, object]) -> list[str]:
     """Chosen amount unit: preferred USD/shares, else the sole observed unit."""
     unit_facts: list[tuple[str, list[object]]] = [
-        (unit, facts) for unit, facts in units.items()
-        if isinstance(unit, str) and isinstance(facts, list) and facts
+        (unit, facts) for unit, facts in units.items() if isinstance(unit, str) and isinstance(facts, list) and facts
     ]
     preferred = [u for u, _ in unit_facts if u == EPS_UNIT]
     # Contingency A: fall back to the sole observed unit for this concept.
@@ -223,7 +242,7 @@ def _event_amount(fact: dict[str, object]) -> float | None:
         return None
     try:
         return float(_coerce_number_text(val_raw))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -233,7 +252,9 @@ def _event_key(fact: dict[str, object]) -> tuple[str, str] | None:
     return (accession, filed) if accession and filed else None
 
 
-def _collect_event_amounts(amounts: list[tuple[str, str, float, str, str]], units: dict[object, object], namespace: object, tag: object) -> None:
+def _collect_event_amounts(
+    amounts: list[tuple[str, str, float, str, str]], units: dict[object, object], namespace: object, tag: object
+) -> None:
     """Append validated (accession, filed, amount, unit, concept) rows."""
     units_map: dict[object, object] = units
     for unit in _amount_unit_choice(units_map):
@@ -252,7 +273,9 @@ def _collect_event_amounts(amounts: list[tuple[str, str, float, str, str]], unit
             amounts.append((key[0], key[1], amount, unit, f"{namespace}:{tag}"))
 
 
-def _collect_event_dates(dates: dict[tuple[str, str], dict[str, set[str]]], units: dict[object, object], role: str) -> None:
+def _collect_event_dates(
+    dates: dict[tuple[str, str], dict[str, set[str]]], units: dict[object, object], role: str
+) -> None:
     """Merge date-role values keyed by (accession, filed)."""
     for facts in units.values():
         if not isinstance(facts, list):
@@ -267,7 +290,13 @@ def _collect_event_dates(dates: dict[tuple[str, str], dict[str, set[str]]], unit
             dates.setdefault(key, {}).setdefault(role, set()).add(value)
 
 
-def _scan_event_concept(amounts: list[tuple[str, str, float, str, str]], dates: dict[tuple[str, str], dict[str, set[str]]], namespace: object, tag: object, payload: object) -> None:
+def _scan_event_concept(
+    amounts: list[tuple[str, str, float, str, str]],
+    dates: dict[tuple[str, str], dict[str, set[str]]],
+    namespace: object,
+    tag: object,
+    payload: object,
+) -> None:
     """Scan one concept as an amount or date-role contributor (others skipped)."""
     is_amount = tag == DIVIDEND_EVENT_AMOUNT_CONCEPT
     role = _DIVIDEND_EVENT_DATE_ROLES.get(tag) if isinstance(tag, str) else None
@@ -284,7 +313,10 @@ def _scan_event_concept(amounts: list[tuple[str, str, float, str, str]], dates: 
         assert role is not None
         _collect_event_dates(dates, units_obj, role)
 
-def _group_event_amounts(amounts: list[tuple[str, str, float, str, str]]) -> dict[tuple[str, str], list[tuple[float, str, str]]]:
+
+def _group_event_amounts(
+    amounts: list[tuple[str, str, float, str, str]],
+) -> dict[tuple[str, str], list[tuple[float, str, str]]]:
     """Amounts grouped by (accession, filed)."""
     groups: dict[tuple[str, str], list[tuple[float, str, str]]] = {}
     for accession, filed, amount, unit, source_concept in amounts:
@@ -330,11 +362,24 @@ def _currency_of(unit: str) -> str:
     return unit.split("/")[0] if "/" in unit else unit
 
 
-def _paired_event(cik: int, entity_id: str, security_id: str, amount: float, unit: str, source_concept: str, declaration: str | None, record: str | None, payment: str | None, accession: str, filed: str, source_url: str, content_hash: str) -> dict[str, object]:
+def _paired_event(
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    amount: float,
+    unit: str,
+    source_concept: str,
+    declaration: str | None,
+    record: str | None,
+    payment: str | None,
+    accession: str,
+    filed: str,
+    source_url: str,
+    content_hash: str,
+) -> dict[str, object]:
     """One date-paired dividend event."""
     return {
-        "dividend_event_id": ids.sec_dividend_event_id(
-            cik, amount, record, payment, "unknown", accession, declaration),
+        "dividend_event_id": ids.sec_dividend_event_id(cik, amount, record, payment, "unknown", accession, declaration),
         "entity_id": entity_id,
         "security_id": security_id,
         "ticker": None,
@@ -360,11 +405,21 @@ def _paired_event(cik: int, entity_id: str, security_id: str, amount: float, uni
     }
 
 
-def _unpaired_event(cik: int, entity_id: str, security_id: str, amount: float, unit: str, source_concept: str, accession: str, filed: str, source_url: str, content_hash: str) -> dict[str, object]:
+def _unpaired_event(
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    amount: float,
+    unit: str,
+    source_concept: str,
+    accession: str,
+    filed: str,
+    source_url: str,
+    content_hash: str,
+) -> dict[str, object]:
     """One undated dividend event for an ambiguous group."""
     return {
-        "dividend_event_id": ids.sec_dividend_event_id(
-            cik, amount, None, None, "unknown", accession, None),
+        "dividend_event_id": ids.sec_dividend_event_id(cik, amount, None, None, "unknown", accession, None),
         "entity_id": entity_id,
         "security_id": security_id,
         "ticker": None,
@@ -390,18 +445,50 @@ def _unpaired_event(cik: int, entity_id: str, security_id: str, amount: float, u
     }
 
 
-def _emit_group_events(events: list[dict[str, object]], cik: int, entity_id: str, security_id: str, seen: dict[float, tuple[str, str]], group_dates: dict[str, set[str]], accession: str, filed: str, source_url: str, content_hash: str) -> None:
+def _emit_group_events(
+    events: list[dict[str, object]],
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    seen: dict[float, tuple[str, str]],
+    group_dates: dict[str, set[str]],
+    accession: str,
+    filed: str,
+    source_url: str,
+    content_hash: str,
+) -> None:
     """Append paired events when dates pin down, else undated events."""
     if _group_is_paired(seen, group_dates):
         declaration, record, paired = _paired_dates(group_dates)
         for amount in sorted(seen):
             unit, source_concept = seen[amount]
             for payment in paired:
-                events.append(_paired_event(cik, entity_id, security_id, amount, unit, source_concept, declaration, record, payment, accession, filed, source_url, content_hash))
+                events.append(
+                    _paired_event(
+                        cik,
+                        entity_id,
+                        security_id,
+                        amount,
+                        unit,
+                        source_concept,
+                        declaration,
+                        record,
+                        payment,
+                        accession,
+                        filed,
+                        source_url,
+                        content_hash,
+                    )
+                )
         return
     for amount in sorted(seen):
         unit, source_concept = seen[amount]
-        events.append(_unpaired_event(cik, entity_id, security_id, amount, unit, source_concept, accession, filed, source_url, content_hash))
+        events.append(
+            _unpaired_event(
+                cik, entity_id, security_id, amount, unit, source_concept, accession, filed, source_url, content_hash
+            )
+        )
+
 
 def _extract_dividend_event_facts(
     raw: object,
@@ -424,15 +511,36 @@ def _extract_dividend_event_facts(
             _scan_event_concept(amounts, dates, namespace, tag, payload)
     groups = _group_event_amounts(amounts)
     events: list[dict[str, object]] = []
-    for (accession, filed) in sorted(groups):
+    for accession, filed in sorted(groups):
         seen = _deduped_amounts(groups[(accession, filed)])
-        _emit_group_events(events, cik, entity_id, security_id, seen, dates.get((accession, filed), {}), accession, filed, source_url, content_hash)
+        _emit_group_events(
+            events,
+            cik,
+            entity_id,
+            security_id,
+            seen,
+            dates.get((accession, filed), {}),
+            accession,
+            filed,
+            source_url,
+            content_hash,
+        )
     return events
 
 
 _DIVIDEND_TEXT_MONTHS = {
-    "jan": "01", "feb": "02", "mar": "03", "apr": "04", "may": "05", "jun": "06",
-    "jul": "07", "aug": "08", "sep": "09", "oct": "10", "nov": "11", "dec": "12",
+    "jan": "01",
+    "feb": "02",
+    "mar": "03",
+    "apr": "04",
+    "may": "05",
+    "jun": "06",
+    "jul": "07",
+    "aug": "08",
+    "sep": "09",
+    "oct": "10",
+    "nov": "11",
+    "dec": "12",
 }
 _DIVIDEND_DECLARE_RE = re.compile(
     r"declared\s+an?\s+"
@@ -444,10 +552,14 @@ _DIVIDEND_DATE_RES = {
     "payment_date": re.compile(r"payable\s+(?:on\s+)?(?P<date>[A-Za-z]+\.?\s+\d{1,2},\s*\d{4})", re.IGNORECASE),
     "record_date": re.compile(
         r"(?:shareholders|stockholders)\s+of\s+record\s+(?:on\s+|as\s+of\s+)?"
-        r"(?P<date>[A-Za-z]+\.?\s+\d{1,2},\s*\d{4})", re.IGNORECASE),
+        r"(?P<date>[A-Za-z]+\.?\s+\d{1,2},\s*\d{4})",
+        re.IGNORECASE,
+    ),
     "ex_dividend_date": re.compile(
         r"ex[-\s]?dividend\s+(?:date\s+)?(?:of\s+|on\s+|is\s+)?"
-        r"(?P<date>[A-Za-z]+\.?\s+\d{1,2},\s*\d{4})", re.IGNORECASE),
+        r"(?P<date>[A-Za-z]+\.?\s+\d{1,2},\s*\d{4})",
+        re.IGNORECASE,
+    ),
 }
 
 
@@ -466,7 +578,7 @@ def _text_event_amount(match: re.Match[str]) -> float | None:
     """Dollar amount from a declare-match (unparseable -> None)."""
     try:
         return float(match.group("amount").replace(",", ""))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -480,18 +592,32 @@ def _text_dividend_type(sentence: str) -> str:
 
 def _text_event_dates(sentence: str) -> dict[str, str | None]:
     """Parsed record/payment/ex-dividend dates from one sentence."""
-    return {key: _parse_dividend_text_date(m.group("date")) for key, m in
-            ((key, rx.search(sentence)) for key, rx in _DIVIDEND_DATE_RES.items()) if m}
+    return {
+        key: _parse_dividend_text_date(m.group("date"))
+        for key, m in ((key, rx.search(sentence)) for key, rx in _DIVIDEND_DATE_RES.items())
+        if m
+    }
 
 
-def _text_event(cik: int, entity_id: str, security_id: str, amount: float, dividend_type: str, found: dict[str, str | None], sentence: str, accession: str, filed_at: str, source_url: str, content_hash: str) -> dict[str, object]:
+def _text_event(
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    amount: float,
+    dividend_type: str,
+    found: dict[str, str | None],
+    sentence: str,
+    accession: str,
+    filed_at: str,
+    source_url: str,
+    content_hash: str,
+) -> dict[str, object]:
     """One proposed dividend event from parsed sentence parts."""
     record = found.get("record_date")
     payment = found.get("payment_date")
     ex_date = found.get("ex_dividend_date")
     return {
-        "dividend_event_id": ids.sec_dividend_event_id(
-            cik, amount, record, payment, dividend_type, accession, None),
+        "dividend_event_id": ids.sec_dividend_event_id(cik, amount, record, payment, dividend_type, accession, None),
         "entity_id": entity_id,
         "security_id": security_id,
         "ticker": None,
@@ -517,7 +643,16 @@ def _text_event(cik: int, entity_id: str, security_id: str, amount: float, divid
     }
 
 
-def _text_event_for_sentence(cik: int, entity_id: str, security_id: str, sentence: str, accession: str, filed_at: str, source_url: str, content_hash: str) -> dict[str, object] | None:
+def _text_event_for_sentence(
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    sentence: str,
+    accession: str,
+    filed_at: str,
+    source_url: str,
+    content_hash: str,
+) -> dict[str, object] | None:
     """Proposed event for one sentence (None when no declare-amount)."""
     match = _DIVIDEND_DECLARE_RE.search(sentence)
     if not match:
@@ -525,7 +660,20 @@ def _text_event_for_sentence(cik: int, entity_id: str, security_id: str, sentenc
     amount = _text_event_amount(match)
     if amount is None:
         return None
-    return _text_event(cik, entity_id, security_id, amount, _text_dividend_type(sentence), _text_event_dates(sentence), sentence, accession, filed_at, source_url, content_hash)
+    return _text_event(
+        cik,
+        entity_id,
+        security_id,
+        amount,
+        _text_dividend_type(sentence),
+        _text_event_dates(sentence),
+        sentence,
+        accession,
+        filed_at,
+        source_url,
+        content_hash,
+    )
+
 
 def _extract_dividend_events_from_text(
     text: str,
@@ -542,7 +690,9 @@ def _extract_dividend_events_from_text(
     events: list[dict[str, object]] = []
     for sentence in re.split(r"(?<=[.!?])\s+", text or ""):
         sentence = sentence.strip()
-        event = _text_event_for_sentence(cik, entity_id, security_id, sentence, accession, filed_at, source_url, content_hash)
+        event = _text_event_for_sentence(
+            cik, entity_id, security_id, sentence, accession, filed_at, source_url, content_hash
+        )
         if event is not None:
             events.append(event)
     return events
@@ -560,18 +710,26 @@ def _parse_company_cik(raw: object) -> int:
     """CIK int from a companyfacts envelope (unparseable -> 0)."""
     cik_raw: object = raw.get("cik") if isinstance(raw, dict) else None
     try:
-        return int(cik_raw or 0) if isinstance(cik_raw, (int, float, str, bytes)) else (int(str(cik_raw) or 0) if cik_raw is not None else 0)
-    except (TypeError, ValueError):
+        return (
+            int(cik_raw or 0)
+            if isinstance(cik_raw, (int, float, str, bytes))
+            else (int(str(cik_raw) or 0) if cik_raw is not None else 0)
+        )
+    except TypeError, ValueError:
         return 0
 
 
 def _envelope_known(extracted_facts: list[tuple[str, str, str, dict[str, object]]], retrieved_at: str) -> str:
     """Latest filed date across facts (no dates -> retrieval time)."""
-    filed_dates = sorted(str(fact.get("filed") or "") for _, _, _, fact in extracted_facts if str(fact.get("filed") or ""))
+    filed_dates = sorted(
+        str(fact.get("filed") or "") for _, _, _, fact in extracted_facts if str(fact.get("filed") or "")
+    )
     return filed_dates[-1] if filed_dates else retrieved_at
 
 
-def _envelope_document(source_record_id: str, source_url: str, retrieved_at: str, envelope_known: str, content_hash: str) -> dict[str, object]:
+def _envelope_document(
+    source_record_id: str, source_url: str, retrieved_at: str, envelope_known: str, content_hash: str
+) -> dict[str, object]:
     """Companyfacts envelope document row."""
     return {
         "doc_id": ids.sec_doc_id("companyfacts", source_record_id, content_hash),
@@ -598,7 +756,7 @@ def _fact_float(fact: dict[str, object]) -> float | None:
         if isinstance(val_raw, (int, float, str, bytes)):
             return float(_coerce_number_text(val_raw))
         return float(str(val_raw))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -619,11 +777,27 @@ def _fact_fiscal_year(fact: dict[str, object]) -> int | None:
         if isinstance(fy_raw, (int, float, str, bytes)):
             return int(_coerce_number_text(fy_raw))
         return int(str(fy_raw))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
-def _fact_row(cik: int, entity_id: str, security_id: str, concept: str, original_concept: str, unit: str, fact: dict[str, object], value: float, period_end: str, filed_at: str, accession: str, retrieved_at: str, source_url: str, source_record_id: str, content_hash: str) -> dict[str, object]:
+def _fact_row(
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    concept: str,
+    original_concept: str,
+    unit: str,
+    fact: dict[str, object],
+    value: float,
+    period_end: str,
+    filed_at: str,
+    accession: str,
+    retrieved_at: str,
+    source_url: str,
+    source_record_id: str,
+    content_hash: str,
+) -> dict[str, object]:
     """One normalized financial-fact row."""
     start_raw = fact.get("start")
     return {
@@ -651,7 +825,19 @@ def _fact_row(cik: int, entity_id: str, security_id: str, concept: str, original
     }
 
 
-def _fact_row_or_none(cik: int, entity_id: str, security_id: str, concept: str, original_concept: str, unit: str, fact: dict[str, object], retrieved_at: str, source_url: str, source_record_id: str, content_hash: str) -> dict[str, object] | None:
+def _fact_row_or_none(
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    concept: str,
+    original_concept: str,
+    unit: str,
+    fact: dict[str, object],
+    retrieved_at: str,
+    source_url: str,
+    source_record_id: str,
+    content_hash: str,
+) -> dict[str, object] | None:
     """Normalized fact row (None when value or key parts are missing)."""
     value = _fact_float(fact)
     if value is None:
@@ -660,20 +846,64 @@ def _fact_row_or_none(cik: int, entity_id: str, security_id: str, concept: str, 
     if key is None:
         return None
     period_end, filed_at, accession = key
-    return _fact_row(cik, entity_id, security_id, concept, original_concept, unit, fact, value, period_end, filed_at, accession, retrieved_at, source_url, source_record_id, content_hash)
+    return _fact_row(
+        cik,
+        entity_id,
+        security_id,
+        concept,
+        original_concept,
+        unit,
+        fact,
+        value,
+        period_end,
+        filed_at,
+        accession,
+        retrieved_at,
+        source_url,
+        source_record_id,
+        content_hash,
+    )
 
 
-def _financial_fact_rows(extracted_facts: list[tuple[str, str, str, dict[str, object]]], cik: int, entity_id: str, security_id: str, retrieved_at: str, source_url: str, source_record_id: str, content_hash: str) -> list[dict[str, object]]:
+def _financial_fact_rows(
+    extracted_facts: list[tuple[str, str, str, dict[str, object]]],
+    cik: int,
+    entity_id: str,
+    security_id: str,
+    retrieved_at: str,
+    source_url: str,
+    source_record_id: str,
+    content_hash: str,
+) -> list[dict[str, object]]:
     """Normalized financial-fact rows (unparseable facts skipped)."""
     financial_facts: list[dict[str, object]] = []
     for concept, original_concept, unit, fact in extracted_facts:
-        row = _fact_row_or_none(cik, entity_id, security_id, concept, original_concept, unit, fact, retrieved_at, source_url, source_record_id, content_hash)
+        row = _fact_row_or_none(
+            cik,
+            entity_id,
+            security_id,
+            concept,
+            original_concept,
+            unit,
+            fact,
+            retrieved_at,
+            source_url,
+            source_record_id,
+            content_hash,
+        )
         if row is not None:
             financial_facts.append(row)
     return financial_facts
 
 
-def _company_security(security_id: str, entity_id: str, financial_facts: list[dict[str, object]], envelope_known: str, retrieved_at: str, content_hash: str) -> dict[str, object]:
+def _company_security(
+    security_id: str,
+    entity_id: str,
+    financial_facts: list[dict[str, object]],
+    envelope_known: str,
+    retrieved_at: str,
+    content_hash: str,
+) -> dict[str, object]:
     """Company security row (equity-common only when facts exist)."""
     return {
         "security_id": security_id,
@@ -687,6 +917,7 @@ def _company_security(security_id: str, entity_id: str, financial_facts: list[di
         "content_hash": content_hash,
         "parser_version": COMPANY_FACTS_PARSER_VERSION,
     }
+
 
 def normalize_sec_company_facts(
     raw: object,
@@ -702,14 +933,25 @@ def normalize_sec_company_facts(
     extracted_facts = _extract_facts(raw)
     known = _envelope_known(extracted_facts, retrieved_at)
     documents = [_envelope_document(source_record_id, source_url, retrieved_at, known, content_hash)]
-    financial_facts = _financial_fact_rows(extracted_facts, cik, entity_id, security_id, retrieved_at, source_url, source_record_id, content_hash)
+    financial_facts = _financial_fact_rows(
+        extracted_facts, cik, entity_id, security_id, retrieved_at, source_url, source_record_id, content_hash
+    )
     dividend_events = _extract_dividend_event_facts(
-        raw, cik=cik, entity_id=entity_id, security_id=security_id,
-        source_url=source_url, retrieved_at=retrieved_at, content_hash=content_hash,
+        raw,
+        cik=cik,
+        entity_id=entity_id,
+        security_id=security_id,
+        source_url=source_url,
+        retrieved_at=retrieved_at,
+        content_hash=content_hash,
     )
     securities = [_company_security(security_id, entity_id, financial_facts, known, retrieved_at, content_hash)]
-    return {"documents": documents, "financial_facts": financial_facts,
-            "securities": securities, "dividend_events": dividend_events}
+    return {
+        "documents": documents,
+        "financial_facts": financial_facts,
+        "securities": securities,
+        "dividend_events": dividend_events,
+    }
 
 
 SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v2"
@@ -728,25 +970,25 @@ def _to_float(value: object) -> float | None:
             if text.strip() == "":
                 return None
             return float(text)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
     try:
         text = str(value).strip()
         if text == "":
             return None
         return float(text)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
 def _parse_iso_instant(value: str, field: str) -> datetime:
     try:
-        parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        parsed = datetime.fromisoformat(value)
     except ValueError:
         raise ValueError(f"{field} {value!r} is not a parseable ISO-8601 timestamp")
     if parsed.tzinfo is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _check_finra_known_at(settlement_date: str, retrieved_at: str, known_at: str) -> None:
@@ -775,7 +1017,16 @@ def _finra_short_position(row: dict[str, object]) -> float | None:
     return None if short_position is not None and short_position < 0 else short_position
 
 
-def _finra_row(settlement_date: str, retrieved_at: str, known_at: str | None, content_hash: str, source_url: str, source_record_id: str, row: dict[str, object], symbol: str) -> dict[str, object]:
+def _finra_row(
+    settlement_date: str,
+    retrieved_at: str,
+    known_at: str | None,
+    content_hash: str,
+    source_url: str,
+    source_record_id: str,
+    row: dict[str, object],
+    symbol: str,
+) -> dict[str, object]:
     """One normalized short-interest row."""
     # The row ID includes the snapshot content hash so a corrected source
     # payload becomes a NEW source version (new retrieved_at) instead of
@@ -801,6 +1052,7 @@ def _finra_row(settlement_date: str, retrieved_at: str, known_at: str | None, co
         "parser_version": SHORT_INTEREST_PARSER_VERSION,
     }
 
+
 def normalize_finra_short_interest(
     rows: list[dict[str, object]],
     *,
@@ -820,5 +1072,7 @@ def normalize_finra_short_interest(
         symbol = _finra_symbol(row)
         if symbol is None:
             continue
-        short_interest.append(_finra_row(settlement_date, retrieved_at, known_at, content_hash, source_url, source_record_id, row, symbol))
+        short_interest.append(
+            _finra_row(settlement_date, retrieved_at, known_at, content_hash, source_url, source_record_id, row, symbol)
+        )
     return {"short_interest": short_interest}

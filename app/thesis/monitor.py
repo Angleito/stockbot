@@ -23,7 +23,7 @@ import hashlib
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypedDict
 
@@ -65,8 +65,7 @@ class SourceService(Protocol):
 
     name: str
 
-    def query_since(self, checkpoint: Mapping[str, object], *, known_at: str) -> list[CanonicalEvent]:
-        ...
+    def query_since(self, checkpoint: Mapping[str, object], *, known_at: str) -> list[CanonicalEvent]: ...
 
 
 @dataclass
@@ -80,7 +79,7 @@ class TickResult:
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _digest(canonical_ref: str, summary: str, known_at: str) -> str:
@@ -89,11 +88,11 @@ def _digest(canonical_ref: str, summary: str, known_at: str) -> str:
 
 def _as_dt(value: str) -> datetime | None:
     try:
-        out = datetime.fromisoformat(value.replace("Z", "+00:00"))
-    except (ValueError, TypeError):
+        out = datetime.fromisoformat(value)
+    except ValueError, TypeError:
         return None
     if out.tzinfo is None:
-        out = out.replace(tzinfo=timezone.utc)  # bare dates are UTC days
+        out = out.replace(tzinfo=UTC)  # bare dates are UTC days
     return out
 
 
@@ -106,8 +105,9 @@ def _le(a: str, b: str) -> bool:
 
 
 def _day(ts: str) -> str:
-    ts = (ts or "")
+    ts = ts or ""
     return ts[:10] if len(ts) >= 10 else ts
+
 
 def targets_for_thesis(thesis: Thesis) -> tuple[str, ...]:
     """Explicit scope only: a single 1-5 letter token, else no targets."""
@@ -198,9 +198,15 @@ def _filing_to_event(target: str, filing: Filing, *, known_at: str, source: str)
         return None
     ref, summary = _filing_summary(target, filing)
     return CanonicalEvent(
-        event_id=ref, canonical_ref=ref, source=source, known_at=ka,
-        entity=target, summary=summary, content_hash=_digest(ref, summary, ka),
-        cursor=_day(ka) or None, file_id=filing.accession_no,
+        event_id=ref,
+        canonical_ref=ref,
+        source=source,
+        known_at=ka,
+        entity=target,
+        summary=summary,
+        content_hash=_digest(ref, summary, ka),
+        cursor=_day(ka) or None,
+        file_id=filing.accession_no,
         metadata={"amendment": _filing_is_amendment(filing), "form": filing.form},
     )
 
@@ -212,8 +218,9 @@ def _material_window(checkpoint: Mapping[str, object], since_default: str | None
 
 def _material_summary(hit: RegulatoryEvent) -> tuple[str, str]:
     """Stable (event_id, summary) for one material event."""
-    return hit.event_id, (f"{hit.event_type} ({hit.issuer}) effective {hit.effective_date or 'unknown date'} "
-                          f"severity {hit.severity}")
+    return hit.event_id, (
+        f"{hit.event_type} ({hit.issuer}) effective {hit.effective_date or 'unknown date'} severity {hit.severity}"
+    )
 
 
 def _material_to_event(target: str, hit: RegulatoryEvent, *, known_at: str, source: str) -> CanonicalEvent | None:
@@ -224,9 +231,15 @@ def _material_to_event(target: str, hit: RegulatoryEvent, *, known_at: str, sour
     eid, summary = _material_summary(hit)
     accs = list(hit.source_accessions or [])
     return CanonicalEvent(
-        event_id=eid, canonical_ref=eid, source=source, known_at=ka,
-        entity=target, summary=summary, content_hash=_digest(eid, summary, ka),
-        cursor=_day(ka) or None, file_id=accs[0] if accs else None,
+        event_id=eid,
+        canonical_ref=eid,
+        source=source,
+        known_at=ka,
+        entity=target,
+        summary=summary,
+        content_hash=_digest(eid, summary, ka),
+        cursor=_day(ka) or None,
+        file_id=accs[0] if accs else None,
         metadata={"event_type": hit.event_type, "issuer": hit.issuer},
     )
 
@@ -245,8 +258,7 @@ def _finra_trends(res: dict[str, object]) -> list[str]:
 def _finra_summary(target: str, cycle: str, trends: list[str]) -> tuple[str, str]:
     """Stable (ref, summary) for one FINRA settlement cycle."""
     ref = f"finra-si:{target}:{cycle}"
-    summary = f"short-interest settlement {cycle} for {target}" + (
-        f": {'; '.join(trends)}" if trends else "")
+    summary = f"short-interest settlement {cycle} for {target}" + (f": {'; '.join(trends)}" if trends else "")
     return ref, summary
 
 
@@ -258,10 +270,15 @@ def _finra_to_event(target: str, res: dict[str, object], *, known_at: str, sourc
     trends = _finra_trends(res)
     ref, summary = _finra_summary(target, cycle, trends)
     return CanonicalEvent(
-        event_id=ref, canonical_ref=ref, source=source, known_at=cycle,
-        entity=target, summary=summary,
+        event_id=ref,
+        canonical_ref=ref,
+        source=source,
+        known_at=cycle,
+        entity=target,
+        summary=summary,
         content_hash=_digest(ref, summary, "|".join(trends)),
-        cycle=cycle, cursor=cycle,
+        cycle=cycle,
+        cursor=cycle,
         metadata={"ticker": target, "cycle": cycle, "trends": [t for t in trends]},
     )
 
@@ -275,7 +292,9 @@ def _finra_failure(target: str, res: object) -> str:
     return f"{target}: {err}"
 
 
-def _finra_query_target(target: str, fetch: FinraFetch, *, known_at: str, source: str) -> tuple[CanonicalEvent | None, str | None]:
+def _finra_query_target(
+    target: str, fetch: FinraFetch, *, known_at: str, source: str
+) -> tuple[CanonicalEvent | None, str | None]:
     """Fetch one FINRA target: (event, None), (None, error), or (None, None) on skip."""
     try:
         res = fetch(target)
@@ -376,6 +395,7 @@ class FinraShortInterestService:
 # Each handler maps already-queried source events (or local checkpoint state)
 # to candidate CanonicalEvents plus its new per-source cursor/detail state.
 
+
 def _cursor_days(events: list[CanonicalEvent]) -> list[str]:
     """Non-empty cursor/known_at days across events."""
     return [d for d in (_day(e.cursor or e.known_at or "") for e in events) if d]
@@ -396,20 +416,41 @@ def _is_amendment(event: CanonicalEvent) -> bool:
     return bool((event.metadata or {}).get("amendment"))
 
 
-def _handle_new_filing(*, rule: WatchRule, thesis: Thesis, source_events: dict[str, list[CanonicalEvent]],
-                       sources: dict[str, JSONValue], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
+def _handle_new_filing(
+    *,
+    rule: WatchRule,
+    thesis: Thesis,
+    source_events: dict[str, list[CanonicalEvent]],
+    sources: dict[str, JSONValue],
+    known_at: str,
+    stored: tuple[CanonicalEvent, ...] = (),
+) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
     filings = source_events.get("sec_filings", [])
     return [e for e in filings if _is_new_filing(e)], _cursor_state(filings, known_at)
 
 
-def _handle_filing_change(*, rule: WatchRule, thesis: Thesis, source_events: dict[str, list[CanonicalEvent]],
-                          sources: dict[str, JSONValue], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
+def _handle_filing_change(
+    *,
+    rule: WatchRule,
+    thesis: Thesis,
+    source_events: dict[str, list[CanonicalEvent]],
+    sources: dict[str, JSONValue],
+    known_at: str,
+    stored: tuple[CanonicalEvent, ...] = (),
+) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
     filings = source_events.get("sec_filings", [])
     return [e for e in filings if _is_amendment(e)], _cursor_state(filings, known_at)
 
 
-def _handle_material_event(*, rule: WatchRule, thesis: Thesis, source_events: dict[str, list[CanonicalEvent]],
-                           sources: dict[str, JSONValue], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
+def _handle_material_event(
+    *,
+    rule: WatchRule,
+    thesis: Thesis,
+    source_events: dict[str, list[CanonicalEvent]],
+    sources: dict[str, JSONValue],
+    known_at: str,
+    stored: tuple[CanonicalEvent, ...] = (),
+) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
     evs = list(source_events.get("material_events", []))
     return evs, _cursor_state(evs, known_at)
 
@@ -421,8 +462,7 @@ def _finra_ticker_entry(event: CanonicalEvent) -> tuple[str, dict[str, JSONValue
         return None
     raw = meta.get("trends") or []
     rows = raw if isinstance(raw, (list, dict, str)) else []
-    return str(meta.get("ticker") or event.entity), {
-        "cycle": meta["cycle"], "trends": list[JSONValue](rows)}
+    return str(meta.get("ticker") or event.entity), {"cycle": meta["cycle"], "trends": list[JSONValue](rows)}
 
 
 def _finra_prior_cursor(prev: Mapping[str, JSONValue], cursor: str) -> str:
@@ -507,22 +547,43 @@ def _si_changed_trends(evs: list[CanonicalEvent], cursor: str, seen: dict[str, J
     return [e for e in evs if _si_trend_changed(e, cursor, seen)]
 
 
-def _handle_si_cycle(*, rule: WatchRule, thesis: Thesis, source_events: dict[str, list[CanonicalEvent]],
-                     sources: dict[str, JSONValue], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
+def _handle_si_cycle(
+    *,
+    rule: WatchRule,
+    thesis: Thesis,
+    source_events: dict[str, list[CanonicalEvent]],
+    sources: dict[str, JSONValue],
+    known_at: str,
+    stored: tuple[CanonicalEvent, ...] = (),
+) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
     prev, cursor, _seen = _si_prev(sources)
     evs = _si_cycle_new(source_events.get("finra_short_interest", []), cursor)
     return evs, _finra_state(source_events.get("finra_short_interest", []), prev, known_at)
 
 
-def _handle_si_material(*, rule: WatchRule, thesis: Thesis, source_events: dict[str, list[CanonicalEvent]],
-                        sources: dict[str, JSONValue], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
+def _handle_si_material(
+    *,
+    rule: WatchRule,
+    thesis: Thesis,
+    source_events: dict[str, list[CanonicalEvent]],
+    sources: dict[str, JSONValue],
+    known_at: str,
+    stored: tuple[CanonicalEvent, ...] = (),
+) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
     prev, cursor, seen = _si_prev(sources)
     out = _si_changed_trends(source_events.get("finra_short_interest", []), cursor, seen)
     return out, _finra_state(source_events.get("finra_short_interest", []), prev, known_at)
 
 
-def _handle_external(*, rule: WatchRule, thesis: Thesis, source_events: dict[str, list[CanonicalEvent]],
-                     sources: dict[str, JSONValue], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
+def _handle_external(
+    *,
+    rule: WatchRule,
+    thesis: Thesis,
+    source_events: dict[str, list[CanonicalEvent]],
+    sources: dict[str, JSONValue],
+    known_at: str,
+    stored: tuple[CanonicalEvent, ...] = (),
+) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
     # Dead: no production source exists; kept only so old imports don't break.
     # Never referenced from SUPPORTED_HANDLERS/_SOURCE_FOR_RULE/_STATE_KEY.
     evs = list(source_events.get("external_evidence", []))
@@ -531,11 +592,17 @@ def _handle_external(*, rule: WatchRule, thesis: Thesis, source_events: dict[str
 
 def _invalidator_tokens(thesis: Thesis) -> set[str]:
     """Keyword tokens (>=5 chars) from the thesis invalidators."""
-    return {w for inv in (getattr(thesis, "invalidators", None) or [])
-            for w in re.split(r"[^a-z0-9]+", str(inv).lower()) if len(w) >= 5}
+    return {
+        w
+        for inv in (getattr(thesis, "invalidators", None) or [])
+        for w in re.split(r"[^a-z0-9]+", str(inv).lower())
+        if len(w) >= 5
+    }
 
 
-def _invalidator_pool(source_events: dict[str, list[CanonicalEvent]], stored: tuple[CanonicalEvent, ...]) -> list[CanonicalEvent]:
+def _invalidator_pool(
+    source_events: dict[str, list[CanonicalEvent]], stored: tuple[CanonicalEvent, ...]
+) -> list[CanonicalEvent]:
     """This tick's events plus already-stored refs as the match pool."""
     return [e for evs in source_events.values() for e in evs] + list(stored)
 
@@ -550,12 +617,19 @@ def _invalidator_event(rule: WatchRule, event: CanonicalEvent, known_at: str) ->
     ref = f"invalidator:{rule.rule_id}:{hashlib.sha256(event.canonical_ref.encode()).hexdigest()[:8]}"
     summary = f"possible invalidator ({rule.rule_type}): {event.summary}"
     return CanonicalEvent(
-        event_id=ref, canonical_ref=ref, source="watch",
-        known_at=event.known_at or known_at, entity=event.entity, summary=summary,
-        content_hash=_digest(ref, summary, event.known_at or known_at))
+        event_id=ref,
+        canonical_ref=ref,
+        source="watch",
+        known_at=event.known_at or known_at,
+        entity=event.entity,
+        summary=summary,
+        content_hash=_digest(ref, summary, event.known_at or known_at),
+    )
 
 
-def _scan_invalidator_pool(rule: WatchRule, pool: list[CanonicalEvent], toks: set[str], known_at: str) -> list[CanonicalEvent]:
+def _scan_invalidator_pool(
+    rule: WatchRule, pool: list[CanonicalEvent], toks: set[str], known_at: str
+) -> list[CanonicalEvent]:
     """First match per canonical ref, in pool order."""
     out: list[CanonicalEvent] = []
     matched: set[str] = set()
@@ -567,9 +641,15 @@ def _scan_invalidator_pool(rule: WatchRule, pool: list[CanonicalEvent], toks: se
     return out
 
 
-def _handle_invalidator(*, rule: WatchRule, thesis: Thesis, source_events: dict[str, list[CanonicalEvent]],
-                        sources: dict[str, JSONValue], known_at: str,
-                        stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
+def _handle_invalidator(
+    *,
+    rule: WatchRule,
+    thesis: Thesis,
+    source_events: dict[str, list[CanonicalEvent]],
+    sources: dict[str, JSONValue],
+    known_at: str,
+    stored: tuple[CanonicalEvent, ...] = (),
+) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
     # Deterministic semantic match, no source query: invalidator keywords from
     # the thesis against this tick's events plus already-stored canonical refs
     # (evidence files, earlier triggers). Refs stay stable, so a repeat tick
@@ -594,21 +674,34 @@ def _review_due(last: str, today: str) -> bool:
     dl, dt = _as_dt(last), _as_dt(today)
     # ponytail: date subtraction covers it; unparseable cursors fall back
     # to lexicographic compare (ISO dates order lexically).
-    return ((dt - dl).days >= _DEEP_REVIEW_DAYS if dl is not None and dt is not None
-            else today > last)
+    return (dt - dl).days >= _DEEP_REVIEW_DAYS if dl is not None and dt is not None else today > last
 
 
 def _review_event(thesis: Thesis, last: str, today: str, known_at: str) -> CanonicalEvent:
     """One scheduled deep-review candidate for today."""
     ref = f"review:{thesis.thesis_id}:{today}"
     summary = f"scheduled deep review ({thesis.slug}); last reviewed {last or 'never'}"
-    return CanonicalEvent(event_id=ref, canonical_ref=ref, source="watch", known_at=known_at,
-                          entity=thesis.slug, summary=summary,
-                          content_hash=_digest(ref, summary, known_at), cursor=today)
+    return CanonicalEvent(
+        event_id=ref,
+        canonical_ref=ref,
+        source="watch",
+        known_at=known_at,
+        entity=thesis.slug,
+        summary=summary,
+        content_hash=_digest(ref, summary, known_at),
+        cursor=today,
+    )
 
 
-def _handle_deep_review(*, rule: WatchRule, thesis: Thesis, source_events: dict[str, list[CanonicalEvent]],
-                        sources: dict[str, JSONValue], known_at: str, stored: tuple[CanonicalEvent, ...] = ()) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
+def _handle_deep_review(
+    *,
+    rule: WatchRule,
+    thesis: Thesis,
+    source_events: dict[str, list[CanonicalEvent]],
+    sources: dict[str, JSONValue],
+    known_at: str,
+    stored: tuple[CanonicalEvent, ...] = (),
+) -> tuple[list[CanonicalEvent], dict[str, JSONValue]]:
     last = _review_last(sources)
     today = _day(known_at)
     if not _review_due(last, today):
@@ -646,6 +739,7 @@ _STATE_KEY = {
     "scheduled_deep_review": "scheduled",
 }
 
+
 class _Grouped(TypedDict):
     rule: WatchRule
     event: CanonicalEvent
@@ -658,6 +752,7 @@ class _Grouped(TypedDict):
 @dataclass
 class _TickScope:
     """Live per-tick view: thesis, rules, targets, and relevance blob."""
+
     thesis: Thesis
     tid: str
     live: list[WatchRule]
@@ -675,8 +770,7 @@ def _tick_gate(repository: ThesisRepository, thesis_id: str) -> tuple[Thesis, st
         raise ValueError(f"{repository.root / thesis.slug}: thesis {tid!r} is closed; cannot tick")
     if status == "paused":
         cp = repository.load_checkpoint(tid)
-        return TickResult(thesis_id=tid, no_op=True, no_op_reason="paused",
-                          checkpoint=cp.to_dict())
+        return TickResult(thesis_id=tid, no_op=True, no_op_reason="paused", checkpoint=cp.to_dict())
     repository.normalize_watch(tid)
     return thesis, tid
 
@@ -702,11 +796,12 @@ def _tick_scope(repository: ThesisRepository, thesis: Thesis, tid: str) -> _Tick
     rules: list[WatchRule] = repository.load_watch_rules(tid)
     claims, exprs = _active_targets(thesis)
     live = [r for r in sorted(rules, key=_rule_order) if _rule_live(r, claims, exprs)]
-    return _TickScope(thesis=thesis, tid=tid, live=live,
-                      targets=targets_for_thesis(thesis), blob=_thesis_blob(thesis))
+    return _TickScope(thesis=thesis, tid=tid, live=live, targets=targets_for_thesis(thesis), blob=_thesis_blob(thesis))
 
 
-def _call_source(svc: SourceService, sources: dict[str, JSONValue], key: str, known_at: str) -> list[CanonicalEvent] | None:
+def _call_source(
+    svc: SourceService, sources: dict[str, JSONValue], key: str, known_at: str
+) -> list[CanonicalEvent] | None:
     """Call one wired source; None when it fails."""
     try:
         seen = svc.query_since(_source_checkpoint(sources, key), known_at=known_at)
@@ -715,8 +810,9 @@ def _call_source(svc: SourceService, sources: dict[str, JSONValue], key: str, kn
     return [e for e in (seen or []) if isinstance(e, CanonicalEvent)]
 
 
-def _query_source(services: dict[str, SourceService], key: str, sources: dict[str, JSONValue],
-                  known_at: str) -> tuple[str, list[CanonicalEvent] | None]:
+def _query_source(
+    services: dict[str, SourceService], key: str, sources: dict[str, JSONValue], known_at: str
+) -> tuple[str, list[CanonicalEvent] | None]:
     """Query one source from its checkpoint; None events on unwired/failed."""
     svc = services.get(key)
     if svc is None:
@@ -730,8 +826,9 @@ def _source_checkpoint(sources: dict[str, JSONValue], key: str) -> dict[str, JSO
     return dict(raw) if isinstance(raw, dict) else {}
 
 
-def _query_sources(services: dict[str, SourceService], live: list[WatchRule],
-                   sources: dict[str, JSONValue], known_at: str) -> tuple[dict[str, list[CanonicalEvent]], set[str]]:
+def _query_sources(
+    services: dict[str, SourceService], live: list[WatchRule], sources: dict[str, JSONValue], known_at: str
+) -> tuple[dict[str, list[CanonicalEvent]], set[str]]:
     """Query each needed source once from its checkpoint up to known_at."""
     needed = _needed_sources(live)
     source_events: dict[str, list[CanonicalEvent]] = {}
@@ -750,7 +847,9 @@ def _needed_sources(live: list[WatchRule]) -> list[str]:
     return sorted({v for v in (_SOURCE_FOR_RULE[r.rule_type] for r in live) if v is not None})
 
 
-def _seen_markers(repository: ThesisRepository, tid: str, checkpoint: Checkpoint) -> tuple[list[Trigger], set[str], set[str]]:
+def _seen_markers(
+    repository: ThesisRepository, tid: str, checkpoint: Checkpoint
+) -> tuple[list[Trigger], set[str], set[str]]:
     """Existing triggers plus content-hash markers for the dedup filters."""
     existing = repository.load_triggers(tid)  # created-time order already
     # ponytail: inbox scan is O(n) per tick; index by canonical ref past thousands.
@@ -775,15 +874,19 @@ def _stored_file_event(raw: dict[str, JSONValue], tid: str, known_at: str) -> Ca
     ref, ka, summary = _stored_file_fields(raw)
     if not ref or not ka or not _le(ka, known_at):
         return None  # missing or future-known evidence is never visible
-    return CanonicalEvent(event_id=ref, canonical_ref=ref, source="stored",
-                          known_at=ka, summary=summary,
-                          content_hash=_digest(ref, summary, ka))
+    return CanonicalEvent(
+        event_id=ref,
+        canonical_ref=ref,
+        source="stored",
+        known_at=ka,
+        summary=summary,
+        content_hash=_digest(ref, summary, ka),
+    )
 
 
 def _stored_file_fields(raw: dict[str, JSONValue]) -> tuple[str, str, str]:
     """(canonical_ref, known_at, summary) for one evidence-file row."""
-    return (str(raw.get("canonical_ref") or ""), str(raw.get("known_at") or ""),
-            str(raw.get("summary") or ""))
+    return (str(raw.get("canonical_ref") or ""), str(raw.get("known_at") or ""), str(raw.get("summary") or ""))
 
 
 def _stored_trigger_event(t: Trigger, known_at: str) -> list[CanonicalEvent]:
@@ -796,8 +899,13 @@ def _stored_trigger_event(t: Trigger, known_at: str) -> list[CanonicalEvent]:
 def _trigger_stored_event(t: Trigger, ref: str) -> CanonicalEvent:
     """One earlier-trigger ref as a stored event."""
     return CanonicalEvent(
-        event_id=ref, canonical_ref=ref, source="stored", known_at=t.created_at,
-        summary=t.summary or "", content_hash=_digest(ref, t.summary or "", t.created_at))
+        event_id=ref,
+        canonical_ref=ref,
+        source="stored",
+        known_at=t.created_at,
+        summary=t.summary or "",
+        content_hash=_digest(ref, t.summary or "", t.created_at),
+    )
 
 
 def _stored_file_events(repository: ThesisRepository, tid: str, slug: str, known_at: str) -> list[CanonicalEvent]:
@@ -826,8 +934,9 @@ def _load_stored_file(f: object, tid: str, known_at: str) -> CanonicalEvent | No
     return _stored_file_event(raw, tid, known_at)
 
 
-def _stored_evidence(repository: ThesisRepository, tid: str, slug: str,
-                     existing: list[Trigger], known_at: str) -> tuple[CanonicalEvent, ...]:
+def _stored_evidence(
+    repository: ThesisRepository, tid: str, slug: str, existing: list[Trigger], known_at: str
+) -> tuple[CanonicalEvent, ...]:
     """Evidence-file + earlier-trigger pool for the handler (PIT-gated)."""
     stored = _stored_file_events(repository, tid, slug, known_at)
     for t in existing:
@@ -847,17 +956,25 @@ def _pit_visible_event(event: CanonicalEvent, known_at: str) -> bool:
     return not (event.known_at and known_at and not _le(event.known_at, known_at))
 
 
-def _dup_seen(event: CanonicalEvent, digest: str, seen_refs: set[str],
-              seen_hashes: set[str], grouped: dict[str, _Grouped]) -> bool:
+def _dup_seen(
+    event: CanonicalEvent, digest: str, seen_refs: set[str], seen_hashes: set[str], grouped: dict[str, _Grouped]
+) -> bool:
     """True when already processed (checkpoint/trigger) or identical in-tick."""
     if digest in seen_hashes or event.canonical_ref in seen_refs:
         return True  # checkpoint / processed-marker / existing-trigger dup
     return event.canonical_ref in grouped and digest in grouped[event.canonical_ref]["digests"]
 
 
-def _should_keep(event: CanonicalEvent, digest: str, known_at: str, seen_refs: set[str],
-                 seen_hashes: set[str], grouped: dict[str, _Grouped],
-                 targets: tuple[str, ...], blob: str) -> bool:
+def _should_keep(
+    event: CanonicalEvent,
+    digest: str,
+    known_at: str,
+    seen_refs: set[str],
+    seen_hashes: set[str],
+    grouped: dict[str, _Grouped],
+    targets: tuple[str, ...],
+    blob: str,
+) -> bool:
     """Global dedup + PIT + relevance gate for one handler candidate."""
     if not _pit_visible_event(event, known_at):
         return False
@@ -868,23 +985,41 @@ def _should_keep(event: CanonicalEvent, digest: str, known_at: str, seen_refs: s
 
 def _fold_candidate(grouped: dict[str, _Grouped], rule: WatchRule, event: CanonicalEvent, digest: str) -> None:
     """Fold one kept candidate into its canonical-ref group."""
-    g = grouped.setdefault(event.canonical_ref, {
-        "rule": rule, "event": event, "digest": digest,
-        "claims": set[str](), "exprs": set[str](), "digests": set[str]()})
+    g = grouped.setdefault(
+        event.canonical_ref,
+        {
+            "rule": rule,
+            "event": event,
+            "digest": digest,
+            "claims": set[str](),
+            "exprs": set[str](),
+            "digests": set[str](),
+        },
+    )
     g["claims"] |= set(rule.claim_ids)
     g["exprs"] |= set(rule.expression_ids)
     g["digests"].add(digest)
 
 
-def _apply_rule(rule: WatchRule, thesis: Thesis, source_events: dict[str, list[CanonicalEvent]],
-                sources: dict[str, JSONValue], known_at: str, stored: tuple[CanonicalEvent, ...],
-                seen_refs: set[str], seen_hashes: set[str], targets: tuple[str, ...], blob: str,
-                grouped: dict[str, _Grouped], pending_states: dict[str, dict[str, JSONValue]],
-                queried_ok: set[str]) -> None:
+def _apply_rule(
+    rule: WatchRule,
+    thesis: Thesis,
+    source_events: dict[str, list[CanonicalEvent]],
+    sources: dict[str, JSONValue],
+    known_at: str,
+    stored: tuple[CanonicalEvent, ...],
+    seen_refs: set[str],
+    seen_hashes: set[str],
+    targets: tuple[str, ...],
+    blob: str,
+    grouped: dict[str, _Grouped],
+    pending_states: dict[str, dict[str, JSONValue]],
+    queried_ok: set[str],
+) -> None:
     """Run one rule handler and fold candidates through the dedup filters."""
     evs, state = SUPPORTED_HANDLERS[rule.rule_type](
-        rule=rule, thesis=thesis, source_events=source_events,
-        sources=sources, known_at=known_at, stored=stored)
+        rule=rule, thesis=thesis, source_events=source_events, sources=sources, known_at=known_at, stored=stored
+    )
     _record_state(rule, state, pending_states, queried_ok)
     for e in evs:
         digest = _candidate_digest(e)
@@ -893,8 +1028,9 @@ def _apply_rule(rule: WatchRule, thesis: Thesis, source_events: dict[str, list[C
         _fold_candidate(grouped, rule, e, digest)
 
 
-def _record_state(rule: WatchRule, state: dict[str, JSONValue],
-                  pending_states: dict[str, dict[str, JSONValue]], queried_ok: set[str]) -> None:
+def _record_state(
+    rule: WatchRule, state: dict[str, JSONValue], pending_states: dict[str, dict[str, JSONValue]], queried_ok: set[str]
+) -> None:
     """Record a rule's state when its source queried OK (scheduled always)."""
     skey = _STATE_KEY[rule.rule_type]
     if skey is not None and (skey == "scheduled" or skey in queried_ok):
@@ -903,11 +1039,14 @@ def _record_state(rule: WatchRule, state: dict[str, JSONValue],
 
 def _trigger_metadata(event: CanonicalEvent, digest: str) -> dict[str, JSONValue]:
     """Trigger metadata: identity + optional locators + event payload."""
-    meta: dict[str, JSONValue] = {"event_id": event.event_id, "source": event.source,
-                                  "content_hash": digest, "entity": event.entity,
-                                  "event_known_at": event.known_at}
-    for k, v in {"cycle": event.cycle, "cursor": event.cursor,
-                 "file_id": event.file_id}.items():
+    meta: dict[str, JSONValue] = {
+        "event_id": event.event_id,
+        "source": event.source,
+        "content_hash": digest,
+        "entity": event.entity,
+        "event_known_at": event.known_at,
+    }
+    for k, v in {"cycle": event.cycle, "cursor": event.cursor, "file_id": event.file_id}.items():
         if v is not None:
             meta[k] = v
     meta.update(event.metadata or {})
@@ -921,13 +1060,24 @@ def _summary_origin(event: CanonicalEvent, ref: str) -> str:
     return "deterministic"
 
 
-def _persist_group(repository: ThesisRepository, tid: str, ref: str, g: _Grouped,
-                   seen_refs: set[str], seen_hashes: set[str], new_hashes: list[str]) -> Trigger:
+def _persist_group(
+    repository: ThesisRepository,
+    tid: str,
+    ref: str,
+    g: _Grouped,
+    seen_refs: set[str],
+    seen_hashes: set[str],
+    new_hashes: list[str],
+) -> Trigger:
     """Persist one grouped canonical event as a pending trigger."""
     trig = repository.create_trigger(
-        tid, trigger_type=g["rule"].rule_type, importance=_importance(g["rule"].rule_type),
-        claim_ids=sorted(g["claims"]), expression_ids=sorted(g["exprs"]),
-        canonical_refs=[ref], summary=g["event"].summary,
+        tid,
+        trigger_type=g["rule"].rule_type,
+        importance=_importance(g["rule"].rule_type),
+        claim_ids=sorted(g["claims"]),
+        expression_ids=sorted(g["exprs"]),
+        canonical_refs=[ref],
+        summary=g["event"].summary,
         summary_origin=_summary_origin(g["event"], ref),
         metadata=_trigger_metadata(g["event"], g["digest"]),
     )
@@ -937,8 +1087,9 @@ def _persist_group(repository: ThesisRepository, tid: str, ref: str, g: _Grouped
     return trig
 
 
-def _persist_triggers(repository: ThesisRepository, tid: str, grouped: dict[str, _Grouped],
-                      seen_refs: set[str], seen_hashes: set[str]) -> tuple[list[Trigger], list[str]]:
+def _persist_triggers(
+    repository: ThesisRepository, tid: str, grouped: dict[str, _Grouped], seen_refs: set[str], seen_hashes: set[str]
+) -> tuple[list[Trigger], list[str]]:
     """One trigger per grouped canonical event; returns (created, new_hashes)."""
     created: list[Trigger] = []
     new_hashes: list[str] = []
@@ -959,8 +1110,7 @@ def _run_pending(repository: ThesisRepository, tid: str, known_at: str) -> list[
     return runs
 
 
-def _merge_source_state(sources: dict[str, JSONValue], key: str,
-                        state: dict[str, JSONValue], known_at: str) -> None:
+def _merge_source_state(sources: dict[str, JSONValue], key: str, state: dict[str, JSONValue], known_at: str) -> None:
     """Merge one queried source's state (FINRA tickers merge, rest replace)."""
     old = dict(sources.get(key) or {})
     rest = _merge_tickers(old, state)
@@ -980,21 +1130,32 @@ def _merge_tickers(old: dict[str, JSONValue], state: dict[str, JSONValue]) -> di
     return dict(state)
 
 
-def _advance_checkpoint(repository: ThesisRepository, tid: str, checkpoint: Checkpoint,
-                        sources: dict[str, JSONValue], pending_states: dict[str, dict[str, JSONValue]],
-                        new_hashes: list[str], known_at: str) -> Checkpoint:
+def _advance_checkpoint(
+    repository: ThesisRepository,
+    tid: str,
+    checkpoint: Checkpoint,
+    sources: dict[str, JSONValue],
+    pending_states: dict[str, dict[str, JSONValue]],
+    new_hashes: list[str],
+    known_at: str,
+) -> Checkpoint:
     """Merge per-source state (never failed ones) and bound the dup markers."""
     for key, state in pending_states.items():
         _merge_source_state(sources, key, state, known_at)
-    recent = (list(checkpoint.recent_hashes or []) + new_hashes)[- _MAX_DUP_MARKERS:]
+    recent = (list(checkpoint.recent_hashes or []) + new_hashes)[-_MAX_DUP_MARKERS:]
     fresh = Checkpoint(thesis_id=tid, sources=sources, recent_hashes=recent)
     if fresh.to_dict() != checkpoint.to_dict():
         return repository.save_checkpoint(tid, fresh)
     return checkpoint
 
 
-def tick(repository: ThesisRepository, thesis_id: str, source_services: Mapping[str, SourceService] | None = None, *,
-         known_at: str | None = None) -> TickResult:
+def tick(
+    repository: ThesisRepository,
+    thesis_id: str,
+    source_services: Mapping[str, SourceService] | None = None,
+    *,
+    known_at: str | None = None,
+) -> TickResult:
     """Run one live monitor tick with a PIT data cutoff.
 
     known_at bounds source, event, evidence, and trigger queries only; it never
@@ -1016,13 +1177,30 @@ def tick(repository: ThesisRepository, thesis_id: str, source_services: Mapping[
     grouped: dict[str, _Grouped] = {}
     stored = _stored_evidence(repository, tid, thesis.slug, existing, cutoff)
     for rule in scope.live:
-        _apply_rule(rule, thesis, source_events, sources, cutoff, stored,
-                    seen_refs, seen_hashes, scope.targets, scope.blob,
-                    grouped, pending_states, queried_ok)
+        _apply_rule(
+            rule,
+            thesis,
+            source_events,
+            sources,
+            cutoff,
+            stored,
+            seen_refs,
+            seen_hashes,
+            scope.targets,
+            scope.blob,
+            grouped,
+            pending_states,
+            queried_ok,
+        )
     created, new_hashes = _persist_triggers(repository, tid, grouped, seen_refs, seen_hashes)
     runs = _run_pending(repository, tid, cutoff)
     checkpoint = _advance_checkpoint(repository, tid, checkpoint, sources, pending_states, new_hashes, cutoff)
     no_op = not created and not runs
-    return TickResult(thesis_id=tid, triggers_created=[t.trigger_id for t in created],
-                      runs=runs, no_op=no_op, no_op_reason="" if not no_op else "",
-                      checkpoint=checkpoint.to_dict())
+    return TickResult(
+        thesis_id=tid,
+        triggers_created=[t.trigger_id for t in created],
+        runs=runs,
+        no_op=no_op,
+        no_op_reason="",
+        checkpoint=checkpoint.to_dict(),
+    )

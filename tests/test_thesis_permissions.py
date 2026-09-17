@@ -29,8 +29,7 @@ def _tool_name(tool: dict[str, object]) -> str:
 
 
 def _ctx(*caps: Capability) -> RequestContext:
-    return RequestContext(principal_id="test",
-                          capabilities=frozenset(caps or (Capability.RESEARCH,)))
+    return RequestContext(principal_id="test", capabilities=frozenset(caps or (Capability.RESEARCH,)))
 
 
 def _repo_with_thesis(tmp_path: Path, scope: str = "NVDA") -> tuple[ThesisRepository, Thesis]:
@@ -40,18 +39,32 @@ def _repo_with_thesis(tmp_path: Path, scope: str = "NVDA") -> tuple[ThesisReposi
     raw = load_raw_yaml(tmp_path / "theses" / t.slug / "watch.yaml")
     rules = raw["rules"]
     assert isinstance(rules, list)
-    rules.append({"rule_id": "rule:1", "rule_type": "new_filing",
-                         "enabled": True, "support_status": "supported",
-                         "support_reason": "", "claim_ids": [cid], "expression_ids": []})
+    rules.append(
+        {
+            "rule_id": "rule:1",
+            "rule_type": "new_filing",
+            "enabled": True,
+            "support_status": "supported",
+            "support_reason": "",
+            "claim_ids": [cid],
+            "expression_ids": [],
+        }
+    )
     atomic_write_yaml(tmp_path / "theses" / t.slug / "watch.yaml", raw, tmp_path / "theses")
     return r, t
 
 
-
 def _broker_names():
-    return {"get_market_snapshot", "get_option_chain", "analyze_option_contract",
-            "compare_options", "get_scanner_filter_specs",
-            "get_portfolio_snapshot", "get_scans", "run_scan"}
+    return {
+        "get_market_snapshot",
+        "get_option_chain",
+        "analyze_option_contract",
+        "compare_options",
+        "get_scanner_filter_specs",
+        "get_portfolio_snapshot",
+        "get_scans",
+        "run_scan",
+    }
 
 
 def test_research_default_hides_broker_tools_despite_env(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -65,10 +78,13 @@ def test_research_default_hides_broker_tools_despite_env(monkeypatch: pytest.Mon
 def test_each_grant_exposes_only_its_cap() -> None:
     assert capabilities_for_grants(["broker-market-read"]) == frozenset({Capability.BROKER_MARKET_READ})
     assert capabilities_for_grants(["portfolio-read"]) == frozenset({Capability.PORTFOLIO_READ})
-    market = {_tool_name(t) for t in tools_for_capabilities(
-        _ctx(Capability.RESEARCH, Capability.BROKER_MARKET_READ).capabilities)}
-    port = {_tool_name(t) for t in tools_for_capabilities(
-        _ctx(Capability.RESEARCH, Capability.PORTFOLIO_READ).capabilities)}
+    market = {
+        _tool_name(t)
+        for t in tools_for_capabilities(_ctx(Capability.RESEARCH, Capability.BROKER_MARKET_READ).capabilities)
+    }
+    port = {
+        _tool_name(t) for t in tools_for_capabilities(_ctx(Capability.RESEARCH, Capability.PORTFOLIO_READ).capabilities)
+    }
     assert "get_market_snapshot" in market and "get_portfolio_snapshot" not in market
     assert "get_portfolio_snapshot" in port and "get_market_snapshot" not in port
     with pytest.raises(ValueError):
@@ -76,39 +92,50 @@ def test_each_grant_exposes_only_its_cap() -> None:
 
 
 def test_temp_research_tool_visible_zero_thesis_changes(tmp_path: Path) -> None:
-    r, t = _repo_with_thesis(tmp_path)
+    _r, t = _repo_with_thesis(tmp_path)
     before = (tmp_path / "theses" / t.slug / "thesis.yaml").read_text(encoding="utf-8")
-    tool: dict[str, object] = {"type": "function", "function": {"name": "tmp_thesis_research_xyz",
-            "description": "t", "parameters": {"type": "object", "properties": {"a": "b"}}}}
+    tool: dict[str, object] = {
+        "type": "function",
+        "function": {
+            "name": "tmp_thesis_research_xyz",
+            "description": "t",
+            "parameters": {"type": "object", "properties": {"a": "b"}},
+        },
+    }
     tools_mod.TOOLS.append(tool)
     tools_mod.TOOL_CAPABILITIES["tmp_thesis_research_xyz"] = Capability.RESEARCH
     try:
         assert "tmp_thesis_research_xyz" in {_tool_name(x) for x in tools_for_capabilities(_ctx().capabilities)}
     finally:
-        tools_mod.TOOLS[:] = [x for x in tools_mod.TOOLS
-                              if _tool_name(x) != "tmp_thesis_research_xyz"]
+        tools_mod.TOOLS[:] = [x for x in tools_mod.TOOLS if _tool_name(x) != "tmp_thesis_research_xyz"]
         tools_mod.TOOL_CAPABILITIES.pop("tmp_thesis_research_xyz", None)
     assert (tmp_path / "theses" / t.slug / "thesis.yaml").read_text(encoding="utf-8") == before
 
 
 def test_temp_broker_tool_hidden_without_grant() -> None:
-    tool2: dict[str, object] = {"type": "function", "function": {"name": "tmp_thesis_broker_xyz",
-            "description": "t", "parameters": {"type": "object", "properties": {"a": "b"}}}}
+    tool2: dict[str, object] = {
+        "type": "function",
+        "function": {
+            "name": "tmp_thesis_broker_xyz",
+            "description": "t",
+            "parameters": {"type": "object", "properties": {"a": "b"}},
+        },
+    }
     tools_mod.TOOLS.append(tool2)
     tools_mod.TOOL_CAPABILITIES["tmp_thesis_broker_xyz"] = Capability.BROKER_MARKET_READ
     try:
         assert "tmp_thesis_broker_xyz" not in {_tool_name(x) for x in tools_for_capabilities(_ctx().capabilities)}
-        assert "tmp_thesis_broker_xyz" in {_tool_name(x) for x in tools_for_capabilities(
-            _ctx(Capability.RESEARCH, Capability.BROKER_MARKET_READ).capabilities)}
+        assert "tmp_thesis_broker_xyz" in {
+            _tool_name(x)
+            for x in tools_for_capabilities(_ctx(Capability.RESEARCH, Capability.BROKER_MARKET_READ).capabilities)
+        }
     finally:
-        tools_mod.TOOLS[:] = [x for x in tools_mod.TOOLS
-                              if _tool_name(x) != "tmp_thesis_broker_xyz"]
+        tools_mod.TOOLS[:] = [x for x in tools_mod.TOOLS if _tool_name(x) != "tmp_thesis_broker_xyz"]
         tools_mod.TOOL_CAPABILITIES.pop("tmp_thesis_broker_xyz", None)
 
 
 def _sec(*turns: str) -> RunSecurityContext:
-    return RunSecurityContext(original_intent=classify_intent(list(turns)),
-                              capabilities=frozenset({"research"}))
+    return RunSecurityContext(original_intent=classify_intent(list(turns)), capabilities=frozenset({"research"}))
 
 
 _THESIS_TOOLS = ("thesis_create", "thesis_show", "thesis_refine", "thesis_watch", "thesis_journal")
@@ -128,8 +155,9 @@ def test_thesis_tools_allowed_under_research_intent() -> None:
         ["Create a thesis on NVDA", "Analyze NVDA earnings"],
     ]:
         sec = _sec(*turns)
-        assert sec.original_intent.permitted_domains == {
-            "financial_research", "public_web_research", "thesis_read"}, turns
+        assert sec.original_intent.permitted_domains == {"financial_research", "public_web_research", "thesis_read"}, (
+            turns
+        )
         for name in _THESIS_TOOLS:
             allowed, _ = authorize_tool_call(name, {}, sec)
             assert allowed is True, (turns, name)

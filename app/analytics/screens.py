@@ -13,7 +13,7 @@ from __future__ import annotations
 import hashlib
 import json
 from calendar import monthrange
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import TypedDict
 
@@ -43,13 +43,13 @@ def _resolve_as_of(as_of: str | None) -> str:
     """
     if as_of:
         return as_of
-    return datetime.now(timezone.utc).date().isoformat()
+    return datetime.now(UTC).date().isoformat()
 
 
 def _clamp_limit(limit: int | None) -> int:
     try:
         return max(1, min((limit if limit is not None else DEFAULT_LIMIT), MAX_LIMIT))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return DEFAULT_LIMIT
 
 
@@ -64,8 +64,7 @@ def latest_settlement_date(as_of: str | None = None, data_root: Path | None = No
     else:
         clause, param = duckdb.as_of_clause(as_of)
         rows = duckdb.query(
-            "SELECT max(settlement_date) AS latest FROM short_interest "
-            f"WHERE {clause}",
+            f"SELECT max(settlement_date) AS latest FROM short_interest WHERE {clause}",
             params=[param],
             data_root=data_root,
         )
@@ -112,8 +111,7 @@ def _ticker_alias_map(as_of: str, data_root: Path) -> dict[str, list[str]]:
     clause, param = duckdb.as_of_clause(as_of)
     aliases: dict[str, list[str]] = {}
     for row in duckdb.query(
-        "SELECT alias_value, entity_id FROM entity_aliases "
-        f"WHERE alias_type = 'ticker' AND {clause}",
+        f"SELECT alias_value, entity_id FROM entity_aliases WHERE alias_type = 'ticker' AND {clause}",
         params=[param],
         data_root=data_root,
     ):
@@ -207,9 +205,7 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
             data_root=data_root,
         ),
     }
-    return hashlib.sha256(
-        json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
 
 
 def _leaderboard_key(item: dict[str, object]) -> tuple[float, str]:
@@ -219,8 +215,13 @@ def _leaderboard_key(item: dict[str, object]) -> tuple[float, str]:
 
 class _ScreenInputs:
     """Resolved point-in-time maps for one screen build (existing boundary)."""
-    def __init__(self, ticker_aliases: dict[str, list[str]], security_types: dict[str, str],
-                 facts_by_entity: dict[str, list[dict[str, object]]]) -> None:
+
+    def __init__(
+        self,
+        ticker_aliases: dict[str, list[str]],
+        security_types: dict[str, str],
+        facts_by_entity: dict[str, list[dict[str, object]]],
+    ) -> None:
         self.ticker_aliases = ticker_aliases
         self.security_types = security_types
         self.facts_by_entity = facts_by_entity
@@ -228,6 +229,7 @@ class _ScreenInputs:
 
 class _ScreenAccum:
     """Exclusions, stage counters, and candidates (existing boundary)."""
+
     def __init__(self, conflicting: int) -> None:
         self.exclusions = {
             "unmapped_symbol": 0,
@@ -303,7 +305,9 @@ def _screen_entity(symbol: str, inputs: _ScreenInputs, accum: _ScreenAccum) -> s
     return entity_ids[0]
 
 
-def _screen_fact(entity_id: str, settlement_date: str, inputs: _ScreenInputs, accum: _ScreenAccum) -> dict[str, object] | None:
+def _screen_fact(
+    entity_id: str, settlement_date: str, inputs: _ScreenInputs, accum: _ScreenAccum
+) -> dict[str, object] | None:
     """Eligible shares-outstanding fact, None when excluded (existing boundary)."""
     # Eligibility is the stored security classification, not a fact-
     # presence proxy: only entities classified as common equity rank.
@@ -322,7 +326,9 @@ def _screen_fact(entity_id: str, settlement_date: str, inputs: _ScreenInputs, ac
     return fact
 
 
-def _screen_candidate(symbol: str, row: dict[str, object], entity_id: str, short_shares: float, fact: dict[str, object]) -> dict[str, object]:
+def _screen_candidate(
+    symbol: str, row: dict[str, object], entity_id: str, short_shares: float, fact: dict[str, object]
+) -> dict[str, object]:
     """One ranked candidate row (existing boundary)."""
     shares = float(str(fact["value"]))
     return {
@@ -340,7 +346,9 @@ def _screen_candidate(symbol: str, row: dict[str, object], entity_id: str, short
     }
 
 
-def _accumulate_screen_row(row: dict[str, object], settlement_date: str, inputs: _ScreenInputs, accum: _ScreenAccum) -> None:
+def _accumulate_screen_row(
+    row: dict[str, object], settlement_date: str, inputs: _ScreenInputs, accum: _ScreenAccum
+) -> None:
     """One snapshot row through the eligibility pipeline (existing boundary)."""
     symbol = str(row["symbol_code"])
     short_shares = _short_shares(row, accum)
@@ -355,31 +363,35 @@ def _accumulate_screen_row(row: dict[str, object], settlement_date: str, inputs:
     accum.candidates.append(_screen_candidate(symbol, row, entity_id, short_shares, fact))
 
 
-def _persist_screen_run(settlement_date: str, as_of: str, data_root: Path, rows: list[dict[str, object]], accum: _ScreenAccum) -> None:
+def _persist_screen_run(
+    settlement_date: str, as_of: str, data_root: Path, rows: list[dict[str, object]], accum: _ScreenAccum
+) -> None:
     """Persist run + entries rows (existing boundary)."""
     accum.candidates.sort(key=_leaderboard_key)
     run_id = f"{SCREEN_NAME}:{settlement_date}:{as_of}:{SCREEN_CALC_VERSION}:{_screen_input_fingerprint(settlement_date, as_of, data_root)}"
     created_at = _utc_now()
     parquet.write_rows(
         "screen_runs",
-        [{
-            "run_id": run_id,
-            "screen": SCREEN_NAME,
-            "settlement_date": settlement_date,
-            "as_of": as_of,
-            "created_at": created_at,
-            "calc_version": SCREEN_CALC_VERSION,
-            "finra_rows": len(rows),
-            "eligible_rows": len(accum.candidates),
-            "valid_short_interest_rows": accum.counters["valid_short_interest_rows"],
-            "mapped_rows": accum.counters["mapped_rows"],
-            "unambiguous_rows": accum.counters["unambiguous_rows"],
-            "common_equity_rows": accum.counters["common_equity_rows"],
-            "shares_outstanding_rows": accum.counters["shares_outstanding_rows"],
-            "exclusions_json": json.dumps(accum.exclusions, sort_keys=True),
-            "environment": finra_client._environment(),
-            "parser_version": SCREEN_CALC_VERSION,
-        }],
+        [
+            {
+                "run_id": run_id,
+                "screen": SCREEN_NAME,
+                "settlement_date": settlement_date,
+                "as_of": as_of,
+                "created_at": created_at,
+                "calc_version": SCREEN_CALC_VERSION,
+                "finra_rows": len(rows),
+                "eligible_rows": len(accum.candidates),
+                "valid_short_interest_rows": accum.counters["valid_short_interest_rows"],
+                "mapped_rows": accum.counters["mapped_rows"],
+                "unambiguous_rows": accum.counters["unambiguous_rows"],
+                "common_equity_rows": accum.counters["common_equity_rows"],
+                "shares_outstanding_rows": accum.counters["shares_outstanding_rows"],
+                "exclusions_json": json.dumps(accum.exclusions, sort_keys=True),
+                "environment": finra_client._environment(),
+                "parser_version": SCREEN_CALC_VERSION,
+            }
+        ],
         root=data_root / "parquet",
     )
     parquet.write_rows(
@@ -465,9 +477,9 @@ def read_short_interest_screen(
         data_root=data_root,
     )
     try:
-        days = (date.today() - date.fromisoformat(settlement_date)).days
+        days = (date.today() - date.fromisoformat(settlement_date)).days  # noqa: DTZ011 - trading-calendar local date has no tz meaning
         freshness = "stale" if days > finra_client.STALE_AFTER_DAYS else "current"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         freshness = "unknown"
     exclusions_raw = run["exclusions_json"]
     exclusions = json.loads(exclusions_raw) if isinstance(exclusions_raw, str) else {}
@@ -590,16 +602,18 @@ def _probe_published_rows(candidate: str) -> int:
             "limit": 1,
             "offset": 0,
             "fields": ["settlementDate"],
-            "compareFilters": [{
-                "compareType": "EQUAL",
-                "fieldName": "settlementDate",
-                "fieldValue": candidate,
-            }],
+            "compareFilters": [
+                {
+                    "compareType": "EQUAL",
+                    "fieldName": "settlementDate",
+                    "fieldValue": candidate,
+                }
+            ],
         },
     )
     try:
         return int(str(headers.get("record-total", 0)))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 
@@ -613,7 +627,7 @@ def _discover_latest_published_settlement_date(today: date) -> str | None:
         try:
             if _probe_published_rows(candidate) > 0:
                 return candidate
-        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
     return None
 
@@ -736,9 +750,9 @@ def get_short_interest_leaderboard(
 
 
 def _utc_now() -> str:
-	"""UTC publication timestamp; microsecond precision so same-second
-	materializations still order by publication time."""
-	return datetime.now(timezone.utc).isoformat(timespec="microseconds")
+    """UTC publication timestamp; microsecond precision so same-second
+    materializations still order by publication time."""
+    return datetime.now(UTC).isoformat(timespec="microseconds")
 
 
 # ---------------------------------------------------------------------------
@@ -841,7 +855,11 @@ def short_interest_change_screen(
     security_types = _security_type_map(as_of, data_root)
     facts_by_entity = _facts_by_entity(as_of, data_root)
     current = _cycle_entities(current_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root)
-    prior: dict[str, _CycleItem] = _cycle_entities(prior_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root) if prior_date else {}
+    prior: dict[str, _CycleItem] = (
+        _cycle_entities(prior_date, as_of, ticker_aliases, security_types, facts_by_entity, data_root)
+        if prior_date
+        else {}
+    )
     entries: list[dict[str, object]] = []
     for symbol, item in sorted(current.items()):
         row, fact = item["row"], item["fact"]
@@ -878,20 +896,24 @@ def short_interest_change_screen(
             prior_row, prior_fact = prior_item["row"], prior_item["fact"]
             short_prior = float(str(prior_row["short_position"]))
             si_pct_prior = 100 * short_prior / float(str(prior_fact["value"]))
-            entry.update({
-                "short_shares_prior": short_prior,
-                "short_interest_percent_prior": si_pct_prior,
-                "shares_outstanding_prior": float(str(prior_fact["value"])),
-                "sec_shares_as_of_prior": str(prior_fact["period_end"]),
-                "sec_filed_at_prior": str(prior_fact["filed_at"]),
-                "sec_accession_prior": prior_fact.get("accession"),
-                "sec_source_url_prior": prior_fact.get("source_url"),
-                "short_change_abs": short_current - short_prior,
-                "short_change_pct": 100 * (short_current - short_prior) / short_prior if short_prior else None,
-                "shares_change_abs": float(str(fact["value"])) - float(str(prior_fact["value"])),
-                "shares_change_pct": 100 * (float(str(fact["value"])) - float(str(prior_fact["value"]))) / float(str(prior_fact["value"])),
-                "si_pp_change": si_pct_current - si_pct_prior,
-            })
+            entry.update(
+                {
+                    "short_shares_prior": short_prior,
+                    "short_interest_percent_prior": si_pct_prior,
+                    "shares_outstanding_prior": float(str(prior_fact["value"])),
+                    "sec_shares_as_of_prior": str(prior_fact["period_end"]),
+                    "sec_filed_at_prior": str(prior_fact["filed_at"]),
+                    "sec_accession_prior": prior_fact.get("accession"),
+                    "sec_source_url_prior": prior_fact.get("source_url"),
+                    "short_change_abs": short_current - short_prior,
+                    "short_change_pct": 100 * (short_current - short_prior) / short_prior if short_prior else None,
+                    "shares_change_abs": float(str(fact["value"])) - float(str(prior_fact["value"])),
+                    "shares_change_pct": 100
+                    * (float(str(fact["value"])) - float(str(prior_fact["value"])))
+                    / float(str(prior_fact["value"])),
+                    "si_pp_change": si_pct_current - si_pct_prior,
+                }
+            )
         entries.append(entry)
     entries.sort(key=_change_key)
     for index, entry in enumerate(entries, 1):

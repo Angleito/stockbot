@@ -220,7 +220,11 @@ def _final_section(out: list[str], header: str, lines: list[str]) -> None:
 def render_final_result(result: dict[str, object], max_bytes: int = MAX_TOOL_MESSAGE_BYTES) -> str:
     """Substantive structured answer for a rich FinalResearchResult."""
     out = _final_core_lines(result)
-    _final_section(out, "Major direct exposures", [_final_channel_line(c) for c in _as_list(result.get("impact_channels")) if _final_channel_line(c)])
+    _final_section(
+        out,
+        "Major direct exposures",
+        [_final_channel_line(c) for c in _as_list(result.get("impact_channels")) if _final_channel_line(c)],
+    )
     _final_section(out, "First-order effects", _final_effect_block(result.get("first_order_effects")))
     _final_section(out, "Second-order effects", _final_effect_block(result.get("second_order_effects")))
     _final_section(out, "Bull case", _final_side_block(result.get("bull_case")))
@@ -232,7 +236,9 @@ def render_final_result(result: dict[str, object], max_bytes: int = MAX_TOOL_MES
     _final_section(out, "Filing refs", _final_claims_block(result.get("grounded_claims", result.get("claims"))))
     out.append(_final_scope_line(result.get("research_scope")))
     text = "\n\n".join(line for line in out if line.strip())
-    return _truncate_bytes(text if text.strip() else _cell(result.get("answer")) or "No grounded SEC findings.", max_bytes)
+    return _truncate_bytes(
+        text if text.strip() else _cell(result.get("answer")) or "No grounded SEC findings.", max_bytes
+    )
 
 
 def _finalize_counts(final: dict[str, object]) -> tuple[int, int]:
@@ -264,6 +270,7 @@ def _dispatch_shape_render_b(result: dict[str, object], max_bytes: int) -> str:
         return text
     return _dispatch_shape_render_doc(result, max_bytes)
 
+
 def _dispatch_tool_render(result: dict[str, object], max_bytes: int) -> str:
     """First matching tool renderer (final table/briefing fallback never misses)."""
     research = _dispatch_research_render(result, max_bytes)
@@ -284,9 +291,7 @@ def _dispatch_research_render(result: dict[str, object], max_bytes: int) -> str 
     return _research_search_card(result, max_bytes)
 
 
-def render_tool_result(
-    result: object, max_bytes: int = MAX_TOOL_MESSAGE_BYTES
-) -> str:
+def render_tool_result(result: object, max_bytes: int = MAX_TOOL_MESSAGE_BYTES) -> str:
     """Render a tool result as compact text within the byte budget.
 
     Always returns a non-empty string of at most max_bytes UTF-8 bytes. The
@@ -311,7 +316,9 @@ _ABSENCE_SCOPE_LABEL = "Absence observation — searched SEC scope only"
 def _evidence_record(result: dict[str, object]) -> dict[str, object] | None:
     """Evidence record in a tool result (research_add_evidence, or research_read)."""
     for candidate in (result, _as_dict(result.get("record"))):
-        if candidate.get("claim_kind") and (candidate.get("evidence_id") or candidate.get("claim_text") or candidate.get("content")):
+        if candidate.get("claim_kind") and (
+            candidate.get("evidence_id") or candidate.get("claim_text") or candidate.get("content")
+        ):
             return candidate
     return None
 
@@ -321,15 +328,23 @@ def _absence_scope_line(record: dict[str, object]) -> str:
     prov = _as_dict(record.get("provenance"))
     search_id = _cell(prov.get("search_id")) or _cell(record.get("search_id"))
     query = _cell(prov.get("query")) or _cell(record.get("query"))
-    parts = [part for part in (
-        f"search {search_id}" if search_id else "",
-        f"query {query!r}" if query else "",
-    ) if part]
+    parts = [
+        part
+        for part in (
+            f"search {search_id}" if search_id else "",
+            f"query {query!r}" if query else "",
+        )
+        if part
+    ]
     return "Searched scope: " + " | ".join(parts) if parts else ""
 
 
 def _render_absence_observation(record: dict[str, object], max_bytes: int) -> str:
-    """Absence-observation card: scoped language, never a categorical denial."""
+    """Absence-observation card: scoped language, never a categorical denial.
+
+    A search-derived absence is coverage state, not evidence: the card names the
+    coverage artifact and says so instead of printing an evidence id.
+    """
     finding = _cell(record.get("claim_text")) or _cell(record.get("content"))
     scoped = "No disclosure was located within the searched SEC scope"
     lines = [_ABSENCE_SCOPE_LABEL]
@@ -337,6 +352,9 @@ def _render_absence_observation(record: dict[str, object], max_bytes: int) -> st
     if scope:
         lines.append(scope)
     lines.append(f"{scoped}: {finding}" if finding else scoped + ".")
+    artifact_id = _cell(record.get("artifact_id"))
+    if artifact_id:
+        lines.append(f"Coverage artifact: {artifact_id} (search scope, never citable evidence)")
     evidence_id = _cell(record.get("evidence_id"))
     if evidence_id:
         lines.append(f"Evidence: {evidence_id}")
@@ -346,10 +364,16 @@ def _render_absence_observation(record: dict[str, object], max_bytes: int) -> st
 def _research_search_hit_line(hit: object) -> str:
     """One paged search-hit line (document identity + snippet, navigation only)."""
     row = _as_dict(hit)
-    head = " ".join(part for part in (
-        _cell(row.get("form")), _cell(row.get("filed_at")),
-        _cell(row.get("accession")), _cell(row.get("document")),
-    ) if part)
+    head = " ".join(
+        part
+        for part in (
+            _cell(row.get("form")),
+            _cell(row.get("filed_at")),
+            _cell(row.get("accession")),
+            _cell(row.get("document")),
+        )
+        if part
+    )
     score = _cell(row.get("score"))
     if score:
         head = f"{head} (score {score})" if head else f"(score {score})"
@@ -365,9 +389,12 @@ def _research_search_head(result: dict[str, object], shown: list[object]) -> lis
     return [
         f"SEC search {_cell(result.get('search_id'))} — {len(shown)} hit(s) at offset {_cell(result.get('offset'))} of {_cell(result.get('total'))} persisted",
         f"query: {_cell(result.get('query')) or 'none'}",
-        ("coverage: " + (_cell(cov.get("status")) or "unknown")
-         + f"; pagination complete: {_briefing_flag_status(cov.get('pagination_complete'))}"
-         + f"; source exhausted: {_briefing_flag_status(cov.get('source_exhausted'))}"),
+        (
+            "coverage: "
+            + (_cell(cov.get("status")) or "unknown")
+            + f"; pagination complete: {_briefing_flag_status(cov.get('pagination_complete'))}"
+            + f"; source exhausted: {_briefing_flag_status(cov.get('source_exhausted'))}"
+        ),
     ]
 
 
@@ -386,9 +413,11 @@ def _research_search_card(result: dict[str, object], max_bytes: int) -> str | No
     head = _research_search_head(result, shown)
     tail = [
         "Hits are navigation artifacts: open the filing and cite a raw passage before recording evidence.",
-        (f"More hits: call research_read_search with offset={next_offset}"
-         if result.get("more") and next_offset is not None
-         else "More hits: none (every persisted hit is shown)"),
+        (
+            f"More hits: call research_read_search with offset={next_offset}"
+            if result.get("more") and next_offset is not None
+            else "More hits: none (every persisted hit is shown)"
+        ),
     ]
     budget = max_bytes - _utf8_size("\n".join(head + tail)) - 2
     kept, omitted = _fit_lines(_research_search_hit_lines(shown), max(budget, 1))
@@ -429,6 +458,8 @@ def _option_chain_spread(row: dict[str, object]) -> object:
     if bid is None or ask is None:
         return None
     return float(str(ask)) - float(str(bid))
+
+
 def _option_chain_cell(row: dict[str, object], field: str) -> str:
     """One derived option-chain cell (mid/spread derive, rest direct)."""
     if field == "mid":
@@ -440,8 +471,36 @@ def _option_chain_cell(row: dict[str, object], field: str) -> str:
     return _table_cell(value if value is not None else "unavailable")
 
 
-_OPTION_CHAIN_FIELDS = ("expiration", "dte", "strike", "bid", "ask", "mark", "mid", "spread", "implied_volatility", "delta", "gamma", "theta", "vega")
-_OPTION_CHAIN_LABELS = ("Expiration", "DTE", "Strike", "Bid", "Ask", "Mark", "Mid", "Spread", "IV", "Delta", "Gamma", "Theta", "Vega")
+_OPTION_CHAIN_FIELDS = (
+    "expiration",
+    "dte",
+    "strike",
+    "bid",
+    "ask",
+    "mark",
+    "mid",
+    "spread",
+    "implied_volatility",
+    "delta",
+    "gamma",
+    "theta",
+    "vega",
+)
+_OPTION_CHAIN_LABELS = (
+    "Expiration",
+    "DTE",
+    "Strike",
+    "Bid",
+    "Ask",
+    "Mark",
+    "Mid",
+    "Spread",
+    "IV",
+    "Delta",
+    "Gamma",
+    "Theta",
+    "Vega",
+)
 
 
 def _option_chain_row_line(row: dict[str, object]) -> str:
@@ -464,7 +523,24 @@ def _render_option_chain(result: dict[str, object], max_bytes: int) -> str:
 
 
 def _render_option_analysis(result: dict[str, object], max_bytes: int) -> str:
-    fields = ("ticker", "expiration", "dte", "strike", "bid", "ask", "mid", "spread", "implied_volatility", "delta", "gamma", "theta", "vega", "target_price", "target_pnl", "target_return_pct")
+    fields = (
+        "ticker",
+        "expiration",
+        "dte",
+        "strike",
+        "bid",
+        "ask",
+        "mid",
+        "spread",
+        "implied_volatility",
+        "delta",
+        "gamma",
+        "theta",
+        "vega",
+        "target_price",
+        "target_pnl",
+        "target_return_pct",
+    )
     lines = ["Option contract analysis"]
     for field in fields:
         value = result.get(field)
@@ -483,10 +559,28 @@ def _render_option_comparison(result: dict[str, object], max_bytes: int) -> str:
     for row in _as_list(result.get("contracts")):
         if not isinstance(row, dict):
             continue
-        lines.append("| " + " | ".join(_table_cell(row.get(field, "unavailable")) for field in (
-            "contract_id", "expiration", "strike", "mid", "spread_pct", "implied_volatility", "delta", "theta", "vega", "target_pnl"
-        )) + " |")
-    lines.append(f"Returned: {result.get('returned', 0)} of {result.get('matched', 0)} matched; ranking: {result.get('ranking', 'unknown')}")
+        lines.append(
+            "| "
+            + " | ".join(
+                _table_cell(row.get(field, "unavailable"))
+                for field in (
+                    "contract_id",
+                    "expiration",
+                    "strike",
+                    "mid",
+                    "spread_pct",
+                    "implied_volatility",
+                    "delta",
+                    "theta",
+                    "vega",
+                    "target_pnl",
+                )
+            )
+            + " |"
+        )
+    lines.append(
+        f"Returned: {result.get('returned', 0)} of {result.get('matched', 0)} matched; ranking: {result.get('ranking', 'unknown')}"
+    )
     lines.append("Source: " + str(result.get("source", "robinhood_mcp")))
     return _truncate_bytes("\n".join(lines), max_bytes)
 
@@ -544,10 +638,10 @@ def _web_search_claim_block(item: dict[str, object], index: int) -> list[str]:
 def _web_search_claim_optionals(item: dict[str, object]) -> list[str]:
     """Reported-ticker/object extras present only on claim blocks."""
     extra = []
-    reported = _cell(item.get('reported_ticker'))
+    reported = _cell(item.get("reported_ticker"))
     if reported:
         extra.append(f"Reported as: {reported}")
-    obj = _cell(item.get('object_name'))
+    obj = _cell(item.get("object_name"))
     if obj:
         extra.append(f"Object: {obj}")
     return extra
@@ -590,9 +684,7 @@ def _web_search_item_lines(item: object, index: int) -> list[str]:
 
 
 def _render_web_search(result: dict[str, object], max_bytes: int) -> str:
-    lines = [
-        f"CURRENT EXTERNAL EVIDENCE (search: {result.get('query') or '?'})"
-    ]
+    lines = [f"CURRENT EXTERNAL EVIDENCE (search: {result.get('query') or '?'})"]
     evidence = _as_list(result.get("evidence"))
     if not evidence:
         lines.append("No evidence returned.")
@@ -708,7 +800,7 @@ def _mandate_value_text(value: object, metric: str, unit: str) -> str:
         return f"${float(str(value)):,.2f}"
     try:
         return f"{float(str(value)) * 100:.1f}%"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return _cell(value)
 
 
@@ -762,7 +854,7 @@ def _mandate_exposure_part(sector: object, weight: object) -> str:
     """One sector exposure part (percent when numeric, raw otherwise)."""
     try:
         return f"{_cell(sector)} {float(str(weight)) * 100:.1f}%"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return f"{_cell(sector)} {_cell(weight)}"
 
 
@@ -833,7 +925,7 @@ def _position_weight_part(row: dict[str, object]) -> str:
         return ""
     try:
         weight = f"{float(weight) * 100:.2f}%"
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         pass
     return f"weight {weight}"
 
@@ -953,7 +1045,8 @@ def _render_scan_list(result: dict[str, object], max_bytes: int) -> str:
 def _scan_result_values(row: dict[str, object]) -> list[str]:
     """Priced-field values present on one scan-result row."""
     return [
-        _cell(row[key]) for key in ("last", "price", "market_cap", "volume", "change", "change_percent")
+        _cell(row[key])
+        for key in ("last", "price", "market_cap", "volume", "change", "change_percent")
         if _cell(row.get(key))
     ]
 
@@ -990,9 +1083,24 @@ def _render_scan_results(result: dict[str, object], max_bytes: int) -> str:
     return _truncate_bytes("\n".join(lines), max_bytes)
 
 
-
-_SHORT_INTEREST_FIELDS = ("rank", "ticker", "short_interest_percent", "short_shares", "shares_outstanding", "sec_shares_as_of", "sec_filed_at")
-_SHORT_INTEREST_LABELS = ("Rank", "Ticker", "Short %", "Short shares", "Shares outstanding", "SEC shares as of", "SEC filed")
+_SHORT_INTEREST_FIELDS = (
+    "rank",
+    "ticker",
+    "short_interest_percent",
+    "short_shares",
+    "shares_outstanding",
+    "sec_shares_as_of",
+    "sec_filed_at",
+)
+_SHORT_INTEREST_LABELS = (
+    "Rank",
+    "Ticker",
+    "Short %",
+    "Short shares",
+    "Shares outstanding",
+    "SEC shares as of",
+    "SEC filed",
+)
 
 
 def _short_interest_cell(entry: dict[str, object], field: str) -> str:
@@ -1031,10 +1139,17 @@ def _short_interest_footer(result: dict[str, object]) -> list[str]:
     lines = [
         "Source: " + str(result.get("source", "FINRA + SEC EDGAR")),
         "Metric: " + str(result.get("metric", "")),
-        "Coverage: " + f"{coverage.get('eligible_rows', 0)} eligible of {coverage.get('finra_rows', 0)} FINRA rows; exclusions {coverage.get('exclusions', {})}",
+        "Coverage: "
+        + f"{coverage.get('eligible_rows', 0)} eligible of {coverage.get('finra_rows', 0)} FINRA rows; exclusions {coverage.get('exclusions', {})}",
     ]
     if result.get("as_of_date"):
-        lines.append("As of: " + str(result["as_of_date"]) + " (freshness: " + str(result.get("data_freshness") or "unknown") + ")")
+        lines.append(
+            "As of: "
+            + str(result["as_of_date"])
+            + " (freshness: "
+            + str(result.get("data_freshness") or "unknown")
+            + ")"
+        )
     lines.append("Environment: " + str(result.get("environment", "unknown")))
     return lines
 
@@ -1105,9 +1220,11 @@ def _render_sp500_weight(result: dict[str, object], max_bytes: int) -> str:
     lines = [
         f"{ticker} S&P 500 index weight (as of {result.get('as_of', '?')})",
         f"Source: {result.get('source', 'Slickcharts')}",
-        f"Rank: {_cell(result.get('rank'))}"
-        f"  |  Company: {result.get('company', '?')}"
-        f"  |  Weight: {_cell(result.get('weight_pct'))}% of index market cap",
+        (
+            f"Rank: {_cell(result.get('rank'))}"
+            f"  |  Company: {result.get('company', '?')}"
+            f"  |  Weight: {_cell(result.get('weight_pct'))}% of index market cap"
+        ),
     ]
     if result.get("note"):
         lines.append("Note: " + str(result["note"]))
@@ -1136,10 +1253,7 @@ def _obligation_headline(row: dict[str, object]) -> str:
             f" | lifecycle: {label} (excluded from current exposure)"
             f"{status}{matched}{trigger}"
         )
-    return (
-        f"- {row.get('type', '?')}: {amount_s}"
-        f" | certainty: {row.get('certainty', '?')}{status}{matched}{trigger}"
-    )
+    return f"- {row.get('type', '?')}: {amount_s} | certainty: {row.get('certainty', '?')}{status}{matched}{trigger}"
 
 
 def _obligation_filed_line(row: dict[str, object]) -> str:
@@ -1257,12 +1371,14 @@ def _valuation_header_lines(result: dict[str, object], ob: dict[str, object]) ->
         f"{ticker} valuation (live price {price_s}, as of {result.get('as_of', '?')})",
         f"Source: {result.get('source', '')}",
         f"Trailing P/E (GAAP TTM EPS ${result.get('ttm_gaap_eps')}): {_valuation_pe(result.get('trailing_pe'))}",
-        f"Obligation drag per share: contractual ${ob.get('drag_per_share_contractual')}"
-        f" | contingent ${ob.get('drag_per_share_contingent')}"
-        f" | default-triggered ${ob.get('drag_per_share_default_triggered')}"
-        f" (annual: ${ob.get('contractual_annual_billions')}B contractual,"
-        f" ${ob.get('contingent_annual_billions')}B contingent,"
-        f" ${ob.get('default_triggered_annual_billions')}B default-triggered)",
+        (
+            f"Obligation drag per share: contractual ${ob.get('drag_per_share_contractual')}"
+            f" | contingent ${ob.get('drag_per_share_contingent')}"
+            f" | default-triggered ${ob.get('drag_per_share_default_triggered')}"
+            f" (annual: ${ob.get('contractual_annual_billions')}B contractual,"
+            f" ${ob.get('contingent_annual_billions')}B contingent,"
+            f" ${ob.get('default_triggered_annual_billions')}B default-triggered)"
+        ),
     ]
 
 
@@ -1438,6 +1554,8 @@ def _render_valuation_metrics(result: dict[str, object], max_bytes: int) -> str:
     if result.get("note"):
         lines.append("Note: " + str(result["note"]))
     return _truncate_bytes("\n".join(lines), max_bytes)
+
+
 def _valuation_pct_text(pct: object) -> str:
     """Percent-change prose for one projected price cell."""
     if isinstance(pct, (int, float, Decimal)):
@@ -1490,10 +1608,7 @@ def _valuation_obligation_scenario_lines(result: dict[str, object]) -> list[str]
     if not rows:
         return []
     rate = scenarios.get("effective_tax_rate")
-    lines = [
-        "Obligation EPS-impact scenarios (after-tax, "
-        f"tax rate {rate if rate is not None else 'unavailable'}):"
-    ]
+    lines = [(f"Obligation EPS-impact scenarios (after-tax, tax rate {rate if rate is not None else 'unavailable'}):")]
     for s in rows:
         assert isinstance(s, dict)
         lines.append(_valuation_obligation_scenario_line(s))
@@ -1508,10 +1623,12 @@ def _valuation_coverage_lines(result: dict[str, object]) -> list[str]:
     filings = [str(f) for f in _as_list(cov.get("filings_examined"))]
     sections = _as_list(cov.get("sections_examined"))
     lines = [
-        f"Coverage: {cov.get('quantified_count', '?')} quantified / "
-        f"{cov.get('unquantified_count', '?')} unquantified"
-        f" | filings: {', '.join(filings) if filings else 'none with quantified rows'}"
-        f" | sections examined: {len(sections)}"
+        (
+            f"Coverage: {cov.get('quantified_count', '?')} quantified / "
+            f"{cov.get('unquantified_count', '?')} unquantified"
+            f" | filings: {', '.join(filings) if filings else 'none with quantified rows'}"
+            f" | sections examined: {len(sections)}"
+        )
     ]
     warnings = [str(w) for w in _as_list(cov.get("warnings")) if str(w).strip()]
     if warnings:
@@ -1618,6 +1735,7 @@ def _datapoints_header(fields: list[str]) -> tuple[str, str]:
         "|" + "|".join("---" for _ in fields) + "|",
     )
 
+
 def _datapoints_reserved(footer: str, stale_banner: str) -> int:
     """Bytes reserved for footer plus worst-case omission notice."""
     reserved = _utf8_size(TRUNCATED_MARKER + "\n" + "Omitted rows: 99999\n" + footer) + 32
@@ -1633,7 +1751,9 @@ def _datapoints_row_line(row: object, fields: list[str]) -> str:
     return "| " + " | ".join(_table_cell(row.get(f)) for f in fields) + " |"
 
 
-def _datapoints_body_lines(records: list[object], fields: list[str], used: int, reserved: int, max_bytes: int) -> tuple[list[str], int, int]:
+def _datapoints_body_lines(
+    records: list[object], fields: list[str], used: int, reserved: int, max_bytes: int
+) -> tuple[list[str], int, int]:
     """Fitted body rows plus updated byte usage and omission count."""
     out: list[str] = []
     omitted = 0
@@ -1669,11 +1789,7 @@ def _render_datapoints(result: dict[str, object], max_bytes: int) -> str:
     out.extend(body)
     text = "\n".join(out) + footer
     if omitted:
-        text = (
-            "\n".join(out)
-            + f"\n{TRUNCATED_MARKER}\nOmitted rows: {omitted}"
-            + footer
-        )
+        text = "\n".join(out) + f"\n{TRUNCATED_MARKER}\nOmitted rows: {omitted}" + footer
     return text
 
 
@@ -1707,10 +1823,7 @@ def _datapoints_asof_line(result: dict[str, object]) -> str:
     """As-of/freshness line, empty when no as-of date present."""
     if not result.get("as_of_date"):
         return ""
-    return (
-        f"As of: {result['as_of_date']} "
-        f"(freshness: {result.get('data_freshness') or 'unknown'})"
-    )
+    return f"As of: {result['as_of_date']} (freshness: {result.get('data_freshness') or 'unknown'})"
 
 
 def _datapoints_warning_line(result: dict[str, object]) -> str:
@@ -1778,7 +1891,10 @@ def _briefing_coverage_line(cov: dict[str, object]) -> str:
         cover.append(f"{cov['rows_matched']} rows returned")
     if cov.get("first_date") and cov.get("last_date"):
         cover.append(f"{cov['first_date']} to {cov['last_date']}")
-    statuses = [f"{f.replace('_', ' ')}: {_briefing_flag_status(cov.get(f))}" for f in ("page_complete", "query_complete", "analysis_complete")]
+    statuses = [
+        f"{f.replace('_', ' ')}: {_briefing_flag_status(cov.get(f))}"
+        for f in ("page_complete", "query_complete", "analysis_complete")
+    ]
     cover.append("; ".join(statuses))
     return "Coverage: " + ", ".join(cover)
 
@@ -1867,16 +1983,16 @@ def _briefing_optional_sections(result: dict[str, object]) -> list[tuple[str, li
     return optional
 
 
-def _briefing_append_section(out: list[str], header: str, lines: list[str], used: int, max_bytes: int) -> tuple[int, bool]:
+def _briefing_append_section(
+    out: list[str], header: str, lines: list[str], used: int, max_bytes: int
+) -> tuple[int, bool]:
     """Append one optional section whole/fitted/truncated; returns (used, stop)."""
     block = header + "\n" + "\n".join("  - " + line for line in lines)
     cost = _utf8_size(block) + 1
     if used + cost <= max_bytes:
         out.append(block)
         return used + cost, False
-    kept, omitted = _fit_lines(
-        ["  - " + line for line in lines], max_bytes - used - _utf8_size(header) - 4
-    )
+    kept, omitted = _fit_lines(["  - " + line for line in lines], max_bytes - used - _utf8_size(header) - 4)
     if kept:
         out.append(header)
         out.extend(kept)
@@ -1975,9 +2091,7 @@ def _render_pagination(result: dict[str, object]) -> str:
     if source:
         parts.append(str(source))
     if result.get("may_have_more") is not None:
-        parts.append(
-            f"more pages: {'yes' if result['may_have_more'] else 'no'}"
-        )
+        parts.append(f"more pages: {'yes' if result['may_have_more'] else 'no'}")
     if result.get("next_offset") is not None:
         parts.append(f"next_offset {result['next_offset']}")
     return ", ".join(parts)
@@ -2006,13 +2120,28 @@ class _SecFactsAccumulator:
         return True
 
 
-_SEC_FACTS_SKIP = frozenset({
-    "source", "metric", "data_source", "as_of_date", "requested_as_of",
-    "row_count", "returned_count", "truncated", "ticker",
-    "quarterly_eps", "annual_history", "matching_concepts", "balance_sheet",
-    "last_dividend", "next_declared_dividend", "past_events",
-    "safety", "risk_flags",
-})
+_SEC_FACTS_SKIP = frozenset(
+    {
+        "source",
+        "metric",
+        "data_source",
+        "as_of_date",
+        "requested_as_of",
+        "row_count",
+        "returned_count",
+        "truncated",
+        "ticker",
+        "quarterly_eps",
+        "annual_history",
+        "matching_concepts",
+        "balance_sheet",
+        "last_dividend",
+        "next_declared_dividend",
+        "past_events",
+        "safety",
+        "risk_flags",
+    }
+)
 _SEC_DIV_GROWTH_KEYS = ("growth_1y", "growth_3y_cagr", "growth_5y_cagr", "growth_10y_cagr")
 
 
@@ -2097,9 +2226,15 @@ def _sec_facts_growth_line(result: dict[str, object]) -> str:
 
 def _sec_facts_safety_line(safety: dict[str, object]) -> str:
     """SAFETY coverage line with methodology suffix when disclosed."""
-    cov = [f"{k} {safety[k]}" for k in ("earnings_payout_ratio", "fcf_payout_ratio", "fcf_coverage", "cash_to_annual_dividend") if safety.get(k) is not None]
+    cov = [
+        f"{k} {safety[k]}"
+        for k in ("earnings_payout_ratio", "fcf_payout_ratio", "fcf_coverage", "cash_to_annual_dividend")
+        if safety.get(k) is not None
+    ]
     method = f" [{safety['methodology']}]" if safety.get("methodology") else ""
     return f"SAFETY: {' | '.join(cov) if cov else 'none'}{method}"
+
+
 def _sec_facts_risk_line(safety: dict[str, object]) -> str:
     """RISK FLAGS line from raised flags (none when none raised)."""
     flags: object = safety.get("risk_flags") or []

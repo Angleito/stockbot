@@ -24,8 +24,15 @@ CLAIM_TYPES = ("observed_fact", "inference", "unknown", "contradicted")
 
 MATERIALITY_LEVELS = ("critical", "high", "medium", "low")
 
-COMMITTEE_REQUIRED_KEYS = ("executive_view", "claims", "impact_channels",
-                           "materiality", "uncertainties", "what_would_change", "follow_ups")
+COMMITTEE_REQUIRED_KEYS = (
+    "executive_view",
+    "claims",
+    "impact_channels",
+    "materiality",
+    "uncertainties",
+    "what_would_change",
+    "follow_ups",
+)
 COMMITTEE_ENVELOPE_ERROR = "ERR_COMMITTEE_ENVELOPE_INCOMPLETE"
 
 
@@ -115,9 +122,7 @@ def _claim_type(item: dict[object, object]) -> str:
 
 def _grounded_ids(raw_ids: object, frozen_set: set[str]) -> list[str] | None:
     """Deduped non-empty ids, all inside the freeze; None when malformed, raises on unknown id."""
-    if not isinstance(raw_ids, list) or any(
-        not isinstance(eid, str) or not eid for eid in raw_ids
-    ):
+    if not isinstance(raw_ids, list) or any(not isinstance(eid, str) or not eid for eid in raw_ids):
         return None
     unknown = next((eid for eid in raw_ids if eid not in frozen_set), None)
     if unknown is not None:
@@ -125,9 +130,7 @@ def _grounded_ids(raw_ids: object, frozen_set: set[str]) -> list[str] | None:
     return list(dict.fromkeys(raw_ids))
 
 
-def _claim_ids(
-    item: dict[object, object], raw_text: str, frozen_set: set[str], claim_type: str
-) -> list[str]:
+def _claim_ids(item: dict[object, object], raw_text: str, frozen_set: set[str], claim_type: str) -> list[str]:
     """Validated deduped evidence ids, all contained in the freeze.
 
     ``unknown`` may cite nothing; every other type needs at least one id.
@@ -145,11 +148,7 @@ def _build_claim(item: object, frozen_set: set[str]) -> GroundedClaim:
     if not isinstance(item, dict):
         raise ModelOutputFailure("each claim must be {text, claim_type, evidence_ids}")
     keys = set(item)
-    if (
-        keys - {"text", "claim_type", "evidence_ids"}
-        or "evidence_ids" not in keys
-        or "text" not in keys
-    ):
+    if keys - {"text", "claim_type", "evidence_ids"} or "evidence_ids" not in keys or "text" not in keys:
         raise ModelOutputFailure("each claim must contain exactly {text, claim_type, evidence_ids}")
     raw_text = _claim_text(item)
     claim_type = _claim_type(item)
@@ -190,7 +189,7 @@ def _embedded_claim_list(text: str) -> list[object] | None:
     start = text.find("[")
     end = text.rfind("]")
     if start >= 0 and end > start:
-        decoded = _try_json_list(text[start:end + 1])
+        decoded = _try_json_list(text[start : end + 1])
         if decoded is not None:
             return decoded
     return None
@@ -276,15 +275,11 @@ def _decode_envelope(text: str) -> dict[object, object]:
     """Parse one JSON object document from committee model text."""
     stripped = text.strip()
     if not stripped:
-        raise ModelOutputFailure(
-            "committee output must be one JSON document (got blank)"
-        )
+        raise ModelOutputFailure("committee output must be one JSON document (got blank)")
     try:
         decoded: object = json.loads(stripped)
     except json.JSONDecodeError as exc:
-        raise ModelOutputFailure(
-            f"committee output must be one JSON document: {exc}"
-        ) from exc
+        raise ModelOutputFailure(f"committee output must be one JSON document: {exc}") from exc
     if not isinstance(decoded, dict):
         raise ModelOutputFailure("committee output must be a JSON object")
     return decoded
@@ -333,14 +328,10 @@ def _require_rich_envelope(decoded: dict[object, object]) -> None:
     """
     missing = [key for key in COMMITTEE_REQUIRED_KEYS if key not in decoded]
     if missing:
-        raise ModelOutputFailure(
-            f"{COMMITTEE_ENVELOPE_ERROR}: committee envelope missing {missing}"
-        )
+        raise ModelOutputFailure(f"{COMMITTEE_ENVELOPE_ERROR}: committee envelope missing {missing}")
     for key, expected, requirement in _ENVELOPE_SHAPE:
         if not isinstance(decoded[key], expected):
-            raise ModelOutputFailure(
-                f"{COMMITTEE_ENVELOPE_ERROR}: committee {key!r} {requirement}"
-            )
+            raise ModelOutputFailure(f"{COMMITTEE_ENVELOPE_ERROR}: committee {key!r} {requirement}")
     _require_materiality_payload(decoded["materiality"])
 
 
@@ -358,9 +349,19 @@ def _follow_up_question(item: object) -> str:
 def _build_follow_up(item: object, agent: str) -> ResearchRequest:
     """Validate one follow-up question string or {question, why_it_matters, suggested_source} mapping."""
     q = _follow_up_question(item)
-    why = item.get("why_it_matters", item.get("why_material", "committee follow-up")) if isinstance(item, dict) else "committee follow-up"
+    why = (
+        item.get("why_it_matters", item.get("why_material", "committee follow-up"))
+        if isinstance(item, dict)
+        else "committee follow-up"
+    )
     src = item.get("suggested_source", item.get("requested_source_domain", "SEC")) if isinstance(item, dict) else "SEC"
-    return ResearchRequest(question=q, why_material=why.strip() if isinstance(why, str) and why.strip() else "committee follow-up", requested_source_domain=src.strip() if isinstance(src, str) and src.strip() else "SEC", expected_gain="medium", requesting_agents=[agent])
+    return ResearchRequest(
+        question=q,
+        why_material=why.strip() if isinstance(why, str) and why.strip() else "committee follow-up",
+        requested_source_domain=src.strip() if isinstance(src, str) and src.strip() else "SEC",
+        expected_gain="medium",
+        requesting_agents=[agent],
+    )
 
 
 def _str_or_blank(value: object, cap: int = 2000) -> str:
@@ -376,7 +377,9 @@ def _parse_channel(item: object, frozen_set: set[str]) -> ImpactChannel | None:
     seen = _grounded_ids(item.get("evidence_ids", []), frozen_set)
     if not isinstance(text, str) or not text.strip() or not seen:
         return None
-    return ImpactChannel(text=text.strip()[:500], direction=_str_or_blank(item.get("direction"), 200), evidence_ids=seen)
+    return ImpactChannel(
+        text=text.strip()[:500], direction=_str_or_blank(item.get("direction"), 200), evidence_ids=seen
+    )
 
 
 def _parse_materiality(raw: object) -> CommitteeMateriality:
@@ -407,9 +410,7 @@ class CommitteeEnvelope:
     what_would_change: list[str] = field(default_factory=list)
 
 
-def parse_committee_envelope(
-    text: str, *, frozen: Sequence[str], agent: str
-) -> CommitteeEnvelope:
+def parse_committee_envelope(text: str, *, frozen: Sequence[str], agent: str) -> CommitteeEnvelope:
     """Rich committee envelope; incomplete envelopes fail ``ERR_COMMITTEE_ENVELOPE_INCOMPLETE``."""
     decoded = _decode_envelope(text)
     _require_rich_envelope(decoded)

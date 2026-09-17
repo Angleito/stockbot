@@ -13,6 +13,7 @@ should you add it to ACCOUNT_READ_TOOLS in app/robinhood/capabilities.py —
 and only if it is genuinely read-only.  Discovery itself never invokes a
 tool; trading/write tools stay on the deny list regardless of discovery.
 """
+
 import argparse
 import json
 import sys
@@ -30,8 +31,13 @@ from app.robinhood.capabilities import (
 )
 
 ACCOUNT_KEYWORDS = (
-    "accounts", "positions", "portfolio", "balance",
-    "transaction", "buying", "cash",
+    "accounts",
+    "positions",
+    "portfolio",
+    "balance",
+    "transaction",
+    "buying",
+    "cash",
 )
 
 SUMMARY_LABELS = ("MARKET_READ", "ACCOUNT_READ", "BLOCKED", "UNKNOWN")
@@ -58,7 +64,8 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--server-url", default=get_robinhood_mcp_url())
     parser.add_argument(
-        "--json", action="store_true",
+        "--json",
+        action="store_true",
         help="dump the full discovered tool list as JSON",
     )
     return parser.parse_args(argv)
@@ -81,12 +88,14 @@ def _tool_schema(tool: dict[str, object]) -> dict[str, object]:
 def render_tool(tool: dict[str, object]) -> str:
     name = str(tool.get("name", "<unknown>"))
     description = str(tool.get("description") or "")
-    return "\n".join((
-        f"- {name}",
-        f"  capability: {_classify(name)}",
-        f"  description: {_truncate(description, 200)}",
-        f"  input_schema: {_truncate(json.dumps(_tool_schema(tool), sort_keys=True), 400)}",
-    ))
+    return "\n".join(
+        (
+            f"- {name}",
+            f"  capability: {_classify(name)}",
+            f"  description: {_truncate(description, 200)}",
+            f"  input_schema: {_truncate(json.dumps(_tool_schema(tool), sort_keys=True), 400)}",
+        )
+    )
 
 
 def render_text(tools: list[dict[str, object]]) -> str:
@@ -112,12 +121,13 @@ def render_json(tools: list[dict[str, object]]) -> str:
 
 
 def find_candidates(names: list[str]) -> list[str]:
-    return sorted({
-        name
-        for name in names
-        if any(keyword in name.lower() for keyword in ACCOUNT_KEYWORDS)
-        and name not in ACCOUNT_READ_TOOLS
-    })
+    return sorted(
+        {
+            name
+            for name in names
+            if any(keyword in name.lower() for keyword in ACCOUNT_KEYWORDS) and name not in ACCOUNT_READ_TOOLS
+        }
+    )
 
 
 def main(argv: list[str] | None = None) -> int:

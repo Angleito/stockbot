@@ -3,7 +3,7 @@ edgartools with no allowlist; as_of filtering lives here (never leak
 filings the market couldn't know yet)."""
 
 import re
-from datetime import date, datetime
+from datetime import UTC, date, datetime
 
 from . import documents
 from .client import get_company
@@ -44,14 +44,14 @@ def _forms_arg(forms: str | list[str] | tuple[str, ...] | None) -> str | list[st
     return forms if isinstance(forms, str) else list(forms)
 
 
-def _filing_date_arg(start_date: str | date | datetime | None,
-                     end_date: str | date | datetime | None,
-                     as_of: str | None) -> str | None:
+def _filing_date_arg(
+    start_date: str | date | datetime | None, end_date: str | date | datetime | None, as_of: str | None
+) -> str | None:
     if start_date is None and end_date is None:
         return None
     # edgartools rejects open-ended ranges ("2026-09-07:"); close them:
     # missing start means archive beginning, missing end means as_of/today.
-    end = _date_str(end_date or as_of or date.today().isoformat())
+    end = _date_str(end_date or as_of or datetime.now(UTC).date().isoformat())
     return f"{_date_str(start_date) if start_date else '1994-01-01'}:{end}"
 
 
@@ -108,7 +108,8 @@ def list_sec_filings(
 ) -> list[Filing]:
     as_of = _check_as_of(as_of)
     filings_raw = get_company(ticker_or_cik).get_filings(
-        form=_forms_arg(forms), filing_date=_filing_date_arg(start_date, end_date, as_of))
+        form=_forms_arg(forms), filing_date=_filing_date_arg(start_date, end_date, as_of)
+    )
     out: list[Filing] = []
     for f in filings_raw:
         if limit is not None and len(out) >= limit:
@@ -138,6 +139,5 @@ def get_sec_filing(
     if as_of is not None:
         value, _basis = pit_of(out)
         if value is None or value[:10] > as_of:
-            raise ValueError(
-                f"filing {accession_no!r} not known as of {as_of!r}")
+            raise ValueError(f"filing {accession_no!r} not known as of {as_of!r}")
     return out

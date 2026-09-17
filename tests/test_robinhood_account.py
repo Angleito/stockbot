@@ -1,6 +1,6 @@
 import json
 from dataclasses import FrozenInstanceError
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -125,7 +125,12 @@ def test_alias_merging_snake_and_camel_normalize_identically() -> None:
         {"account_id": "acc-1", "cash": "100.00", "buying_power": "200.00", "withdrawable_cash": "50.00"}
     )
     camel = normalize_cash_balance(
-        {"accountId": "acc-1", "cashAvailable": "100.00", "buyingPowerAvailable": "200.00", "withdrawableAmount": "50.00"}
+        {
+            "accountId": "acc-1",
+            "cashAvailable": "100.00",
+            "buyingPowerAvailable": "200.00",
+            "withdrawableAmount": "50.00",
+        }
     )
     assert snake.cash == camel.cash == Decimal("100.00")
     assert snake.buying_power == camel.buying_power == Decimal("200.00")
@@ -137,41 +142,45 @@ def test_alias_merging_snake_and_camel_normalize_identically() -> None:
 
 
 def test_explicit_retrieved_at_is_honored() -> None:
-    when = datetime(2026, 8, 25, 15, 0)
+    when = datetime(2026, 8, 25, 15, 0)  # noqa: DTZ001 - naive input is the case under test
     account = normalize_account({"id": "acc-1"}, retrieved_at=when)
-    assert account.retrieved_at == when.replace(tzinfo=timezone.utc)
-    assert account.retrieved_at.tzinfo == timezone.utc
+    assert account.retrieved_at == when.replace(tzinfo=UTC)
+    assert account.retrieved_at.tzinfo == UTC
 
 
 def test_naive_payload_timestamp_becomes_utc() -> None:
     position = normalize_position(
         {"id": "p", "account_id": "a", "ticker": "WING", "quantity": "1", "retrieved_at": "2026-08-25T15:00:00"}
     )
-    assert position.retrieved_at == datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
+    assert position.retrieved_at == datetime(2026, 8, 25, 15, 0, tzinfo=UTC)
 
 
 def test_z_suffix_timestamp_normalizes() -> None:
     balance = normalize_cash_balance({"account_id": "a", "cash": "1.00", "retrievedAt": "2026-08-25T15:00:00Z"})
-    assert balance.retrieved_at == datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
+    assert balance.retrieved_at == datetime(2026, 8, 25, 15, 0, tzinfo=UTC)
 
 
 def test_missing_retrieved_at_defaults_to_now_utc() -> None:
-    before = datetime.now(timezone.utc)
+    before = datetime.now(UTC)
     balance = normalize_cash_balance({"account_id": "a", "cash": "1.00"})
-    after = datetime.now(timezone.utc)
+    after = datetime.now(UTC)
     assert isinstance(balance.retrieved_at, datetime)
-    assert balance.retrieved_at.tzinfo == timezone.utc
+    assert balance.retrieved_at.tzinfo == UTC
     assert before <= balance.retrieved_at <= after
 
 
 def test_source_defaults_to_robinhood_mcp() -> None:
     assert normalize_account({"id": "a"}).source == "robinhood_mcp"
     assert normalize_cash_balance({"account_id": "a"}).source == "robinhood_mcp"
-    assert normalize_position({"id": "p", "account_id": "a", "ticker": "WING", "quantity": "1"}).source == "robinhood_mcp"
+    assert (
+        normalize_position({"id": "p", "account_id": "a", "ticker": "WING", "quantity": "1"}).source == "robinhood_mcp"
+    )
 
 
 def test_malformed_monetary_values_are_none_never_zero() -> None:
-    balance = normalize_cash_balance({"account_id": "a", "cash": "abc", "buying_power": "", "withdrawable_cash": "oops"})
+    balance = normalize_cash_balance(
+        {"account_id": "a", "cash": "abc", "buying_power": "", "withdrawable_cash": "oops"}
+    )
     assert balance.cash is None
     assert balance.buying_power is None
     assert balance.withdrawable_cash is None
@@ -201,16 +210,16 @@ def test_domain_models_are_frozen_and_hold_values() -> None:
         unrealized_gain_pct=None,
         portfolio_weight=None,
         source="robinhood_mcp",
-        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
     )
     assert position.quantity == Decimal("0.5")
     assert position.average_cost == Decimal("95.50")
     with pytest.raises(FrozenInstanceError):
-        setattr(position, "ticker", "AAPL")
+        setattr(position, "ticker", "AAPL")  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
 
     snapshot = PortfolioSnapshot(
         snapshot_id="snap-1",
-        created_at=datetime(2026, 8, 25, 15, 1, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 25, 15, 1, tzinfo=UTC),
         broker="robinhood",
         account_ids=("a",),
         cash=Decimal("1234.56"),
@@ -222,11 +231,13 @@ def test_domain_models_are_frozen_and_hold_values() -> None:
     assert snapshot.cash == Decimal("1234.56")
     assert snapshot.positions[0] is position
     with pytest.raises(FrozenInstanceError):
-        setattr(snapshot, "cash", Decimal(0))
+        setattr(snapshot, "cash", Decimal(0))  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
 
 
 def test_to_json_dict_serializes_decimals_and_datetimes() -> None:
-    data = to_json_dict(normalize_cash_balance({"account_id": "a", "cash": "1234.56", "retrieved_at": "2026-08-25T15:00:00Z"}))
+    data = to_json_dict(
+        normalize_cash_balance({"account_id": "a", "cash": "1234.56", "retrieved_at": "2026-08-25T15:00:00Z"})
+    )
     assert data["cash"] == "1234.56"
     assert data["retrieved_at"] == "2026-08-25T15:00:00+00:00"
     assert data["source"] == "robinhood_mcp"

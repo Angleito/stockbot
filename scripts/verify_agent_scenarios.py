@@ -73,9 +73,7 @@ def _pi_flags(provider: str, model: str) -> list[str]:
 
     Mirrors app/thesis/omp_runner.py: an unset flag is absent, never empty.
     """
-    return (["--provider", provider] if provider else []) + (
-        ["--model", model] if model else []
-    )
+    return (["--provider", provider] if provider else []) + (["--model", model] if model else [])
 
 
 def _pi_completion_argv(provider: str, model: str, prompt: str) -> list[str]:
@@ -215,6 +213,7 @@ def _search_tool_names(sec_tools: object) -> list[str]:
     )
 
 
+
 def _search_tool_matches(query: object, sec_tools: object) -> list[str]:
     q = str(query or "").lower()
     base = _search_tool_names(sec_tools)
@@ -262,6 +261,7 @@ def _make_tool_context(make_ctx: object, research: object) -> object:
     return make_ctx(
         principal_id="verify-agent-scenarios", capabilities=frozenset({research})
     )
+
 
 
 def _build_tool_context(harness: _ToolHarness) -> tuple[object | None, str]:
@@ -573,11 +573,7 @@ def _build_success_input(
 
 
 def _live_trace(
-    scenario: Scenario,
-    repo: ResearchRepository,
-    sid: str,
-    jobs: list[Job],
-    evidence_ids: tuple[str, ...] = (),
+    scenario: Scenario, repo: ResearchRepository, sid: str, jobs: list[Job], evidence_ids: tuple[str, ...] = ()
 ) -> dict[str, object]:
     """Eval fields the live run can actually prove: opened filings/documents + ledger record kinds.
 
@@ -598,11 +594,7 @@ def _live_trace(
         "raw_evidence_ids": tuple(eid for eid in evidence_ids if eid in raw_rows),
         "navigation_evidence_ids": _ledger_ids(repo, sid, "discovery"),
         "waves": freeze_ids,
-        "committee_freeze_ids": tuple(
-            str(run)
-            for run in getattr(sess, "committee_runs", ())
-            if isinstance(run, str)
-        ),
+        "committee_freeze_ids": tuple(str(run) for run in getattr(sess, "committee_runs", ()) if isinstance(run, str)),
         "roles_completed": _completed_roles(jobs),
     }
 
@@ -764,13 +756,9 @@ def _run_live_scenario(
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
+    parser.add_argument("--list", action="store_true", help="list scenario names and exit")
     parser.add_argument(
-        "--list", action="store_true", help="list scenario names and exit"
-    )
-    parser.add_argument(
-        "--scenario",
-        default=None,
-        help="run one scenario, fixture-only regressions included (default: all live)",
+        "--scenario", default=None, help="run one scenario, fixture-only regressions included (default: all live)"
     )
     parser.add_argument(
         "--model",
@@ -788,17 +776,11 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
         help="per-call OMP model timeout seconds (or STOCKBOT_MODEL_TIMEOUT; "
         f"default {_PI_CALL_TIMEOUT_DEFAULT_S})",
     )
+    parser.add_argument("--prompt-version", default="v1", help="prompt version stamp (default v1)")
     parser.add_argument(
-        "--prompt-version", default="v1", help="prompt version stamp (default v1)"
+        "--fixtures-dir", default=None, help="accepted for compat; live runs do not use static fixtures"
     )
-    parser.add_argument(
-        "--fixtures-dir",
-        default=None,
-        help="accepted for compat; live runs do not use static fixtures",
-    )
-    parser.add_argument(
-        "--json", action="store_true", help="print machine-readable summary"
-    )
+    parser.add_argument("--json", action="store_true", help="print machine-readable summary")
     return parser.parse_args(argv)
 
 
@@ -831,16 +813,9 @@ def _find_unknown(names: list[str], by_name: dict[str, Scenario]) -> list[str]:
 
 
 def _eval_one_scenario(
-    name: str,
-    by_name: dict[str, Scenario],
-    provider: str,
-    model: str,
-    prompt_version: str,
-    timeout_s: int,
+    name: str, by_name: dict[str, Scenario], provider: str, model: str, prompt_version: str, timeout_s: int
 ) -> ScenarioResult:
-    return evaluate(
-        _run_live_scenario(by_name[name], provider, model, prompt_version, timeout_s)
-    )
+    return evaluate(_run_live_scenario(by_name[name], provider, model, prompt_version, timeout_s))
 
 
 def _run_all_scenarios(
@@ -861,9 +836,7 @@ def _failed_results(results: list[ScenarioResult]) -> list[ScenarioResult]:
     return [r for r in results if not r.passed]
 
 
-def summarize_results(
-    results: list[ScenarioResult],
-) -> tuple[list[ScenarioResult], int]:
+def summarize_results(results: list[ScenarioResult]) -> tuple[list[ScenarioResult], int]:
     failed = _failed_results(results)
     return failed, (1 if failed else 0)
 
@@ -887,12 +860,7 @@ def _build_summary(
         "model": model or _DEFAULT_MODEL_LABEL,
         "prompt_version": prompt_version,
         "scenarios": [
-            {
-                "scenario": r.scenario_name,
-                "passed": r.passed,
-                "violations": list(r.violations),
-            }
-            for r in results
+            {"scenario": r.scenario_name, "passed": r.passed, "violations": list(r.violations)} for r in results
         ],
     }
 
@@ -946,11 +914,7 @@ def _cli_prereqs(
 
 
 def _report_cli_run(
-    args: argparse.Namespace,
-    provider: str,
-    model: str,
-    results: list[ScenarioResult],
-    summary: dict[str, object],
+    args: argparse.Namespace, provider: str, model: str, results: list[ScenarioResult], summary: dict[str, object]
 ) -> int:
     _print_results(results, provider, model)
     _maybe_print_suite_info(results, provider, model, summary)

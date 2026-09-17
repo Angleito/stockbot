@@ -1,7 +1,7 @@
 {
   "answer_excerpt": "Microsoft's FY2026 10-K [rs:msft-openai-bankruptcy-2026-08-10:ev:1] discloses the OpenAI investment carrying value and the Azure commercial commitments; Amazon's 10-K [rs:msft-openai-bankruptcy-2026-08-10:ev:2] and Oracle's 10-K [rs:msft-openai-bankruptcy-2026-08-10:ev:3] cover the non-MSFT compute branch and CoreWeave's 10-Q covers the neocloud credit branch. An OpenAI insolvency impairs the carrying value (inference). No disclosure of OpenAI's private funding terms was located within the searched SEC scope (SEC-only limitation).",
   "as_of": "2026-08-10",
-  "budget_cap": 60,
+  "budget_cap": null,
   "budget_used": 31,
   "evidence_ids": [
     "rs:msft-openai-bankruptcy-2026-08-10:ev:1",
@@ -39,7 +39,7 @@
     "relationships_found": 3,
     "relationships_skipped": 1,
     "searches": 3,
-    "stop_reason": "complete:wave2",
+    "stop_reason": "no_questions",
     "unresolved": [
       "OpenAI private funding terms"
     ]

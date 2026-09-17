@@ -53,9 +53,9 @@ None
 - `company_name` (string)
 - `domain` (string)
 - `end_date` (string)
-- `exhaustive` (boolean): Fan out over all routes (default false; non-exhaustive).
+- `exhaustive` (boolean): true drains every applicable route (the default when dispatched inside a research session); false requests the quick bounded lookup (default outside a research session).
 - `forms` (array)
-- `limit` (integer)
+- `limit` (integer): Max hits in the returned packet (default 20); under exhaustive retrieval it does not reduce retrieval.
 - `person_name` (string)
 - `query` (string)
 - `security_identifier` (string): Ticker, CUSIP, ISIN, or class title; never treated as issuer identity.

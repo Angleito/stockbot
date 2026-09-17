@@ -36,10 +36,7 @@ WEIGHT_CACHE_TTL_SECONDS = 86400
 CRUMB_TTL_SECONDS = 900
 REQUEST_TIMEOUT_SECONDS = 20
 
-_UA = (
-    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-    "(KHTML, like Gecko) Chrome/125.0 Safari/537.36"
-)
+_UA = "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/125.0 Safari/537.36"
 
 _lock = threading.RLock()
 _session: requests.Session | None = None
@@ -66,9 +63,7 @@ def _no_data(ticker: str, what: str) -> dict[str, object]:
     return {"error": f"No data found for {ticker}: {what}"}
 
 
-def _session_get(
-    session: requests.Session, url: str, headers: dict[str, str] | None = None
-) -> requests.Response:
+def _session_get(session: requests.Session, url: str, headers: dict[str, str] | None = None) -> requests.Response:
     return session.get(url, headers=headers, timeout=REQUEST_TIMEOUT_SECONDS)
 
 
@@ -88,9 +83,7 @@ def _get_crumb() -> str:
     global _crumb, _crumb_at
     with _lock:
         if _crumb is None or (time.time() - _crumb_at) > CRUMB_TTL_SECONDS:
-            _crumb = _session_get(
-                _ensure_session(), f"{YAHOO_QUERY_BASE}/v1/test/getcrumb"
-            ).text.strip()
+            _crumb = _session_get(_ensure_session(), f"{YAHOO_QUERY_BASE}/v1/test/getcrumb").text.strip()
             _crumb_at = time.time()
         return _crumb
 
@@ -103,19 +96,11 @@ def _reset_crumb() -> None:
 
 def _fetch_summary_response(ticker: str, modules: str) -> requests.Response:
     """GET quoteSummary; retry once with a fresh crumb on 401/403."""
-    url = (
-        f"{YAHOO_QUERY_BASE}/v10/finance/quoteSummary/{ticker}"
-        f"?modules={modules}&crumb={_get_crumb()}"
-    )
-    resp = _session_get(
-        _ensure_session(), url, headers={"Accept": "application/json"}
-    )
+    url = f"{YAHOO_QUERY_BASE}/v10/finance/quoteSummary/{ticker}?modules={modules}&crumb={_get_crumb()}"
+    resp = _session_get(_ensure_session(), url, headers={"Accept": "application/json"})
     if resp.status_code in (401, 403):
         _reset_crumb()
-        url = (
-            f"{YAHOO_QUERY_BASE}/v10/finance/quoteSummary/{ticker}"
-            f"?modules={modules}&crumb={_get_crumb()}"
-        )
+        url = f"{YAHOO_QUERY_BASE}/v10/finance/quoteSummary/{ticker}?modules={modules}&crumb={_get_crumb()}"
         resp = _session_get(_ensure_session(), url, headers={"Accept": "application/json"})
     return resp
 
@@ -126,9 +111,7 @@ def _summary_result_list(summary: dict[str, object], ticker: str) -> list[object
     if not isinstance(result_obj, list) or not result_obj:
         err: object = summary.get("error") or {}
         detail: object = err.get("description") if isinstance(err, dict) else None
-        raise ValueError(
-            detail if isinstance(detail, str) else f"Yahoo returned no data for {ticker}"
-        )
+        raise ValueError(detail if isinstance(detail, str) else f"Yahoo returned no data for {ticker}")
     return result_obj
 
 
@@ -242,9 +225,7 @@ def get_analyst_estimates(ticker: str) -> dict[str, object]:
     if isinstance(hit, dict):
         return hit
     try:
-        data = _quote_summary(
-            ticker, "financialData,earningsTrend,defaultKeyStatistics"
-        )
+        data = _quote_summary(ticker, "financialData,earningsTrend,defaultKeyStatistics")
     except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("analyst estimates failed for %s: %s", ticker, e)
         return {"error": f"Analyst estimates unavailable for {ticker}: {e}"}
@@ -326,8 +307,7 @@ def get_sp500_weight(ticker: str) -> dict[str, object]:
         if resp.status_code == 403:
             return {
                 "error": (
-                    f"S&P 500 index weights unavailable for {ticker}: "
-                    "Slickcharts rejected the request (HTTP 403)"
+                    f"S&P 500 index weights unavailable for {ticker}: Slickcharts rejected the request (HTTP 403)"
                 )
             }
         resp.raise_for_status()
@@ -355,14 +335,11 @@ def get_sp500_weight(ticker: str) -> dict[str, object]:
 
 
 def _find_weight(html: str, ticker: str) -> dict[str, object] | None:
-    body = re.search(r"<tbody>(.*?)</tbody>", html, re.S)
+    body = re.search(r"<tbody>(.*?)</tbody>", html, re.DOTALL)
     if body is None:
         return None
-    for row in re.findall(r"<tr>(.*?)</tr>", body.group(1), re.S):
-        cells = [
-            re.sub(r"<[^>]+>", "", cell).strip()
-            for cell in re.findall(r"<td[^>]*>(.*?)</td>", row, re.S)
-        ]
+    for row in re.findall(r"<tr>(.*?)</tr>", body.group(1), re.DOTALL):
+        cells = [re.sub(r"<[^>]+>", "", cell).strip() for cell in re.findall(r"<td[^>]*>(.*?)</td>", row, re.DOTALL)]
         if len(cells) < 5:
             continue
         symbol = cells[2].split(".")[0].upper()

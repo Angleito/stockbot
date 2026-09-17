@@ -4,6 +4,7 @@ import json
 import sqlite3
 import subprocess
 from pathlib import Path
+from typing import ClassVar
 
 import pytest
 
@@ -48,7 +49,7 @@ def _as_list(value: object) -> list[object]:
 
 def _fake_proc(mode: str) -> type:
     class _FakeProc:
-        captured: dict[str, object] = {}
+        captured: ClassVar[dict[str, object]] = {}
 
         def __init__(self, cmd: list[str], **kw: object) -> None:
             env = kw.get("env")
@@ -61,8 +62,7 @@ def _fake_proc(mode: str) -> type:
                 done_p.parent.mkdir(parents=True, exist_ok=True)
                 done_p.write_text(json.dumps({"status": "completed", "answer": "ok"}))
                 # done_only writes no recorder row; done_failed_row writes a failed row.
-                status = {"ok": "completed", "linger": "completed",
-                          "done_failed_row": "failed"}.get(mode)
+                status = {"ok": "completed", "linger": "completed", "done_failed_row": "failed"}.get(mode)
                 if status is not None:
                     db_path = env.get("RUNS_DB_PATH")
                     assert isinstance(db_path, (str, Path))
@@ -88,9 +88,18 @@ def _fake_proc(mode: str) -> type:
 
     return _FakeProc
 
-def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, prompt: str, mode: str = "ok", timeout_s: int = 170,
-         run_id: str | None = "run:test", data_root: Path | None = None) -> dict[str, object]:
+
+def _run(
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    prompt: str,
+    mode: str = "ok",
+    timeout_s: int = 170,
+    run_id: str | None = "run:test",
+    data_root: Path | None = None,
+) -> dict[str, object]:
     fake = _fake_proc(mode)
+
     def _which(_name: str) -> str | None:
         return "/bin/omp"
     monkeypatch.setattr(omp_runner.shutil, "which", _which)
@@ -98,11 +107,11 @@ def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, prompt: str, mode: str
     monkeypatch.delenv("STOCKBOT_PROVIDER", raising=False)
     monkeypatch.delenv("STOCKBOT_MODEL", raising=False)
     root = data_root if data_root is not None else tmp_path / "data"
-    out = run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1", prompt=prompt,
-                        data_root=root, timeout_s=timeout_s, run_id=run_id)
+    out = run_thesis_omp(
+        thesis_id="thesis:t", trigger_id="trigger:1", prompt=prompt, data_root=root, timeout_s=timeout_s, run_id=run_id
+    )
     assert out is None
     return _as_dict(fake.captured)
-
 
 
 def test_builds_canonical_command_with_tool_restrictions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -113,6 +122,7 @@ def test_builds_canonical_command_with_tool_restrictions(monkeypatch: pytest.Mon
     assert "--no-builtin-tools" not in cmd
 
     assert cap["cwd"] == str(omp_runner._repo_root())
+
 
 def test_provider_model_flags_inserted_before_separator(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("STOCKBOT_PROVIDER", "openai")
@@ -161,14 +171,16 @@ def test_no_run_id_leaves_env_unset(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     monkeypatch.setattr(subprocess, "Popen", fake)
     monkeypatch.setattr(omp_runner, "_RECORDER_GRACE_S", 0.0)
     with pytest.raises(RuntimeError, match="without recorder"):
-        run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1",
-                       prompt="Do research", data_root=tmp_path / "data", run_id=None)
+        run_thesis_omp(
+            thesis_id="thesis:t", trigger_id="trigger:1", prompt="Do research", data_root=tmp_path / "data", run_id=None
+        )
     env = _as_dict(_as_dict(fake.captured)["env"])
     assert "STOCKBOT_RUN_ID" not in env
 
 
 def test_raises_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake = _fake_proc("fail")
+
     def _which_ok(_name: str) -> str | None:
         return "/bin/omp"
     monkeypatch.setattr(omp_runner.shutil, "which", _which_ok)
@@ -180,6 +192,7 @@ def test_raises_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 
 def test_raises_on_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     fake = _fake_proc("hang")
+
     def _which_ok2(_name: str) -> str | None:
         return "/bin/omp"
     monkeypatch.setattr(omp_runner.shutil, "which", _which_ok2)
@@ -207,6 +220,7 @@ def test_failed_run_after_completed_run_still_raises(monkeypatch: pytest.MonkeyP
     _run(monkeypatch, tmp_path, "Do research", mode="ok", run_id="run:one", data_root=data_root)
 
     fake = _fake_proc("fail")
+
     def _which_ok(_name: str) -> str | None:
         return "/bin/omp"
     monkeypatch.setattr(omp_runner.shutil, "which", _which_ok)
@@ -217,9 +231,7 @@ def test_failed_run_after_completed_run_still_raises(monkeypatch: pytest.MonkeyP
 
 
 @pytest.mark.parametrize("mode", ["done_only", "done_failed_row"])
-def test_done_completed_without_recorder_is_failure(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str
-) -> None:
+def test_done_completed_without_recorder_is_failure(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, mode: str) -> None:
     # Regression: completed done.json with an absent (done_only) or failed
     # (done_failed_row) recorder row must fail, never count as success.
     fake = _fake_proc(mode)
@@ -227,5 +239,10 @@ def test_done_completed_without_recorder_is_failure(
     monkeypatch.setattr(subprocess, "Popen", fake)
     monkeypatch.setattr(omp_runner, "_RECORDER_GRACE_S", 0.0)
     with pytest.raises(RuntimeError, match="without recorder|durable"):
-        run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1",
-                       prompt="Do research", data_root=tmp_path / "data", run_id="run:test")
+        run_thesis_omp(
+            thesis_id="thesis:t",
+            trigger_id="trigger:1",
+            prompt="Do research",
+            data_root=tmp_path / "data",
+            run_id="run:test",
+        )

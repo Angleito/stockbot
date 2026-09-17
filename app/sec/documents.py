@@ -7,7 +7,7 @@ import subprocess
 import tempfile
 from collections.abc import Iterable
 from dataclasses import replace
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from html.parser import HTMLParser
 from pathlib import Path
 from typing import TYPE_CHECKING, override
@@ -21,7 +21,9 @@ from .normalization import document_from_attachment, filing_from_edgar
 _MAX_CHARS = 32_000
 _VIEW_MAX_SECTIONS = 50
 
-_IXBLR_NOISE_RE = re.compile(r"<[A-Za-z][\w.-]*:[^>]*>.*?</[A-Za-z][\w.-]*:[^>]*>|<[A-Za-z][\w.-]*:[^>]*/>", re.IGNORECASE | re.DOTALL)
+_IXBLR_NOISE_RE = re.compile(
+    r"<[A-Za-z][\w.-]*:[^>]*>.*?</[A-Za-z][\w.-]*:[^>]*>|<[A-Za-z][\w.-]*:[^>]*/>", re.IGNORECASE | re.DOTALL
+)
 _STYLE_SCRIPT_RE = re.compile(r"<(style|script)[^>]*>.*?</\1>", re.IGNORECASE | re.DOTALL)
 _COMMENT_RE = re.compile(r"<!--.*?-->", re.DOTALL)
 _TAG_RE = re.compile(r"<[^>]+>")
@@ -113,7 +115,7 @@ def _parse_view(cleaned: str) -> str:
 
 
 def _section_names(view: str) -> list[str]:
-    return [name for name, _ in _split_sections(view) if name][: _VIEW_MAX_SECTIONS]
+    return [name for name, _ in _split_sections(view) if name][:_VIEW_MAX_SECTIONS]
 
 
 def _render_text(source: str) -> str:
@@ -190,6 +192,7 @@ def render_sec_view(source: str) -> str:
     """Public seam for the derived model-readable view (raw stays in the archive)."""
     return _render_text(source)
 
+
 def _normalize_accession(accession_no: str) -> str:
     """Tolerate pasting variants of the same identifier (never invent one):
     surrounding whitespace is stripped and a bare 18-digit run takes the
@@ -239,8 +242,7 @@ def _require_known(accession_no: str, as_of: str | None) -> Filing:
     meta = _meta(accession_no)
     value, _basis = pit_of(meta)
     if value is None or value[:10] > as_of:
-        raise ValueError(
-            f"filing {accession_no!r} not known as of {as_of!r}")
+        raise ValueError(f"filing {accession_no!r} not known as of {as_of!r}")
     return meta
 
 
@@ -250,15 +252,16 @@ def list_sec_documents(accession_no: str, as_of: str | None = None) -> list[Fili
     out: list[FilingDocument] = []
     for a in filing.attachments:
         doc = document_from_attachment(accession_no, a)
-        out.append(replace(
-            doc,
-            filed_at=meta.filed_at or None,
-            accepted_at=meta.accepted_at,
-            known_at=meta.known_at or None,
-            source_url=meta.source or None,
-            is_primary=(doc.document_name is not None
-                        and doc.document_name == meta.primary_document),
-        ))
+        out.append(
+            replace(
+                doc,
+                filed_at=meta.filed_at or None,
+                accepted_at=meta.accepted_at,
+                known_at=meta.known_at or None,
+                source_url=meta.source or None,
+                is_primary=(doc.document_name is not None and doc.document_name == meta.primary_document),
+            )
+        )
     return out
 
 
@@ -266,9 +269,7 @@ def _primary_attachment_of(filing: EdgarFiling, accession_no: str) -> object:
     try:
         attachment = filing.document
     except Exception as exc:
-        raise ValueError(
-            f"no primary document for accession: {accession_no!r}"
-        ) from exc
+        raise ValueError(f"no primary document for accession: {accession_no!r}") from exc
     if attachment is None:
         raise ValueError(f"no primary document for accession: {accession_no!r}")
     return attachment
@@ -289,7 +290,8 @@ def _missing_document_error(accession_no: str, document_name: str, names: list[s
     return ValueError(
         f"document not found: {document_name!r} for accession {accession_no!r}; "
         f"available documents: {sample or 'none'}. Call list_sec_documents "
-        f"for the full list, or omit the document name for the primary document.")
+        f"for the full list, or omit the document name for the primary document."
+    )
 
 
 def _named_attachment_of(filing: EdgarFiling, accession_no: str, document_name: str) -> object:
@@ -356,13 +358,13 @@ def _raw_root_for(data_root: Path | str | None) -> Path | None:
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
-def _check_window(offset: int | str | float, max_chars: int | str | float | None) -> tuple[int, int | None]:
+def _check_window(offset: str | float, max_chars: str | float | None) -> tuple[int, int | None]:
     try:
         offset = int(offset)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise ValueError(f"offset must be an integer, got {offset!r}") from None
     if offset < 0:
         raise ValueError(f"offset must be >= 0, got {offset}")
@@ -370,25 +372,40 @@ def _check_window(offset: int | str | float, max_chars: int | str | float | None
         return offset, None
     try:
         max_chars = int(max_chars)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise ValueError(f"max_chars must be an integer, got {max_chars!r}") from None
     if max_chars < 1 or max_chars > _MAX_CHARS:
         raise ValueError(f"max_chars must be 1..{_MAX_CHARS}, got {max_chars}")
     return offset, max_chars
 
 
-def _bounded_response(*, accession_no: str, document_name: object,
-                      description: object, url: object, full_text: str,
-                      content_hash: object, source_content_hash: object,
-                      source_representation: object, raw_archive_path: object,
-                      source_url: object, filed_at: object, known_at: object,
-                      retrieved_at: object, offset: int, max_chars: int | None,
-                      cache_hit: bool, cache_type: str,
-                      warnings: Iterable[str] | None = None,
-                      view_text: str | None = None, view_base: int = 0,
-                      resolved_section: str | None = None,
-                      raw_view: bool = False,
-                      available_sections: list[str] | None = None) -> dict[str, object]:
+def _bounded_response(
+    *,
+    accession_no: str,
+    document_name: object,
+    description: object,
+    url: object,
+    full_text: str,
+    content_hash: object,
+    source_content_hash: object,
+    source_representation: object,
+    raw_archive_path: object,
+    source_url: object,
+    filed_at: object,
+    known_at: object,
+    retrieved_at: object,
+    offset: int,
+    max_chars: int | None,
+    cache_hit: bool,
+    cache_type: str,
+    warnings: Iterable[str] | None = None,
+    view_text: str | None = None,
+    view_base: int = 0,
+    resolved_section: str | None = None,
+    raw_view: bool = False,
+    query: str | None = None,
+    available_sections: list[str] | None = None,
+) -> dict[str, object]:
     effective = view_text if view_text is not None else full_text
     total = len(effective)
     if offset > total:
@@ -415,23 +432,61 @@ def _bounded_response(*, accession_no: str, document_name: object,
         "cache_hit": cache_hit,
         "cache_type": cache_type,
     }
+    out["source_handle"] = _source_handle(
+        accession_no=accession_no,
+        document_name=document_name,
+        view_text=view_text,
+        full_text=full_text,
+        offset=offset,
+        end=end,
+        max_chars=max_chars,
+        raw_view=raw_view,
+        resolved_section=resolved_section,
+        query=query,
+        content_hash=content_hash,
+    )
     if warnings:
         out["warnings"] = list(warnings)
-    _attach_view(out, accession_no=accession_no, document_name=document_name,
-                 view_text=view_text, view_base=view_base, resolved_section=resolved_section,
-                 raw_view=raw_view, available_sections=available_sections,
-                 source_url=source_url, filed_at=filed_at, known_at=known_at,
-                 content_hash=content_hash, source_content_hash=source_content_hash,
-                 offset=offset, end=end, total=total)
+    _attach_view(
+        out,
+        accession_no=accession_no,
+        document_name=document_name,
+        view_text=view_text,
+        view_base=view_base,
+        resolved_section=resolved_section,
+        raw_view=raw_view,
+        available_sections=available_sections,
+        source_url=source_url,
+        filed_at=filed_at,
+        known_at=known_at,
+        content_hash=content_hash,
+        source_content_hash=source_content_hash,
+        offset=offset,
+        end=end,
+        total=total,
+    )
     return out
 
 
-def _attach_view(out: dict[str, object], *, accession_no: str, document_name: object,
-                 view_text: str | None, view_base: int, resolved_section: str | None,
-                 raw_view: bool, available_sections: list[str] | None,
-                 source_url: object, filed_at: object, known_at: object,
-                 content_hash: object, source_content_hash: object,
-                 offset: int, end: int, total: int) -> None:
+def _attach_view(
+    out: dict[str, object],
+    *,
+    accession_no: str,
+    document_name: object,
+    view_text: str | None,
+    view_base: int,
+    resolved_section: str | None,
+    raw_view: bool,
+    available_sections: list[str] | None,
+    source_url: object,
+    filed_at: object,
+    known_at: object,
+    content_hash: object,
+    source_content_hash: object,
+    offset: int,
+    end: int,
+    total: int,
+) -> None:
     """Raw-addressable cursor + span pointers for the derived view (raw stays in the archive)."""
     if view_text is None:
         out["cursor"] = offset
@@ -440,7 +495,9 @@ def _attach_view(out: dict[str, object], *, accession_no: str, document_name: ob
     uri = _source_uri_for(accession_no, document_name)
     out["view"] = "raw" if raw_view else "rendered"
     out["section"] = resolved_section
-    out["available_sections"] = list(available_sections) if available_sections is not None else _section_names(view_text)
+    out["available_sections"] = (
+        list(available_sections) if available_sections is not None else _section_names(view_text)
+    )
     out["metadata"] = {
         "accession_no": accession_no,
         "document_name": document_name,
@@ -453,14 +510,54 @@ def _attach_view(out: dict[str, object], *, accession_no: str, document_name: ob
         "source_content_hash": source_content_hash,
     }
     out["source_uri"] = uri
-    out["source_refs"] = [{
-        "accession": accession_no,
-        "document": document_name if isinstance(document_name, str) else None,
-        "offset": view_base + offset,
-        "source_uri": uri,
-    }]
+    out["source_refs"] = [
+        {
+            "accession": accession_no,
+            "document": document_name if isinstance(document_name, str) else None,
+            "offset": view_base + offset,
+            "source_uri": uri,
+        }
+    ]
     out["cursor"] = offset
     out["next_cursor"] = end if end < len(view_text) else None
+
+
+def _source_handle(
+    *,
+    accession_no: str,
+    document_name: object,
+    view_text: str | None,
+    full_text: str,
+    offset: int,
+    end: int,
+    max_chars: int | None,
+    raw_view: bool,
+    resolved_section: str | None,
+    query: str | None,
+    content_hash: object,
+) -> dict[str, object]:
+    """Canonical source handle for the window just returned.
+
+    It carries the exact read coordinates and a hash of the returned text, so a
+    caller (the research kernel) can re-read the same window and verify it before
+    admitting a passage as evidence: the archive, never a model string, is
+    authoritative for source text.
+    """
+    effective = view_text if view_text is not None else full_text
+    window = effective[offset:end]
+    return {
+        "accession_no": accession_no,
+        "document_name": document_name if isinstance(document_name, str) else None,
+        "basis": "raw" if raw_view else "rendered",
+        "section": resolved_section if isinstance(resolved_section, str) and resolved_section.strip() else None,
+        "query": query if isinstance(query, str) and query.strip() else None,
+        "offset": offset,
+        "max_chars": max_chars,
+        "length": len(window),
+        "text_hash": hashlib.sha256(window.encode("utf-8")).hexdigest(),
+        "content_hash": content_hash,
+        "source_uri": _source_uri_for(accession_no, document_name),
+    }
 
 
 def _binary_source_kind(text: str) -> str | None:
@@ -470,8 +567,7 @@ def _binary_source_kind(text: str) -> str | None:
 
 def _pdftotext_output(extractor: str, path: str) -> str | None:
     """One ``pdftotext -layout`` run: cleaned stdout text, or None on nonzero exit or no text."""
-    completed = subprocess.run([extractor, "-q", "-layout", path, "-"],
-                               capture_output=True, timeout=30, check=False)
+    completed = subprocess.run([extractor, "-q", "-layout", path, "-"], capture_output=True, timeout=30, check=False)
     if completed.returncode != 0:
         return None
     text = _CONTROL_CHARS_RE.sub("", completed.stdout.decode("utf-8", "replace"))
@@ -494,12 +590,13 @@ def _extract_pdf_text(payload: bytes | Path) -> str | None:
             handle.write(payload)
             handle.flush()
             return _pdftotext_output(extractor, handle.name)
-    except (OSError, subprocess.SubprocessError):
+    except OSError, subprocess.SubprocessError:
         return None
 
 
-def _readable_document_text(text: str, representation: object,
-                            payload: bytes | Path | None) -> tuple[str, object, list[str]]:
+def _readable_document_text(
+    text: str, representation: object, payload: bytes | Path | None
+) -> tuple[str, object, list[str]]:
     """Caller-facing document text: a binary payload never leaves here as ``text``.
 
     Non-binary text passes through untouched with its representation. A binary payload
@@ -525,7 +622,9 @@ def _readable_document_text(text: str, representation: object,
     return "", "binary_unsupported", [f"{reason}; raw bytes remain at raw_archive_path"]
 
 
-def _build_view(full: str, *, section: str | None, query: str | None, raw: bool) -> tuple[str, str | None, int, bool, list[str]]:
+def _build_view(
+    full: str, *, section: str | None, query: str | None, raw: bool
+) -> tuple[str, str | None, int, bool, list[str]]:
     """Derived window over stored text; returns (view, resolved, base, is_raw, sections)."""
     if raw:
         return full, section.strip() if isinstance(section, str) and section.strip() else None, 0, True, []
@@ -576,40 +675,40 @@ def _source_bytes_of(attachment: object) -> tuple[bytes | None, str | None]:
     return None, None
 
 
-def _filing_row_of(accession_no: str, as_of: str | None,
-                   data_root: Path | str | None) -> dict[str, object] | None:
+def _filing_row_of(accession_no: str, as_of: str | None, data_root: Path | str | None) -> dict[str, object] | None:
     from . import store as _store
 
     try:
-        filings = _store.query_filings(
-            accession=accession_no, as_of=as_of, limit=5, root=data_root)
+        filings = _store.query_filings(accession=accession_no, as_of=as_of, limit=5, root=data_root)
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
     return filings[0] if filings else None
 
 
-def _effective_document_name(document_name: str | None,
-                             filing: dict[str, object] | None) -> str | None:
+def _effective_document_name(document_name: str | None, filing: dict[str, object] | None) -> str | None:
     filing_name = filing.get("primary_document") if filing else None
     if filing_name is not None and not isinstance(filing_name, str):
         filing_name = str(filing_name)
     return document_name or filing_name
 
 
-def _document_rows_of(accession_no: str, document_name: str | None, as_of: str | None,
-                      data_root: Path | str | None,
-                      filing: dict[str, object] | None) -> list[dict[str, object]]:
+def _document_rows_of(
+    accession_no: str,
+    document_name: str | None,
+    as_of: str | None,
+    data_root: Path | str | None,
+    filing: dict[str, object] | None,
+) -> list[dict[str, object]]:
     from . import store as _store
 
     effective = _effective_document_name(document_name, filing)
     try:
         if effective is not None:
             return _store.query_document_text(
-                accession=accession_no, document_name=effective,
-                as_of=as_of, limit=50, root=data_root)
+                accession=accession_no, document_name=effective, as_of=as_of, limit=50, root=data_root
+            )
         if document_name is None:
-            rows = _store.query_document_text(
-                accession=accession_no, as_of=as_of, limit=50, root=data_root)
+            rows = _store.query_document_text(accession=accession_no, as_of=as_of, limit=50, root=data_root)
             if len({r.get("document_name") for r in rows}) > 1:
                 return []
             return rows
@@ -618,7 +717,9 @@ def _document_rows_of(accession_no: str, document_name: str | None, as_of: str |
         return []
 
 
-def _stored_candidates(accession_no: str, document_name: str | None, as_of: str | None, data_root: Path | str | None) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+def _stored_candidates(
+    accession_no: str, document_name: str | None, as_of: str | None, data_root: Path | str | None
+) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
     """Local archive rows for one accession/document; returns (filing, rows).
 
     Filing lookup resolves the primary name when document_name is None;
@@ -629,11 +730,10 @@ def _stored_candidates(accession_no: str, document_name: str | None, as_of: str 
     return filing, _document_rows_of(accession_no, document_name, as_of, data_root, filing)
 
 
-def _revision_conflict(accession_no: str, document_name: object,
-                       top_known: object, as_of: str) -> dict[str, object]:
+def _revision_conflict(accession_no: str, document_name: object, top_known: object, as_of: str) -> dict[str, object]:
     return {
         "error": f"conflicting revisions for {accession_no}/{document_name} "
-                 f"known at {top_known}; cannot resolve as of {as_of}",
+        f"known at {top_known}; cannot resolve as of {as_of}",
         "error_type": "pit_revision_conflict",
         "accession_no": accession_no,
         "document_name": document_name,
@@ -642,14 +742,17 @@ def _revision_conflict(accession_no: str, document_name: object,
     }
 
 
-def _revision_warning(accession_no: str, document_name: object,
-                      top_known: object, count: int) -> str:
-    return (f"conflicting revisions for {accession_no}/{document_name} "
-            f"known at {top_known}; chose latest retrieved_at/content_hash, "
-            f"{count} revision(s) retained")
+def _revision_warning(accession_no: str, document_name: object, top_known: object, count: int) -> str:
+    return (
+        f"conflicting revisions for {accession_no}/{document_name} "
+        f"known at {top_known}; chose latest retrieved_at/content_hash, "
+        f"{count} revision(s) retained"
+    )
 
 
-def _pick_revision(rows: list[dict[str, object]], *, as_of: str | None, accession_no: str, document_name: object) -> tuple[dict[str, object] | None, list[str] | None, dict[str, object] | None]:
+def _pick_revision(
+    rows: list[dict[str, object]], *, as_of: str | None, accession_no: str, document_name: object
+) -> tuple[dict[str, object] | None, list[str] | None, dict[str, object] | None]:
     """Deterministic revision choice; returns (row, warnings) or an error dict.
 
     Rows arrive ordered known_at DESC, retrieved_at DESC, content_hash DESC.
@@ -661,25 +764,22 @@ def _pick_revision(rows: list[dict[str, object]], *, as_of: str | None, accessio
     winners = [r for r in rows if r.get("known_at") == top_known]
     if len({r.get("content_hash") for r in winners}) > 1:
         if as_of is not None:
-            return None, None, _revision_conflict(
-                accession_no, document_name, top_known, as_of)
-        return winners[0], [_revision_warning(
-            accession_no, document_name, top_known, len(winners) - 1)], None
+            return None, None, _revision_conflict(accession_no, document_name, top_known, as_of)
+        return winners[0], [_revision_warning(accession_no, document_name, top_known, len(winners) - 1)], None
     return rows[0], None, None
 
 
-def _winning_revision(accession_no: str, document_name: str | None,
-                      rows: list[dict[str, object]], *,
-                      as_of: str | None) -> tuple[dict[str, object], list[str] | None]:
+def _winning_revision(
+    accession_no: str, document_name: str | None, rows: list[dict[str, object]], *, as_of: str | None
+) -> tuple[dict[str, object], list[str] | None]:
     display_name = document_name or rows[0].get("document_name")
     row, rev_warnings, conflict = _pick_revision(
-        rows, as_of=as_of, accession_no=accession_no,
-        document_name=display_name)
+        rows, as_of=as_of, accession_no=accession_no, document_name=display_name
+    )
     if conflict is not None:
         return conflict, rev_warnings
     if row is None:  # Unreachable: a winning revision always yields a row.
-        raise ValueError(
-            f"no document revision for {accession_no}/{display_name}")
+        raise ValueError(f"no document revision for {accession_no}/{display_name}")
     return row, rev_warnings
 
 
@@ -688,18 +788,28 @@ def _archived_body_of(row: dict[str, object]) -> tuple[str, object]:
     return (raw_text if isinstance(raw_text, str) else "", row.get("source_url"))
 
 
-def _archived_bounded(accession_no: str, document_name: str | None,
-                      row: dict[str, object], full: str, source_url: object,
-                      offset: int, max_chars: int | None,
-                      rev_warnings: list[str] | None, *,
-                      section: str | None = None, query: str | None = None,
-                      raw: bool = False) -> dict[str, object]:
+def _archived_bounded(
+    accession_no: str,
+    document_name: str | None,
+    row: dict[str, object],
+    full: str,
+    source_url: object,
+    offset: int,
+    max_chars: int | None,
+    rev_warnings: list[str] | None,
+    *,
+    section: str | None = None,
+    query: str | None = None,
+    raw: bool = False,
+) -> dict[str, object]:
     name_raw = row.get("document_name")
     doc_name = (name_raw if isinstance(name_raw, str) else None) or document_name
     raw_path = row.get("raw_archive_path")
     full, representation, binary_warnings = _readable_document_text(
-        full, row.get("source_representation"),
-        Path(raw_path) if isinstance(raw_path, str) and raw_path else None)
+        full,
+        row.get("source_representation"),
+        Path(raw_path) if isinstance(raw_path, str) and raw_path else None,
+    )
     view, resolved, base, is_raw, sections = _build_view(full, section=section, query=query, raw=raw)
     return _bounded_response(
         accession_no=accession_no,
@@ -715,28 +825,49 @@ def _archived_bounded(accession_no: str, document_name: str | None,
         filed_at=row.get("filed_at"),
         known_at=row.get("known_at"),
         retrieved_at=row.get("retrieved_at"),
-        offset=offset, max_chars=max_chars,
-        cache_hit=True, cache_type="stockbot_archive",
+        offset=offset,
+        max_chars=max_chars,
+        cache_hit=True,
+        cache_type="stockbot_archive",
         warnings=((rev_warnings or []) + binary_warnings) or None,
-        view_text=view, view_base=base, resolved_section=resolved,
-        raw_view=is_raw, available_sections=sections,
+        view_text=view,
+        view_base=base,
+        resolved_section=resolved,
+        raw_view=is_raw,
+        query=query,
+        available_sections=sections,
     )
 
 
-def _archived_response(accession_no: str, document_name: str | None,
-                       rows: list[dict[str, object]], *, as_of: str | None,
-                       offset: int, max_chars: int | None,
-                       section: str | None = None, query: str | None = None,
-                       raw: bool = False) -> dict[str, object]:
-    row, rev_warnings = _winning_revision(
-        accession_no, document_name, rows, as_of=as_of)
+def _archived_response(
+    accession_no: str,
+    document_name: str | None,
+    rows: list[dict[str, object]],
+    *,
+    as_of: str | None,
+    offset: int,
+    max_chars: int | None,
+    section: str | None = None,
+    query: str | None = None,
+    raw: bool = False,
+) -> dict[str, object]:
+    row, rev_warnings = _winning_revision(accession_no, document_name, rows, as_of=as_of)
     if isinstance(row, dict) and row.get("error_type") == "pit_revision_conflict":
         return row
     full, source_url = _archived_body_of(row)
     return _archived_bounded(
-        accession_no, document_name, row, full, source_url,
-        offset, max_chars, rev_warnings,
-        section=section, query=query, raw=raw)
+        accession_no,
+        document_name,
+        row,
+        full,
+        source_url,
+        offset,
+        max_chars,
+        rev_warnings,
+        section=section,
+        query=query,
+        raw=raw,
+    )
 
 
 def _attachment_attr_of(attachment: object, name: str) -> object:
@@ -747,13 +878,14 @@ def _attachment_attr_of(attachment: object, name: str) -> object:
     narrowed: object = found
     return narrowed
 
-def _attachment_meta_of(attachment: object, document_name: str | None,
-                        primary_document: str | None) -> tuple[object, object, object, str]:
+
+def _attachment_meta_of(
+    attachment: object, document_name: str | None, primary_document: str | None
+) -> tuple[object, object, object, str]:
     name = _attachment_attr_of(attachment, "document")
     description = _attachment_attr_of(attachment, "description")
     url = _attachment_attr_of(attachment, "url") or ""
-    doc_name = (name if isinstance(name, str) else None) or document_name or \
-        primary_document or "primary"
+    doc_name = (name if isinstance(name, str) else None) or document_name or primary_document or "primary"
     return name, description, url, doc_name
 
 
@@ -765,11 +897,19 @@ def _normalized_text_of(attachment: object) -> tuple[bytes, str, str]:
     return source_bytes, source_bytes.decode("utf-8", "replace"), representation or "normalized_text"
 
 
-def _persist_live_document(*, accession_no: str, doc_name: str, source_bytes: bytes,
-                           representation: str, normalized: str,
-                           source_content_hash: str, content_hash: str,
-                           meta: Filing, source_url: str | None,
-                           data_root: Path | str | None) -> tuple[str | None, str | None, list[str]]:
+def _persist_live_document(
+    *,
+    accession_no: str,
+    doc_name: str,
+    source_bytes: bytes,
+    representation: str,
+    normalized: str,
+    source_content_hash: str,
+    content_hash: str,
+    meta: Filing,
+    source_url: str | None,
+    data_root: Path | str | None,
+) -> tuple[str | None, str | None, list[str]]:
     from ..domain.market.ids import sec_doc_id
     from . import archive as _archive
     from . import store as _store
@@ -781,18 +921,29 @@ def _persist_live_document(*, accession_no: str, doc_name: str, source_bytes: by
     retrieved_at: str | None = None
     try:
         record = _archive.archive_sec_document(
-            accession_no, doc_name, source_bytes, url=source_url or "",
+            accession_no,
+            doc_name,
+            source_bytes,
+            url=source_url or "",
             metadata={"form": meta.form, "representation": representation},
-            root=_raw_root_for(data_root))
+            root=_raw_root_for(data_root),
+        )
         raw_path = str(record.payload_path)
         retrieved_at = record.retrieved_at
         _store.store_document_text(
-            doc_id, normalized, accession=accession_no, document_name=doc_name,
-            source_url=source_url, raw_archive_path=raw_path,
+            doc_id,
+            normalized,
+            accession=accession_no,
+            document_name=doc_name,
+            source_url=source_url,
+            raw_archive_path=raw_path,
             source_content_hash=source_content_hash,
             source_representation=representation,
-            filed_at=meta.filed_at, known_at=known_at,
-            retrieved_at=retrieved_at, root=data_root)
+            filed_at=meta.filed_at,
+            known_at=known_at,
+            retrieved_at=retrieved_at,
+            root=data_root,
+        )
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         warnings.append(f"persistence failed, returning live evidence: {exc}")
         retrieved_at = retrieved_at or _utcnow()
@@ -812,22 +963,35 @@ def _live_source_url(url: object, meta: Filing) -> str | None:
     return source_url
 
 
-def _live_response(accession_no: str, document_name: str | None, *,
-                   attachment: object, meta: Filing,
-                   offset: int, max_chars: int | None,
-                   data_root: Path | str | None,
-                   section: str | None = None, query: str | None = None,
-                   raw: bool = False) -> dict[str, object]:
-    _name, description, url, doc_name = _attachment_meta_of(
-        attachment, document_name, meta.primary_document)
+def _live_response(
+    accession_no: str,
+    document_name: str | None,
+    *,
+    attachment: object,
+    meta: Filing,
+    offset: int,
+    max_chars: int | None,
+    data_root: Path | str | None,
+    section: str | None = None,
+    query: str | None = None,
+    raw: bool = False,
+) -> dict[str, object]:
+    _name, description, url, doc_name = _attachment_meta_of(attachment, document_name, meta.primary_document)
     source_bytes, normalized, representation = _normalized_text_of(attachment)
     source_content_hash, content_hash = _live_hashes(source_bytes, normalized)
     source_url = _live_source_url(url, meta)
     raw_path, retrieved_at, warnings = _persist_live_document(
-        accession_no=accession_no, doc_name=doc_name, source_bytes=source_bytes,
-        representation=representation, normalized=normalized,
-        source_content_hash=source_content_hash, content_hash=content_hash,
-        meta=meta, source_url=source_url, data_root=data_root)
+        accession_no=accession_no,
+        doc_name=doc_name,
+        source_bytes=source_bytes,
+        representation=representation,
+        normalized=normalized,
+        source_content_hash=source_content_hash,
+        content_hash=content_hash,
+        meta=meta,
+        source_url=source_url,
+        data_root=data_root,
+    )
     payload = source_bytes if representation == "source_bytes" else None
     full, representation, binary_warnings = _readable_document_text(normalized, representation, payload)
     view, resolved, base, is_raw, sections = _build_view(full, section=section, query=query, raw=raw)
@@ -845,11 +1009,17 @@ def _live_response(accession_no: str, document_name: str | None, *,
         filed_at=meta.filed_at,
         known_at=meta.known_at or meta.filed_at,
         retrieved_at=retrieved_at,
-        offset=offset, max_chars=max_chars,
-        cache_hit=False, cache_type="live_or_edgartools_http",
+        offset=offset,
+        max_chars=max_chars,
+        cache_hit=False,
+        cache_type="live_or_edgartools_http",
         warnings=(warnings + binary_warnings) or None,
-        view_text=view, view_base=base, resolved_section=resolved,
-        raw_view=is_raw, available_sections=sections,
+        view_text=view,
+        view_base=base,
+        resolved_section=resolved,
+        raw_view=is_raw,
+        query=query,
+        available_sections=sections,
     )
 
 
@@ -859,26 +1029,31 @@ def _checked_live_meta(accession_no: str, as_of: str | None) -> tuple[EdgarFilin
     if as_of is not None:
         value, _basis = pit_of(meta)
         if value is None or value[:10] > as_of:
-            raise ValueError(
-                f"filing {accession_no!r} not known as of {as_of!r}")
+            raise ValueError(f"filing {accession_no!r} not known as of {as_of!r}")
     return filing, meta
 
 
-def _coerce_window_alias(offset: int, max_chars: int | None,
-                         cursor: int | str | float | None,
-                         limit: int | str | float | None) -> tuple[int, int | None]:
+def _coerce_window_alias(
+    offset: int, max_chars: int | None, cursor: str | float | None, limit: str | float | None
+) -> tuple[int, int | None]:
     """cursor/limit aliases win over offset/max_chars; None falls back to the legacy value."""
-    return _check_window(cursor if cursor is not None else offset,
-                         limit if limit is not None else max_chars)
+    return _check_window(cursor if cursor is not None else offset, limit if limit is not None else max_chars)
 
 
-def get_sec_document(accession_no: str, document_name: str | None = None, as_of: str | None = None, *,
-                     offset: int = 0, max_chars: int | None = None,
-                     data_root: Path | str | None = None,
-                     section: str | None = None, query: str | None = None,
-                     cursor: int | str | float | None = None,
-                     limit: int | str | float | None = None,
-                     raw: bool = False) -> dict[str, object]:
+def get_sec_document(
+    accession_no: str,
+    document_name: str | None = None,
+    as_of: str | None = None,
+    *,
+    offset: int = 0,
+    max_chars: int | None = None,
+    data_root: Path | str | None = None,
+    section: str | None = None,
+    query: str | None = None,
+    cursor: str | float | None = None,
+    limit: str | float | None = None,
+    raw: bool = False,
+) -> dict[str, object]:
     """Exact document retrieval; EFTS callers pass the matched document name.
     Primary-document fallback applies only when document_name is None.
 
@@ -898,9 +1073,17 @@ def get_sec_document(accession_no: str, document_name: str | None = None, as_of:
     accession_no = accession_no if isinstance(accession_no, str) else str(accession_no)
     _filing_row, rows = _stored_candidates(accession_no, document_name, as_of, data_root)
     if rows:
-        return _archived_response(accession_no, document_name, rows, as_of=as_of,
-                                  offset=offset, max_chars=max_chars,
-                                  section=section, query=query, raw=raw)
+        return _archived_response(
+            accession_no,
+            document_name,
+            rows,
+            as_of=as_of,
+            offset=offset,
+            max_chars=max_chars,
+            section=section,
+            query=query,
+            raw=raw,
+        )
     filing, meta = _checked_live_meta(accession_no, as_of)
     attachment = _resolve_in(filing, accession_no, document_name)
     if isinstance(attachment, str):
@@ -911,9 +1094,18 @@ def get_sec_document(accession_no: str, document_name: str | None = None, as_of:
             "url": "",
             "text": attachment,
         }
-    return _live_response(accession_no, document_name, attachment=attachment, meta=meta,
-                          offset=offset, max_chars=max_chars, data_root=data_root,
-                          section=section, query=query, raw=raw)
+    return _live_response(
+        accession_no,
+        document_name,
+        attachment=attachment,
+        meta=meta,
+        offset=offset,
+        max_chars=max_chars,
+        data_root=data_root,
+        section=section,
+        query=query,
+        raw=raw,
+    )
 
 
 def get_sec_filing_text(accession_no: str, document_name: str | None = None, as_of: str | None = None) -> str:
@@ -921,7 +1113,6 @@ def get_sec_filing_text(accession_no: str, document_name: str | None = None, as_
     if not isinstance(text, str):
         raise ValueError(f"no text for accession: {accession_no!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return text
-
 
 
 _EXHIBIT_NORM_RE = re.compile(r"^EX-\d{1,3}(?:\.\d{1,3}[A-Z]?)?$")
@@ -932,12 +1123,30 @@ _SOW_RE = re.compile(r"\bsow\b")
 _MSA_RE = re.compile(r"\bmsa\b")
 
 _ORDER_FORM_PHRASES = ("order form", "order schedule", "work order", "statement of work")
-_PRESENTATION_PHRASES = ("investor presentation", "corporate presentation", "investor deck",
-                         "earnings presentation", "analyst presentation", "investor day")
-_CREDIT_PHRASES = ("credit agreement", "credit facility", "loan agreement", "loan and security",
-                   "term loan", "revolving credit", "credit and guarant")
-_SERVICE_PHRASES = ("service agreement", "services agreement", "master service",
-                    "professional service", "managed service")
+_PRESENTATION_PHRASES = (
+    "investor presentation",
+    "corporate presentation",
+    "investor deck",
+    "earnings presentation",
+    "analyst presentation",
+    "investor day",
+)
+_CREDIT_PHRASES = (
+    "credit agreement",
+    "credit facility",
+    "loan agreement",
+    "loan and security",
+    "term loan",
+    "revolving credit",
+    "credit and guarant",
+)
+_SERVICE_PHRASES = (
+    "service agreement",
+    "services agreement",
+    "master service",
+    "professional service",
+    "managed service",
+)
 
 _DOCUMENT_KEYWORD_RULES = (
     ("amendment", ("amend",), ()),
@@ -956,7 +1165,7 @@ def _normalize_exhibit(value: object) -> str | None:
         return None
     text = value.strip().upper()
     if text.startswith("EXHIBIT"):
-        text = text[len("EXHIBIT"):].strip()
+        text = text[len("EXHIBIT") :].strip()
     text = text.replace(" ", "").replace("_", "")
     if text.startswith("EX") and not text.startswith("EX-"):
         text = "EX-" + text[2:]
@@ -1009,7 +1218,11 @@ def _keyword_document_kind(hay: str) -> str | None:
 def _exhibit_document_kind(hay: str, number: str | None) -> str:
     """Exhibit-number defaults after keywords (EX-99.1 press release, EX-10.* contract)."""
     press = "press release" in hay or "pressrelease" in hay or number == "EX-99.1"
-    material = (number is not None and number.startswith("EX-10")) or "material contract" in hay or "definitive agreement" in hay
+    material = (
+        (number is not None and number.startswith("EX-10"))
+        or "material contract" in hay
+        or "definitive agreement" in hay
+    )
     return "press_release" if press else ("material_contract" if material else "other")
 
 

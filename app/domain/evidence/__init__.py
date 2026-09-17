@@ -12,14 +12,14 @@ from .models import (
 from .source_quality import classify_source
 
 __all__ = [
-    "EvidenceClaim",
     "ClaimType",
+    "EvidenceClaim",
     "ResolutionStatus",
-    "SourceTier",
     "SourceClassification",
-    "classify_source",
-    "make_claim_id",
-    "claim_content_hash",
+    "SourceTier",
     "build_claim",
+    "claim_content_hash",
+    "classify_source",
     "coerce_claim_type",
+    "make_claim_id",
 ]

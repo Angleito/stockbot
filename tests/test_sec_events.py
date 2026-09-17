@@ -1,7 +1,7 @@
 """Offline tests for 8-K events, exhibits, and filing diffs (no network)."""
 
 from types import SimpleNamespace
-from typing import NoReturn
+from typing import ClassVar, NoReturn
 
 import pytest
 
@@ -33,7 +33,7 @@ def test_extract_wrapper_skips_falsy() -> None:
     texts = {"Item 1.03": "bankruptcy text", "Item 2.02": ""}
 
     class R:
-        items = ["Item 1.03", "Item 2.02"]
+        items: ClassVar[object] = ["Item 1.03", "Item 2.02"]
 
         def __getitem__(self, name: str) -> object:
             return texts[name]
@@ -44,10 +44,12 @@ def test_extract_wrapper_skips_falsy() -> None:
 
 def test_exhibits(monkeypatch: pytest.MonkeyPatch) -> None:
     atts = [
-        SimpleNamespace(document_type="EX-99.1", description="Press release",
-                        document="ex991.htm", url="https://x/ex991.htm"),
-        SimpleNamespace(document_type="EX-10.1", description="Agreement",
-                        document="ex101.htm", url="https://x/ex101.htm"),
+        SimpleNamespace(
+            document_type="EX-99.1", description="Press release", document="ex991.htm", url="https://x/ex991.htm"
+        ),
+        SimpleNamespace(
+            document_type="EX-10.1", description="Agreement", document="ex101.htm", url="https://x/ex101.htm"
+        ),
     ]
 
     def _fake_get(accession_no: str) -> SimpleNamespace:
@@ -55,9 +57,13 @@ def test_exhibits(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(documents, "get_by_accession_number", _fake_get)
     rows = documents.get_filing_exhibits(ACC)
-    assert rows[0] == {"accession_no": ACC, "exhibit": "EX-99.1",
-                       "description": "Press release", "document": "ex991.htm",
-                       "url": "https://x/ex991.htm"}
+    assert rows[0] == {
+        "accession_no": ACC,
+        "exhibit": "EX-99.1",
+        "description": "Press release",
+        "document": "ex991.htm",
+        "url": "https://x/ex991.htm",
+    }
     assert documents.get_filing_exhibit(ACC, "ex-99.1")["document"] == "ex991.htm"
     with pytest.raises(ValueError):
         documents.get_filing_exhibit(ACC, "EX-99.9")
@@ -82,8 +88,8 @@ def test_diff_specialization_and_counts(monkeypatch: pytest.MonkeyPatch) -> None
 
 def test_diff_truncated_and_error(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import filings
-    texts = {"n": "\n".join(str(i) for i in range(1000, 2000)),
-             "o": "\n".join(str(i) for i in range(1000))}
+
+    texts = {"n": "\n".join(str(i) for i in range(1000, 2000)), "o": "\n".join(str(i) for i in range(1000))}
 
     def _fake_text(accession_no: str, document: object = None) -> str:
         return texts[accession_no]
@@ -105,6 +111,7 @@ def test_diff_truncated_and_error(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(documents, "get_sec_filing_text", boom)
     assert "error" in diffs.diff_filings("n", "o")
 
+
 def test_diff_section_full_uses_primary(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import filings
 
@@ -116,21 +123,25 @@ def test_diff_section_full_uses_primary(monkeypatch: pytest.MonkeyPatch) -> None
 
     def _fake_filing(accession_no: str) -> object:
         return SimpleNamespace(form="10-K")
+
     monkeypatch.setattr(filings, "get_sec_filing", _fake_filing)
     monkeypatch.setattr(documents, "get_sec_filing_text", _fake_text)
     out = diffs.diff_filings("n", "o", section="full")
     assert "error" not in out
     assert seen == [None, None]
 
+
 def test_diff_section_miss_names_documents(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import filings
 
-    docs = [SimpleNamespace(document_name="aapl-20250927.htm"),
-            SimpleNamespace(document_name="exhibit211.htm")]
+    docs = [SimpleNamespace(document_name="aapl-20250927.htm"), SimpleNamespace(document_name="exhibit211.htm")]
+
     def _fake_docs(accession_no: str) -> object:
         return docs
+
     def _fake_filing(accession_no: str) -> object:
         return SimpleNamespace(form="10-K")
+
     monkeypatch.setattr(documents, "list_sec_documents", _fake_docs)
     monkeypatch.setattr(filings, "get_sec_filing", _fake_filing)
     out = diffs.diff_filings("n", "o", section="risk_factors")

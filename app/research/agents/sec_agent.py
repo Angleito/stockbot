@@ -59,8 +59,7 @@ def _fallback_payload(fallback: SourceDossier) -> tuple[dict[str, object], list[
     }
     fallback_findings = list(getattr(fallback, "findings", []) or [])
     findings: list[dict[str, object]] = [
-        {"text": claim.text, "evidence_ids": list(claim.evidence_ids)}
-        for claim in fallback_findings
+        {"text": claim.text, "evidence_ids": list(claim.evidence_ids)} for claim in fallback_findings
     ]
     supporting: list[str] = []
     for claim in fallback_findings:
@@ -97,9 +96,7 @@ def _coerce_dossier(fallback: SourceDossier) -> object:
     except Exception as exc:  # the canonical shape is required downstream
         # Never degrade to the local shape silently: the runner needs a canonical
         # SECDossier and a hidden fallback reports the wrong cause. Name the real one.
-        raise ValueError(
-            f"source dossier could not be canonicalised: {type(exc).__name__}: {exc}"
-        ) from exc
+        raise ValueError(f"source dossier could not be canonicalised: {type(exc).__name__}: {exc}") from exc
 
 
 def run_sec_assignment(
@@ -163,8 +160,7 @@ def assignments_for(
     relevant 8-Ks checked next); causal channels expand dynamically per the
     source-agent context prompt, never a fixed issuer list.
     """
-    return decompose_question(
-        question, session_id=session_id, as_of=as_of, tickers=tickers, dispatch=dispatch
-    )
+    return decompose_question(question, session_id=session_id, as_of=as_of, tickers=tickers, dispatch=dispatch)
+
 
 __all__ = ["assignments_for", "run_sec_assignment"]

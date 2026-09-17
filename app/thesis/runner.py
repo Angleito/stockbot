@@ -14,7 +14,7 @@ from __future__ import annotations
 
 import json
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.config import get_data_root
 from app.policy import Capability
@@ -36,6 +36,7 @@ def _grant_cap(grant: str) -> Capability:
         raise ValueError(f"<runner>: unknown grant {grant!r}; expected one of {sorted(_GRANTS)}")
     return _GRANTS[grant]
 
+
 def capabilities_for_grants(grants: list[str]) -> frozenset[Capability]:
     """Map explicit CLI grant strings to capabilities; reject anything else."""
     return frozenset(_grant_cap(g) for g in grants or [])
@@ -53,7 +54,7 @@ class RunOutcome:
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _stringify_prompt_text(text: object, ref: str) -> str | None:
@@ -80,6 +81,7 @@ def _scan_prompt_text(text: str, ref: str) -> str:
         from app.security.prompt_injection import (
             assess,  # local: keep thesis import graph acyclic
         )
+
         found = assess(text)
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return f"[unsafe content withheld ref={ref}]"
@@ -138,31 +140,42 @@ def _safe_journal_row(j: object) -> object:
     return jd
 
 
-def _prompt_sections(thesis_id: str, trigger: Trigger, data_cutoff: str, ctx: ResearchContext,
-                     run_id: str, refs: str, summary_line: str, packet: dict[str, JSONValue],
-                     trig_out: object, evidence_out: list[object],
-                     journals_out: list[object]) -> list[str]:
+def _prompt_sections(
+    thesis_id: str,
+    trigger: Trigger,
+    data_cutoff: str,
+    ctx: ResearchContext,
+    run_id: str,
+    refs: str,
+    summary_line: str,
+    packet: dict[str, JSONValue],
+    trig_out: object,
+    evidence_out: list[object],
+    journals_out: list[object],
+) -> list[str]:
     """Ordered prompt lines: identity, cutoff, state, trigger/evidence, journals, close."""
     return [
-            f"thesis_id: {thesis_id}",
-            f"trigger_id: {trigger.trigger_id}",
-            f"run_id: {run_id}",
-            f"TRIGGER DATA CUTOFF: {data_cutoff}",
-            f"trigger summary: {summary_line}",
-            f"trigger canonical refs: {refs[:500]}",
-            "The supplied trigger and stored-evidence packet is bounded by the trigger data cutoff. You may perform additional live research using currently available tools. Preserve the real timing/provenance of anything newly found.",
-            "CURRENT THESIS STATE:",
-            json.dumps(packet, sort_keys=True),
-            "TRIGGER/EVIDENCE AVAILABLE TO THIS MONITOR TICK:",
-            json.dumps({"trigger": trig_out, "evidence": evidence_out}, sort_keys=True),
-            "CURRENT PRIOR JOURNAL CONTEXT:",
-            json.dumps(journals_out, sort_keys=True),
-            "Only trigger and evidence inputs are bounded by the trigger data cutoff; thesis, state, watch, questions, memory, and prior journals are current.",
-            "Record material findings, supporting and counterevidence, with the thesis_journal tool.",
+        f"thesis_id: {thesis_id}",
+        f"trigger_id: {trigger.trigger_id}",
+        f"run_id: {run_id}",
+        f"TRIGGER DATA CUTOFF: {data_cutoff}",
+        f"trigger summary: {summary_line}",
+        f"trigger canonical refs: {refs[:500]}",
+        "The supplied trigger and stored-evidence packet is bounded by the trigger data cutoff. You may perform additional live research using currently available tools. Preserve the real timing/provenance of anything newly found.",
+        "CURRENT THESIS STATE:",
+        json.dumps(packet, sort_keys=True),
+        "TRIGGER/EVIDENCE AVAILABLE TO THIS MONITOR TICK:",
+        json.dumps({"trigger": trig_out, "evidence": evidence_out}, sort_keys=True),
+        "CURRENT PRIOR JOURNAL CONTEXT:",
+        json.dumps(journals_out, sort_keys=True),
+        "Only trigger and evidence inputs are bounded by the trigger data cutoff; thesis, state, watch, questions, memory, and prior journals are current.",
+        "Record material findings, supporting and counterevidence, with the thesis_journal tool.",
+        (
             "Before completing, write a material thesis_journal entry using"
-            f" trigger_id '{trigger.trigger_id}' and run_id '{run_id}'.",
-            "Do not copy the trigger data cutoff into journal known_at; omit known_at unless it independently represents when the journal information became known.",
-        ]
+            f" trigger_id '{trigger.trigger_id}' and run_id '{run_id}'."
+        ),
+        "Do not copy the trigger data cutoff into journal known_at; omit known_at unless it independently represents when the journal information became known.",
+    ]
 
 
 def _build_prompt(*, thesis_id: str, trigger: Trigger, data_cutoff: str, ctx: ResearchContext, run_id: str) -> str:
@@ -174,8 +187,21 @@ def _build_prompt(*, thesis_id: str, trigger: Trigger, data_cutoff: str, ctx: Re
     trig_out = _safe_trigger_row(trig, tid_ref)
     evidence_out = [_safe_evidence_row(e) for e in ctx.evidence_refs]
     journals_out = [_safe_journal_row(j) for j in ctx.journal_excerpts]
-    return "\n".join(_prompt_sections(thesis_id, trigger, data_cutoff, ctx, run_id, refs,
-                                      summary_line, packet, trig_out, evidence_out, journals_out))
+    return "\n".join(
+        _prompt_sections(
+            thesis_id,
+            trigger,
+            data_cutoff,
+            ctx,
+            run_id,
+            refs,
+            summary_line,
+            packet,
+            trig_out,
+            evidence_out,
+            journals_out,
+        )
+    )
 
 
 def _fail(run_id: str, exc: Exception) -> None:
@@ -204,9 +230,7 @@ def run_trigger(
     known_at = known_at or _utcnow()
     thesis = repository.load_thesis(thesis_id)
     tid = thesis.thesis_id
-    trigger = next(
-        (t for t in repository.load_triggers(tid) if t.trigger_id == trigger_id), None
-    )
+    trigger = next((t for t in repository.load_triggers(tid) if t.trigger_id == trigger_id), None)
     if trigger is None:
         raise KeyError(f"unknown trigger: {trigger_id!r}")
     if trigger.status != "pending":

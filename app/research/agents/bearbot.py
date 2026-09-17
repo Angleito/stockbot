@@ -123,9 +123,7 @@ def run_bearbot(
     extra = _tag_requests(list(follow_ups or []))
     env = parse_committee_envelope(text, frozen=frozen, agent="bearbot")
     unknowns: list[str] = (
-        list(env.uncertainties)
-        if env.uncertainties
-        else ([] if env.claims or frozen else ["freeze holds no evidence"])
+        list(env.uncertainties) if env.uncertainties else ([] if env.claims or frozen else ["freeze holds no evidence"])
     )
     prose = _prose_or_placeholder(env.claims, frozen)
     extra = list(env.follow_ups) + list(extra)

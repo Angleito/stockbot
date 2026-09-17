@@ -26,6 +26,7 @@ All invocation is programmatic via app.tools.execute_tool, never via Pi LLM.
 Exit 0 when every tool passes, 1 with per-tool failures listed otherwise.
 Stdlib + repo venv only.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -49,21 +50,25 @@ class _PipeEnd(Protocol):
     def send(self, obj: object) -> None: ...
     def close(self) -> None: ...
 
+
 class _SendChannel(Protocol):
     """Pipe end the handler child sends its result dict through."""
 
     def send(self, obj: object) -> None: ...
     def close(self) -> None: ...
+
+
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app import tools as tools_mod  # noqa: E402
-from app.policy import Capability, RequestContext  # noqa: E402
-from app.sec.discovery import service as sec_discovery_service  # noqa: E402
-from app.tools import (  # noqa: E402
+from app import tools as tools_mod
+from app.policy import Capability, RequestContext
+from app.sec.discovery import service as sec_discovery_service
+from app.tools import (
     _FINRA_HANDLERS,
     _MODEL_HANDLERS,
     _RESEARCH_HANDLERS,
     _ROBINHOOD_HANDLERS,
+    _SEC_DISCOVERY_HANDLERS,
     _THESIS_HANDLERS,
     TOOL_CAPABILITIES,
     TOOLS,
@@ -72,7 +77,7 @@ from app.tools import (  # noqa: E402
     execute_tool,
     tool_is_permitted,
 )
-from scripts.verify_tool_registry import (  # noqa: E402
+from scripts.verify_tool_registry import (
     get_registry_sets,
     tool_schema_function,
     tool_schema_name,
@@ -124,7 +129,7 @@ def research_names() -> list[str]:
 
 
 def _is_date_prop(prop: str) -> bool:
-    return prop in _DATE_NAMES or prop.endswith("Date") or prop.endswith("_date")
+    return prop in _DATE_NAMES or prop.endswith(("Date", "_date"))
 
 
 def _string_for(prop: str) -> str:
@@ -280,7 +285,14 @@ def check_schema(name: str, function: dict[str, object]) -> str | None:
 
 
 def handler_owner(name: str) -> object | None:
-    for table in (_THESIS_HANDLERS, _MODEL_HANDLERS, _FINRA_HANDLERS, _ROBINHOOD_HANDLERS, _RESEARCH_HANDLERS):
+    for table in (
+        _THESIS_HANDLERS,
+        _MODEL_HANDLERS,
+        _SEC_DISCOVERY_HANDLERS,
+        _FINRA_HANDLERS,
+        _ROBINHOOD_HANDLERS,
+        _RESEARCH_HANDLERS,
+    ):
         if name in table:
             return table
     return None
@@ -306,7 +318,9 @@ def _run_sentinel_dispatch(
         owner[name] = real
 
 
-def _sentinel_result_error(name: str, result: object, calls: list[tuple[tuple[object, ...], dict[str, object]]]) -> str | None:
+def _sentinel_result_error(
+    name: str, result: object, calls: list[tuple[tuple[object, ...], dict[str, object]]]
+) -> str | None:
     if not calls:
         return "canonical execute_tool did not invoke handler"
     if not isinstance(result, dict) or result.get("ok") is not True:
@@ -334,29 +348,33 @@ EXTRA_FIXTURE_OVERRIDES: dict[str, dict[str, object]] = {
 }
 
 # Pure-local tools: no provider seam to double, call the handler directly.
-_LOCAL_HANDLER_TOOLS = frozenset({
-    "thesis_create",
-    "thesis_show",
-    "thesis_refine",
-    "thesis_watch",
-    "thesis_journal",
-    "thesis_status",
-    "get_sec_search_coverage",
-    "find_alternative_signals",
-    "get_macro_context",
-    "get_trend_evidence",
-    "search_company_patents",
-}) | frozenset(_RESEARCH_HANDLERS)
+_LOCAL_HANDLER_TOOLS = frozenset(
+    {
+        "thesis_create",
+        "thesis_show",
+        "thesis_refine",
+        "thesis_watch",
+        "thesis_journal",
+        "thesis_status",
+        "get_sec_search_coverage",
+        "find_alternative_signals",
+        "get_macro_context",
+        "get_trend_evidence",
+        "search_company_patents",
+    }
+) | frozenset(_RESEARCH_HANDLERS)
 
 # Google collectors check enabled flags first (trends.collect_trends:_bq_ready,
 # datacommons.get_macro_context, patents.search_company_patents:_data_enabled,
 # all via app/google_data/_lazy_config.py, read per call), so forcing the flag
 # off makes them return fast disabled dicts with zero HTTP calls.
-_GOOGLE_DISABLED_ENV_TOOLS = frozenset({
-    "get_macro_context",
-    "get_trend_evidence",
-    "search_company_patents",
-})
+_GOOGLE_DISABLED_ENV_TOOLS = frozenset(
+    {
+        "get_macro_context",
+        "get_trend_evidence",
+        "search_company_patents",
+    }
+)
 
 
 def _swap(target: object, attr: str, value: object, saved: list[tuple[object, str, object]]) -> None:
@@ -378,7 +396,7 @@ def _fake_empty_dict(*args: object, **kwargs: object) -> dict[str, object]:
 
 
 def _fake_search_envelope(*args: object, **kwargs: object) -> object:
-    return SimpleNamespace(to_dict=lambda: {})
+    return SimpleNamespace(to_dict=dict)
 
 
 def _fake_entities_empty(*args: object, **kwargs: object) -> object:
@@ -389,7 +407,6 @@ def _fake_exa_search(query: object = "", **kwargs: object) -> dict[str, object]:
     return {"result_type": "web_search", "query": query, "evidence": []}
 
 
-
 class _FakeDiscoveryService:
     """Mirrors tests/test_sec_tools.py::_FakeService: serves one empty result."""
 
@@ -397,7 +414,7 @@ class _FakeDiscoveryService:
         pass
 
     def search(self, _request: object) -> object:
-        return SimpleNamespace(to_dict=lambda: {})
+        return SimpleNamespace(to_dict=dict)
 
 
 # Provider seams (what each handler calls one level down), never handler
@@ -426,9 +443,7 @@ _SEAM_MAP: dict[str, list[tuple[object, str, object]]] = {
     "get_governance_events": [(tools_mod.sec, "get_governance_events", _fake_empty_list)],
     "get_transaction_status": [(tools_mod.sec, "get_transaction_status", _fake_empty_list)],
     "get_short_pressure_profile": [(tools_mod.sec, "get_short_pressure_context", _fake_empty_dict)],
-    "get_recent_ownership_filings": [
-        (tools_mod.edgar_client, "get_recent_ownership_filings", _fake_empty_dict)
-    ],
+    "get_recent_ownership_filings": [(tools_mod.edgar_client, "get_recent_ownership_filings", _fake_empty_dict)],
     "diff_risk_factors": [(tools_mod.edgar_client, "diff_risk_factors", _fake_empty_dict)],
     "get_financial_statements": [(tools_mod.edgar_client, "get_financial_statements", _fake_empty_dict)],
     "get_fundamentals": [(tools_mod.sec_facts, "get_fundamentals", _fake_empty_dict)],
@@ -445,12 +460,8 @@ _SEAM_MAP: dict[str, list[tuple[object, str, object]]] = {
     "get_short_interest": [(tools_mod.finra_client, "get_short_interest", _fake_empty_dict)],
     "get_reg_sho_volume": [(tools_mod.finra_client, "get_reg_sho_volume", _fake_empty_dict)],
     "get_threshold_securities": [(tools_mod.finra_client, "get_threshold_securities", _fake_empty_dict)],
-    "get_short_interest_leaderboard": [
-        (tools_mod.screens, "get_short_interest_leaderboard", _fake_empty_dict)
-    ],
-    "investigate_social_arbitrage_candidate": [
-        (sec_discovery_service, "find_sec_entities", _fake_entities_empty)
-    ],
+    "get_short_interest_leaderboard": [(tools_mod.screens, "get_short_interest_leaderboard", _fake_empty_dict)],
+    "investigate_social_arbitrage_candidate": [(sec_discovery_service, "find_sec_entities", _fake_entities_empty)],
 }
 
 
@@ -483,6 +494,7 @@ def _apply_worker_swaps(name: str, swaps: list[tuple[object, str, object]]) -> N
     if name in _GOOGLE_DISABLED_ENV_TOOLS:
         _swap_env([], "GOOGLE_DATA_ENABLED", "")
 
+
 def _install_worker_doubles(name: str) -> str | None:
     swaps = _handler_swaps(name)
     if swaps is None:
@@ -491,9 +503,7 @@ def _install_worker_doubles(name: str) -> str | None:
     return None
 
 
-def _run_worker_tool(
-    conn: _SendChannel, name: str, args: dict[str, object], ctx: RequestContext
-) -> bool:
+def _run_worker_tool(conn: _SendChannel, name: str, args: dict[str, object], ctx: RequestContext) -> bool:
     try:
         result = execute_tool(name, args, MODEL, context=ctx)
     except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
@@ -505,8 +515,10 @@ def _run_worker_tool(
         _fail(conn, f"handler result not sendable: {type(e).__name__}: {e}")
     return True
 
-def _setup_worker_ctx(conn: _SendChannel, name: str, principal_id: str,
-                      capability_names: list[str], data_root_str: str):
+
+def _setup_worker_ctx(
+    conn: _SendChannel, name: str, principal_id: str, capability_names: list[str], data_root_str: str
+):
     try:
         ctx = _worker_context(principal_id, capability_names, data_root_str)
         missing = _install_worker_doubles(name)
@@ -514,6 +526,7 @@ def _setup_worker_ctx(conn: _SendChannel, name: str, principal_id: str,
         _fail(conn, f"handler setup failed: {type(e).__name__}: {e}")
         return None, None
     return ctx, missing
+
 
 def _handler_worker(
     conn: _SendChannel,
@@ -557,6 +570,7 @@ def _result_json_error(result: dict[str, object]) -> str | None:
         return f"handler result not JSON-serializable: {e}"
     return None
 
+
 def _result_error_shape(result: dict[str, object]) -> str | None:
     if not isinstance(result["error"], str) or not result["error"].strip():
         return "handler error is not a non-empty string"
@@ -564,6 +578,7 @@ def _result_error_shape(result: dict[str, object]) -> str | None:
     if error_type is not None and (not isinstance(error_type, str) or not error_type):
         return "handler error_type is not a string"
     return None
+
 
 def _envelope_result_error(result: object) -> str | None:
     if not isinstance(result, dict):
@@ -602,6 +617,7 @@ def _proc_alive(proc: object) -> bool:
     alive = getattr(proc, "is_alive", None)
     return bool(alive()) if callable(alive) else False
 
+
 def _proc_stop(proc: object) -> None:
     """Terminate + join via duck-typed handle; missing methods are no-ops."""
     terminate = getattr(proc, "terminate", None)
@@ -611,17 +627,20 @@ def _proc_stop(proc: object) -> None:
     if callable(join):
         join()
 
+
 def _proc_start(proc: object) -> None:
     """Start via duck-typed handle."""
     start = getattr(proc, "start", None)
     if callable(start):
         start()
 
+
 def _proc_close(proc: object) -> None:
     """Close via duck-typed handle."""
     close = getattr(proc, "close", None)
     if callable(close):
         close()
+
 
 def _poll_once(parent_conn: _PipeEnd, proc: object, deadline: float) -> tuple[object, bool, bool]:
     remaining = deadline - time.monotonic()
@@ -631,6 +650,7 @@ def _poll_once(parent_conn: _PipeEnd, proc: object, deadline: float) -> tuple[ob
         return parent_conn.recv(), True, False
     return None, False, not _proc_alive(proc)
 
+
 def _drain_envelope(parent_conn: _PipeEnd, proc: object, deadline: float) -> tuple[object, bool]:
     while True:
         envelope, got, done = _poll_once(parent_conn, proc, deadline)
@@ -639,6 +659,7 @@ def _drain_envelope(parent_conn: _PipeEnd, proc: object, deadline: float) -> tup
         if done:
             return None, False
 
+
 def _await_envelope(parent_conn: _PipeEnd, proc: object, deadline: float) -> tuple[object, bool]:
     envelope, got_envelope = _drain_envelope(parent_conn, proc, deadline)
     if not got_envelope and parent_conn.poll():
@@ -646,8 +667,10 @@ def _await_envelope(parent_conn: _PipeEnd, proc: object, deadline: float) -> tup
         got_envelope = True
     return (envelope, got_envelope)
 
+
 def _stop_hung_proc(proc: object) -> None:
     _proc_stop(proc)
+
 
 def _reap_handler_proc(proc: object, missing: bool) -> str | None:
     if missing:
@@ -662,7 +685,10 @@ def _reap_handler_proc(proc: object, missing: bool) -> str | None:
         _stop_hung_proc(proc)
     return None
 
-def _spawn_handler_proc(mp_ctx: object, name: str, fixture: dict[str, object], ctx: RequestContext) -> tuple[_PipeEnd, object]:
+
+def _spawn_handler_proc(
+    mp_ctx: object, name: str, fixture: dict[str, object], ctx: RequestContext
+) -> tuple[_PipeEnd, object]:
     make_pipe = getattr(mp_ctx, "Pipe")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
     make_proc = getattr(mp_ctx, "Process")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
     parent_conn, child_conn = make_pipe(duplex=False)
@@ -674,20 +700,21 @@ def _spawn_handler_proc(mp_ctx: object, name: str, fixture: dict[str, object], c
     child_conn.close()
     return parent_conn, proc
 
+
 def _wait_handler_result(parent_conn: _PipeEnd, proc: object) -> str | None:
-    envelope, got_envelope = _await_envelope(
-        parent_conn, proc, time.monotonic() + HANDLER_CALL_TIMEOUT_S
-    )
+    envelope, got_envelope = _await_envelope(parent_conn, proc, time.monotonic() + HANDLER_CALL_TIMEOUT_S)
     timeout = _reap_handler_proc(proc, not got_envelope)
     if timeout is not None:
         return timeout
     return _evaluate_envelope(envelope)
+
 
 def _close_handler_proc(parent_conn: _PipeEnd, proc: object) -> None:
     parent_conn.close()
     if _proc_alive(proc):
         _proc_stop(proc)
     _proc_close(proc)
+
 
 def check_handler(name: str, fixture: dict[str, object], ctx: RequestContext) -> str | None:
     """Execute the REAL handler via canonical execute_tool with provider doubles.
@@ -732,21 +759,26 @@ def _live_error_text_error(result: dict[str, object]) -> str | None:
         return "live error_type is not a string"
     return None
 
+
 def _live_error_shape_error(result: dict[str, object]) -> str | None:
     if "error" not in result:
         return None
     return _live_error_text_error(result)
 
 
-def _invoke_live(pool: concurrent.futures.ThreadPoolExecutor, name: str,
-                 fixture: dict[str, object], ctx: RequestContext):
+def _invoke_live(
+    pool: concurrent.futures.ThreadPoolExecutor, name: str, fixture: dict[str, object], ctx: RequestContext
+):
     try:
         result = _submit_live(pool, name, fixture, ctx).result(timeout=LIVE_CALL_TIMEOUT_S)
     except concurrent.futures.TimeoutError:
         return None, f"live call exceeded {LIVE_CALL_TIMEOUT_S}s"
-    except Exception as e:  # execute_tool contract: never raises  # noqa: BLE001 - intentional best-effort boundary, never aborts
+    except (
+        Exception  # noqa: BLE001 - intentional best-effort boundary, never aborts
+    ) as e:  # execute_tool contract: never raises
         return None, f"live call raised {type(e).__name__}: {e}"
     return result, None
+
 
 def check_live(
     name: str,
@@ -767,15 +799,18 @@ def check_live(
 def _is_denied_surface(denied: object) -> bool:
     return isinstance(denied, dict) and "not permitted" in str(denied.get("error", ""))
 
+
 def _deny_surface_error(name: str, denied: object) -> str | None:
     if _is_denied_surface(denied):
         return None
     return f"empty-capability call not denied: {str(denied)[:200]}"
 
+
 def _security_capability_error(name: str) -> str | None:
     if TOOL_CAPABILITIES.get(name) is not Capability.RESEARCH:
         return f"capability is {TOOL_CAPABILITIES.get(name)!r}, want RESEARCH"
     return None
+
 
 def check_security(name: str, fixture: dict[str, object], ctx: RequestContext, deny: RequestContext) -> str | None:
     cap_err = _security_capability_error(name)
@@ -845,17 +880,14 @@ def bootstrap_thesis_id(ctx: RequestContext) -> str | None:
     return _first_thesis_id(result)
 
 
-def _verify_fixture(
-    name: str, params_dict: dict[str, object], thesis_id: str | None
-) -> dict[str, object]:
+def _verify_fixture(name: str, params_dict: dict[str, object], thesis_id: str | None) -> dict[str, object]:
     fixture = fixture_for(params_dict)
     if name in THESIS_ID_TOOLS and thesis_id:
         fixture["id"] = thesis_id
     return fixture
 
 
-def _verify_core_stages(name: str, fixture: dict[str, object], ctx: RequestContext,
-                        failures: list[str]) -> None:
+def _verify_core_stages(name: str, fixture: dict[str, object], ctx: RequestContext, failures: list[str]) -> None:
     if (invalid := _validate_tool_arguments(name, fixture)) is not None:
         failures.append(f"fixture: {invalid}")
     if (problem := check_dispatch(name, fixture, ctx)) is not None:
@@ -863,14 +895,21 @@ def _verify_core_stages(name: str, fixture: dict[str, object], ctx: RequestConte
     if (problem := check_handler(name, fixture, ctx)) is not None:
         failures.append(f"handler: {problem}")
 
-def _verify_live_security(name: str, fixture: dict[str, object], ctx: RequestContext,
-                          deny: RequestContext,
-                          pool: concurrent.futures.ThreadPoolExecutor,
-                          live: bool, failures: list[str]) -> None:
+
+def _verify_live_security(
+    name: str,
+    fixture: dict[str, object],
+    ctx: RequestContext,
+    deny: RequestContext,
+    pool: concurrent.futures.ThreadPoolExecutor,
+    live: bool,
+    failures: list[str],
+) -> None:
     if live and (problem := check_live(name, fixture, ctx, pool)) is not None:
         failures.append(f"live: {problem}")
     if (problem := check_security(name, fixture, ctx, deny)) is not None:
         failures.append(f"security: {problem}")
+
 
 def _verify_stages(
     name: str,
@@ -908,11 +947,15 @@ def verify_one(
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
-    parser = argparse.ArgumentParser(description="Deterministic per-research-tool health gate (fast default; --live runs real handlers).")
+    parser = argparse.ArgumentParser(
+        description="Deterministic per-research-tool health gate (fast default; --live runs real handlers)."
+    )
     parser.add_argument("--tool", action="append", default=None, help="check one tool (repeatable)")
     parser.add_argument("--list", action="store_true", help="list research tools and exit 0")
     parser.add_argument("--json", action="store_true", help="emit JSON summary")
-    parser.add_argument("--live", action="store_true", help="also execute real handlers (integration, may be slow/flaky)")
+    parser.add_argument(
+        "--live", action="store_true", help="also execute real handlers (integration, may be slow/flaky)"
+    )
     return parser.parse_args(argv)
 
 
@@ -939,14 +982,21 @@ def _verify_contexts(tmp: str) -> tuple[RequestContext, RequestContext]:
     deny = RequestContext("verify-tool-health-deny", frozenset(), data_root=Path(tmp))
     return ctx, deny
 
-def _run_all_selected(selected: list[str], by_name: dict[str, dict[str, object]],
-                      ctx: RequestContext, deny: RequestContext,
-                      pool: concurrent.futures.ThreadPoolExecutor,
-                      thesis_id: str | None, live: bool) -> dict[str, list[str]]:
+
+def _run_all_selected(
+    selected: list[str],
+    by_name: dict[str, dict[str, object]],
+    ctx: RequestContext,
+    deny: RequestContext,
+    pool: concurrent.futures.ThreadPoolExecutor,
+    thesis_id: str | None,
+    live: bool,
+) -> dict[str, list[str]]:
     results: dict[str, list[str]] = {}
     for name in selected:
         results[name] = verify_one(name, by_name[name], ctx, deny, pool, thesis_id, live)
     return results
+
 
 def _run_selected(
     selected: list[str],
@@ -978,6 +1028,7 @@ def _report_tool_line(name: str, problems: list[str] | None) -> None:
     else:
         print(f"PASS {name}")
 
+
 def _report_text(selected: list[str], results: dict[str, list[str]]) -> int:
     failed = {name: problems for name, problems in results.items() if problems}
     for name in selected:
@@ -1001,6 +1052,7 @@ def _probe_unknown_tool() -> bool:
         probe_ctx = RequestContext("verify-tool-health", frozenset({Capability.RESEARCH}), data_root=Path(tmp))
         return _check_unknown_tool(probe_ctx)
 
+
 def _run_main_checks(args: argparse.Namespace, selected: list[str]) -> int | None:
     by_name = _schema_table()
     if by_name is None:
@@ -1009,6 +1061,7 @@ def _run_main_checks(args: argparse.Namespace, selected: list[str]) -> int | Non
     if _probe_unknown_tool():
         return 1
     return _report_results(args, selected, results)
+
 
 def main(argv: list[str] | None = None) -> int:
     args = parse_args(argv)

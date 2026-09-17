@@ -62,6 +62,7 @@ DEMOTED_BOOST = 0.5
 def _date_part(value: object) -> str:
     return str(value or "")[:10]
 
+
 def is_pit_safe(instance: dict[str, object]) -> bool:
     """True only when evidence ``known_at`` strictly precedes the prediction."""
     known = _date_part(instance.get("evidence_known_at"))
@@ -98,7 +99,9 @@ def _forward_window(day: str, horizon: int, calendar: list[str], positions: dict
 
 
 def _forward_prices(
-    entity: object, day: str, later: str,
+    entity: object,
+    day: str,
+    later: str,
     observations: Mapping[tuple[str, str], int | float],
     benchmark: Mapping[str, int | float],
 ) -> tuple[float, float, float, float] | None:
@@ -114,7 +117,7 @@ def _forward_prices(
         p1 = float(observations[entity_later_key])
         b0 = float(benchmark[day])
         b1 = float(benchmark[later])
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     if p0 == 0 or b0 == 0:
         return None
@@ -157,15 +160,15 @@ def _max_drawdown(ordered_excess: list[float]) -> float:
 
 def _instance_key(it: dict[str, object]) -> tuple[str, str]:
     """Chronological sort key: prediction date, then instance id."""
-    return (_date_part(it.get("prediction_date")),
-            str(it.get("instance_id") or ""))
+    return (_date_part(it.get("prediction_date")), str(it.get("instance_id") or ""))
 
 
-def _window_instances(instances: list[dict[str, object]], window_start: str, window_end: str) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+def _window_instances(
+    instances: list[dict[str, object]], window_start: str, window_end: str
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Chronological in-window plus PIT-safe split (existing boundary)."""
     in_window = sorted(
-        (it for it in instances
-         if window_start <= _date_part(it.get("prediction_date")) <= window_end),
+        (it for it in instances if window_start <= _date_part(it.get("prediction_date")) <= window_end),
         key=_instance_key,
     )
     return in_window, [it for it in in_window if is_pit_safe(it)]
@@ -201,7 +204,14 @@ def _baseline_f1(safe: list[dict[str, object]]) -> float:
     return b_f1
 
 
-def _window_result(window_start: str, window_end: str, in_window: list[dict[str, object]], safe: list[dict[str, object]], f1: float, b_f1: float) -> dict[str, object]:
+def _window_result(
+    window_start: str,
+    window_end: str,
+    in_window: list[dict[str, object]],
+    safe: list[dict[str, object]],
+    f1: float,
+    b_f1: float,
+) -> dict[str, object]:
     """Neutral result skeleton with retrieval/quality metrics (existing boundary)."""
     tp, fp, fn = _confusion(safe, "predicted")
     precision, recall, _ = _prf(tp, fp, fn)
@@ -213,9 +223,12 @@ def _window_result(window_start: str, window_end: str, in_window: list[dict[str,
         "n_pit_safe": len(safe),
         "pit_violations": len(in_window) - len(safe),
         "retrieval": {
-            "precision": precision, "recall": recall, "f1": f1,
+            "precision": precision,
+            "recall": recall,
+            "f1": f1,
             "utility": f1,
-            "baseline_f1": b_f1, "baseline_utility": b_f1,
+            "baseline_f1": b_f1,
+            "baseline_utility": b_f1,
         },
         "identity_accuracy": identity,
         "baseline_identity_accuracy": _rate(safe, "baseline_identity_correct", True),
@@ -240,11 +253,25 @@ def _horizon_stats(ordered: list[float]) -> dict[str, float]:
     return {"n": len(ordered), "mean_excess": mean, "volatility": vol, "max_drawdown": _max_drawdown(ordered)}
 
 
-def _horizon_excess(picked: list[dict[str, object]], horizon: int, calendar: list[str], positions: dict[str, int], observations: Mapping[tuple[str, str], int | float] | None, benchmark: Mapping[str, int | float] | None) -> list[float] | None:
+def _horizon_excess(
+    picked: list[dict[str, object]],
+    horizon: int,
+    calendar: list[str],
+    positions: dict[str, int],
+    observations: Mapping[tuple[str, str], int | float] | None,
+    benchmark: Mapping[str, int | float] | None,
+) -> list[float] | None:
     """Forward excess for one horizon, None when any price is missing (existing boundary)."""
     excess = [
-        _forward_excess(it.get("entity_id"), _date_part(it.get("prediction_date")),
-                        horizon, calendar, positions, observations, benchmark)
+        _forward_excess(
+            it.get("entity_id"),
+            _date_part(it.get("prediction_date")),
+            horizon,
+            calendar,
+            positions,
+            observations,
+            benchmark,
+        )
         for it in picked
     ]
     if any(value is None for value in excess):
@@ -253,8 +280,13 @@ def _horizon_excess(picked: list[dict[str, object]], horizon: int, calendar: lis
 
 
 def _composite_for(
-    safe: list[dict[str, object]], flag: str, horizons: tuple[int, ...],
-    calendar: list[str], positions: dict[str, int], observations: Mapping[tuple[str, str], int | float] | None, benchmark: Mapping[str, int | float] | None,
+    safe: list[dict[str, object]],
+    flag: str,
+    horizons: tuple[int, ...],
+    calendar: list[str],
+    positions: dict[str, int],
+    observations: Mapping[tuple[str, str], int | float] | None,
+    benchmark: Mapping[str, int | float] | None,
 ) -> tuple[dict[str, dict[str, float]], float] | None:
     """Market composite for one retrieval flag (existing boundary)."""
     picked = sorted((it for it in safe if it.get(flag)), key=_instance_key)
@@ -272,8 +304,12 @@ def _composite_for(
 
 
 def _market_pair(
-    safe: list[dict[str, object]], horizons: tuple[int, ...],
-    calendar: list[str], positions: dict[str, int], observations: Mapping[tuple[str, str], int | float] | None, benchmark: Mapping[str, int | float] | None,
+    safe: list[dict[str, object]],
+    horizons: tuple[int, ...],
+    calendar: list[str],
+    positions: dict[str, int],
+    observations: Mapping[tuple[str, str], int | float] | None,
+    benchmark: Mapping[str, int | float] | None,
 ) -> tuple[tuple[dict[str, dict[str, float]], float], tuple[dict[str, dict[str, float]], float]] | None:
     """Model/baseline composite pair, None when either lacks prices (existing boundary)."""
     model = _composite_for(safe, "predicted", horizons, calendar, positions, observations, benchmark)
@@ -283,12 +319,17 @@ def _market_pair(
     return model, baseline
 
 
-def _apply_market(result: dict[str, object], pair: tuple[tuple[dict[str, dict[str, float]], float], tuple[dict[str, dict[str, float]], float]]) -> tuple[float, float]:
+def _apply_market(
+    result: dict[str, object],
+    pair: tuple[tuple[dict[str, dict[str, float]], float], tuple[dict[str, dict[str, float]], float]],
+) -> tuple[float, float]:
     """Store the market pair on the result (existing boundary)."""
     (model_per_horizon, model_composite), (_, baseline_composite) = pair
     result["market"], result["market_composite"] = model_per_horizon, model_composite
     result["baseline_market_composite"] = baseline_composite
     return model_composite, baseline_composite
+
+
 def _result_float(result: dict[str, object], key: str) -> float:
     """float() over a stored result metric, narrowed without escapes."""
     value = result[key]
@@ -305,13 +346,24 @@ def _result_int(result: dict[str, object], key: str) -> int:
     raise TypeError(f"evaluation result {key!r} is not an integer")
 
 
-def _window_verdict(result: dict[str, object], f1: float, b_f1: float, model_composite: float, baseline_composite: float, violations: int, identity: float, baseline_identity: float) -> dict[str, object]:
+def _window_verdict(
+    result: dict[str, object],
+    f1: float,
+    b_f1: float,
+    model_composite: float,
+    baseline_composite: float,
+    violations: int,
+    identity: float,
+    baseline_identity: float,
+) -> dict[str, object]:
     """Qualifying/below-baseline gates (existing boundary)."""
     result["qualifying"] = (
-        _improves(f1, b_f1) and _improves(model_composite, baseline_composite)
-        and violations == 0 and identity >= baseline_identity
+        _improves(f1, b_f1)
+        and _improves(model_composite, baseline_composite)
+        and violations == 0
+        and identity >= baseline_identity
     )
-    result["below_baseline"] = (f1 < b_f1 or model_composite < baseline_composite)
+    result["below_baseline"] = f1 < b_f1 or model_composite < baseline_composite
     return result
 
 
@@ -331,8 +383,7 @@ def evaluate_window(
     if not in_window:
         return result  # empty window: complete but neutral, breaks streaks
     if not observations or not benchmark:
-        result.update(complete=False,
-                      incomplete_reason="missing-observations-or-benchmark")
+        result.update(complete=False, incomplete_reason="missing-observations-or-benchmark")
         return result
     calendar = sorted(d for d in benchmark)
     positions = {day: idx for idx, day in enumerate(calendar)}
@@ -343,8 +394,16 @@ def evaluate_window(
     model_composite, baseline_composite = _apply_market(result, pair)
     identity = _result_float(result, "identity_accuracy")
     baseline_identity = _result_float(result, "baseline_identity_accuracy")
-    return _window_verdict(result, f1, b_f1, model_composite, baseline_composite,
-                           _result_int(result, "pit_violations"), identity, baseline_identity)
+    return _window_verdict(
+        result,
+        f1,
+        b_f1,
+        model_composite,
+        baseline_composite,
+        _result_int(result, "pit_violations"),
+        identity,
+        baseline_identity,
+    )
 
 
 def evaluate_type(
@@ -363,8 +422,9 @@ def evaluate_type(
     ``no_change``. A PIT leak can never qualify, so it blocks promotion.
     """
     ordered = sorted(windows)
-    evaluated = [evaluate_window(list(instances or []), observations, benchmark,
-                                 start, end, horizons) for start, end in ordered]
+    evaluated = [
+        evaluate_window(list(instances or []), observations, benchmark, start, end, horizons) for start, end in ordered
+    ]
     total_safe = _total_pit_safe(evaluated)
     decision, reason = _type_decision(evaluated, total_safe)
     return {
@@ -401,14 +461,14 @@ def _type_decision(evaluated: list[dict[str, object]], total_safe: int) -> tuple
 
 def _trailing_qualifying(evaluated: list[dict[str, object]]) -> bool:
     """Trailing-two qualifying streak (existing boundary)."""
-    return (len(evaluated) >= REQUIRED_QUALIFYING_WINDOWS
-            and all(w["qualifying"] for w in evaluated[-REQUIRED_QUALIFYING_WINDOWS:]))
+    return len(evaluated) >= REQUIRED_QUALIFYING_WINDOWS and all(
+        w["qualifying"] for w in evaluated[-REQUIRED_QUALIFYING_WINDOWS:]
+    )
 
 
 def _trailing_below(evaluated: list[dict[str, object]]) -> bool:
     """Trailing-two below-baseline streak (existing boundary)."""
-    return (len(evaluated) >= DEMOTE_WINDOWS
-            and all(w["below_baseline"] for w in evaluated[-DEMOTE_WINDOWS:]))
+    return len(evaluated) >= DEMOTE_WINDOWS and all(w["below_baseline"] for w in evaluated[-DEMOTE_WINDOWS:])
 
 
 def _canon_key(key: object) -> str:
@@ -427,13 +487,13 @@ def _canon(value: object) -> object:
 
 def hash_inputs(payload: object) -> str:
     """Deterministic sha256 over canonical JSON for evaluation provenance."""
-    return hashlib.sha256(
-        json.dumps(_canon(payload), sort_keys=True, default=str).encode("utf-8")).hexdigest()
+    return hashlib.sha256(json.dumps(_canon(payload), sort_keys=True, default=str).encode("utf-8")).hexdigest()
 
 
 def ontology_boost(label: object, active_types: Collection[str] = (), demoted_types: Collection[str] = ()) -> float:
     """Ranking-only boost for one normalized type label; never filters."""
     from .relationships import normalize_label
+
     key = normalize_label(label)
     active = {normalize_label(t) for t in active_types or ()}
     demoted = {normalize_label(t) for t in demoted_types or ()}

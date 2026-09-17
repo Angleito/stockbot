@@ -12,6 +12,7 @@ def _as_seq(value: object) -> list[dict[str, object]]:
         assert isinstance(item, dict)
     return value
 
+
 def test_eps_data_structure():
     """Test that get_fundamentals returns eps_basic and eps_diluted in quarterly_eps."""
     from app.edgar_client import get_fundamentals

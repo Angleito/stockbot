@@ -34,17 +34,25 @@ def test_no_trading_tool_schemas_in_registry():
         lowered = name.lower()
         assert not is_blocked(lowered), f"trading-like tool in registry: {name}"
         assert lowered not in BLOCKED_TOOLS, f"blocked tool in registry: {name}"
-    assert not any(
-        keyword in name
-        for name in names
-        if name not in non_trading
-        for keyword in BLOCKED_KEYWORDS
-    ), "trading keyword leaked into a model-visible tool schema"
+    assert not any(keyword in name for name in names if name not in non_trading for keyword in BLOCKED_KEYWORDS), (
+        "trading keyword leaked into a model-visible tool schema"
+    )
 
 
 def test_blocked_keyword_set_covers_trading_verbs():
-    for keyword in ("order", "trade", "place", "submit", "cancel", "replace",
-                    "modify", "exercise", "withdraw", "deposit", "transfer"):
+    for keyword in (
+        "order",
+        "trade",
+        "place",
+        "submit",
+        "cancel",
+        "replace",
+        "modify",
+        "exercise",
+        "withdraw",
+        "deposit",
+        "transfer",
+    ):
         assert keyword in BLOCKED_KEYWORDS
 
 
@@ -98,14 +106,16 @@ def test_portfolio_render_never_dumps_raw_mcp_payload():
         "priced_position_count": 1,
         "unresolved_position_count": 0,
         "source": "robinhood_mcp",
-        "positions": [{
-            "ticker": "AMD",
-            "quantity": "10.0",
-            "market_price": "100.00",
-            "market_value": "1000.00",
-            "portfolio_weight": "1.0",
-            "unrealized_gain": "20.00",
-        }],
+        "positions": [
+            {
+                "ticker": "AMD",
+                "quantity": "10.0",
+                "market_price": "100.00",
+                "market_value": "1000.00",
+                "portfolio_weight": "1.0",
+                "unrealized_gain": "20.00",
+            }
+        ],
     }
     rendered = render_tool_result(result)
     # Normalized fields render; raw MCP payload keys never do.

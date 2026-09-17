@@ -8,7 +8,7 @@ seeding pattern.
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -38,48 +38,66 @@ def _fact_source_url(entity_id: str = ENTITY_ID) -> str:
 
 
 def _seed_entity(data_root: Path, entity_id: str = ENTITY_ID) -> None:
-    parquet.write_rows("entities", [{
-        "entity_id": entity_id,
-        "name": "Advanced Micro Devices, Inc.",
-        "entity_type": "unknown",
-        "sic": None,
-        "source": "test",
-        "known_at": "2026-08-01T00:00:00Z",
-        "retrieved_at": "2026-08-01T00:00:00Z",
-        "content_hash": "entities-hash",
-        "parser_version": "test-v1",
-    }], root=data_root / "parquet")
+    parquet.write_rows(
+        "entities",
+        [
+            {
+                "entity_id": entity_id,
+                "name": "Advanced Micro Devices, Inc.",
+                "entity_type": "unknown",
+                "sic": None,
+                "source": "test",
+                "known_at": "2026-08-01T00:00:00Z",
+                "retrieved_at": "2026-08-01T00:00:00Z",
+                "content_hash": "entities-hash",
+                "parser_version": "test-v1",
+            }
+        ],
+        root=data_root / "parquet",
+    )
 
 
 def _seed_alias(data_root: Path, alias_value: str = "AMD", entity_id: str = ENTITY_ID) -> None:
-    parquet.write_rows("entity_aliases", [{
-        "alias_type": "ticker",
-        "alias_value": alias_value,
-        "entity_id": entity_id,
-        "security_id": SECURITY_ID,
-        "source": "test",
-        "valid_from": None,
-        "valid_to": None,
-        "known_at": "2026-08-01T00:00:00Z",
-        "retrieved_at": "2026-08-01T00:00:00Z",
-        "content_hash": "alias-hash",
-        "parser_version": "test-v1",
-    }], root=data_root / "parquet")
+    parquet.write_rows(
+        "entity_aliases",
+        [
+            {
+                "alias_type": "ticker",
+                "alias_value": alias_value,
+                "entity_id": entity_id,
+                "security_id": SECURITY_ID,
+                "source": "test",
+                "valid_from": None,
+                "valid_to": None,
+                "known_at": "2026-08-01T00:00:00Z",
+                "retrieved_at": "2026-08-01T00:00:00Z",
+                "content_hash": "alias-hash",
+                "parser_version": "test-v1",
+            }
+        ],
+        root=data_root / "parquet",
+    )
 
 
 def _seed_security(data_root: Path) -> None:
-    parquet.write_rows("securities", [{
-        "security_id": SECURITY_ID,
-        "entity_id": ENTITY_ID,
-        "security_type": "equity-common",
-        "ticker": None,
-        "exchange": None,
-        "source": "test",
-        "known_at": "2026-08-01T00:00:00Z",
-        "retrieved_at": "2026-08-01T00:00:00Z",
-        "content_hash": "security-hash",
-        "parser_version": "test-v1",
-    }], root=data_root / "parquet")
+    parquet.write_rows(
+        "securities",
+        [
+            {
+                "security_id": SECURITY_ID,
+                "entity_id": ENTITY_ID,
+                "security_type": "equity-common",
+                "ticker": None,
+                "exchange": None,
+                "source": "test",
+                "known_at": "2026-08-01T00:00:00Z",
+                "retrieved_at": "2026-08-01T00:00:00Z",
+                "content_hash": "security-hash",
+                "parser_version": "test-v1",
+            }
+        ],
+        root=data_root / "parquet",
+    )
 
 
 def _seed_fact(
@@ -91,26 +109,32 @@ def _seed_fact(
     accession: str,
     entity_id: str = ENTITY_ID,
 ) -> None:
-    parquet.write_rows("financial_facts", [{
-        "fact_id": f"sec:fact:{entity_id}:{concept}:{accession}",
-        "entity_id": entity_id,
-        "security_id": SECURITY_ID,
-        "concept": concept,
-        "original_concept": concept,
-        "value": value,
-        "unit": "shares" if concept == "EntityCommonStockSharesOutstanding" else "USD",
-        "duration_type": "instant" if concept == "EntityCommonStockSharesOutstanding" else "duration",
-        "period_end": period_end,
-        "filed_at": filed_at,
-        "accession": accession,
-        "frame": None,
-        "known_at": filed_at,
-        "retrieved_at": RETRIEVED_AT,
-        "source_url": _fact_source_url(entity_id),
-        "source_record_id": "cik0000320193",
-        "content_hash": f"facts-{concept}-{accession}",
-        "parser_version": "test-v1",
-    }], root=data_root / "parquet")
+    parquet.write_rows(
+        "financial_facts",
+        [
+            {
+                "fact_id": f"sec:fact:{entity_id}:{concept}:{accession}",
+                "entity_id": entity_id,
+                "security_id": SECURITY_ID,
+                "concept": concept,
+                "original_concept": concept,
+                "value": value,
+                "unit": "shares" if concept == "EntityCommonStockSharesOutstanding" else "USD",
+                "duration_type": "instant" if concept == "EntityCommonStockSharesOutstanding" else "duration",
+                "period_end": period_end,
+                "filed_at": filed_at,
+                "accession": accession,
+                "frame": None,
+                "known_at": filed_at,
+                "retrieved_at": RETRIEVED_AT,
+                "source_url": _fact_source_url(entity_id),
+                "source_record_id": "cik0000320193",
+                "content_hash": f"facts-{concept}-{accession}",
+                "parser_version": "test-v1",
+            }
+        ],
+        root=data_root / "parquet",
+    )
 
 
 def _seed_short_interest(
@@ -124,24 +148,30 @@ def _seed_short_interest(
     symbol: str = "AMD",
     content_hash: str = "finra-hash",
 ) -> None:
-    parquet.write_rows("short_interest", [{
-        "row_id": f"finra:row:{settlement_date}:{symbol}:{content_hash[:12]}",
-        "entity_id": None,
-        "security_id": None,
-        "symbol_code": symbol,
-        "issue_name": "Advanced Micro Devices, Inc.",
-        "settlement_date": settlement_date,
-        "short_position": short_position,
-        "prev_position": prev_position,
-        "avg_daily_volume": avg_daily_volume,
-        "days_to_cover": days_to_cover,
-        "source_url": FINRA_SOURCE_URL,
-        "source_record_id": f"otcMarket/consolidatedShortInterest:{settlement_date}",
-        "known_at": settlement_date,
-        "retrieved_at": retrieved_at,
-        "content_hash": content_hash,
-        "parser_version": "test-v1",
-    }], root=data_root / "parquet")
+    parquet.write_rows(
+        "short_interest",
+        [
+            {
+                "row_id": f"finra:row:{settlement_date}:{symbol}:{content_hash[:12]}",
+                "entity_id": None,
+                "security_id": None,
+                "symbol_code": symbol,
+                "issue_name": "Advanced Micro Devices, Inc.",
+                "settlement_date": settlement_date,
+                "short_position": short_position,
+                "prev_position": prev_position,
+                "avg_daily_volume": avg_daily_volume,
+                "days_to_cover": days_to_cover,
+                "source_url": FINRA_SOURCE_URL,
+                "source_record_id": f"otcMarket/consolidatedShortInterest:{settlement_date}",
+                "known_at": settlement_date,
+                "retrieved_at": retrieved_at,
+                "content_hash": content_hash,
+                "parser_version": "test-v1",
+            }
+        ],
+        root=data_root / "parquet",
+    )
 
 
 def _position(
@@ -164,14 +194,14 @@ def _position(
         unrealized_gain_pct=Decimal(10),
         portfolio_weight=Decimal("0.05"),
         source="test",
-        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
     )
 
 
 def _snapshot(positions: list[Position]) -> PortfolioSnapshot:
     return PortfolioSnapshot(
         snapshot_id="snap-1",
-        created_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        created_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
         broker="test",
         account_ids=("acc-1",),
         cash=Decimal(0),
@@ -195,20 +225,33 @@ def test_cross_source_integration_enriches_resolved_position(data_root: Path) ->
     _seed_fact(data_root, "NetIncomeLoss", 265_000_000.0, "2026-06-30", "2026-08-05", "accn-ni-1")
     _seed_fact(data_root, "CashAndCashEquivalents", 4_100_000_000.0, "2026-06-30", "2026-08-05", "accn-cash-1")
     _seed_fact(data_root, "LongTermDebt", 2_300_000_000.0, "2026-06-30", "2026-08-05", "accn-debt-1")
-    _seed_fact(data_root, "EntityCommonStockSharesOutstanding", 1_610_000_000.0, "2026-07-01", "2026-08-06", "accn-shares-1")
-    _seed_short_interest(
-        data_root, settlement_date="2026-08-07", short_position=1_000_000,
-        prev_position=950_000, retrieved_at="2026-08-10T12:00:00Z",
+    _seed_fact(
+        data_root, "EntityCommonStockSharesOutstanding", 1_610_000_000.0, "2026-07-01", "2026-08-06", "accn-shares-1"
     )
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_200_000,
-        prev_position=1_000_000, retrieved_at="2026-08-17T12:00:00Z",
+        data_root,
+        settlement_date="2026-08-07",
+        short_position=1_000_000,
+        prev_position=950_000,
+        retrieved_at="2026-08-10T12:00:00Z",
+    )
+    _seed_short_interest(
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_200_000,
+        prev_position=1_000_000,
+        retrieved_at="2026-08-17T12:00:00Z",
         content_hash="finra-v1-hash",
     )
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_150_000,
-        prev_position=1_000_000, avg_daily_volume=38_000_000, days_to_cover=2.3,
-        retrieved_at="2026-08-20T12:00:00Z", content_hash="finra-v2-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_150_000,
+        prev_position=1_000_000,
+        avg_daily_volume=38_000_000,
+        days_to_cover=2.3,
+        retrieved_at="2026-08-20T12:00:00Z",
+        content_hash="finra-v2-hash",
     )
 
     position = _position()
@@ -256,7 +299,7 @@ def test_cross_source_integration_enriches_resolved_position(data_root: Path) ->
 
     freshness = research.research_data_freshness
     assert freshness == {
-        "as_of": datetime.now(timezone.utc).date().isoformat(),
+        "as_of": datetime.now(UTC).date().isoformat(),
         "sec_latest_filed_at": date(2026, 8, 20),
         "finra_settlement_date": date(2026, 8, 14),
         "finra_retrieved_at": "2026-08-20T12:00:00Z",
@@ -272,8 +315,11 @@ def test_unresolved_position_gets_empty_sec_and_symbol_based_finra(data_root: Pa
     _seed_entity(data_root)
     _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_150_000,
-        prev_position=1_000_000, retrieved_at="2026-08-20T12:00:00Z",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_150_000,
+        prev_position=1_000_000,
+        retrieved_at="2026-08-20T12:00:00Z",
     )
 
     resolved = _position()
@@ -338,12 +384,20 @@ def test_as_of_regression_facts_after_as_of_are_excluded(data_root: Path) -> Non
 
 def test_finra_newest_version_wins_per_symbol(data_root: Path) -> None:
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_200_000,
-        prev_position=1_000_000, retrieved_at="2026-08-17T12:00:00Z", content_hash="finra-v1-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_200_000,
+        prev_position=1_000_000,
+        retrieved_at="2026-08-17T12:00:00Z",
+        content_hash="finra-v1-hash",
     )
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_150_000,
-        prev_position=1_000_000, retrieved_at="2026-08-20T12:00:00Z", content_hash="finra-v2-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_150_000,
+        prev_position=1_000_000,
+        retrieved_at="2026-08-20T12:00:00Z",
+        content_hash="finra-v2-hash",
     )
 
     research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
@@ -352,14 +406,23 @@ def test_finra_newest_version_wins_per_symbol(data_root: Path) -> None:
     assert research.latest_finra_metrics["known_at"] == "2026-08-14"
     assert research.latest_finra_metrics["retrieved_at"] == "2026-08-20T12:00:00Z"
 
+
 def test_finra_mixed_offset_newest_version_wins_per_symbol(data_root: Path) -> None:
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_200_000,
-        prev_position=1_000_000, retrieved_at="2026-08-17T13:00:00+01:00", content_hash="finra-v1-mixed-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_200_000,
+        prev_position=1_000_000,
+        retrieved_at="2026-08-17T13:00:00+01:00",
+        content_hash="finra-v1-mixed-hash",
     )
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_150_000,
-        prev_position=1_000_000, retrieved_at="2026-08-17T12:30:00Z", content_hash="finra-v2-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_150_000,
+        prev_position=1_000_000,
+        retrieved_at="2026-08-17T12:30:00Z",
+        content_hash="finra-v2-hash",
     )
 
     research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
@@ -373,12 +436,20 @@ def test_finra_mixed_offset_newest_version_wins_per_symbol(data_root: Path) -> N
 
 def test_finra_same_instant_conflicting_versions_empty(data_root: Path) -> None:
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_200_000,
-        prev_position=1_000_000, retrieved_at="2026-08-17T12:00:00Z", content_hash="finra-c1-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_200_000,
+        prev_position=1_000_000,
+        retrieved_at="2026-08-17T12:00:00Z",
+        content_hash="finra-c1-hash",
     )
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_150_000,
-        prev_position=1_000_000, retrieved_at="2026-08-17T12:00:00Z", content_hash="finra-c2-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_150_000,
+        prev_position=1_000_000,
+        retrieved_at="2026-08-17T12:00:00Z",
+        content_hash="finra-c2-hash",
     )
     research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
     assert research.latest_finra_metrics == {}
@@ -386,18 +457,27 @@ def test_finra_same_instant_conflicting_versions_empty(data_root: Path) -> None:
 
 def test_finra_older_settlement_correction_does_not_beat_newer_settlement(data_root: Path) -> None:
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_200_000,
-        retrieved_at="2026-08-20T12:00:00Z", content_hash="finra-a14-v1-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_200_000,
+        retrieved_at="2026-08-20T12:00:00Z",
+        content_hash="finra-a14-v1-hash",
     )
     _seed_short_interest(
-        data_root, settlement_date="2026-08-29", short_position=900_000,
-        retrieved_at="2026-09-02T12:00:00Z", content_hash="finra-a29-v1-hash",
+        data_root,
+        settlement_date="2026-08-29",
+        short_position=900_000,
+        retrieved_at="2026-09-02T12:00:00Z",
+        content_hash="finra-a29-v1-hash",
     )
     # Correction to the OLDER settlement, learned after the Aug 29 cycle:
     # must not replace the newer settlement's metrics.
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_150_000,
-        retrieved_at="2026-09-03T12:00:00Z", content_hash="finra-a14-v2-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_150_000,
+        retrieved_at="2026-09-03T12:00:00Z",
+        content_hash="finra-a14-v2-hash",
     )
     research = enrich_portfolio_research(
         _snapshot([_position(entity_id=None)]), as_of=date(2026, 9, 5), data_root=data_root
@@ -409,12 +489,18 @@ def test_finra_older_settlement_correction_does_not_beat_newer_settlement(data_r
 
 def test_finra_same_instant_ingestion_across_settlements_is_not_conflict(data_root: Path) -> None:
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_200_000,
-        retrieved_at="2026-09-01T12:00:00Z", content_hash="finra-a14-hash",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_200_000,
+        retrieved_at="2026-09-01T12:00:00Z",
+        content_hash="finra-a14-hash",
     )
     _seed_short_interest(
-        data_root, settlement_date="2026-08-29", short_position=900_000,
-        retrieved_at="2026-09-01T12:00:00Z", content_hash="finra-a29-hash",
+        data_root,
+        settlement_date="2026-08-29",
+        short_position=900_000,
+        retrieved_at="2026-09-01T12:00:00Z",
+        content_hash="finra-a29-hash",
     )
     research = enrich_portfolio_research(
         _snapshot([_position(entity_id=None)]), as_of=date(2026, 9, 5), data_root=data_root
@@ -425,7 +511,6 @@ def test_finra_same_instant_ingestion_across_settlements_is_not_conflict(data_ro
     assert research.latest_finra_metrics["short_position"] == Decimal(900000)
 
 
-
 def test_no_data_reports_empty_metrics_without_raising(data_root: Path) -> None:
     position = _position(position_id="pos-1", entity_id=None, security_id=None, ticker="NODATA")
     research = enrich_portfolio_research(_snapshot([position]), data_root=data_root)[0]
@@ -433,7 +518,7 @@ def test_no_data_reports_empty_metrics_without_raising(data_root: Path) -> None:
     assert research.latest_sec_metrics == {}
     assert research.latest_finra_metrics == {}
     assert research.research_data_freshness == {
-        "as_of": datetime.now(timezone.utc).date().isoformat(),
+        "as_of": datetime.now(UTC).date().isoformat(),
         "sec_latest_filed_at": None,
         "finra_settlement_date": None,
         "finra_retrieved_at": None,
@@ -443,12 +528,18 @@ def test_no_data_reports_empty_metrics_without_raising(data_root: Path) -> None:
 
 def test_missing_values_are_none_never_zero(data_root: Path) -> None:
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=1_150_000,
-        prev_position=None, avg_daily_volume=None, days_to_cover=None,
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=1_150_000,
+        prev_position=None,
+        avg_daily_volume=None,
+        days_to_cover=None,
         retrieved_at="2026-08-20T12:00:00Z",
     )
 
-    finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0].latest_finra_metrics
+    finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[
+        0
+    ].latest_finra_metrics
 
     assert finra["short_position"] == Decimal(1150000)
     assert finra["prev_position"] is None
@@ -460,14 +551,20 @@ def test_missing_values_are_none_never_zero(data_root: Path) -> None:
 
 def test_change_pct_is_none_when_prev_is_zero(data_root: Path) -> None:
     _seed_short_interest(
-        data_root, settlement_date="2026-08-14", short_position=100,
-        prev_position=0, retrieved_at="2026-08-20T12:00:00Z",
+        data_root,
+        settlement_date="2026-08-14",
+        short_position=100,
+        prev_position=0,
+        retrieved_at="2026-08-20T12:00:00Z",
     )
 
-    finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0].latest_finra_metrics
+    finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[
+        0
+    ].latest_finra_metrics
 
     assert finra["short_interest_change"] == Decimal(100)
     assert finra["short_interest_change_pct"] is None
+
 
 def _metric(research: PortfolioResearchPosition, concept: str) -> dict[str, object]:
     """Typed accessor: latest_sec_metrics[concept] is always a fact dict."""
@@ -494,8 +591,7 @@ def test_as_of_2025_01_01_excludes_later_filings(data_root: Path) -> None:
     _seed_entity(data_root)
     _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2024-12-31", "2024-12-31", "accn-old")
     _seed_fact(data_root, "Revenue", 9_999_000_000.0, "2025-06-30", "2025-06-30", "accn-new")
-    early = enrich_portfolio_research(
-        _snapshot([_position()]), as_of=date(2025, 1, 1), data_root=data_root)[0]
+    early = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2025, 1, 1), data_root=data_root)[0]
     assert _metric(early, "Revenue")["accession"] == "accn-old"
     assert _metric(early, "Revenue")["filed_at"] == "2024-12-31"
 
@@ -504,11 +600,9 @@ def test_interval_start_end_bounds_facts(data_root: Path) -> None:
     _seed_entity(data_root)
     _seed_fact(data_root, "Revenue", 1_000_000_000.0, "2025-03-31", "2025-04-30", "accn-q1")
     _seed_fact(data_root, "Revenue", 2_000_000_000.0, "2025-06-30", "2025-07-30", "accn-q2")
-    mid = enrich_portfolio_research(
-        _snapshot([_position()]), as_of=date(2025, 5, 15), data_root=data_root)[0]
+    mid = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2025, 5, 15), data_root=data_root)[0]
     assert _metric(mid, "Revenue")["accession"] == "accn-q1"
-    later = enrich_portfolio_research(
-        _snapshot([_position()]), as_of=date(2025, 8, 1), data_root=data_root)[0]
+    later = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2025, 8, 1), data_root=data_root)[0]
     assert _metric(later, "Revenue")["accession"] == "accn-q2"
 
 
@@ -516,11 +610,9 @@ def test_last_quarter_range_picks_quarter_doc(data_root: Path) -> None:
     _seed_entity(data_root)
     _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2026-03-31", "2026-05-05", "accn-q1")
     _seed_fact(data_root, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-05", "accn-q2")
-    end_q1 = enrich_portfolio_research(
-        _snapshot([_position()]), as_of=date(2026, 6, 29), data_root=data_root)[0]
+    end_q1 = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2026, 6, 29), data_root=data_root)[0]
     assert _metric(end_q1, "Revenue")["accession"] == "accn-q1"
-    end_q2 = enrich_portfolio_research(
-        _snapshot([_position()]), as_of=date(2026, 8, 25), data_root=data_root)[0]
+    end_q2 = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2026, 8, 25), data_root=data_root)[0]
     assert _metric(end_q2, "Revenue")["accession"] == "accn-q2"
 
 
@@ -528,7 +620,6 @@ def test_latest_doc_respects_cutoff_not_newest_ingested(data_root: Path) -> None
     _seed_entity(data_root)
     _seed_fact(data_root, "LongTermDebt", 2_100_000_000.0, "2026-03-31", "2026-05-05", "accn-cutoff")
     _seed_fact(data_root, "LongTermDebt", 2_300_000_000.0, "2026-06-30", "2026-08-30", "accn-future")
-    at_cutoff = enrich_portfolio_research(
-        _snapshot([_position()]), as_of=date(2026, 8, 14), data_root=data_root)[0]
+    at_cutoff = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2026, 8, 14), data_root=data_root)[0]
     assert _metric(at_cutoff, "LongTermDebt")["accession"] == "accn-cutoff"
     assert at_cutoff.research_data_freshness["sec_latest_filed_at"] == date(2026, 5, 5)

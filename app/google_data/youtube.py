@@ -13,7 +13,7 @@ import json
 import os
 import re
 import sys
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from pathlib import Path
 from typing import BinaryIO
 from zoneinfo import ZoneInfo
@@ -151,7 +151,7 @@ def _open_lock(qdir: Path) -> BinaryIO:
     """Open (creating) the quota lock file; OSError becomes quota_state_invalid."""
     try:
         qdir.mkdir(parents=True, exist_ok=True)
-        return open(qdir / _QUOTA_LOCK, "a+b")  # noqa: PTH123, SIM115
+        return open(qdir / _QUOTA_LOCK, "a+b")
     except OSError:
         raise _QuotaRefused("quota_state_invalid") from None
 
@@ -166,7 +166,7 @@ def _read_raw(qpath: Path) -> object:
             raise _QuotaRefused("quota_state_invalid")
         parsed: object = json.loads(raw_bytes.decode("utf-8"))
         return parsed
-    except (ValueError, OSError):
+    except ValueError, OSError:
         raise _QuotaRefused("quota_state_invalid") from None
 
 
@@ -185,8 +185,7 @@ def _legacy_total(raw: dict[str, object]) -> int:
 def _migrate_legacy(raw: dict[str, object], today: str, qpath: Path) -> dict[str, object]:
     """Validate a legacy unversioned ledger, seed today at both ceilings, pause."""
     total = _legacy_total(raw)
-    days: dict[str, object] = {today: {"search": max(_SEARCH_BUCKET, total),
-                                       "videos": max(_VIDEOS_BUCKET, total)}}
+    days: dict[str, object] = {today: {"search": max(_SEARCH_BUCKET, total), "videos": max(_VIDEOS_BUCKET, total)}}
     _store_ledger(qpath, days)
     raise _QuotaRefused("quota_exhausted")
 
@@ -221,8 +220,7 @@ def _today_bucket(days: dict[str, object], today: str) -> dict[str, object]:
     return bucket
 
 
-def _consume(days: dict[str, object], today: str, kind: str,
-             ceiling: int, qpath: Path) -> None:
+def _consume(days: dict[str, object], today: str, kind: str, ceiling: int, qpath: Path) -> None:
     """Consume one unit for kind today; exhausted/over-ceiling refuses."""
     for old in sorted(days)[:-3]:
         del days[old]
@@ -269,7 +267,7 @@ def _reserve(root: Path, kind: str, ceiling: int) -> None:
 def _http_body(chunks: list[bytes]) -> tuple[dict[str, object] | None, str | None]:
     try:
         body = json.loads(b"".join(chunks).decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except ValueError, UnicodeDecodeError:
         return None, "malformed_response"
     if not isinstance(body, dict):
         return None, "malformed_response"
@@ -295,8 +293,7 @@ def _http_chunks(resp: requests.Response) -> tuple[list[bytes] | None, str | Non
 def _http_get(url: str, params: dict[str, str | int]) -> tuple[dict[str, object] | None, str | None]:
     """Bounded GET returning (body, error_code); never raises, never logs."""
     try:
-        resp = requests.get(url, params=params, timeout=_TIMEOUT,
-                            allow_redirects=False, stream=True)
+        resp = requests.get(url, params=params, timeout=_TIMEOUT, allow_redirects=False, stream=True)
     except requests.RequestException:
         return None, "source_unavailable"
     try:
@@ -325,8 +322,7 @@ def _snippet_text(snip: dict[str, object]) -> tuple[str, str, str, str]:
     channel_id = _narrow_str(snip.get("channelId"))
     channel_title = _narrow_str(snip.get("channelTitle"))
     published = snip.get("publishedAt")
-    if (title is None or channel_id is None
-            or channel_title is None or not _valid_ts(published)):
+    if title is None or channel_id is None or channel_title is None or not _valid_ts(published):
         raise _Malformed("metadata")
     if not isinstance(published, str):
         raise _Malformed("metadata")
@@ -345,10 +341,15 @@ def _snippet_row(video_id: str, snip: dict[str, object]) -> dict[str, object]:
     title, channel_id, channel_title, published = _snippet_text(snip)
     live = _snippet_live(snip)
     return {
-        "video_id": video_id, "title": title, "channel_id": channel_id,
-        "channel_title": channel_title, "published_at": published,
+        "video_id": video_id,
+        "title": title,
+        "channel_id": channel_id,
+        "channel_title": channel_title,
+        "published_at": published,
         "live_broadcast_content": live,
-        "view_count": None, "like_count": None, "comment_count": None,
+        "view_count": None,
+        "like_count": None,
+        "comment_count": None,
     }
 
 
@@ -395,8 +396,7 @@ def _details_index(body: dict[str, object]) -> dict[str, object] | None:
     items = body.get("items")
     if not isinstance(items, list):
         return None
-    return {e["id"]: e for e in items
-            if isinstance(e, dict) and isinstance(e.get("id"), str)}
+    return {e["id"]: e for e in items if isinstance(e, dict) and isinstance(e.get("id"), str)}
 
 
 def _merge_stats(row: dict[str, object], stats: object) -> bool:
@@ -437,15 +437,25 @@ def _apply_details(rows: list[dict[str, object]], body: dict[str, object]) -> st
     return "details_missing" if missing else None
 
 
-def _success(thesis: Thesis, mode: str, query: str | None, region: str, days: int | None,
-             order: str, videos: list[dict[str, object]],
-             warnings: set[str]) -> dict[str, object]:
-    now = datetime.now(timezone.utc)
+def _success(
+    thesis: Thesis,
+    mode: str,
+    query: str | None,
+    region: str,
+    days: int | None,
+    order: str,
+    videos: list[dict[str, object]],
+    warnings: set[str],
+) -> dict[str, object]:
+    now = datetime.now(UTC)
     return {
         "status": "partial" if warnings - {"live_ordering"} else "ok",
         "source": SOURCE,
         "thesis": {"thesis_id": thesis.thesis_id, "slug": thesis.slug},
-        "mode": mode, "query": query, "region": region, "days": days,
+        "mode": mode,
+        "query": query,
+        "region": region,
+        "days": days,
         "order": order,
         "retrieved_at": now.isoformat(),
         "expires_at": (now + timedelta(minutes=_EXPIRY_MINUTES)).isoformat(),
@@ -454,23 +464,26 @@ def _success(thesis: Thesis, mode: str, query: str | None, region: str, days: in
     }
 
 
-def _search_params(query: str, region: str, days: int, limit: int,
-                   key: str) -> dict[str, str | int]:
+def _search_params(query: str, region: str, days: int, limit: int, key: str) -> dict[str, str | int]:
     """Bounded search.list params for the trailing-days window."""
-    now = datetime.now(timezone.utc)
+    now = datetime.now(UTC)
     return {
-        "part": "snippet", "type": "video", "q": query, "order": "viewCount",
+        "part": "snippet",
+        "type": "video",
+        "q": query,
+        "order": "viewCount",
         "regionCode": region,
         "publishedAfter": (now - timedelta(days=days)).strftime("%Y-%m-%dT%H:%M:%SZ"),
         "publishedBefore": now.strftime("%Y-%m-%dT%H:%M:%SZ"),
-        "maxResults": limit, "key": key,
-        "fields": ("regionCode,items(id/videoId,snippet(title,channelId,"
-                   "channelTitle,publishedAt,liveBroadcastContent))"),
+        "maxResults": limit,
+        "key": key,
+        "fields": (
+            "regionCode,items(id/videoId,snippet(title,channelId,channelTitle,publishedAt,liveBroadcastContent))"
+        ),
     }
 
 
-def _search_rows(body: dict[str, object],
-                 region: str) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+def _search_rows(body: dict[str, object], region: str) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
     """(error, rows): validated search rows or a fixed-shape error."""
     items = body.get("items")
     if not isinstance(items, list):
@@ -489,14 +502,15 @@ def _details_params(rows: list[dict[str, object]], key: str) -> dict[str, str | 
         "part": "snippet,statistics",
         "id": ",".join(str(r["video_id"]) for r in rows),
         "key": key,
-        "fields": ("items(id,snippet(title,channelId,channelTitle,"
-                   "publishedAt,liveBroadcastContent),"
-                   "statistics(viewCount,likeCount,commentCount))"),
+        "fields": (
+            "items(id,snippet(title,channelId,channelTitle,"
+            "publishedAt,liveBroadcastContent),"
+            "statistics(viewCount,likeCount,commentCount))"
+        ),
     }
 
 
-def _enrich(rows: list[dict[str, object]], key: str,
-            root: Path, warnings: set[str]) -> None:
+def _enrich(rows: list[dict[str, object]], key: str, root: Path, warnings: set[str]) -> None:
     """Reserve videos quota and merge details; failures become warnings."""
     _reserve(root, "videos", _VIDEOS_BUCKET)
     dbody, derr = _http_get(_VIDEOS_URL, _details_params(rows, key))
@@ -514,8 +528,9 @@ def _with_live_warning(rows: list[dict[str, object]], warnings: set[str]) -> Non
         warnings.add("live_ordering")
 
 
-def _topic(root: Path, thesis: Thesis, query: str, region: str, days: int,
-           limit: int, key: str, search_ceiling: int) -> dict[str, object]:
+def _topic(
+    root: Path, thesis: Thesis, query: str, region: str, days: int, limit: int, key: str, search_ceiling: int
+) -> dict[str, object]:
     _reserve(root, "search", search_ceiling)
     body, err = _http_get(_SEARCH_URL, _search_params(query, region, days, limit, key))
     if err:
@@ -534,11 +549,16 @@ def _topic(root: Path, thesis: Thesis, query: str, region: str, days: int,
 
 def _popular_params(region: str, limit: int, key: str) -> dict[str, str | int]:
     return {
-        "part": "snippet,statistics", "chart": "mostPopular",
-        "regionCode": region, "maxResults": limit, "key": key,
-        "fields": ("items(id,snippet(title,channelId,channelTitle,"
-                   "publishedAt,liveBroadcastContent),"
-                   "statistics(viewCount,likeCount,commentCount))"),
+        "part": "snippet,statistics",
+        "chart": "mostPopular",
+        "regionCode": region,
+        "maxResults": limit,
+        "key": key,
+        "fields": (
+            "items(id,snippet(title,channelId,channelTitle,"
+            "publishedAt,liveBroadcastContent),"
+            "statistics(viewCount,likeCount,commentCount))"
+        ),
     }
 
 
@@ -565,8 +585,9 @@ def _popular(root: Path, thesis: Thesis, region: str, limit: int, key: str) -> d
     return _success(thesis, "popular", None, region, None, "mostPopular", rows, warnings)
 
 
-def _defaults(mode: str | None, region: str | None, days: int | None,
-              limit: int | None) -> tuple[str, str, int | None, int | None]:
+def _defaults(
+    mode: str | None, region: str | None, days: int | None, limit: int | None
+) -> tuple[str, str, int | None, int | None]:
     """Caller params with documented defaults applied."""
     return mode or "topic", region or "US", 30 if days is None else days, 10 if limit is None else limit
 
@@ -594,8 +615,7 @@ def _mode_error(mode: str) -> dict[str, object] | None:
 
 def _region_error(region: object) -> tuple[dict[str, object] | None, str]:
     """(error, UPPER region) for two-letter ASCII region codes."""
-    if (not isinstance(region, str) or len(region) != 2
-            or not region.isascii() or not region.isalpha()):
+    if not isinstance(region, str) or len(region) != 2 or not region.isascii() or not region.isalpha():
         return _unavailable("invalid_params"), ""
     return None, region.upper()
 
@@ -607,11 +627,9 @@ def _root_error(data_root: Path | str | None) -> dict[str, object] | None:
     return None
 
 
-def _topic_params(query: object,
-                  days: object) -> tuple[dict[str, object] | None, str | None]:
+def _topic_params(query: object, days: object) -> tuple[dict[str, object] | None, str | None]:
     """(error, clean query) for topic-mode params."""
-    if (not isinstance(days, int) or isinstance(days, bool)
-            or not 1 <= days <= 90):
+    if not isinstance(days, int) or isinstance(days, bool) or not 1 <= days <= 90:
         return _unavailable("invalid_params"), None
     clean = query.strip() if isinstance(query, str) else ""
     if not 1 <= len(clean) <= 200 or _QUERY_BAD_RE.search(clean):
@@ -619,9 +637,9 @@ def _topic_params(query: object,
     return None, clean
 
 
-def _topic_shape(region: str, query: str | None, days: int | None,
-                 limit: object) -> tuple[dict[str, object] | None, str, str | None,
-                                        int | None, int]:
+def _topic_shape(
+    region: str, query: str | None, days: int | None, limit: object
+) -> tuple[dict[str, object] | None, str, str | None, int | None, int]:
     """Validated topic-mode shape or (error, region, query, days, 0)."""
     limit_value = _limit_value(limit)
     if limit_value is None:
@@ -632,9 +650,9 @@ def _topic_shape(region: str, query: str | None, days: int | None,
     return None, region, clean_query, days, limit_value
 
 
-def _popular_shape(region: str, query: str | None,
-                   limit: object) -> tuple[dict[str, object] | None, str, str | None,
-                                          int | None, int]:
+def _popular_shape(
+    region: str, query: str | None, limit: object
+) -> tuple[dict[str, object] | None, str, str | None, int | None, int]:
     """Validated popular-mode shape or (error, region, query, None, 0)."""
     limit_value = _limit_value(limit)
     if limit_value is None:
@@ -644,10 +662,9 @@ def _popular_shape(region: str, query: str | None,
     return None, region, None, None, limit_value
 
 
-def _shape_error(mode: str, query: str | None, region: object,
-                 days: int | None, limit: object,
-                 data_root: Path | str | None) -> tuple[dict[str, object] | None, str, str | None,
-                                                       int | None, int]:
+def _shape_error(
+    mode: str, query: str | None, region: object, days: int | None, limit: object, data_root: Path | str | None
+) -> tuple[dict[str, object] | None, str, str | None, int | None, int]:
     """(error, region, query, days, limit) for fixed-shape param validation."""
     mode_err = _mode_error(mode)
     if mode_err is not None:
@@ -695,8 +712,7 @@ def _thesis_id_error(thesis_id: str) -> dict[str, object] | None:
     return None
 
 
-def _topic_guard(mode: str, query: str | None,
-                 days: int | None) -> dict[str, object] | None:
+def _topic_guard(mode: str, query: str | None, days: int | None) -> dict[str, object] | None:
     """Topic-mode guard for cleared params and private patterns."""
     if mode != "topic":
         return None
@@ -725,9 +741,17 @@ def _resolve_thesis(root: Path, thesis_id: str) -> tuple[dict[str, object] | Non
     return None, thesis
 
 
-def _dispatch(root: Path, thesis: Thesis, mode: str, query: str | None,
-              region: str, days: int | None, limit: int, key: str,
-              configured: int) -> dict[str, object]:
+def _dispatch(
+    root: Path,
+    thesis: Thesis,
+    mode: str,
+    query: str | None,
+    region: str,
+    days: int | None,
+    limit: int,
+    key: str,
+    configured: int,
+) -> dict[str, object]:
     """Run the selected mode; quota refusals become fixed-shape errors."""
     try:
         if mode == "topic":
@@ -735,24 +759,30 @@ def _dispatch(root: Path, thesis: Thesis, mode: str, query: str | None,
                 return _unavailable("invalid_params")
             if private_pattern_hit(query):
                 return _unavailable("private_args_denied")
-            return _topic(root, thesis, query, region, days, limit,
-                          key, min(configured, _SEARCH_BUCKET))
+            return _topic(root, thesis, query, region, days, limit, key, min(configured, _SEARCH_BUCKET))
         return _popular(root, thesis, region, limit, key)
     except _QuotaRefused as refused:
         return _unavailable(refused.code)
 
 
-def get_youtube_analytics(*, thesis_id: str, mode: str | None = "topic",
-                          query: str | None = None, region: str | None = "US",
-                          days: int | None = 30, limit: int | None = 10,
-                          data_root: Path | str | None = None) -> dict[str, object]:
+def get_youtube_analytics(
+    *,
+    thesis_id: str,
+    mode: str | None = "topic",
+    query: str | None = None,
+    region: str | None = "US",
+    days: int | None = 30,
+    limit: int | None = 10,
+    data_root: Path | str | None = None,
+) -> dict[str, object]:
     """Thesis-labelled attention metrics; memory-only, fixed-shape errors."""
-    default_mode, default_region, default_days, default_limit = _defaults(mode, region, days, limit)
+    default_mode, _default_region, default_days, default_limit = _defaults(mode, region, days, limit)
     thesis_err = _thesis_id_error(thesis_id)
     if thesis_err is not None:
         return thesis_err
     shape_err, clean_region, clean_query, clean_days, clean_limit = _shape_error(
-        default_mode, query, region, default_days, default_limit, data_root)
+        default_mode, query, region, default_days, default_limit, data_root
+    )
     if shape_err is not None:
         return shape_err
     gate_err, key, root, configured = _gate(data_root)
@@ -772,7 +802,7 @@ def get_youtube_analytics(*, thesis_id: str, mode: str | None = "topic",
 def _emit(response: dict[str, object]) -> None:
     try:
         out = json.dumps(response).encode("utf-8")
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         out = json.dumps(_unavailable("response_too_large")).encode("utf-8")
     if len(out) > _STDOUT_MAX:
         out = json.dumps(_unavailable("response_too_large")).encode("utf-8")
@@ -783,7 +813,7 @@ def _emit(response: dict[str, object]) -> None:
 def _decode_request(raw: bytes) -> tuple[dict[str, object] | None, str | None]:
     try:
         request = json.loads(raw.decode("utf-8"))
-    except (ValueError, UnicodeDecodeError):
+    except ValueError, UnicodeDecodeError:
         return None, "invalid_params"
     if not isinstance(request, dict) or set(request) - _WIRE_FIELDS:
         return None, "invalid_params"
@@ -814,6 +844,7 @@ def _narrow_path(value: object) -> Path | str | None:
         return value
     return None
 
+
 def _main_action(request: dict[str, object]) -> dict[str, object]:
     """Dispatch one validated worker request to the analytics entry point."""
     if request.get("confirmed") is not True:
@@ -822,12 +853,15 @@ def _main_action(request: dict[str, object]) -> dict[str, object]:
     if not isinstance(thesis_raw, str) or not thesis_raw.strip():
         return _unavailable("invalid_params")
     try:
-        return get_youtube_analytics(thesis_id=thesis_raw, mode=_narrow_opt_str(request.get("mode")),
-                                     query=_narrow_opt_str(request.get("query")),
-                                     region=_narrow_opt_str(request.get("region")),
-                                     days=_narrow_opt_int(request.get("days")),
-                                     limit=_narrow_opt_int(request.get("limit")),
-                                     data_root=_narrow_path(request.get("data_root")))
+        return get_youtube_analytics(
+            thesis_id=thesis_raw,
+            mode=_narrow_opt_str(request.get("mode")),
+            query=_narrow_opt_str(request.get("query")),
+            region=_narrow_opt_str(request.get("region")),
+            days=_narrow_opt_int(request.get("days")),
+            limit=_narrow_opt_int(request.get("limit")),
+            data_root=_narrow_path(request.get("data_root")),
+        )
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return _unavailable("source_unavailable")
 

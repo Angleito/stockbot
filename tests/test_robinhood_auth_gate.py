@@ -7,6 +7,7 @@ monkeypatched.
 """
 
 import webbrowser
+from datetime import UTC
 from pathlib import Path
 
 import pytest
@@ -26,17 +27,16 @@ def _invalid_tokens(*args: object, **kwargs: object) -> bool:
 
 # -- execute_tool soft error without stored tokens ---------------------------
 
+
 def test_market_tool_fails_soft_without_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROKER_ENABLED", "true")
     monkeypatch.setattr(tools, "has_valid_tokens", _invalid_tokens)
+
     def _no_browser(*args: object, **kwargs: object) -> None:
         pytest.fail("browser must not open")
-    monkeypatch.setattr(
-        webbrowser, "open", _no_browser
-    )
-    result = tools.execute_tool(
-        "get_market_snapshot", {"ticker": "GPRO"}, model="test", context=LOCAL_BROKER_CONTEXT
-    )
+
+    monkeypatch.setattr(webbrowser, "open", _no_browser)
+    result = tools.execute_tool("get_market_snapshot", {"ticker": "GPRO"}, model="test", context=LOCAL_BROKER_CONTEXT)
     assert result["error_type"] == "auth_required"
     assert result["soft"] is True
     err = result["error"]
@@ -48,16 +48,16 @@ def test_market_tool_fails_soft_without_tokens(monkeypatch: pytest.MonkeyPatch) 
 def test_portfolio_tool_fails_soft_without_client_construction(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("BROKER_ENABLED", "true")
     monkeypatch.setattr(tools, "has_valid_tokens", _invalid_tokens)
+
     def _no_client(*args: object, **kwargs: object) -> None:
         pytest.fail("RobinhoodClient must not be constructed")
+
     monkeypatch.setattr(
         tools,
         "RobinhoodClient",
         _no_client,
     )
-    result = tools.execute_tool(
-        "get_portfolio_snapshot", {}, model="test", context=LOCAL_BROKER_CONTEXT
-    )
+    result = tools.execute_tool("get_portfolio_snapshot", {}, model="test", context=LOCAL_BROKER_CONTEXT)
     assert result["error_type"] == "auth_required"
     assert result["soft"] is True
     err2 = result["error"]
@@ -66,6 +66,7 @@ def test_portfolio_tool_fails_soft_without_client_construction(monkeypatch: pyte
 
 
 # -- OAuth callback port -----------------------------------------------------
+
 
 def test_oauth_config_defaults_to_dynamic_port() -> None:
     assert tools.OAuthConfig(tools.get_robinhood_mcp_url()).redirect_uri == "http://127.0.0.1:0/callback"
@@ -105,16 +106,17 @@ def test_oauth_callback_avoids_occupied_log_port(tmp_path: Path) -> None:
 
 # -- token expiry and record hygiene -----------------------------------------
 
+
 def _token_path(tmp_path: Path) -> Path:
     return tmp_path / "oauth.json"
 
 
 def _expired_state(origin: str, age_seconds: int = 120, expires_in: int = 60) -> dict[str, object]:
-    from datetime import datetime, timedelta, timezone
+    from datetime import datetime, timedelta
 
     return {
         "server_origin": origin,
-        "issued_at": (datetime.now(timezone.utc) - timedelta(seconds=age_seconds)).isoformat(),
+        "issued_at": (datetime.now(UTC) - timedelta(seconds=age_seconds)).isoformat(),
         "tokens": {"access_token": "x", "expires_in": expires_in},
     }
 
@@ -129,16 +131,16 @@ def test_expired_tokens_fail_auth_required(monkeypatch: pytest.MonkeyPatch, tmp_
 
     monkeypatch.setenv("BROKER_ENABLED", "true")
     monkeypatch.setattr(tools, "DEFAULT_TOKEN_PATH", path)
+
     def _no_client2(*args: object, **kwargs: object) -> None:
         pytest.fail("RobinhoodClient must not be constructed")
+
     monkeypatch.setattr(
         tools,
         "RobinhoodClient",
         _no_client2,
     )
-    result = tools.execute_tool(
-        "get_market_snapshot", {"ticker": "GPRO"}, model="test", context=LOCAL_BROKER_CONTEXT
-    )
+    result = tools.execute_tool("get_market_snapshot", {"ticker": "GPRO"}, model="test", context=LOCAL_BROKER_CONTEXT)
     assert result["error_type"] == "auth_required"
     assert result["soft"] is True
 
@@ -173,6 +175,7 @@ def test_corrupt_state_is_invalid(tmp_path: Path) -> None:
 
 # -- authorize_robinhood_browser ---------------------------------------------
 
+
 def test_authorize_robinhood_browser_success(monkeypatch: pytest.MonkeyPatch) -> None:
     calls: list[str] = []
 
@@ -202,9 +205,11 @@ def test_authorize_robinhood_browser_failure(monkeypatch: pytest.MonkeyPatch) ->
 
 # -- cli robinhood-login ------------------------------------------------------
 
+
 def test_cmd_robinhood_login_success(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def _ok() -> bool:
         return True
+
     monkeypatch.setattr(cli, "authorize_robinhood_browser", _ok)
     cli._cmd_robinhood_login()
     assert "Tokens stored at" in capsys.readouterr().out
@@ -213,4 +218,5 @@ def test_cmd_robinhood_login_success(monkeypatch: pytest.MonkeyPatch, capsys: py
 def test_cmd_robinhood_login_failure_exits(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def _no() -> bool:
         return False
+
     monkeypatch.setattr(cli, "authorize_robinhood_browser", _no)

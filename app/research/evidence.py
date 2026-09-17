@@ -5,7 +5,7 @@ from __future__ import annotations
 import re
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass, field
-from datetime import datetime
+from datetime import UTC, datetime
 from hashlib import sha256
 
 from .models import JSONValue, pit_unverified, pit_violated, validate_json_mapping
@@ -14,6 +14,7 @@ __all__ = [
     "ACCESSION_RE",
     "CLAIM_KINDS",
     "PROVENANCE_KINDS",
+    "RECORD_KINDS",
     "DiscoveryRecord",
     "Evidence",
     "EvidenceIntegrityError",
@@ -21,7 +22,6 @@ __all__ = [
     "EvidenceNotFoundError",
     "EvidenceRecord",
     "EvidenceRejectedError",
-    "RECORD_KINDS",
     "discovery_only",
     "evidence_content_hash",
     "evidence_from_dict",
@@ -37,8 +37,14 @@ __all__ = [
 ACCESSION_RE = re.compile(r"^\d{10}-\d{2}-\d{6}$")
 """Canonical SEC accession; a bare 18-digit run normalizes into it (``normalize_accession``)."""
 
-CLAIM_KINDS = ("observed_fact", "absence_observation")
-"""Closed claim vocabulary: what the record asserts, stated by the caller, never inferred from wording."""
+CLAIM_KINDS = ("observed_fact",)
+"""Closed claim vocabulary: what the record asserts, stated by the caller, never inferred from wording.
+
+Only raw-document claims are evidence. A search-derived absence observation is a
+session coverage artifact (``ResearchRepository.save_coverage_artifact``), never a
+ledger row: evidence is what a human/source document states, coverage is what a
+search did or did not reach.
+"""
 
 PROVENANCE_KINDS = ("sec_source", "search_run", "none")
 """Closed provenance vocabulary: a raw document passage, the executed search, or nothing recorded."""
@@ -83,29 +89,80 @@ def normalize_accession(value: object) -> str:
     return text
 
 
+BASIS_KINDS = ("raw", "rendered")
+"""Closed basis vocabulary for a materialized passage: the stored document text, or its rendered view."""
+
+
+def _canonical_offset(value: object, key: str) -> int:
+    """Non-negative int offset/end of a materialized passage."""
+    if isinstance(value, bool) or not isinstance(value, int) or value < 0:
+        raise ValueError(f"sec_source_ref: {key} must be an int >= 0, got {value!r}")
+    return value
+
+
+def _canonical_hash(value: object) -> str:
+    """Non-empty sha256 hex of the window the passage was sliced from."""
+    text = value.strip() if isinstance(value, str) else ""
+    if len(text) != 64 or any(ch not in "0123456789abcdef" for ch in text):
+        raise ValueError(f"sec_source_ref: text_hash must be a sha256 hex digest, got {value!r}")
+    return text
+
+
 def sec_source_ref(
     *,
     accession_no: object,
     document_name: object,
     passage: object,
     source_uri: object = None,
+    offset: object = None,
+    end: object = None,
+    basis: object = None,
+    text_hash: object = None,
 ) -> dict[str, JSONValue]:
-    """SECSourceRef: the raw filing document + quoted passage an observed fact is read off."""
-    document = document_name.strip() if isinstance(document_name, str) else ""
-    quoted = passage.strip() if isinstance(passage, str) else ""
-    if not document or not quoted:
-        raise ValueError("sec_source_ref: document_name and passage must be non-empty strings")
+    """SECSourceRef: the filing document + the kernel-materialized passage an observed fact is read off.
+
+    ``offset``/``end`` are the passage's coordinates in the read ``basis`` (``raw``
+    stored text or ``rendered`` view), and ``text_hash`` pins the window the
+    kernel reloaded from the archive. They are required: the kernel, never the
+    model, materializes the source text.
+    """
+    document, quoted = _ref_texts(document_name, passage)
+    if basis not in BASIS_KINDS:
+        raise ValueError(f"sec_source_ref: basis must be one of {list(BASIS_KINDS)}, got {basis!r}")
+    start, stop = _ref_window(offset, end)
     return {
         "kind": "sec_source",
         "accession_no": normalize_accession(accession_no),
         "document_name": document,
         "passage": quoted,
+        "offset": start,
+        "end": stop,
+        "basis": basis,
+        "text_hash": _canonical_hash(text_hash),
         "source_uri": source_uri.strip() if isinstance(source_uri, str) and source_uri.strip() else None,
     }
 
 
+def _ref_texts(document_name: object, passage: object) -> tuple[str, str]:
+    """(document, quoted passage) of one source ref; both must be non-empty strings."""
+    document = document_name.strip() if isinstance(document_name, str) else ""
+    quoted = passage.strip() if isinstance(passage, str) else ""
+    if not document or not quoted:
+        raise ValueError("sec_source_ref: document_name and passage must be non-empty strings")
+    return document, quoted
+
+
+def _ref_window(offset: object, end: object) -> tuple[int, int]:
+    """(offset, end) of the passage inside the read window; the window must be non-empty."""
+    start = _canonical_offset(offset, "offset")
+    stop = _canonical_offset(end, "end")
+    if stop <= start:
+        raise ValueError(f"sec_source_ref: end ({stop}) must be greater than offset ({start})")
+    return start, stop
+
+
 def search_run_ref(*, search_id: object, query: object) -> dict[str, JSONValue]:
-    """SearchRunRef: the executed search an absence observation is scoped to."""
+    """SearchRunRef: the executed search a navigation (discovery) row records; never evidence of a claim."""
     sid = search_id.strip() if isinstance(search_id, str) else ""
     text = query.strip() if isinstance(query, str) else ""
     if not sid or not text:
@@ -118,6 +175,21 @@ def _provenance_str(prov: Mapping[str, object], key: str, where: str) -> str:
     if not isinstance(value, str) or not value.strip():
         raise EvidenceIntegrityError(f"{where}: provenance[{key!r}] must be a non-empty string")
     return value
+
+
+def _uncanonical_sec_source_ref(value: Mapping[str, object], where: str) -> dict[str, JSONValue]:
+    """Pre-canonical SECSourceRef (no window coordinates): read tolerance for rows persisted earlier.
+
+    It preserves exactly what the row recorded — no revision can be re-verified
+    for such a row, so it is never written by this version.
+    """
+    return {
+        "kind": "sec_source",
+        "accession_no": normalize_accession(value.get("accession_no")),
+        "document_name": _provenance_str(value, "document_name", where),
+        "passage": _provenance_str(value, "passage", where),
+        "source_uri": str(value["source_uri"]) if isinstance(value.get("source_uri"), str) else None,
+    }
 
 
 def validate_provenance(value: object, where: str = "<evidence>: 'provenance'") -> dict[str, JSONValue]:
@@ -136,13 +208,27 @@ def validate_provenance(value: object, where: str = "<evidence>: 'provenance'") 
             search_id=_provenance_str(value, "search_id", where),
             query=_provenance_str(value, "query", where),
         )
+    return _sec_source_provenance(value, where)
+
+
+def _sec_source_provenance(value: Mapping[str, object], where: str) -> dict[str, JSONValue]:
+    """Canonical SEC ref when the row holds kernel coordinates, else the legacy un-canonical ref."""
+    if "text_hash" in value or "offset" in value or "basis" in value:
+        try:
+            return sec_source_ref(
+                accession_no=value.get("accession_no"),
+                document_name=_provenance_str(value, "document_name", where),
+                passage=_provenance_str(value, "passage", where),
+                source_uri=value.get("source_uri"),
+                offset=value.get("offset"),
+                end=value.get("end"),
+                basis=value.get("basis"),
+                text_hash=value.get("text_hash"),
+            )
+        except ValueError as exc:
+            raise EvidenceIntegrityError(f"{where}: {exc}") from None
     try:
-        return sec_source_ref(
-            accession_no=value.get("accession_no"),
-            document_name=_provenance_str(value, "document_name", where),
-            passage=_provenance_str(value, "passage", where),
-            source_uri=value.get("source_uri"),
-        )
+        return _uncanonical_sec_source_ref(value, where)
     except ValueError as exc:
         raise EvidenceIntegrityError(f"{where}: {exc}") from None
 
@@ -205,7 +291,9 @@ class Evidence:
 
     def _check_record_kind(self) -> None:
         if self.record_kind not in RECORD_KINDS:
-            raise EvidenceIntegrityError(f"evidence {self.evidence_id}: 'record_kind' must be discovery|evidence, got {self.record_kind!r}")
+            raise EvidenceIntegrityError(
+                f"evidence {self.evidence_id}: 'record_kind' must be discovery|evidence, got {self.record_kind!r}"
+            )
 
     def _check_claim_kind(self) -> None:
         if self.claim_kind not in CLAIM_KINDS:
@@ -228,7 +316,8 @@ class Evidence:
         object.__setattr__(self, "supports", tuple(self.supports))
         object.__setattr__(self, "contradicts", tuple(self.contradicts))
         object.__setattr__(
-            self, "provenance",
+            self,
+            "provenance",
             validate_provenance(self.provenance, f"evidence {self.evidence_id}: 'provenance'"),
         )
 
@@ -286,6 +375,7 @@ class EvidenceLedger:
     def __len__(self) -> int:
         return len(self._records)
 
+
 def _record_kind_of(item: object) -> str:
     """Kind tag for one record: attr wins, then mapping keys, absent means evidence."""
     kind = getattr(item, "record_kind", None)
@@ -321,8 +411,8 @@ def _iso(value: datetime | str | None) -> str | None:
 def _ingest_required(evidence: Evidence) -> tuple[tuple[str, object], ...]:
     """Required fields. A discovery row is a navigation artifact: it carries no source document.
 
-    Only evidential rows need a source document/ref; a SearchRunRef stands in for an
-    absence observation, which has no document URI by construction.
+    Only evidential rows need a source document/ref; a search run is never evidence,
+    so a SearchRunRef can satisfy neither ingest nor a citation.
     """
     if evidence.record_kind == "discovery":
         return (
@@ -330,12 +420,10 @@ def _ingest_required(evidence: Evidence) -> tuple[tuple[str, object], ...]:
             ("retrieved_at", evidence.retrieved_at),
             ("lineage", evidence.job_id or evidence.agent_id),
         )
-    provenance_search = evidence.provenance.get("search_id")
     return (
         ("session_id", evidence.session_id),
         ("source_name", evidence.source_name),
-        ("source_ref", evidence.source_uri or evidence.source_record_id
-         or (provenance_search if isinstance(provenance_search, str) else None)),
+        ("source_ref", evidence.source_uri or evidence.source_record_id),
         ("retrieved_at", evidence.retrieved_at),
         ("lineage", evidence.job_id or evidence.agent_id),
     )
@@ -414,7 +502,6 @@ def ingest_evidence(
     return ledger.append(evidence)
 
 
-
 def evidence_to_dict(evidence: Evidence) -> dict[str, JSONValue]:
     """Evidence -> JSON-able dict (datetimes as ISO); the JSON blob is source of truth."""
     return {
@@ -464,17 +551,16 @@ def _opt_str(d: dict[str, object], key: str) -> str | None:
 
 
 def _req_dt(d: dict[str, object], key: str) -> datetime:
-    from datetime import timezone as _tz
     value = d.get(key)
     if isinstance(value, datetime):
-        return value.replace(tzinfo=_tz.utc) if value.tzinfo is None else value.astimezone(_tz.utc)
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
     if isinstance(value, str):
         try:
-            parsed = datetime.fromisoformat(value.strip().replace("Z", "+00:00"))
+            parsed = datetime.fromisoformat(value.strip())
         except ValueError:
             pass
         else:
-            return parsed.replace(tzinfo=_tz.utc) if parsed.tzinfo is None else parsed.astimezone(_tz.utc)
+            return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
     raise EvidenceIntegrityError(f"evidence: '{key}' must be an ISO-8601 datetime")
 
 
@@ -499,8 +585,7 @@ def _str_list(value: object, key: str) -> tuple[str, ...]:
 
 def _json_str_list(values: list[str]) -> list[JSONValue]:
     out: list[JSONValue] = []
-    for value in values:
-        out.append(value)
+    out.extend(values)
     return out
 
 
@@ -573,4 +658,3 @@ def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
         claim_kind=_evidence_claim_kind(d),
         provenance=validate_provenance(d.get("provenance", {}), "<evidence>: 'provenance'"),
     )
-

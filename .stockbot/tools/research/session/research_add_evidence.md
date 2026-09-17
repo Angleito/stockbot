@@ -32,7 +32,7 @@ None
 
 ## Required arguments
 
-- `item` (object): Finding whose provenance must match its claim_kind: raw filing passage for observed_fact, search scope for absence_observation.
+- `item` (object): Finding whose provenance must match its claim_kind: the get_sec_document source_handle + cited passage for observed_fact, search scope for absence_observation.
 - `job_id` (string): Running job ID the finding belongs to.
 - `session_id` (string): Research session ID.
 

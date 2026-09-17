@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import logging
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from urllib.parse import urlparse
 
 import requests
@@ -69,13 +69,9 @@ def _validate_search_params(
     if _bad_search_query(query):
         return _error("Exa search query must be a non-empty string")
     if search_type not in _APPROVED_SEARCH_TYPES:
-        return _error(
-            f"Unsupported search_type '{search_type}'. Allowed: auto, fast, deep-lite"
-        )
+        return _error(f"Unsupported search_type '{search_type}'. Allowed: auto, fast, deep-lite")
     if _bad_search_category(category):
-        return _error(
-            f"Unsupported category '{category}'. Allowed: news, company, publication, financial report"
-        )
+        return _error(f"Unsupported category '{category}'. Allowed: news, company, publication, financial report")
     return None
 
 
@@ -111,12 +107,9 @@ def _validate_search_options(
     # Exa returns HTTP 400 for date/domain-exclusion params with
     # category=company; reject instead of silently dropping filters so the
     # caller learns the request cannot be honored (include_domains is fine).
-    if category == "company" and any(
-        (start_published_date, end_published_date, exclude_domains)
-    ):
+    if category == "company" and any((start_published_date, end_published_date, exclude_domains)):
         return _error(
-            "category 'company' does not support start_published_date, "
-            "end_published_date, or exclude_domains"
+            "category 'company' does not support start_published_date, end_published_date, or exclude_domains"
         ), normalized
     return None, normalized
 
@@ -168,15 +161,17 @@ def _parse_search_results(
     for item in raw_results:
         if not isinstance(item, dict) or not item.get("url"):
             continue
-        evidence.append({
-            "title": str(item.get("title") or ""),
-            "url": item["url"],
-            "source_domain": urlparse(item["url"]).netloc,
-            "published_at": item.get("publishedDate"),
-            "retrieved_at": retrieved_at,
-            "highlight": _first_highlight(item),
-            "category": category,
-        })
+        evidence.append(
+            {
+                "title": str(item.get("title") or ""),
+                "url": item["url"],
+                "source_domain": urlparse(item["url"]).netloc,
+                "published_at": item.get("publishedDate"),
+                "retrieved_at": retrieved_at,
+                "highlight": _first_highlight(item),
+                "category": category,
+            }
+        )
     return evidence, max(0, len(raw_results) - len(evidence))
 
 
@@ -262,7 +257,7 @@ def search(
         search_type,
         normalized_limit,
     )
-    retrieved_at = datetime.now(timezone.utc).isoformat()
+    retrieved_at = datetime.now(UTC).isoformat()
     response = _request_search(payload)
     if isinstance(response, dict):
         return response

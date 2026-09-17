@@ -3,9 +3,9 @@
 from __future__ import annotations
 
 import asyncio
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from pathlib import Path
-from typing import Callable, TypeVar
+from typing import TypeVar
 
 from app.thesis.models import JSONValue
 
@@ -91,12 +91,17 @@ def normalize_tools(result: object) -> list[dict[str, object]]:
 
 
 class RobinhoodClient:
-    def __init__(self, server_url: str, *, oauth: OAuthConfig | None = None,
-                 token_path: Path = DEFAULT_TOKEN_PATH,
-                 market_tools: frozenset[str] | None = None,
-                 account_tools: frozenset[str] | None = None,
-                 allowed_tools: set[str] | None = None,
-                 transport_factory: Callable[..., object] | None = None):
+    def __init__(
+        self,
+        server_url: str,
+        *,
+        oauth: OAuthConfig | None = None,
+        token_path: Path = DEFAULT_TOKEN_PATH,
+        market_tools: frozenset[str] | None = None,
+        account_tools: frozenset[str] | None = None,
+        allowed_tools: set[str] | None = None,
+        transport_factory: Callable[..., object] | None = None,
+    ):
         if allowed_tools is not None:
             # Legacy generic configuration still cannot add capabilities:
             # classify it against the canonical registry before construction.
@@ -108,18 +113,14 @@ class RobinhoodClient:
             market_tools = configured & MARKET_READ_TOOLS
             account_tools = configured & ACCOUNT_READ_TOOLS
         if oauth is not None and server_url != oauth.server_url:
-            raise ValueError(
-                "Robinhood MCP transport URL must match the OAuth server URL"
-            )
+            raise ValueError("Robinhood MCP transport URL must match the OAuth server URL")
         self.server_url = server_url
         self.oauth = oauth
         self.token_path = token_path
         self.market_tools = market_tools
         self.account_tools = account_tools
         self.allowed_tools = allowed_tools
-        self.permitted_tools = allowed_read_tools(
-            market=market_tools, account=account_tools
-        )
+        self.permitted_tools = allowed_read_tools(market=market_tools, account=account_tools)
         self.transport_factory = transport_factory
 
     def list_tools(self) -> list[dict[str, object]]:
@@ -212,7 +213,14 @@ class _SessionContext:
 
 
 class _HttpSessionContext:
-    def __init__(self, url: str, auth: object | None, transport_factory: Callable[..., object], client_type: Callable[..., object], httpx_module: object) -> None:
+    def __init__(
+        self,
+        url: str,
+        auth: object | None,
+        transport_factory: Callable[..., object],
+        client_type: Callable[..., object],
+        httpx_module: object,
+    ) -> None:
         self.url = url
         self.auth = auth
         self.transport_factory = transport_factory
@@ -224,15 +232,11 @@ class _HttpSessionContext:
 
     async def __aenter__(self) -> object:
         async_client_factory = getattr(self.httpx_module, "AsyncClient")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
-        http_client: object = async_client_factory(
-            auth=self.auth, follow_redirects=False
-        )
+        http_client: object = async_client_factory(auth=self.auth, follow_redirects=False)
         self.http_client = http_client
         enter_http = getattr(http_client, "__aenter__")  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
         await enter_http()
-        transport: object = self.transport_factory(
-            self.url, http_client=self.http_client, terminate_on_close=False
-        )
+        transport: object = self.transport_factory(self.url, http_client=self.http_client, terminate_on_close=False)
         self.transport_context = transport
         client: object = self.client_type(self.transport_context)
         self.client_context = client

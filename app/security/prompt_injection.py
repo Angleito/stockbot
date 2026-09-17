@@ -106,9 +106,7 @@ def _compile(phrase: str) -> re.Pattern[str]:
 
 
 _RULES: tuple[tuple[str, str, re.Pattern[str], int], ...] = tuple(
-    (category, phrase, _compile(phrase), weight)
-    for category, specs in _RULE_SPECS.items()
-    for phrase, weight in specs
+    (category, phrase, _compile(phrase), weight) for category, specs in _RULE_SPECS.items() for phrase, weight in specs
 )
 
 
@@ -156,7 +154,7 @@ def _decoding_candidates(text: str) -> list[str]:
         blob += "=" * (-len(blob) % 4)
         try:
             decoded = base64.b64decode(blob, validate=False).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError, ValueError):
+        except binascii.Error, UnicodeDecodeError, ValueError:
             continue
         candidates.append(decoded)
     for match in _HEX_RE.finditer(text):
@@ -165,7 +163,7 @@ def _decoding_candidates(text: str) -> list[str]:
             run = run[:-1]
         try:
             decoded = bytes.fromhex(run).decode("utf-8")
-        except (binascii.Error, UnicodeDecodeError, ValueError):
+        except binascii.Error, UnicodeDecodeError, ValueError:
             continue
         candidates.append(decoded)
     return candidates
@@ -220,6 +218,4 @@ def assess(text: str) -> InjectionAssessment:
     matched_rules = tuple(f"{category}:{phrase}" for category, phrase, _ in matched)
     reasons = tuple(f"matched '{phrase}' ({category})" for category, phrase, _ in matched)
     verdict = _verdict_for(matched, score)
-    return InjectionAssessment(
-        score=score, verdict=verdict, reasons=reasons, matched_rules=matched_rules
-    )
+    return InjectionAssessment(score=score, verdict=verdict, reasons=reasons, matched_rules=matched_rules)

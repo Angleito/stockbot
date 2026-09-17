@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import itertools
 from datetime import date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
@@ -32,8 +33,7 @@ def list_sec_filings(
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .filings import list_sec_filings as _real
 
-    return _real(ticker_or_cik, forms=forms, start_date=start_date,
-                 end_date=end_date, as_of=as_of, limit=limit)
+    return _real(ticker_or_cik, forms=forms, start_date=start_date, end_date=end_date, as_of=as_of, limit=limit)
 
 
 def _safe_int(value: object) -> int | None:
@@ -46,7 +46,7 @@ def _safe_int(value: object) -> int | None:
         if not text or text.lower() in ("none", "nan", "na", "n/a", "--"):
             return None
         return int(float(text)) if "." in text else int(text)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 
@@ -58,7 +58,7 @@ def _safe_float(value: object) -> float | None:
         if not text or text.lower() in ("none", "nan", "na", "n/a", "--"):
             return None
         return float(text)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 
@@ -69,7 +69,7 @@ def _first(obj: object, *names: str) -> object:
     for name in names:
         try:
             value: object = getattr(obj, name)
-        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
         if value is not None:
             return value
@@ -80,12 +80,12 @@ def _named_purpose_of(items: object) -> str | None:
     for attr in ("purpose_of_transaction", "purpose"):
         try:
             value = getattr(items, attr)
-        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
         if value:
             try:
                 return str(value)
-            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+            except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
                 continue
     return None
 
@@ -141,8 +141,7 @@ def _reporting_persons_of(schedule: Schedule13D | Schedule13G | SimpleNamespace)
     return list(persons)
 
 
-def _explicit_subject(subject_cik: str | int | None,
-                      subject_name: str | None) -> tuple[str | None, str | None]:
+def _explicit_subject(subject_cik: str | int | None, subject_name: str | None) -> tuple[str | None, str | None]:
     try:
         explicit_cik = str(subject_cik).strip() if subject_cik is not None else None
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
@@ -154,9 +153,9 @@ def _explicit_subject(subject_cik: str | int | None,
     return explicit_cik, explicit_name
 
 
-def _resolved_subject(schedule: Schedule13D | Schedule13G | SimpleNamespace,
-                      subject_cik: str | int | None,
-                      subject_name: str | None) -> tuple[str | None, str | None]:
+def _resolved_subject(
+    schedule: Schedule13D | Schedule13G | SimpleNamespace, subject_cik: str | int | None, subject_name: str | None
+) -> tuple[str | None, str | None]:
     info_cik, info_name = _subject_of(schedule)
     explicit_cik, explicit_name = _explicit_subject(subject_cik, subject_name)
     return explicit_cik or info_cik, explicit_name or info_name
@@ -169,11 +168,21 @@ def _is_amendment_form(form: str) -> bool:
         return False
 
 
-def _person_record(person: object, *, issuer: str, form: str, filed_at: str | None,
-                   accession_no: str, purpose: str | None,
-                   resolved_cik: str | None, resolved_name: str | None,
-                   is_amend: bool, known: str | None, document_name: str | None,
-                   source_url: str | None) -> BeneficialOwnership:
+def _person_record(
+    person: object,
+    *,
+    issuer: str,
+    form: str,
+    filed_at: str | None,
+    accession_no: str,
+    purpose: str | None,
+    resolved_cik: str | None,
+    resolved_name: str | None,
+    is_amend: bool,
+    known: str | None,
+    document_name: str | None,
+    source_url: str | None,
+) -> BeneficialOwnership:
     name = _first(person, "name", "filer_name", "reporting_person_name")
     cik = _first(person, "cik", "filer_cik", "reporting_person_cik")
     return BeneficialOwnership(
@@ -183,17 +192,12 @@ def _person_record(person: object, *, issuer: str, form: str, filed_at: str | No
         form=form,
         filed_at=filed_at,
         accession_no=accession_no,
-        shares=_safe_int(_first(person, "aggregate_amount", "shares",
-                                      "beneficially_owned", "aggregate_shares")),
-        percent=_safe_float(_first(person, "percent_of_class", "percent",
-                                          "ownership_percent")),
+        shares=_safe_int(_first(person, "aggregate_amount", "shares", "beneficially_owned", "aggregate_shares")),
+        percent=_safe_float(_first(person, "percent_of_class", "percent", "ownership_percent")),
         sole_voting=_safe_int(_first(person, "sole_voting_power", "sole_voting")),
-        shared_voting=_safe_int(_first(person, "shared_voting_power",
-                                              "shared_voting")),
-        sole_dispositive=_safe_int(_first(person, "sole_dispositive_power",
-                                                 "sole_dispositive")),
-        shared_dispositive=_safe_int(_first(person, "shared_dispositive_power",
-                                                   "shared_dispositive")),
+        shared_voting=_safe_int(_first(person, "shared_voting_power", "shared_voting")),
+        sole_dispositive=_safe_int(_first(person, "sole_dispositive_power", "sole_dispositive")),
+        shared_dispositive=_safe_int(_first(person, "shared_dispositive_power", "shared_dispositive")),
         is_amendment=is_amend,
         purpose_text=purpose,
         subject_cik=resolved_cik,
@@ -204,10 +208,14 @@ def _person_record(person: object, *, issuer: str, form: str, filed_at: str | No
     )
 
 
-def _schedule_context_of(schedule: Schedule13D | Schedule13G | SimpleNamespace,
-                         subject_cik: str | int | None, subject_name: str | None,
-                         form: str, known_at: str | None,
-                         filed_at: str | None) -> tuple[str | None, str | None, str | None, bool, str | None]:
+def _schedule_context_of(
+    schedule: Schedule13D | Schedule13G | SimpleNamespace,
+    subject_cik: str | int | None,
+    subject_name: str | None,
+    form: str,
+    known_at: str | None,
+    filed_at: str | None,
+) -> tuple[str | None, str | None, str | None, bool, str | None]:
     try:
         items = getattr(schedule, "items", None)
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
@@ -242,19 +250,31 @@ def normalize_schedule(
     if not persons:
         return []
     purpose, resolved_cik, resolved_name, is_amend, known = _schedule_context_of(
-        schedule, subject_cik, subject_name, form, known_at, filed_at)
+        schedule, subject_cik, subject_name, form, known_at, filed_at
+    )
     out: list[BeneficialOwnership] = []
     for person in persons:
         try:
-            out.append(_person_record(
-                person, issuer=issuer, form=form, filed_at=filed_at,
-                accession_no=accession_no, purpose=purpose,
-                resolved_cik=resolved_cik, resolved_name=resolved_name,
-                is_amend=is_amend, known=known, document_name=document_name,
-                source_url=source_url))
-        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+            out.append(
+                _person_record(
+                    person,
+                    issuer=issuer,
+                    form=form,
+                    filed_at=filed_at,
+                    accession_no=accession_no,
+                    purpose=purpose,
+                    resolved_cik=resolved_cik,
+                    resolved_name=resolved_name,
+                    is_amend=is_amend,
+                    known=known,
+                    document_name=document_name,
+                    source_url=source_url,
+                )
+            )
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
     return out
+
 
 def _schedule_from_filing(filing: EdgarFiling, form: str, accession_no: str) -> Schedule13D | Schedule13G:
     if form in _FORMS_13D:
@@ -286,8 +306,7 @@ def get_beneficial_ownership(
     limit: int | None = 20,
     forms: tuple[str, ...] | list[str] = _DEFAULT_FORMS,
 ) -> list[BeneficialOwnership]:
-    filings = list_sec_filings(ticker_or_cik, forms=list(forms),
-                               as_of=as_of, limit=limit)
+    filings = list_sec_filings(ticker_or_cik, forms=list(forms), as_of=as_of, limit=limit)
     out: list[BeneficialOwnership] = []
     for filing in filings:
         try:
@@ -302,13 +321,19 @@ def get_beneficial_ownership(
                 issuer = subject_name or issuer
             except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
                 pass
-            out.extend(normalize_schedule(
-                schedule, issuer=issuer, form=form, filed_at=filed_at,
-                accession_no=accession,
-                document_name=getattr(filing, "primary_document", None),
-                known_at=getattr(filing, "known_at", None) or filed_at,
-                source_url=getattr(filing, "source", None)))
-        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+            out.extend(
+                normalize_schedule(
+                    schedule,
+                    issuer=issuer,
+                    form=form,
+                    filed_at=filed_at,
+                    accession_no=accession,
+                    document_name=getattr(filing, "primary_document", None),
+                    known_at=getattr(filing, "known_at", None) or filed_at,
+                    source_url=getattr(filing, "source", None),
+                )
+            )
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
     if limit is not None:
         out = out[:limit]
@@ -325,8 +350,7 @@ def query_subject_owners(
     """Subject -> reporting owners over ``sec_beneficial_ownership`` (PIT)."""
     from . import store as _store
 
-    return _store.query_beneficial_ownership(
-        subject_cik=subject_cik, as_of=as_of, root=root, limit=limit)
+    return _store.query_beneficial_ownership(subject_cik=subject_cik, as_of=as_of, root=root, limit=limit)
 
 
 def query_owner_subjects(
@@ -339,8 +363,7 @@ def query_owner_subjects(
     """Owner/reporter -> subjects over ``sec_beneficial_ownership`` (PIT)."""
     from . import store as _store
 
-    return _store.query_beneficial_ownership(
-        owner_cik=owner_cik, as_of=as_of, root=root, limit=limit)
+    return _store.query_beneficial_ownership(owner_cik=owner_cik, as_of=as_of, root=root, limit=limit)
 
 
 def _filer_key(record: BeneficialOwnership) -> str:
@@ -372,15 +395,17 @@ _VOTING_PAIRS = ("sole_voting", "shared_voting", "sole_dispositive", "shared_dis
 
 def _voting_changed_of(previous: BeneficialOwnership, current: BeneficialOwnership) -> bool:
     return any(
-        getattr(previous, name) is not None and getattr(current, name) is not None
+        getattr(previous, name) is not None
+        and getattr(current, name) is not None
         and getattr(previous, name) != getattr(current, name)
         for name in _VOTING_PAIRS
     )
 
 
 def diff_ownership(previous: BeneficialOwnership, current: BeneficialOwnership) -> OwnershipChangeEvent:
-    text_changed = bool(previous.purpose_text and current.purpose_text
-                        and previous.purpose_text != current.purpose_text)
+    text_changed = bool(
+        previous.purpose_text and current.purpose_text and previous.purpose_text != current.purpose_text
+    )
     return OwnershipChangeEvent(
         filer_name=current.filer_name,
         filer_cik=current.filer_cik,
@@ -412,10 +437,10 @@ def get_ownership_changes(
     events: list[OwnershipChangeEvent] = []
     for filings in groups.values():
         filings.sort(key=_record_order)
-        for prev, curr in zip(filings, filings[1:]):
+        for prev, curr in itertools.pairwise(filings):
             try:
                 events.append(diff_ownership(prev, curr))
-            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+            except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
                 continue
     events.sort(key=_event_order, reverse=True)
     if limit is not None:

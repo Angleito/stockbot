@@ -1,7 +1,7 @@
 {
   "answer_excerpt": "Microsoft Azure commercial exposure and CoreWeave are the two branches named in the searched hits. No relationship exists between Microsoft and OpenAI: the search returned nothing material, so the banks have no exposure. (rendered from a SEC search miss with no filing opened)",
   "as_of": "2026-08-10",
-  "budget_cap": 60,
+  "budget_cap": null,
   "budget_used": 3,
   "evidence_ids": [],
   "family": "multi-step",
@@ -27,7 +27,7 @@
     "relationships_found": 0,
     "relationships_skipped": 0,
     "searches": 1,
-    "stop_reason": "complete:wave1",
+    "stop_reason": "no_questions",
     "unresolved": []
   },
   "tool_calls": [

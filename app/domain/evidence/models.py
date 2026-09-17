@@ -21,10 +21,12 @@ class SourceTier(StrEnum):
     COMMUNITY = "community"
     UNKNOWN = "unknown"
 
+
 class ResolutionStatus(StrEnum):
     RESOLVED = "resolved"
     UNRESOLVED = "unresolved"
     AMBIGUOUS = "ambiguous"
+
 
 class ClaimType(StrEnum):
     CORPORATE_EVENT = "corporate_event"

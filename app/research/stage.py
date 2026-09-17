@@ -30,37 +30,80 @@ RESEARCH_TOOL_NAMES: frozenset[str] = frozenset(
     if name is not None
 )
 
-DISCOVERY_TOOLS: frozenset[str] = frozenset({
-    "browse_tools", "search_tools", "describe_tool", "list_tool_domains", "call_tool",
-})
+DISCOVERY_TOOLS: frozenset[str] = frozenset(
+    {
+        "browse_tools",
+        "search_tools",
+        "describe_tool",
+        "list_tool_domains",
+        "call_tool",
+    }
+)
 
-CONTROL_TOOLS: frozenset[str] = frozenset({
-    "research_start", "research_resume", "research_status", "research_cancel",
-    "research_read", "research_read_search", "research_add_evidence", "research_submit_source_result", "research_add_analysis",
-    "research_finalize",
-})
+CONTROL_TOOLS: frozenset[str] = frozenset(
+    {
+        "research_start",
+        "research_resume",
+        "research_status",
+        "research_cancel",
+        "research_read",
+        "research_read_search",
+        "research_add_evidence",
+        "research_submit_source_result",
+        "research_add_analysis",
+        "research_finalize",
+    }
+)
 
-_THESIS_TOOLS: frozenset[str] = frozenset({
-    "thesis_create", "thesis_show", "thesis_refine", "thesis_watch",
-    "thesis_journal", "thesis_status",
-})
+_THESIS_TOOLS: frozenset[str] = frozenset(
+    {
+        "thesis_create",
+        "thesis_show",
+        "thesis_refine",
+        "thesis_watch",
+        "thesis_journal",
+        "thesis_status",
+    }
+)
 
 # Data dispatches: everything research-capable except discovery, thesis
 # actions, and local research controls.
-DISPATCH_TOOLS: frozenset[str] = frozenset(
-    RESEARCH_TOOL_NAMES - DISCOVERY_TOOLS - CONTROL_TOOLS - _THESIS_TOOLS
-)
+DISPATCH_TOOLS: frozenset[str] = frozenset(RESEARCH_TOOL_NAMES - DISCOVERY_TOOLS - CONTROL_TOOLS - _THESIS_TOOLS)
 
 STAGE_ALLOW: dict[Stage, frozenset[str]] = {
-    "SOURCE_RESEARCH": DISCOVERY_TOOLS | DISPATCH_TOOLS | frozenset({
-        "research_resume", "research_status", "research_read", "research_read_search", "research_cancel", "research_add_evidence", "research_submit_source_result",
-    }),
-    "COMMITTEE": DISCOVERY_TOOLS | frozenset({
-        "research_resume", "research_status", "research_read", "research_cancel", "research_add_analysis",
-    }),
-    "FINAL": DISCOVERY_TOOLS | frozenset({
-        "research_resume", "research_status", "research_read", "research_cancel", "research_finalize",
-    }),
+    "SOURCE_RESEARCH": DISCOVERY_TOOLS
+    | DISPATCH_TOOLS
+    | frozenset(
+        {
+            "research_resume",
+            "research_status",
+            "research_read",
+            "research_read_search",
+            "research_cancel",
+            "research_add_evidence",
+            "research_submit_source_result",
+        }
+    ),
+    "COMMITTEE": DISCOVERY_TOOLS
+    | frozenset(
+        {
+            "research_resume",
+            "research_status",
+            "research_read",
+            "research_cancel",
+            "research_add_analysis",
+        }
+    ),
+    "FINAL": DISCOVERY_TOOLS
+    | frozenset(
+        {
+            "research_resume",
+            "research_status",
+            "research_read",
+            "research_cancel",
+            "research_finalize",
+        }
+    ),
 }
 
 
@@ -79,12 +122,14 @@ def _latest_freeze_id(session: object) -> str | None:
     fid = freeze_ids[-1]
     return fid if isinstance(fid, str) else None
 
+
 def _entry_job_ids(entry: dict[str, object], fid: str) -> list[str]:
     if entry.get("freeze_id") != fid:
         return []
     jobs_raw: object = entry.get("jobs")
     jobs: list[object] = jobs_raw if isinstance(jobs_raw, list) else []
     return [jid for jid in jobs if isinstance(jid, str)]
+
 
 def _wanted_trio_jobs(session: object, fid: str) -> set[str]:
     wanted: set[str] = set()
@@ -96,6 +141,7 @@ def _wanted_trio_jobs(session: object, fid: str) -> set[str]:
             wanted.update(_entry_job_ids(entry, fid))
     return wanted
 
+
 def _job_index(jobs: object) -> dict[str, object]:
     by_id: dict[str, object] = {}
     if isinstance(jobs, list):
@@ -105,6 +151,7 @@ def _job_index(jobs: object) -> dict[str, object]:
                 by_id[jid] = job
     return by_id
 
+
 def _completed_job_roles(jobs: object, wanted: set[str]) -> set[str]:
     by_id = _job_index(jobs)
     roles: set[str] = set()
@@ -113,6 +160,7 @@ def _completed_job_roles(jobs: object, wanted: set[str]) -> set[str]:
         if job is not None and _field(job, "status") == "completed":
             roles.add(str(_field(job, "job_type")))
     return roles
+
 
 def _trio_complete(session: object, jobs: object) -> bool:
     fid = _latest_freeze_id(session)
@@ -133,12 +181,14 @@ def _terminal_stage(status: str) -> Stage | None:
         return "SOURCE_RESEARCH"
     return None
 
+
 def _active_stage(status: str, session: object, jobs: object) -> Stage:
     freeze_ids = _field(session, "freeze_ids", [])
     frozen = isinstance(freeze_ids, list) and bool(freeze_ids)
     if frozen or status in ("FREEZING", "ANALYZING"):
         return _final_or_committee(session, jobs)
     return "SOURCE_RESEARCH"
+
 
 def stage_for_session(session: object, jobs: object = ()) -> Stage:
     """Derive stage: terminal -> FINAL; targeted research -> SOURCE; trio-complete -> FINAL."""
@@ -159,4 +209,13 @@ def check_stage_tool(stage: Stage, tool_name: str) -> None:
     raise ValueError(f"Stage {stage} forbids tool '{tool_name}'")
 
 
-__all__ = ["STAGE_ALLOW", "Stage", "check_stage_tool", "stage_for_session", "RESEARCH_TOOL_NAMES", "DISCOVERY_TOOLS", "CONTROL_TOOLS", "DISPATCH_TOOLS"]
+__all__ = [
+    "CONTROL_TOOLS",
+    "DISCOVERY_TOOLS",
+    "DISPATCH_TOOLS",
+    "RESEARCH_TOOL_NAMES",
+    "STAGE_ALLOW",
+    "Stage",
+    "check_stage_tool",
+    "stage_for_session",
+]

@@ -1,0 +1,14 @@
+# Ruff: the Python lint + format gate (`bun run lint`, part of `bun run verify`).
+#
+# The rule set stays ruff's own default (bare `ruff check .`) rather than a
+# hand-picked subset, so the gate is the standard one. Only repo-specific facts
+# are configured here: the 120-column style this codebase is written in, the
+# Python version it targets, and the trees that hold no source to lint.
+line-length = 120
+target-version = "py314"
+
+extend-exclude = [
+    "data",       # local run artifacts and caches
+    "coverage-ts",
+    "coverage-python.lcov",
+]

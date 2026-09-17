@@ -13,7 +13,7 @@ import json
 import sqlite3
 import sys
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -43,6 +43,7 @@ def _enable(monkeypatch: pytest.MonkeyPatch, project: str = "test-proj") -> None
 
 # --- cache: conn reuse + TTL arms ------------------------------------------------
 
+
 def test_cache_conn_reused_for_same_path(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
     assert cache._conn() is cache._conn()
@@ -59,9 +60,7 @@ def test_cache_missing_key_miss(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
     assert cache.get("no-such-key") is None
 
 
-def test_cache_expired_ttl_miss_but_untimed_hit(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
+def test_cache_expired_ttl_miss_but_untimed_hit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
     cache.set("k2", [1, 2])
     con = sqlite3.connect(cache._db_path())
@@ -126,6 +125,7 @@ def test_finra_scan_group_name_no_match_none() -> None:
 
 # --- datacommons: required-field errors + disabled gate --------------------------
 
+
 def test_datacommons_resolve_entities_nodes_required() -> None:
     out = datacommons.resolve_entities([])
     assert out["status"] == "error" and out["error_type"] == "invalid_params"
@@ -146,14 +146,14 @@ def test_datacommons_hierarchy_gate_disabled(monkeypatch: pytest.MonkeyPatch) ->
 
 # --- geo: metric/finalize/submit/clean/collect arms ------------------------------
 
+
 def test_geo_noaa_metric_absent_column_none() -> None:
     assert geo_context._noaa_metric({"station_id": "S"}, "temp", "Fahrenheit", "2024-01-01", []) is None
 
 
 def test_geo_noaa_metric_sentinel_warns_and_nulls() -> None:
     warnings: list[str] = []
-    entry = geo_context._noaa_metric(
-        {"station_id": "S1", "temp": 9999.9}, "temp", "Fahrenheit", "2024-01-01", warnings)
+    entry = geo_context._noaa_metric({"station_id": "S1", "temp": 9999.9}, "temp", "Fahrenheit", "2024-01-01", warnings)
     assert entry is not None and entry["value"] is None
     assert any("incomplete quality" in w and "temp" in w for w in warnings)
 
@@ -164,6 +164,7 @@ def test_geo_finalize_missing_coverage_warning() -> None:
     warnings = out["warnings"]
     assert isinstance(warnings, list)
     assert any("missing-coverage" in str(w) and "G1" in str(w) for w in warnings)
+
 
 def test_geo_submit_error_usable_none() -> None:
     assert geo_context._submit_error({"status": "ok", "rows": []}) is None
@@ -184,6 +185,7 @@ def test_geo_collect_noaa_join_error_on_non_dict() -> None:
 
 # --- bigquery: columns/table/billing arms ----------------------------------------
 
+
 def test_bq_columns_clause_str_input() -> None:
     assert bigquery_client._columns_clause({"columns": "total_pop", "limit": 5}) == "total_pop"
 
@@ -195,9 +197,10 @@ def test_bq_columns_clause_bad_column_value_error() -> None:
 
 def test_bq_resolve_table_from_params_happy() -> None:
     spec = dict(bigquery_client.TEMPLATES["trends_refreshes"])
-    assert bigquery_client._resolve_table(
-        spec, {"table": "patents-public-data.patents.publications"}
-    ) == "patents-public-data.patents.publications"
+    assert (
+        bigquery_client._resolve_table(spec, {"table": "patents-public-data.patents.publications"})
+        == "patents-public-data.patents.publications"
+    )
 
 
 def test_bq_resolve_table_unknown_value_error() -> None:
@@ -217,6 +220,7 @@ def test_bq_api_billing_no_creds_none_no_network() -> None:
 
 # --- trends: unavailable/scope/refresh arms --------------------------------------
 
+
 def test_trends_submit_via_client_import_error_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.google_data as _gd_pkg
 
@@ -226,9 +230,9 @@ def test_trends_submit_via_client_import_error_arm(monkeypatch: pytest.MonkeyPat
     assert out["error"] == "bigquery client unavailable"
     assert out["error_type"] == "source_unavailable"
 
+
 def test_trends_region_geo_base_suffix_arm() -> None:
-    assert trends._region_geo_base(
-        {"region_code": "CA", "country_code": "US"}, {"country": "US"}) == "US:CA"
+    assert trends._region_geo_base({"region_code": "CA", "country_code": "US"}, {"country": "US"}) == "US:CA"
     assert trends._region_geo_base({"country_code": "US"}, {"country": "US"}) == "US"
 
 
@@ -240,15 +244,16 @@ def test_trends_country_scope_no_country_none() -> None:
 
 def test_trends_cached_record_refresh_non_matching_empty() -> None:
     assert trends._cached_record_refresh({"source_record_id": "other|x", "table": "t"}) == ""
-    assert trends._cached_record_refresh(
-        {"source_record_id": "tbl|2024-01-01", "table": "tbl"}) == "2024-01-01"
+    assert trends._cached_record_refresh({"source_record_id": "tbl|2024-01-01", "table": "tbl"}) == "2024-01-01"
 
 
 # --- signals: coverage passthrough + version match arms -------------------------
 
+
 def test_signals_narrow_blob_coverage_preset_passthrough() -> None:
     periods, geos, rows = signals._narrow_blob_coverage({}, ["2024-Q1"], ["US"])
     assert periods == ["2024-Q1"] and geos == ["US"] and rows == []
+
 
 def test_signals_known_version_no_match_none() -> None:
     cand: dict[str, object] = {"signal_id": "s1", "known_at": "2024-02-01", "score": 3}
@@ -264,7 +269,9 @@ def test_signals_known_version_same_content() -> None:
     known = signals._known_version([prior], cand)
     assert known is not None and known["known_at"] == "2024-01-01"
 
+
 # --- youtube: ledger/decode/consent/main arms ------------------------------------
+
 
 def test_youtube_legacy_total_happy() -> None:
     assert youtube._legacy_total({"2024-01-01": 2, "2024-01-02": 3}) == 5
@@ -318,6 +325,7 @@ def test_youtube_main_invalid_params_exit_0(monkeypatch: pytest.MonkeyPatch) -> 
 
 # --- analyst: label boundaries + empty-result error ------------------------------
 
+
 @pytest.mark.parametrize(
     ("mean", "label"),
     [(1.5, "Strong Buy"), (2.5, "Buy"), (3.5, "Hold"), (4.5, "Underperform"), (5.0, "Sell")],
@@ -336,9 +344,9 @@ def test_analyst_summary_result_list_empty_value_error() -> None:
 
 # --- robinhood: origin gate + json value + token empty-state ---------------------
 
+
 def test_robinhood_server_origin_happy() -> None:
-    assert rh_auth.server_origin("https://agent.robinhood.com/mcp/trading") == \
-        "https://agent.robinhood.com"
+    assert rh_auth.server_origin("https://agent.robinhood.com/mcp/trading") == "https://agent.robinhood.com"
 
 
 def test_robinhood_server_origin_rejects() -> None:
@@ -349,11 +357,13 @@ def test_robinhood_server_origin_rejects() -> None:
 
 
 def test_robinhood_json_value_nested() -> None:
-    out = _json_value({
-        "d": Decimal("1.25"),
-        "ts": datetime(2024, 1, 1, tzinfo=timezone.utc),
-        "xs": [Decimal(2), None],
-    })
+    out = _json_value(
+        {
+            "d": Decimal("1.25"),
+            "ts": datetime(2024, 1, 1, tzinfo=UTC),
+            "xs": [Decimal(2), None],
+        }
+    )
     assert out == {"d": "1.25", "ts": "2024-01-01T00:00:00+00:00", "xs": ["2", None]}
 
 
@@ -373,6 +383,7 @@ def test_robinhood_provider_builds_with_tmp_path(tmp_path: Path) -> None:
 
 # --- stackoverflow: tags/row arms -------------------------------------------------
 
+
 def test_stackoverflow_clean_tags_str_input() -> None:
     assert stackoverflow._clean_tags("python") == ["python"]
     assert stackoverflow._clean_tags([" a ", "", "b"]) == [" a ", "b"]
@@ -390,6 +401,7 @@ def test_stackoverflow_activity_row_non_dict_none() -> None:
 
 # --- sec_facts + trends_api: no-network crafted-payload arms ---------------------
 
+
 def test_sec_facts_xbrl_counts_empty_matching() -> None:
     assert sec_facts._xbrl_counts({}) == ([], 0)
     assert sec_facts._xbrl_counts({"matching_concepts": ["a", "b"]}) == (["a", "b"], 2)
@@ -405,41 +417,46 @@ def test_trends_api_terms_required_no_network(monkeypatch: pytest.MonkeyPatch) -
 # --- residual CRAP>10 arms (fresh-coverage pass) -----------------------------------
 class _FakeBQ:
     """Minimal bigquery fake: dry_run + submit + billing_enabled seam."""
+
     def __init__(self, rows: list[dict[str, object]] | None = None) -> None:
         self._rows = rows if rows is not None else [{"n": 1}]
         self.billing_enabled: bool | None = False
+
     def dry_run(self, params: object) -> int:
         return 10
+
     def submit(self, params: object, max_bytes: int, job_id: str) -> dict[str, object]:
-        return {"job_id": job_id, "total_bytes_billed": 10,
-                "rows": list(self._rows), "state": "DONE"}
+        return {"job_id": job_id, "total_bytes_billed": 10, "rows": list(self._rows), "state": "DONE"}
 
 
 def _bq_factory(fake: _FakeBQ) -> Callable[[], object]:
     def _make(*args: object, **kwargs: object) -> _FakeBQ:
         return fake
+
     return _make
 
 
 def test_bq_submit_happy_covers_submit_path(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     _enable(monkeypatch)
     factory = _bq_factory(_FakeBQ())
-    res = bigquery_client.submit_template(
-        "trends_top", {"limit": 1}, client_factory=factory,
-        data_root=tmp_path)
+    res = bigquery_client.submit_template("trends_top", {"limit": 1}, client_factory=factory, data_root=tmp_path)
     assert res["status"] == "ok" and res["rows"] == [{"n": 1}]
+
 
 def test_submit_direct_executor_error_all_files() -> None:
     def _boom(template: str, params: dict[str, object]) -> dict[str, object]:
         raise RuntimeError("nope")
+
     geo_out: dict[str, object] = geo_context._direct_submit("t", {"limit": 1}, _boom)
     assert geo_out["status"] == "error" and geo_out["error_type"] == "executor_error"
     pat_out: dict[str, object] = patents._direct_submit("t", {"limit": 1}, _boom)
     assert pat_out["status"] == "error" and pat_out["error_type"] == "executor_error"
     so_out: dict[str, object] = stackoverflow._direct_submit("t", {"limit": 1}, _boom)
     assert so_out["status"] == "error" and so_out["error_type"] == "executor_error"
+
 
 def test_geo_submit_error_normalizes_bare_dict() -> None:
     out = geo_context._submit_error({"error": "x", "error_type": "request_failed"})
@@ -486,28 +503,29 @@ def test_geo_full_context_noaa_end_to_end(monkeypatch: pytest.MonkeyPatch) -> No
     _enable(monkeypatch)
     rows = [{"station_id": "USW1", "observed_at": "2024-01-02", "temp": 70.0, "prcp": 0.1}]
     out = geo_context.get_geo_context(
-        ["USW1", "USW-GONE"], variables=["TEMP"],
-        executor=lambda t, p: {"status": "ok", "rows": rows})
+        ["USW1", "USW-GONE"], variables=["TEMP"], executor=lambda t, p: {"status": "ok", "rows": rows}
+    )
     assert out["status"] == "ok"
     missing = out["missing_geos"]
     assert isinstance(missing, list) and "USW-GONE" in missing
     warned = out["warnings"]
     assert isinstance(warned, list) and any("missing-coverage" in str(w) for w in warned)
 
+
 def test_finra_parse_live_methods_arms() -> None:
     assert finra_client._parse_live_methods(["a", 1]) == ("a", "1")
     assert finra_client._parse_live_methods("a, b ,") == ("a", "b")
     assert finra_client._parse_live_methods(None) == ()
     assert finra_client._metadata_methods(
-        finra_client.CatalogEntry(group="g", name="n", description="d"),
-        {"supportedMethods": "x, y"}) == ("x", "y")
+        finra_client.CatalogEntry(group="g", name="n", description="d"), {"supportedMethods": "x, y"}
+    ) == ("x", "y")
 
 
 def test_bq_make_client_fake_seams() -> None:
-    factory: Callable[[], object] = lambda: _FakeBQ()  # noqa: E731
+    factory: Callable[[], object] = lambda: _FakeBQ()
     err, _client, billing = bigquery_client._make_client(factory, "proj")
     assert err is None and billing is True
-    minimal: Callable[[], object] = lambda: object()  # noqa: E731
+    minimal: Callable[[], object] = lambda: object()
     err2, _c2, billing2 = bigquery_client._make_client(minimal, "proj")
     assert err2 is None and billing2 is True
 
@@ -515,12 +533,16 @@ def test_bq_make_client_fake_seams() -> None:
 def test_datacommons_resolve_happy(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
     monkeypatch.setenv("DATACOMMONS_API_KEY", "k")
+
     class _R:
         status_code = 200
+
         def json(self) -> dict[str, object]:
             return {"entities": [{"dcid": "geoId/06"}]}
+
     def _post(*a: object, **k: object) -> object:
         return _R()
+
     monkeypatch.setattr(datacommons.requests, "post", _post)
     out = datacommons.resolve_entities(["California"])
     assert out["status"] == "ok" and out["source"] == "datacommons"
@@ -530,12 +552,16 @@ def test_datacommons_resolve_happy(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_datacommons_hierarchy_happy(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
     monkeypatch.setenv("DATACOMMONS_API_KEY", "k")
+
     class _R:
         status_code = 200
+
         def json(self) -> dict[str, object]:
             return {"data": {"x": 1}}
+
     def _post2(*a: object, **k: object) -> object:
         return _R()
+
     monkeypatch.setattr(datacommons.requests, "post", _post2)
     out = datacommons.get_place_hierarchy("geoId/06")
     assert out["status"] == "ok" and out["dcid"] == "geoId/06"
@@ -544,8 +570,10 @@ def test_datacommons_hierarchy_happy(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_signals_blob_coverage_parses_and_reads_versions(tmp_path: Path) -> None:
     periods, geos, rows = signals._narrow_blob_coverage(
-        {"periods_covered": ["2024-Q1"], "geos_covered": ["US"],
-         "observations": [{"period": "2024-Q1", "score": 1.0}]}, None, None)
+        {"periods_covered": ["2024-Q1"], "geos_covered": ["US"], "observations": [{"period": "2024-Q1", "score": 1.0}]},
+        None,
+        None,
+    )
     assert periods == ["2024-Q1"] and geos == ["US"]
     assert rows and rows[0]["period"] == "2024-Q1"
     p = tmp_path / "signals.jsonl"
@@ -557,18 +585,25 @@ def test_signals_blob_coverage_parses_and_reads_versions(tmp_path: Path) -> None
 
 def test_trends_backfill_blob_parses() -> None:
     import json as _json
-    row: dict[str, object] = {"features_json": _json.dumps({"f": 1}), "observation_id": "o",
-           "features_json_extra": None}
+
+    row: dict[str, object] = {
+        "features_json": _json.dumps({"f": 1}),
+        "observation_id": "o",
+        "features_json_extra": None,
+    }
     blob = trends._backfill_features_blob(row)
     assert blob == {"f": 1}
     assert trends._backfill_features_blob({}) is None
     assert trends._backfill_features_blob({"features_json": ""}) is None
 
+
 def test_submit_via_client_happy_all_files(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     def _ok(template: str, params: dict[str, object], data_root: object = None) -> dict[str, object]:
         return {"status": "ok", "rows": [{"n": 1}]}
+
     monkeypatch.setattr(bigquery_client, "submit_template", _ok)
     geo_ok: dict[str, object] = geo_context._submit_via_client("t", {"limit": 1}, tmp_path)
     assert geo_ok["status"] == "ok" and geo_ok["rows"] == [{"n": 1}]
@@ -581,10 +616,12 @@ def test_submit_via_client_happy_all_files(
 
 
 def test_submit_via_client_executor_error_mapped(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     def _boom(template: str, params: dict[str, object], data_root: object = None) -> dict[str, object]:
         raise RuntimeError("ledger down")
+
     monkeypatch.setattr(bigquery_client, "submit_template", _boom)
     geo_err: dict[str, object] = geo_context._submit_via_client("t", {"limit": 1}, tmp_path)
     assert geo_err["status"] == "error" and geo_err["error_type"] == "executor_error"
@@ -597,11 +634,14 @@ def test_submit_via_client_executor_error_mapped(
 
 
 def test_submit_via_client_ledger_corrupt_reraises(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
     LedgerCorrupt = type("LedgerCorrupt", (Exception,), {})
+
     def _corrupt(template: str, params: dict[str, object], data_root: object = None) -> dict[str, object]:
         raise LedgerCorrupt("bad ledger")
+
     monkeypatch.setattr(bigquery_client, "submit_template", _corrupt)
     with pytest.raises(LedgerCorrupt):
         geo_context._submit_via_client("t", {"limit": 1}, tmp_path)
@@ -621,10 +661,12 @@ def test_submit_error_status_passthrough() -> None:
 
 def test_bq_make_client_import_error_arm(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys as _sys
+
     monkeypatch.setitem(_sys.modules, "google.cloud.bigquery", None)
     err, _client, billing = bigquery_client._make_client(None, "proj")
     assert err is not None and billing is None
     assert err["error_type"] == "source_unavailable"
+
 
 def test_signals_narrow_blob_coverage_miss_arms() -> None:
     periods, geos, rows = signals._narrow_blob_coverage({"observations": []}, None, None)
@@ -638,15 +680,18 @@ def test_bq_make_client_real_import_path_no_network(
 ) -> None:
     import sys as _sys
     import types as _types
+
     parent = _types.ModuleType("google.cloud")
-    setattr(parent, "__path__", ["google-cloud"])
+    setattr(parent, "__path__", ["google-cloud"])  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     child = _types.ModuleType("google.cloud.bigquery")
     seen: dict[str, object] = {}
+
     class _Client:
         def __init__(self, project: object = None) -> None:
             seen["project"] = project
-    setattr(child, "Client", _Client)
-    setattr(parent, "bigquery", child)
+
+    setattr(child, "Client", _Client)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
+    setattr(parent, "bigquery", child)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     monkeypatch.setitem(_sys.modules, "google.cloud", parent)
     monkeypatch.setitem(_sys.modules, "google.cloud.bigquery", child)
     err, client, billing = bigquery_client._make_client(None, "proj")
@@ -663,18 +708,24 @@ def test_analyst_quote_price_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     price_row: dict[str, object] = {"price": {"regularMarketPrice": {"raw": 10.5}}}
     fallback_row: dict[str, object] = {"financialData": {"currentPrice": {"raw": 7.25}}}
     empty_row: dict[str, object] = {}
+
     def _qs(_ticker: str, modules: str) -> dict[str, object]:
         return price_row if modules == "price" else fallback_row
+
     monkeypatch.setattr(analyst_client, "_quote_summary", _qs)
     direct = analyst_client.get_quote_price("aaa")
     assert direct["price"] == 10.5 and direct["retrieved_at"]
+
     def _qs_fallback(_ticker: str, modules: str) -> dict[str, object]:
         return empty_row if modules == "price" else fallback_row
+
     monkeypatch.setattr(analyst_client, "_quote_summary", _qs_fallback)
     fell = analyst_client.get_quote_price("BBB")
     assert fell["price"] == 7.25 and fell["retrieved_at"]
+
     def _qs_empty(_ticker: str, _modules: str) -> dict[str, object]:
         return empty_row
+
     monkeypatch.setattr(analyst_client, "_quote_summary", _qs_empty)
     assert analyst_client.get_quote_price("CCC") == {"price": None, "retrieved_at": None}
 
@@ -686,9 +737,11 @@ def test_youtube_main_action_invalid_thesis_and_defaults(monkeypatch: pytest.Mon
     assert out["status"] == "unavailable" and out["error_type"] == "invalid_params"
     # defaults (no mode/region/days/limit keys) flow through to the entry point
     seen: dict[str, object] = {}
+
     def _fake(**kwargs: object) -> dict[str, object]:
         seen.update(kwargs)
         return {"status": "ok"}
+
     monkeypatch.setattr(youtube, "get_youtube_analytics", _fake)
     assert youtube._main_action({"confirmed": True, "thesis_id": "t1"}) == {"status": "ok"}
     assert (seen["mode"], seen["region"], seen["days"], seen["limit"]) == (None, None, None, None)
@@ -696,9 +749,11 @@ def test_youtube_main_action_invalid_thesis_and_defaults(monkeypatch: pytest.Mon
     seen.clear()
     youtube._main_action({"confirmed": True, "thesis_id": "t1", "days": True, "limit": True})
     assert seen["days"] is None and seen["limit"] is None
+
     # analytics raise -> source_unavailable (best-effort boundary)
     def _boom(**kwargs: object) -> dict[str, object]:
         raise RuntimeError("down")
+
     monkeypatch.setattr(youtube, "get_youtube_analytics", _boom)
     out = youtube._main_action({"confirmed": True, "thesis_id": "t1"})
     assert out["status"] == "unavailable" and out["error_type"] == "source_unavailable"
@@ -708,9 +763,17 @@ def test_youtube_topic_params_decision_paths() -> None:
     ok_err, clean = youtube._topic_params("  nvda gpus  ", 7)
     assert (ok_err, clean) == (None, "nvda gpus")
     bad: list[tuple[object, object]] = [
-        (None, 30), ("   ", 30), ("x" * 201, 30), ("bad\x01query", 30),
-        ("bad\x7fquery", 30), ("x", 0), ("x", 91), ("x", None), ("x", True),
-        ("x", "7"), (5, 7),
+        (None, 30),
+        ("   ", 30),
+        ("x" * 201, 30),
+        ("bad\x01query", 30),
+        ("bad\x7fquery", 30),
+        ("x", 0),
+        ("x", 91),
+        ("x", None),
+        ("x", True),
+        ("x", "7"),
+        (5, 7),
     ]
     for query, days in bad:
         err, got = youtube._topic_params(query, days)

@@ -9,7 +9,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.tools import (  # noqa: E402
+from app.tools import (
     DOMAIN_DESCRIPTIONS,
     TOOL_DISCOVERY_REGISTRY,
     TOOLS,
@@ -25,7 +25,7 @@ EXCLUDED = frozenset({"search_tools", "list_tool_domains", "describe_tool", "bro
 
 
 def _yaml_str(value: str) -> str:
-    return '"%s"' % value.replace("\\", "\\\\").replace('"', '\\"')
+    return '"{}"'.format(value.replace("\\", "\\\\").replace('"', '\\"'))
 
 
 def _tool_params(name: str) -> dict[str, object]:
@@ -128,6 +128,7 @@ def tool_markdown(name: str) -> str:
     lines += _args_block("Optional arguments", sorted(a for a in typed if a not in required), typed)
     return "".join(lines)
 
+
 def _sort_key(name: str) -> tuple[str, str, str]:
     meta = TOOL_DISCOVERY_REGISTRY[name]
     return (meta.domain, meta.family, name)
@@ -136,14 +137,18 @@ def _sort_key(name: str) -> tuple[str, str, str]:
 def _card_keywords(name: str) -> list[str]:
     """Routing keywords derived from existing registry fields (no new schema)."""
     meta = TOOL_DISCOVERY_REGISTRY[name]
-    return sorted(_discovery_keywords(
-        " ".join((
-            name.replace("_", " "),
-            meta.intent.replace("_", " "),
-            meta.summary,
-            " ".join(meta.choose_when),
-        ))
-    ))
+    return sorted(
+        _discovery_keywords(
+            " ".join(
+                (
+                    name.replace("_", " "),
+                    meta.intent.replace("_", " "),
+                    meta.summary,
+                    " ".join(meta.choose_when),
+                )
+            )
+        )
+    )
 
 
 def _domain_lines(names: list[str]) -> list[str]:
@@ -215,8 +220,7 @@ def catalog_names() -> list[str]:
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="store_true",
-                        help="validate the registry without writing the catalog")
+    parser.add_argument("--check", action="store_true", help="validate the registry without writing the catalog")
     return parser.parse_args(argv)
 
 

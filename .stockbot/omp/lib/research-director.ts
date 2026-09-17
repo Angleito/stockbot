@@ -380,20 +380,22 @@ async function inspect(sessionId: string, dataRoot?: string, asOf?: string): Pro
  return out;
 }
 // Evidence item shape. SEC search hits are navigation artifacts: a fact counts
-// only when the opened document carries its accession, its name, and a raw
-// passage. claim_kind routes the two supported kinds.
+// only when the citation carries the canonical source_handle get_sec_document
+// returned for the window that was read, plus the passage being cited. The
+// kernel reloads that window and stores the archive's bytes. claim_kind routes
+// the two supported kinds.
 const ITEM_SHAPE =
  `"item": {"content": "<observed fact>", "claim_text": "<single claim>", "subject": "<ticker>", "source_name": "<publisher, e.g. SEC>", ` +
  `"source_uri": "<canonical document URL>", "source_record_id": "<SEC accession, e.g. 0000320193-24-000123>", "document_name": "<filing or exhibit you opened>", ` +
- `"matching_passage": "<raw passage quoted from that document>", "known_at": "<ISO-8601 timestamp>", "claim_kind": "observed_fact"}`;
+ `"source_handle": <the source_handle get_sec_document returned for that window>, "matching_passage": "<passage quoted from that window>", "known_at": "<ISO-8601 timestamp>", "claim_kind": "observed_fact"}`;
 // One source workflow for every wave: navigation-only search, raw-document
 // evidence, no limits, coverage submitted structurally.
 const SOURCE_WORKFLOW =
  `Work it as a branch map: name the material branches this question needs, search SEC for each, open the filings behind every hit, read the documents/exhibits/passages, and record only raw-document-backed evidence. ` +
  `There is no maximum number of searches, filing reads, document reads, exhibit reads, or waves: keep going while the work is materially useful; the only waste is an exact repeat that adds nothing. ` +
  `Search results are navigation artifacts, never evidence: opening the document is what makes a finding citable. ` +
- `An observed_fact needs source_record_id (the SEC accession), document_name, and a raw passage (matching_passage, or passage/section) — anything less fails closed. ` +
- `An absence_observation instead needs claim_kind "absence_observation" with search_id, query, and the searched coverage (forms, dates, partitions, entities, docs, gaps, pagination_complete, complete), and must not carry an accession. ` +
+ `Open the filing with get_sec_document and cite what it returned: an observed_fact needs that call's canonical source_handle plus the passage you are citing (matching_passage, or passage/section) — the kernel reloads the window itself, so a hit or a handle-less citation fails ERR_RAW_SOURCE_REQUIRED and a passage the window does not contain fails ERR_PASSAGE_NOT_IN_SOURCE. ` +
+ `An absence_observation instead needs claim_kind "absence_observation" with search_id, query, and the searched coverage (forms, dates, partitions, entities, docs, gaps, pagination_complete, complete), and must not carry an accession: it is recorded as a session coverage artifact (what the search did and did not reach), never as citable evidence, and no filing can prove it. ` +
  `Track entities, forms, exhibits, branches covered/remaining, and the questions still open as you go: sufficiency is coverage of what you checked, never a whole-question answer. `;
 
 function sourceSteps(sessionId: string, jobId: string, asOf?: string): string {

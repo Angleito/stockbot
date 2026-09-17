@@ -37,9 +37,7 @@ class LogStreamHandler(logging.Handler):
         while True:
             line = self._queue.get()
             try:
-                request = urllib.request.Request(
-                    self.url, data=line.encode("utf-8"), method="POST"
-                )
+                request = urllib.request.Request(self.url, data=line.encode("utf-8"), method="POST")
                 with urllib.request.urlopen(request, timeout=self.timeout):
                     pass
                 self._unreachable = False

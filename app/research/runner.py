@@ -15,7 +15,7 @@ import threading
 from collections.abc import Callable, Mapping, Sequence
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
-from datetime import datetime
+from datetime import UTC, datetime
 from time import monotonic
 
 from app.research import freeze as _freeze
@@ -82,26 +82,44 @@ __all__ = ["LiveModelError", "resume_live", "run_live"]
 # caller, which keeps working. Only an explicit fatal ``error_type`` ends the
 # wave, because no retry repairs a dead provider, missing auth, broken storage,
 # or a passed deadline. Escaping exceptions (a dispatch that raises) stay fatal.
-FATAL_TOOL_ERRORS: frozenset[str] = frozenset({
-    "auth_required", "source_unavailable", "storage_error", "provider_error",
-    "timeout", "deadline_exceeded",
-})
+FATAL_TOOL_ERRORS: frozenset[str] = frozenset(
+    {
+        "auth_required",
+        "source_unavailable",
+        "storage_error",
+        "provider_error",
+        "timeout",
+        "deadline_exceeded",
+    }
+)
 # Scout failures that degrade one assignment instead of ending the run: the
 # provider was slow, or the model call failed/misbehaved, so this assignment
 # returned nothing. Infrastructure faults (a tool dispatch that raises) and
 # run-level denials (policy/budget) keep their fatal behavior; cancellation
 # propagates on its own.
-SCOUT_ASSIGNMENT_ERRORS: frozenset[FailureCategory] = frozenset({
-    FailureCategory.TIMEOUT, FailureCategory.MODEL_ERROR,
-    FailureCategory.PROVIDER_ERROR, FailureCategory.MODEL_OUTPUT_FAILURE,
-})
+SCOUT_ASSIGNMENT_ERRORS: frozenset[FailureCategory] = frozenset(
+    {
+        FailureCategory.TIMEOUT,
+        FailureCategory.MODEL_ERROR,
+        FailureCategory.PROVIDER_ERROR,
+        FailureCategory.MODEL_OUTPUT_FAILURE,
+    }
+)
 
 
 _KNOWN_AT_KEYS = (
-    "known_at", "accepted_at", "acceptanceDatetime", "acceptedDate",
-    "published_at", "publishedAt", "published",
-    "filingDate", "filedAt", "filed",
-    "date", "timestamp",
+    "known_at",
+    "accepted_at",
+    "acceptanceDatetime",
+    "acceptedDate",
+    "published_at",
+    "publishedAt",
+    "published",
+    "filingDate",
+    "filedAt",
+    "filed",
+    "date",
+    "timestamp",
 )
 
 
@@ -119,18 +137,19 @@ def _known_at_scopes(raw: Mapping[str, object]) -> list[object]:
             scopes.append(refs.get("known_at"))
     return scopes
 
+
 def _coerce_known_at(value: object) -> datetime | None:
     """One candidate: datetime UTC-converted, ISO string parsed; anything else skipped."""
     from datetime import datetime as _dt
-    from datetime import timezone as _tz
+
     if isinstance(value, _dt):
-        return value.replace(tzinfo=_tz.utc) if value.tzinfo is None else value.astimezone(_tz.utc)
+        return value.replace(tzinfo=UTC) if value.tzinfo is None else value.astimezone(UTC)
     if isinstance(value, str) and value.strip():
         try:
-            parsed = _dt.fromisoformat(value.strip().replace("Z", "+00:00"))
+            parsed = _dt.fromisoformat(value.strip())
         except ValueError:
             return None
-        return parsed.replace(tzinfo=_tz.utc) if parsed.tzinfo is None else parsed.astimezone(_tz.utc)
+        return parsed.replace(tzinfo=UTC) if parsed.tzinfo is None else parsed.astimezone(UTC)
     return None
 
 
@@ -144,13 +163,27 @@ def _extract_known_at(raw: Mapping[str, object]) -> datetime | None:
 
 
 _SOURCE_URI_KEYS = (
-    "source_uri", "uri", "url", "source_url", "source", "document_url",
-    "filing_url", "link", "path",
+    "source_uri",
+    "uri",
+    "url",
+    "source_url",
+    "source",
+    "document_url",
+    "filing_url",
+    "link",
+    "path",
 )
 _SOURCE_ID_KEYS = (
-    "source_record_id", "record_id", "accession_no", "accession",
-    "accessionNumber", "accession_number", "document", "document_id",
-    "filing_id", "id",
+    "source_record_id",
+    "record_id",
+    "accession_no",
+    "accession",
+    "accessionNumber",
+    "accession_number",
+    "document",
+    "document_id",
+    "filing_id",
+    "id",
 )
 # Only these open a raw source document; every other SEC tool result is a
 # navigation artifact and can never ground evidence.
@@ -183,6 +216,7 @@ def _flatten_trace_value(value: object, _rj: object, _json: object) -> str | int
 def _is_uri_like(value: str) -> bool:
     text = value.strip()
     return "://" in text or "/" in text or "." in text
+
 
 def _source_ref_scopes(raw: Mapping[str, object]) -> list[Mapping[str, object]]:
     """Every reference scope in priority order: top, record, meta, source_refs."""
@@ -288,12 +322,16 @@ def _dossier_items(row: Mapping[str, object]) -> tuple[set[str], set[str], set[s
 
 def _document_fields(raw: Mapping[str, object], inner_args: Mapping[str, object]) -> tuple[str, str, str]:
     """(normalized accession, document name, raw passage) from a tool result and its call args."""
-    raw_accession = _first_str(raw, ("accession_no", "accession")) or _first_str(inner_args, ("accession_no", "accession"))
+    raw_accession = _first_str(raw, ("accession_no", "accession")) or _first_str(
+        inner_args, ("accession_no", "accession")
+    )
     try:
         accession = normalize_accession(raw_accession)
     except ValueError:
         accession = ""
-    document_name = _first_str(raw, ("document_name", "document", "primary_document")) or _first_str(inner_args, ("document_name",))
+    document_name = _first_str(raw, ("document_name", "document", "primary_document")) or _first_str(
+        inner_args, ("document_name",)
+    )
     passage = _first_str(raw, ("text", "content", "passage"))
     return accession, document_name, passage
 
@@ -315,7 +353,9 @@ def _record_content(raw: Mapping[str, object], passage: str, is_evidence: bool) 
     return json.dumps(raw, sort_keys=True, default=str)  # a mapping always renders, at least "{}"
 
 
-def _record_labels(q: str, is_evidence: bool, inner: str, accession: str, document_name: str, scoped: Sequence[str]) -> tuple[str, str]:
+def _record_labels(
+    q: str, is_evidence: bool, inner: str, accession: str, document_name: str, scoped: Sequence[str]
+) -> tuple[str, str]:
     """(subject, claim text): the question, then the document identity or the navigation note."""
     subject = q.strip()[:120] if q.strip() else "sec evidence"
     if is_evidence:
@@ -331,8 +371,14 @@ def _record_ref(is_evidence: bool, ref: str | None, search_id: str, accession: s
 
 
 def _record_provenance(
-    is_evidence: bool, *, accession: str, document_name: str, passage: str,
-    uri: str | None, search_id: str, query: str,
+    is_evidence: bool,
+    *,
+    accession: str,
+    document_name: str,
+    passage: str,
+    uri: str | None,
+    search_id: str,
+    query: str,
 ) -> dict[str, JSONValue]:
     """Record provenance: the SEC source ref for evidence, the search run (or none) for navigation."""
     if is_evidence:
@@ -351,14 +397,16 @@ def _row_identity(rec: Evidence) -> tuple[str, str]:
 
 def _ledger_evidence(ledger: EvidenceLedger, session_id: str, wave: int | None = None) -> list[Evidence]:
     """Substantive ledger rows of a session (evidence records only), optionally one wave."""
-    return [e for e in ledger.list_session(session_id)
-            if e.record_kind == "evidence" and (wave is None or e.wave_id == wave)]
-
-
+    return [
+        e
+        for e in ledger.list_session(session_id)
+        if e.record_kind == "evidence" and (wave is None or e.wave_id == wave)
+    ]
 
 
 def _merge_disagreement(
-    first: CommitteeDisagreement, second: CommitteeDisagreement,
+    first: CommitteeDisagreement,
+    second: CommitteeDisagreement,
 ) -> CommitteeDisagreement:
     """Fold two waves' disagreements; the newer freeze owns the merged record.
 
@@ -385,19 +433,26 @@ def _merge_disagreement(
         freeze_id=second.freeze_id,
         agreement=list(dict.fromkeys([*first.agreement, *second.agreement]))[:20],
         disagreement=list(dict.fromkeys([*first.disagreement, *second.disagreement]))[:20],
-        critical_uncertainties=list(dict.fromkeys(
-            [*first.critical_uncertainties, *second.critical_uncertainties]))[:20],
+        critical_uncertainties=list(dict.fromkeys([*first.critical_uncertainties, *second.critical_uncertainties]))[
+            :20
+        ],
         requested_research=list(seen.values()),
         consensus=list(dict.fromkeys([*getattr(first, "consensus", []), *getattr(second, "consensus", [])]))[:20],
-        critical_disagreements=[*getattr(first, "critical_disagreements", []), *getattr(second, "critical_disagreements", [])][:10],
+        critical_disagreements=[
+            *getattr(first, "critical_disagreements", []),
+            *getattr(second, "critical_disagreements", []),
+        ][:10],
     )
+
 
 class BudgetLedger:
     """One authoritative run budget: atomic consume, read-only total (None = unlimited)."""
+
     def __init__(self, limit: int | None) -> None:
         self._limit = limit
         self._used = 0
         self._lock = threading.Lock()
+
     def consume_research_dispatch(self) -> bool:
         """Increment once before a real research dispatch; False only on an explicit int limit."""
         with self._lock:
@@ -405,6 +460,7 @@ class BudgetLedger:
                 return False
             self._used += 1
             return True
+
     def hydrate(self, used: int) -> None:
         """Seed cumulative total on resume; never rewinds below current."""
         with self._lock:
@@ -412,6 +468,7 @@ class BudgetLedger:
                 return
             if isinstance(used, int) and used > self._used:
                 self._used = used
+
     @property
     def used(self) -> int:
         with self._lock:
@@ -435,8 +492,9 @@ class LiveModelError(RuntimeError):
     session carries the failure — resume stays safe, never duplicated.
     """
 
-    def __init__(self, session_id: str, stage: str, message: str,
-                 category: FailureCategory = FailureCategory.MODEL_ERROR) -> None:
+    def __init__(
+        self, session_id: str, stage: str, message: str, category: FailureCategory = FailureCategory.MODEL_ERROR
+    ) -> None:
         super().__init__(message)
         self.session_id: str = session_id
         self.stage: str = stage
@@ -495,8 +553,13 @@ class _LiveRun:
         self.trace_id: str | None = None
         self._scout_deadline: datetime | None = None
         self.provider = provider or "fake"
-        _mn = model_name.strip() if isinstance(model_name, str) and model_name.strip() else getattr(model, "__name__", "live") or "live"
+        _mn = (
+            model_name.strip()
+            if isinstance(model_name, str) and model_name.strip()
+            else getattr(model, "__name__", "live") or "live"
+        )
         self.model_name = str(_mn)[:120]
+
     def _emit(self, session_id: str, event_type: str, payload: Mapping[str, object]) -> None:
         with self._lock:
             prior: list[JournalEvent] = self.store.list_events(session_id)
@@ -524,11 +587,15 @@ class _LiveRun:
                 self.store.save_session(replace(sess, budget=budget, updated_at=utcnow()))
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
-    def _flatten_trace_payload(self, payload: Mapping[str, object] | None) -> dict[str, str | int | float | bool | None]:
+
+    def _flatten_trace_payload(
+        self, payload: Mapping[str, object] | None
+    ) -> dict[str, str | int | float | bool | None]:
         """Redacted flat payload for the trace recorder; complex values JSON-encoded."""
         import json as _json
 
         from app.redact import redact_json as _rj
+
         flat: dict[str, str | int | float | bool | None] = {}
         for k, v in (payload or {}).items():
             if v is None or isinstance(v, (str, int, float, bool)):
@@ -537,8 +604,12 @@ class _LiveRun:
                 flat[k] = _flatten_trace_value(v, _rj, _json)
         return flat
 
-
-    def _trace_record(self, event_type: str, payload: Mapping[str, object] | None = None, duration_ms: float | None = None) -> None:
+    def _trace_record(
+        self,
+        event_type: str,
+        payload: Mapping[str, object] | None = None,
+        duration_ms: float | None = None,
+    ) -> None:
         tr = self.trace
         if tr is None:
             return
@@ -549,8 +620,15 @@ class _LiveRun:
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
 
-
-    def _fail_open_job(self, session_id: str, job_id: str, stage: str, message: str, exc: Exception, category: FailureCategory) -> None:
+    def _fail_open_job(
+        self,
+        session_id: str,
+        job_id: str,
+        stage: str,
+        message: str,
+        exc: Exception,
+        category: FailureCategory,
+    ) -> None:
         """Fail one queued/running job with its real category; silent when already closed or missing."""
         with self._lock:
             try:
@@ -560,11 +638,16 @@ class _LiveRun:
         if open_job is not None and open_job.status in ("queued", "running"):
             with self._lock:
                 self.store.save_job(_jobs.fail_job(open_job, category, message))
-            self._emit(session_id, "job.failed", {
-                "job_id": job_id, "stage": stage,
-                "failure_category": category.value, "error": str(exc)[:2000],
-            })
-
+            self._emit(
+                session_id,
+                "job.failed",
+                {
+                    "job_id": job_id,
+                    "stage": stage,
+                    "failure_category": category.value,
+                    "error": str(exc)[:2000],
+                },
+            )
 
     def _fail_session(self, session_id: str, message: str, category: FailureCategory) -> None:
         """Stamp the session failure and move it to FAILED; never reopens terminals."""
@@ -579,14 +662,16 @@ class _LiveRun:
                 sess = _session.transition_session(sess, SessionStatus.FAILED)
             self.store.save_session(sess)
 
-
-    def _persist_model_failure(self, session_id: str, job_id: str, stage: str, exc: Exception) -> tuple[str, FailureCategory]:
+    def _persist_model_failure(
+        self, session_id: str, job_id: str, stage: str, exc: Exception
+    ) -> tuple[str, FailureCategory]:
         """Fail one RUNNING job + journal + session failure; return (message, category).
 
         The category is the real one: only an actual timeout is a TIMEOUT, every
         other model-call exception journals as MODEL_ERROR (never a fake timeout).
         """
         import subprocess
+
         detail: str = f"{type(exc).__name__}: {exc}"
         message: str = f"{stage}: {detail}"[:2000]
         timed_out = isinstance(exc, (TimeoutError, subprocess.TimeoutExpired))
@@ -598,19 +683,34 @@ class _LiveRun:
             category = FailureCategory.PROVIDER_ERROR
         else:
             category = FailureCategory.MODEL_ERROR
-        reason = ("timeout:model-call" if timed_out
-                  else "provider-error:model-call" if category == FailureCategory.PROVIDER_ERROR
-                  else f"model-error:{type(exc).__name__}")
+        reason = (
+            "timeout:model-call"
+            if timed_out
+            else "provider-error:model-call"
+            if category == FailureCategory.PROVIDER_ERROR
+            else f"model-error:{type(exc).__name__}"
+        )
         self._fail_open_job(session_id, job_id, stage, message, exc, category)
-        self._emit(session_id, "model.failed", {
-            "stage": stage, "job_id": job_id,
-            "error_type": type(exc).__name__, "error": str(exc)[:2000],
-        })
+        self._emit(
+            session_id,
+            "model.failed",
+            {
+                "stage": stage,
+                "job_id": job_id,
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:2000],
+            },
+        )
         self._fail_session(session_id, message, category)
-        self._emit(session_id, "research.failed", {
-            "stage": stage, "failure_category": category.value,
-            "reason": reason,
-        })
+        self._emit(
+            session_id,
+            "research.failed",
+            {
+                "stage": stage,
+                "failure_category": category.value,
+                "reason": reason,
+            },
+        )
         self._emit(session_id, "wave.stopped", {"reason": reason, "stage": stage})
         try:
             if self.trace is not None:
@@ -621,31 +721,63 @@ class _LiveRun:
 
     def _model_at_stage(self, stage: str, session_id: str, job_id: str) -> Callable[[str], str]:
         """Wrap the live model so a failure persists before it propagates."""
+
         def _call(prompt: str) -> str:
             from time import perf_counter as _pc
 
             from app.redact import redact_text as _rt
+
             _t0 = _pc()
             try:
                 out = self.model(prompt)
                 _dur = (_pc() - _t0) * 1000.0
-                self._trace_record("model.completed", {"provider": self.provider, "model": self.model_name, "stage": stage, "job_id": job_id, "prompt": _rt(prompt)[:2000], "output": _rt(out)[:2000]}, _dur)
+                self._trace_record(
+                    "model.completed",
+                    {
+                        "provider": self.provider,
+                        "model": self.model_name,
+                        "stage": stage,
+                        "job_id": job_id,
+                        "prompt": _rt(prompt)[:2000],
+                        "output": _rt(out)[:2000],
+                    },
+                    _dur,
+                )
                 return out
             except Exception as exc:
                 _dur2 = (_pc() - _t0) * 1000.0
-                self._trace_record("model.failed", {"provider": self.provider, "model": self.model_name, "stage": stage, "job_id": job_id, "error": str(exc)[:2000]}, _dur2)
+                self._trace_record(
+                    "model.failed",
+                    {
+                        "provider": self.provider,
+                        "model": self.model_name,
+                        "stage": stage,
+                        "job_id": job_id,
+                        "error": str(exc)[:2000],
+                    },
+                    _dur2,
+                )
                 detail, category = self._persist_model_failure(session_id, job_id, stage, exc)
                 raise LiveModelError(session_id, stage, detail, category) from exc
+
         return _call
 
     def _attach_trace(self, session_id: str) -> None:
         """Create the eval trace and stamp its id on the session budget; raises on failure."""
         import subprocess as _sp
+
         try:
             _sha = _sp.check_output(["git", "rev-parse", "--short", "HEAD"], text=True, timeout=2).strip() or "unknown"
         except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             _sha = "unknown"
-        tr = create_trace(session_id=session_id, wave_id=self.wave_id, provider=self.provider, model=self.model_name, prompt_version="v1", git_sha=_sha)
+        tr = create_trace(
+            session_id=session_id,
+            wave_id=self.wave_id,
+            provider=self.provider,
+            model=self.model_name,
+            prompt_version="v1",
+            git_sha=_sha,
+        )
         self.trace, self.trace_id = tr, tr.trace_id
         try:
             with self._lock:
@@ -656,7 +788,6 @@ class _LiveRun:
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
         self._trace_record("trace.opened", {"trace_id": tr.trace_id, "session_id": session_id})
-
 
     def _create_session(self, q: str, aof: str, interrupt_after: str | None = None) -> str:
         _ = aof
@@ -688,12 +819,23 @@ class _LiveRun:
         sess = self.store.get_session(session_id)
         existing: list[Job] = self.store.list_jobs(session_id)
         updated, job = _jobs.create_job(
-            sess, existing, job_type=JobType.SOURCE_AGENT, owner="runner",
-            wave_id=wave, source_domain="SEC",
+            sess,
+            existing,
+            job_type=JobType.SOURCE_AGENT,
+            owner="runner",
+            wave_id=wave,
+            source_domain="SEC",
         )
         q = question if isinstance(question, str) and question.strip() else self.question
         tickers_json: list[JSONValue] = [t for t in self.scoped]
-        job = replace(job, diagnostics={"tickers": tickers_json, "question": q[:500], "as_of": self.as_of_str})
+        job = replace(
+            job,
+            diagnostics={
+                "tickers": tickers_json,
+                "question": q[:500],
+                "as_of": self.as_of_str,
+            },
+        )
         self.store.save_session(updated)
         self.store.save_job(job)
         self._emit(session_id, "job.created", {"job_id": job.job_id, "job_type": job.job_type})
@@ -716,14 +858,18 @@ class _LiveRun:
                     names.append({"name": cand})
         return names
 
-
     def _catalog_dispatch(self, name: str, args: dict[str, object]) -> dict[str, object]:
         """Discovery passthrough: timed dispatch, normalized match names for catalog tools."""
         from time import perf_counter as _pc2
+
         _t1 = _pc2()
         raw: dict[str, object] = self.dispatch(name, args)
         _d1 = (_pc2() - _t1) * 1000.0
-        self._trace_record("discovery.completed", {"tool": name, "args": args, "matches": raw.get("matches")}, _d1)
+        self._trace_record(
+            "discovery.completed",
+            {"tool": name, "args": args, "matches": raw.get("matches")},
+            _d1,
+        )
         if name == "search_tools" or name == "browse_tools":
             found: object = raw.get("matches")
             if isinstance(found, list):
@@ -733,13 +879,21 @@ class _LiveRun:
             return {"matches": self._match_names(inner)}
         return raw
 
-    def _action_key(self, inner: str, args: Mapping[str, object]) -> tuple[str, str, str, str, tuple[str, ...], str, str, str]:
+    def _action_key(
+        self, inner: str, args: Mapping[str, object]
+    ) -> tuple[str, str, str, str, tuple[str, ...], str, str, str]:
         """Semantic action key for the loop detector (source, tool, query, entity, forms, as_of, accession, objective)."""
         inner_args = _inner_args(args)
         forms: object = inner_args.get("forms")
-        entity: object = inner_args.get("ticker") or inner_args.get("identifier") or inner_args.get("entity") or inner_args.get("query")
+        entity: object = (
+            inner_args.get("ticker")
+            or inner_args.get("identifier")
+            or inner_args.get("entity")
+            or inner_args.get("query")
+        )
         return normalize_research_action(
-            "sec", inner,
+            "sec",
+            inner,
             str(inner_args.get("query") or ""),
             str(entity or ""),
             forms if isinstance(forms, (list, tuple, str)) else (),
@@ -748,7 +902,9 @@ class _LiveRun:
             self.objective,
         )
 
-    def _guarded_tool_call(self, sid: str, inner: str, name: str, args: dict[str, object]) -> tuple[dict[str, object], float]:
+    def _guarded_tool_call(
+        self, sid: str, inner: str, name: str, args: dict[str, object]
+    ) -> tuple[dict[str, object], float]:
         """Policy + loop gates, timed dispatch, deadline and error checks; returns (raw, duration_ms).
 
         Tool volume is unlimited by default; an explicit int BudgetLedger limit
@@ -767,17 +923,29 @@ class _LiveRun:
             raise ValueError("policy_rejection: explicit tool limit reached")
         action = self._action_key(inner, args)
         if self.loops.precheck(action)["duplicate"]:
-            self._emit(sid, "research_loop_detected", {
-                "tool": inner, "action": list(action), "query": action[2], "reason": "research_loop_detected",
-            })
+            self._emit(
+                sid,
+                "research_loop_detected",
+                {
+                    "tool": inner,
+                    "action": list(action),
+                    "query": action[2],
+                    "reason": "research_loop_detected",
+                },
+            )
             return {"evidence_ids": []}, 0.0
         from time import perf_counter as _pc
+
         _t0 = _pc()
         try:
             raw: dict[str, object] = self.dispatch(name, args)
         except Exception as exc:
             _dur_e = (_pc() - _t0) * 1000.0
-            self._trace_record("tool.failed", {"tool": inner, "args": args, "error": str(exc)[:2000]}, _dur_e)
+            self._trace_record(
+                "tool.failed",
+                {"tool": inner, "args": args, "error": str(exc)[:2000]},
+                _dur_e,
+            )
             raise
         _dur = (_pc() - _t0) * 1000.0
         self._raise_if_past_deadline(sid, inner, args, _dur)
@@ -789,14 +957,39 @@ class _LiveRun:
             error_type = str(raw.get("error_type") or "")
             reason = str(raw.get("error"))[:2000]
             if error_type in FATAL_TOOL_ERRORS:
-                self._emit(sid, "tool.failed", {"tool": inner, "error_type": error_type, "error": reason})
-                self._trace_record("tool.failed", {"tool": inner, "args": args, "error_type": error_type, "error": reason}, _dur)
+                self._emit(
+                    sid,
+                    "tool.failed",
+                    {"tool": inner, "error_type": error_type, "error": reason},
+                )
+                self._trace_record(
+                    "tool.failed",
+                    {
+                        "tool": inner,
+                        "args": args,
+                        "error_type": error_type,
+                        "error": reason,
+                    },
+                    _dur,
+                )
                 raise ValueError(f"TOOL_ERROR: {inner} failed: {raw.get('error')}")
-            self._emit(sid, "tool.rejected", {"tool": inner, "error_type": error_type, "error": reason})
-            self._trace_record("tool.rejected", {"tool": inner, "args": args, "error_type": error_type, "error": reason}, _dur)
+            self._emit(
+                sid,
+                "tool.rejected",
+                {"tool": inner, "error_type": error_type, "error": reason},
+            )
+            self._trace_record(
+                "tool.rejected",
+                {
+                    "tool": inner,
+                    "args": args,
+                    "error_type": error_type,
+                    "error": reason,
+                },
+                _dur,
+            )
             return raw, _dur
         return raw, _dur
-
 
     def _raise_if_past_deadline(self, sid: str, inner: str, args: dict[str, object], _dur: float) -> None:
         """Timeout when the scout deadline passed during dispatch; tolerant of naive datetimes."""
@@ -804,20 +997,33 @@ class _LiveRun:
             _sdl = self._scout_deadline
             if _sdl is not None:
                 from datetime import datetime as _dts
-                from datetime import timezone as _tzs
-                _nows = _dts.now(_tzs.utc)
-                _sdlc = _sdl if _sdl.tzinfo is not None else _sdl.replace(tzinfo=_tzs.utc)
+
+                _nows = _dts.now(UTC)
+                _sdlc = _sdl if _sdl.tzinfo is not None else _sdl.replace(tzinfo=UTC)
                 if _nows >= _sdlc:
-                    self._emit(sid, "tool.failed", {"tool": inner, "error": "scout deadline exceeded"})
-                    self._trace_record("tool.failed", {"tool": inner, "args": args, "error": "scout deadline exceeded"}, _dur)
+                    self._emit(
+                        sid,
+                        "tool.failed",
+                        {"tool": inner, "error": "scout deadline exceeded"},
+                    )
+                    self._trace_record(
+                        "tool.failed",
+                        {
+                            "tool": inner,
+                            "args": args,
+                            "error": "scout deadline exceeded",
+                        },
+                        _dur,
+                    )
                     raise TimeoutError("scout deadline exceeded after dispatch")
         except TimeoutError:
             raise
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
 
-
-    def _register_rejected_action(self, inner: str, args: Mapping[str, object], raw: dict[str, object]) -> dict[str, object]:
+    def _register_rejected_action(
+        self, inner: str, args: Mapping[str, object], raw: dict[str, object]
+    ) -> dict[str, object]:
         """Hand an agent-visible tool error back and register it as a zero-progress action.
 
         A rejected result never reaches ``_build_evidence_record`` /
@@ -843,8 +1049,17 @@ class _LiveRun:
                 out[key] = raw[key]
         return out
 
-
-    def _build_evidence_record(self, sid: str, wave: int, q: str, src_job_id: str, inner: str, args: Mapping[str, object], raw: dict[str, object], eid: str) -> Evidence:
+    def _build_evidence_record(
+        self,
+        sid: str,
+        wave: int,
+        q: str,
+        src_job_id: str,
+        inner: str,
+        args: Mapping[str, object],
+        raw: dict[str, object],
+        eid: str,
+    ) -> Evidence:
         """One ledger record from a successful tool result; timestamps never invented.
 
         Only document-opening tools (``_DOCUMENT_TOOLS``) can become evidence, and
@@ -862,58 +1077,182 @@ class _LiveRun:
         is_evidence = kind == "evidence"
         query = _first_str(inner_args, ("query",))
         search_id = _first_str(raw, ("search_id",))
-        content = _record_content(raw, passage, is_evidence)
         known_at = _extract_known_at(raw)
+        provenance: dict[str, JSONValue] | None = None
+        if is_evidence:
+            # The archive, never the model or the tool payload, is authoritative for
+            # the admitted text: reload the handle the document read returned and
+            # slice the passage out of that. A result without a canonical handle, or
+            # one the archive no longer reproduces, stays a navigation artifact.
+            provenance, kind, is_evidence, passage = self._materialize_document_handle(
+                sid, eid, raw.get("source_handle"), passage, known_at
+            )
+        content = _record_content(raw, passage, is_evidence)
         if "\x00" in content:
             # NULs mean the bytes are not readable text, and POSIX argv cannot carry
             # them at all, so this can never ground a claim. Keep a stripped navigation
             # record and say why the evidence candidacy was dropped.
             content = content.replace("\x00", "")
-            kind, is_evidence = "discovery", False
-            self._emit(sid, "evidence.rejected", rejection_payload(
-                eid, "binary_source_unreadable",
-                known_at.isoformat() if known_at is not None else None, self.as_of,
-            ))
+            kind, is_evidence, provenance = "discovery", False, None
+            self._emit(
+                sid,
+                "evidence.rejected",
+                rejection_payload(
+                    eid,
+                    "binary_source_unreadable",
+                    known_at.isoformat() if known_at is not None else None,
+                    self.as_of,
+                ),
+            )
         subject, claim_text = _record_labels(q, is_evidence, inner, accession, document_name, self.scoped)
-        metadata: dict[str, JSONValue] = {"tool": inner, "tickers": ", ".join(self.scoped), "record_kind": kind}
+        metadata: dict[str, JSONValue] = {
+            "tool": inner,
+            "tickers": ", ".join(self.scoped),
+            "record_kind": kind,
+        }
         scope = _first_str(inner_args, ("ticker", "cik"))
-        for key, value in (("accession_no", accession), ("document_name", document_name),
-                           ("query", query), ("search_id", search_id), ("search_scope", scope)):
+        for key, value in (
+            ("accession_no", accession),
+            ("document_name", document_name),
+            ("query", query),
+            ("search_id", search_id),
+            ("search_scope", scope),
+        ):
             if value:
                 metadata[key] = value
         return Evidence(
-            evidence_id=eid, session_id=sid, wave_id=wave,
-            source_type="sec", source_name=inner, subject=subject, claim_text=claim_text,
+            evidence_id=eid,
+            session_id=sid,
+            wave_id=wave,
+            source_type="sec",
+            source_name=inner,
+            subject=subject,
+            claim_text=claim_text,
             content=content,
             content_hash=evidence_content_hash(content),
-            retrieved_at=utcnow(), source_uri=uri,
+            retrieved_at=utcnow(),
+            source_uri=uri,
             source_record_id=_record_ref(is_evidence, ref, search_id, accession),
-            published_at=None, known_at=known_at, effective_at=None,
-            job_id=src_job_id or None, agent_id="sec_scout",
-            supports=(), contradicts=(), confidence=None, quality=None,
+            published_at=None,
+            known_at=known_at,
+            effective_at=None,
+            job_id=src_job_id or None,
+            agent_id="sec_scout",
+            supports=(),
+            contradicts=(),
+            confidence=None,
+            quality=None,
             metadata=metadata,
             superseded_by=None,
             record_kind=kind,
-            provenance=_record_provenance(is_evidence, accession=accession, document_name=document_name,
-                                          passage=passage, uri=uri, search_id=search_id, query=query),
+            provenance=(
+                provenance
+                if provenance is not None
+                else _record_provenance(
+                    False,
+                    accession=accession,
+                    document_name=document_name,
+                    passage=passage,
+                    uri=uri,
+                    search_id=search_id,
+                    query=query,
+                )
+            ),
         )
 
+    def _materialize_document_handle(
+        self,
+        sid: str,
+        eid: str,
+        handle: object,
+        locator: str,
+        known_at: datetime | None,
+    ) -> tuple[dict[str, JSONValue] | None, str, bool, str]:
+        """(provenance, record kind, is_evidence, passage) for one document result.
 
-    def _ingest_tool_evidence(self, sid: str, inner: str, args: dict[str, object], record: Evidence, eid: str, _dur: float) -> dict[str, object]:
+        The kernel reloads the handle's window from the SEC archive and slices the
+        passage out of it; a missing, stale, or unreadable handle demotes the result
+        to a navigation record (journaled), so a claim can never ground on text the
+        archive does not reproduce.
+        """
+        from app.research.service import materialize_sec_passage
+
+        if not isinstance(handle, Mapping):
+            self._emit(
+                sid,
+                "evidence.rejected",
+                rejection_payload(
+                    eid,
+                    "no_canonical_source_handle",
+                    known_at.isoformat() if known_at is not None else None,
+                    self.as_of,
+                ),
+            )
+            return None, "discovery", False, locator
+        try:
+            provenance = materialize_sec_passage(handle, locator)
+        except ValueError as exc:
+            self._emit(
+                sid,
+                "evidence.rejected",
+                rejection_payload(
+                    eid,
+                    str(exc)[:300],
+                    known_at.isoformat() if known_at is not None else None,
+                    self.as_of,
+                ),
+            )
+            return None, "discovery", False, locator
+        passage = provenance.get("passage")
+        return (
+            provenance,
+            "evidence",
+            True,
+            passage if isinstance(passage, str) else locator,
+        )
+
+    def _ingest_tool_evidence(
+        self,
+        sid: str,
+        inner: str,
+        args: dict[str, object],
+        record: Evidence,
+        eid: str,
+        _dur: float,
+    ) -> dict[str, object]:
         """Ledger + store persist for one tool record; rejected records yield empty ids.
 
         Discovery records persist for provenance but are never advertised as
         citable evidence ids, so no claim can ground on a navigation artifact.
         """
         if record.record_kind == "discovery":
-            self._emit(sid, "discovery.recorded", {
-                "record_id": eid, "tool": inner,
-                "query": record.metadata.get("query"), "search_id": record.metadata.get("search_id"),
-            })
+            self._emit(
+                sid,
+                "discovery.recorded",
+                {
+                    "record_id": eid,
+                    "tool": inner,
+                    "query": record.metadata.get("query"),
+                    "search_id": record.metadata.get("search_id"),
+                },
+            )
         try:
-            ingest_evidence(self.ledger, record, as_of=self.as_of, on_reject=lambda t, p: self._emit(sid, t, p))
+            ingest_evidence(
+                self.ledger,
+                record,
+                as_of=self.as_of,
+                on_reject=lambda t, p: self._emit(sid, t, p),
+            )
         except EvidenceRejectedError as exc:
-            self._trace_record("tool.failed", {"tool": inner, "args": args, "error": f"evidence.rejected:{exc.reason if hasattr(exc, 'reason') else exc}"[:2000]}, _dur)
+            self._trace_record(
+                "tool.failed",
+                {
+                    "tool": inner,
+                    "args": args,
+                    "error": f"evidence.rejected:{exc.reason if hasattr(exc, 'reason') else exc}"[:2000],
+                },
+                _dur,
+            )
             return {"evidence_ids": []}
         try:
             with self._lock:
@@ -922,19 +1261,31 @@ class _LiveRun:
             pass
         if record.record_kind == "discovery":
             self._emit(sid, "discovery.ingested", {"record_id": eid, "tool": inner})
-            self._trace_record("tool.completed", {"tool": inner, "args": args, "record_kind": "discovery"}, _dur)
+            self._trace_record(
+                "tool.completed",
+                {"tool": inner, "args": args, "record_kind": "discovery"},
+                _dur,
+            )
             return {"evidence_ids": []}
         self._emit(sid, "evidence.ingested", {"evidence_id": eid, "tool": inner})
         self._trace_record("tool.completed", {"tool": inner, "args": args, "evidence_id": eid}, _dur)
         known_at = record.known_at
-        return {"evidence_ids": [{"evidence_id": eid, "known_at": known_at.isoformat() if known_at else None, "claim_text": record.claim_text[:500], "content_snippet": record.content[:500]}]}
+        return {
+            "evidence_ids": [
+                {
+                    "evidence_id": eid,
+                    "known_at": known_at.isoformat() if known_at else None,
+                    "claim_text": record.claim_text[:500],
+                    "content_snippet": record.content[:500],
+                }
+            ]
+        }
 
     @staticmethod
     def _finding_text(item: Mapping[str, object]) -> str | None:
         """Stripped finding text or None when blank."""
         txt = item.get("text")
         return txt.strip()[:500] if isinstance(txt, str) and txt.strip() else None
-
 
     @staticmethod
     def _finding_ids(item: Mapping[str, object]) -> list[str] | None:
@@ -945,11 +1296,11 @@ class _LiveRun:
         eids = [e for e in ids if isinstance(e, str) and e]
         return eids or None
 
-
     @staticmethod
     def _valid_finding(item: object) -> object | None:
         """One valid finding dict or None: non-empty text plus a string evidence id."""
         from app.research.agents import GroundedClaim as _GC
+
         if not isinstance(item, Mapping):
             return None
         text = _LiveRun._finding_text(item)
@@ -963,7 +1314,6 @@ class _LiveRun:
             evidence_ids=eids,
         )
 
-
     @staticmethod
     def _coerce_reused_findings(raw_findings: object) -> list[object]:
         """Valid finding dicts only: non-empty text plus at least one string evidence id."""
@@ -974,7 +1324,6 @@ class _LiveRun:
             if (found := _LiveRun._valid_finding(item)) is not None:
                 out.append(found)
         return out
-
 
     @staticmethod
     def _valid_request(item: object) -> ResearchRequest | None:
@@ -988,10 +1337,15 @@ class _LiveRun:
             material_raw: object = item.get("why_material", "")
             domain_raw: object = item.get("requested_source_domain", "SEC")
             gain_raw: object = item.get("expected_gain", "medium")
-            return ResearchRequest(question=str(question_raw), why_material=str(material_raw), requested_source_domain=str(domain_raw), expected_gain=str(gain_raw), requesting_agents=agents)
+            return ResearchRequest(
+                question=str(question_raw),
+                why_material=str(material_raw),
+                requested_source_domain=str(domain_raw),
+                expected_gain=str(gain_raw),
+                requesting_agents=agents,
+            )
         except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             return None
-
 
     @staticmethod
     def _coerce_reused_requests(req_raw: object) -> list[ResearchRequest]:
@@ -1005,34 +1359,59 @@ class _LiveRun:
                 out.append(req)
         return out
 
-
-    def _reused_scout_result(self, sid: str, assignment: ScoutAssignment, child: Job, res: Mapping[str, object]) -> ScoutResult:
+    def _reused_scout_result(
+        self,
+        sid: str,
+        assignment: ScoutAssignment,
+        child: Job,
+        res: Mapping[str, object],
+    ) -> ScoutResult:
         """Rebuild a ScoutResult from a completed child job; emits scout.reused."""
         from app.research.agents import GroundedClaim as _GC2
+
         unk_raw = res.get("unknowns")
         lim_raw = res.get("limitations")
-        self._emit(sid, "scout.reused", {"job_id": child.job_id, "assignment_id": assignment.assignment_id})
-        self._trace_record("scout.reused", {"job_id": child.job_id, "assignment_id": assignment.assignment_id})
+        self._emit(
+            sid,
+            "scout.reused",
+            {"job_id": child.job_id, "assignment_id": assignment.assignment_id},
+        )
+        self._trace_record(
+            "scout.reused",
+            {"job_id": child.job_id, "assignment_id": assignment.assignment_id},
+        )
         raw_findings: list[object] = _LiveRun._coerce_reused_findings(res.get("findings"))
         findings: list[_GC2] = [f for f in raw_findings if isinstance(f, _GC2)]
         return ScoutResult(
-            assignment_id=assignment.assignment_id, session_id=sid, coverage=str(res.get("coverage", "reused")),
+            assignment_id=assignment.assignment_id,
+            session_id=sid,
+            coverage=str(res.get("coverage", "reused")),
             findings=findings,
             unknowns=[e for e in unk_raw if isinstance(e, str)] if isinstance(unk_raw, list) else [],
             limitations=[e for e in lim_raw if isinstance(e, str)] if isinstance(lim_raw, list) else [],
             follow_up_requests=_LiveRun._coerce_reused_requests(res.get("follow_up_requests")),
         )
 
-
-    def _find_completed_scout(self, sid: str, src_job_id: str, assignment: ScoutAssignment, existing_jobs: list[Job]) -> ScoutResult | None:
+    def _find_completed_scout(
+        self,
+        sid: str,
+        src_job_id: str,
+        assignment: ScoutAssignment,
+        existing_jobs: list[Job],
+    ) -> ScoutResult | None:
         """Completed child with the same assignment id; None when the scout must run."""
         for child in existing_jobs:
             if child.parent_job_id != src_job_id or child.job_type != JobType.SCOUT.value:
                 continue
             res = child.result or {}
-            if res.get("assignment_id") == assignment.assignment_id and child.status == "completed" and "findings" in res:
+            if (
+                res.get("assignment_id") == assignment.assignment_id
+                and child.status == "completed"
+                and "findings" in res
+            ):
                 return self._reused_scout_result(sid, assignment, child, res)
         return None
+
     def _start_reused_scout(self, sid: str, reusable: Job, assignment_id: str = "") -> Job:
         """Start a queued scout child and journal the retry."""
         if reusable.status == "queued":
@@ -1043,48 +1422,104 @@ class _LiveRun:
         self._trace_record("scout.retried", {"job_id": reusable.job_id, "assignment_id": aid})
         return reusable
 
-
-    def _create_scout_job(self, sid: str, wave: int, src_job_id: str, assignment: ScoutAssignment, existing_jobs: list[Job]) -> Job:
+    def _create_scout_job(
+        self,
+        sid: str,
+        wave: int,
+        src_job_id: str,
+        assignment: ScoutAssignment,
+        existing_jobs: list[Job],
+    ) -> Job:
         """Create + start a fresh scout child for one assignment."""
         from datetime import timedelta
+
         sess_now = self.store.get_session(sid)
-        deadline = ((utcnow() + timedelta(seconds=assignment.time_budget_s)).isoformat()
-                    if isinstance(assignment.time_budget_s, (int, float)) and not isinstance(assignment.time_budget_s, bool) and assignment.time_budget_s > 0
-                    else None)
-        sess_upd, scout_job = _jobs.create_job(sess_now, existing_jobs, job_type=JobType.SCOUT, owner="runner", wave_id=wave, parent_job_id=src_job_id, source_domain="SEC", tool_budget=assignment.max_tool_calls, deadline=deadline)
+        deadline = (
+            (utcnow() + timedelta(seconds=assignment.time_budget_s)).isoformat()
+            if isinstance(assignment.time_budget_s, (int, float))
+            and not isinstance(assignment.time_budget_s, bool)
+            and assignment.time_budget_s > 0
+            else None
+        )
+        sess_upd, scout_job = _jobs.create_job(
+            sess_now,
+            existing_jobs,
+            job_type=JobType.SCOUT,
+            owner="runner",
+            wave_id=wave,
+            parent_job_id=src_job_id,
+            source_domain="SEC",
+            tool_budget=assignment.max_tool_calls,
+            deadline=deadline,
+        )
         tickers_j: list[JSONValue] = [t for t in assignment.tickers]
-        scout_job = replace(scout_job, diagnostics={"assignment_id": assignment.assignment_id, "role": assignment.role, "question": assignment.question[:500], "tickers": tickers_j, "as_of": assignment.as_of, "max_tool_calls": assignment.max_tool_calls, "time_budget_s": assignment.time_budget_s, "allowed_domain": assignment.allowed_domain, "session_id": assignment.session_id})
+        scout_job = replace(
+            scout_job,
+            diagnostics={
+                "assignment_id": assignment.assignment_id,
+                "role": assignment.role,
+                "question": assignment.question[:500],
+                "tickers": tickers_j,
+                "as_of": assignment.as_of,
+                "max_tool_calls": assignment.max_tool_calls,
+                "time_budget_s": assignment.time_budget_s,
+                "allowed_domain": assignment.allowed_domain,
+                "session_id": assignment.session_id,
+            },
+        )
         self.store.save_session(sess_upd)
         self.store.save_job(scout_job)
-        self._emit(sid, "job.created", {"job_id": scout_job.job_id, "job_type": scout_job.job_type, "assignment_id": assignment.assignment_id})
+        self._emit(
+            sid,
+            "job.created",
+            {
+                "job_id": scout_job.job_id,
+                "job_type": scout_job.job_type,
+                "assignment_id": assignment.assignment_id,
+            },
+        )
         self.store.save_job(_jobs.start_job(scout_job))
         return scout_job
 
-
-    def _open_or_reuse_scout_job(self, sid: str, wave: int, src_job_id: str, assignment: ScoutAssignment, existing_jobs: list[Job]) -> Job:
+    def _open_or_reuse_scout_job(
+        self,
+        sid: str,
+        wave: int,
+        src_job_id: str,
+        assignment: ScoutAssignment,
+        existing_jobs: list[Job],
+    ) -> Job:
         """Reuse a queued/running scout child or create + start a fresh one."""
-        reusable = next((c for c in existing_jobs if c.parent_job_id == src_job_id and c.job_type == JobType.SCOUT.value and (c.diagnostics or {}).get("assignment_id") == assignment.assignment_id and c.status in ("queued", "running")), None)
+        reusable = next(
+            (
+                c
+                for c in existing_jobs
+                if c.parent_job_id == src_job_id
+                and c.job_type == JobType.SCOUT.value
+                and (c.diagnostics or {}).get("assignment_id") == assignment.assignment_id
+                and c.status in ("queued", "running")
+            ),
+            None,
+        )
         if reusable is not None:
             return self._start_reused_scout(sid, reusable, assignment.assignment_id)
         return self._create_scout_job(sid, wave, src_job_id, assignment, existing_jobs)
 
-
     def _raise_if_deadline_exceeded(self, what: str, name: str = "") -> None:
         """Timeout when the scout deadline already passed; tolerant of naive datetimes."""
         from datetime import datetime as _dt
-        from datetime import timezone as _tz
+
         _dl = self._scout_deadline
         if _dl is None:
             return
         try:
-            _dlc = _dl if _dl.tzinfo is not None else _dl.replace(tzinfo=_tz.utc)
-            if _dt.now(_tz.utc) >= _dlc:
+            _dlc = _dl if _dl.tzinfo is not None else _dl.replace(tzinfo=UTC)
+            if _dt.now(UTC) >= _dlc:
                 raise TimeoutError(f"scout deadline exceeded {what}{name}")
         except TimeoutError:
             raise
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
-
 
     def _seed_scout_deadline(self, scout_job: Job, assignment: ScoutAssignment) -> None:
         """Seed the scout deadline from the job; None when neither job nor assignment sets one."""
@@ -1092,11 +1527,16 @@ class _LiveRun:
             _dl = scout_job.deadline
         except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             _dl = None
-        if _dl is None and isinstance(assignment.time_budget_s, (int, float)) and not isinstance(assignment.time_budget_s, bool) and assignment.time_budget_s > 0:
+        if (
+            _dl is None
+            and isinstance(assignment.time_budget_s, (int, float))
+            and not isinstance(assignment.time_budget_s, bool)
+            and assignment.time_budget_s > 0
+        ):
             from datetime import timedelta as _td
+
             _dl = utcnow() + _td(seconds=assignment.time_budget_s)
         self._scout_deadline = _dl
-
 
     @staticmethod
     def _categorize_scout_error(exc: Exception, origin: str) -> FailureCategory:
@@ -1111,7 +1551,6 @@ class _LiveRun:
             return FailureCategory.MODEL_ERROR
         return FailureCategory.TOOL_ERROR
 
-
     def _cancel_scout_job(self, sid: str, scout_job: Job, exc: Exception, pre_cat: object) -> None:
         """Cancel one scout child on cancellation; tags the exception for the outer handler."""
         try:
@@ -1121,9 +1560,9 @@ class _LiveRun:
             self._emit(sid, "job.cancelled", {"job_id": scout_job.job_id})
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
-        setattr(exc, "_failure_category", pre_cat if isinstance(pre_cat, FailureCategory) else FailureCategory.TOOL_ERROR)  # noqa: B010 - dynamic boundary, no stubs; getattr keeps checker green
+        cat_value = pre_cat if isinstance(pre_cat, FailureCategory) else FailureCategory.TOOL_ERROR
+        setattr(exc, "_failure_category", cat_value)  # noqa: B010 - dynamic boundary; keeps checker green
         setattr(exc, "_scout_cancelled", True)  # noqa: B010 - dynamic boundary, no stubs; getattr keeps checker green
-
 
     def _fail_scout_job(self, sid: str, scout_job: Job, exc: Exception, cat: FailureCategory, msg: str) -> None:
         """Fail one scout child and journal it; tags the exception category."""
@@ -1131,29 +1570,57 @@ class _LiveRun:
             cur2 = self.store.get_job(scout_job.job_id)
             if cur2.status in ("queued", "running"):
                 self.store.save_job(_jobs.fail_job(cur2, cat, f"scout:{type(exc).__name__}:{msg}"[:2000]))
-            self._emit(sid, "job.failed", {"job_id": scout_job.job_id, "failure_category": cat.value})
+            self._emit(
+                sid,
+                "job.failed",
+                {"job_id": scout_job.job_id, "failure_category": cat.value},
+            )
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
         setattr(exc, "_failure_category", cat)  # noqa: B010 - dynamic boundary, no stubs; getattr keeps checker green
-
 
     @staticmethod
     def _is_scout_cancelled(exc: Exception) -> bool:
         """True when the scout error signals cancellation."""
         low = (type(exc).__name__ + " " + str(exc)).lower()
-        return "cancel" in type(exc).__name__.lower() or "cancelled" in low or "canceled" in low or bool(getattr(exc, "_scout_cancelled", False))
-
+        return (
+            "cancel" in type(exc).__name__.lower()
+            or "cancelled" in low
+            or "canceled" in low
+            or bool(getattr(exc, "_scout_cancelled", False))
+        )
 
     def _complete_scout_job(self, sid: str, assignment: ScoutAssignment, scout_job: Job, result: ScoutResult) -> None:
         """Persist one scout result onto its job and journal completion."""
         req_out: list[JSONValue] = []
         for req in result.follow_up_requests:
             agents_out: list[JSONValue] = [a for a in req.requesting_agents]
-            req_out.append({"question": req.question, "why_material": req.why_material, "requested_source_domain": req.requested_source_domain, "expected_gain": req.expected_gain, "requesting_agents": agents_out})
-        findings_out: list[JSONValue] = [{"text": c.text, "evidence_ids": list(c.evidence_ids)} for c in result.findings]
-        self.store.save_job(_jobs.complete_job(self.store.get_job(scout_job.job_id), result={"assignment_id": assignment.assignment_id, "findings": findings_out, "coverage": result.coverage, "unknowns": list(result.unknowns), "limitations": list(result.limitations), "follow_up_requests": req_out}))
+            req_out.append(
+                {
+                    "question": req.question,
+                    "why_material": req.why_material,
+                    "requested_source_domain": req.requested_source_domain,
+                    "expected_gain": req.expected_gain,
+                    "requesting_agents": agents_out,
+                }
+            )
+        findings_out: list[JSONValue] = [
+            {"text": c.text, "evidence_ids": list(c.evidence_ids)} for c in result.findings
+        ]
+        self.store.save_job(
+            _jobs.complete_job(
+                self.store.get_job(scout_job.job_id),
+                result={
+                    "assignment_id": assignment.assignment_id,
+                    "findings": findings_out,
+                    "coverage": result.coverage,
+                    "unknowns": list(result.unknowns),
+                    "limitations": list(result.limitations),
+                    "follow_up_requests": req_out,
+                },
+            )
+        )
         self._emit(sid, "job.completed", {"job_id": scout_job.job_id})
-
 
     def _scout_model_call(self, sid: str, prefix: str, scout_job: Job, scout_calls: list[int], prompt: str) -> str:
         """One scout model call with pre/post deadline guards; tags model origin on error."""
@@ -1162,24 +1629,54 @@ class _LiveRun:
         from time import perf_counter as _pc
 
         from app.redact import redact_text as _rt
+
         _t0 = _pc()
         try:
             self._raise_if_deadline_exceeded("before model call")
             out = self.model(prompt)
             self._raise_if_deadline_exceeded("after model call")
             _dur = (_pc() - _t0) * 1000.0
-            self._trace_record("model.completed", {"provider": self.provider, "model": self.model_name, "stage": f"{prefix}scout", "job_id": scout_job.job_id, "prompt": _rt(prompt)[:2000], "output": _rt(out)[:2000]}, _dur)
+            self._trace_record(
+                "model.completed",
+                {
+                    "provider": self.provider,
+                    "model": self.model_name,
+                    "stage": f"{prefix}scout",
+                    "job_id": scout_job.job_id,
+                    "prompt": _rt(prompt)[:2000],
+                    "output": _rt(out)[:2000],
+                },
+                _dur,
+            )
             return out
         except Exception as exc:
             _dur2 = (_pc() - _t0) * 1000.0
-            self._trace_record("model.failed", {"provider": self.provider, "model": self.model_name, "stage": f"{prefix}scout", "job_id": scout_job.job_id, "error": str(exc)[:2000]}, _dur2)
+            self._trace_record(
+                "model.failed",
+                {
+                    "provider": self.provider,
+                    "model": self.model_name,
+                    "stage": f"{prefix}scout",
+                    "job_id": scout_job.job_id,
+                    "error": str(exc)[:2000],
+                },
+                _dur2,
+            )
             setattr(exc, "_scout_origin", "model")  # noqa: B010 - dynamic boundary, no stubs; getattr keeps checker green
             raise
 
-
-    def _run_scout_assignment(self, sid: str, assignment: ScoutAssignment, scout_job: Job, dispatch_fn: Callable[[str, dict[str, object]], dict[str, object]], model_fn: Callable[[str], str], journal_fn: Callable[[str, dict[str, object]], None] | None) -> ScoutResult:
+    def _run_scout_assignment(
+        self,
+        sid: str,
+        assignment: ScoutAssignment,
+        scout_job: Job,
+        dispatch_fn: Callable[[str, dict[str, object]], dict[str, object]],
+        model_fn: Callable[[str], str],
+        journal_fn: Callable[[str, dict[str, object]], None] | None,
+    ) -> ScoutResult:
         """Run one scout with deadline reset; cancels or fails the child on error."""
         from app.research.agents.scout import run_scout as _run_one
+
         try:
             try:
                 return _run_one(assignment, dispatch=dispatch_fn, model=model_fn, journal=journal_fn)
@@ -1196,8 +1693,9 @@ class _LiveRun:
             self._fail_scout_job(sid, scout_job, exc, cat, msg)
             raise
 
-
-    def _degrade_scout_assignment(self, sid: str, assignment: ScoutAssignment, scout_job: Job, exc: Exception) -> ScoutResult:
+    def _degrade_scout_assignment(
+        self, sid: str, assignment: ScoutAssignment, scout_job: Job, exc: Exception
+    ) -> ScoutResult:
         """Turn one failed scout assignment into an assignment-scoped limitation.
 
         A slow provider, a crashed model call, or a model-output failure means
@@ -1215,10 +1713,16 @@ class _LiveRun:
         if category not in SCOUT_ASSIGNMENT_ERRORS:
             raise exc
         detail = f"{type(exc).__name__}: {exc}"[:500]
-        self._emit(sid, "scout.degraded", {
-            "job_id": scout_job.job_id, "assignment_id": assignment.assignment_id,
-            "failure_category": category.value, "error": detail,
-        })
+        self._emit(
+            sid,
+            "scout.degraded",
+            {
+                "job_id": scout_job.job_id,
+                "assignment_id": assignment.assignment_id,
+                "failure_category": category.value,
+                "error": detail,
+            },
+        )
         return ScoutResult(
             assignment_id=assignment.assignment_id,
             session_id=assignment.session_id,
@@ -1229,12 +1733,10 @@ class _LiveRun:
             follow_up_requests=[],
         )
 
-
     @staticmethod
     def _is_timeout_text(low: str) -> bool:
         """Timeout arm: timeout/expired/timed_out."""
         return "timeout" in low or "expired" in low or "timed_out" in low
-
 
     @staticmethod
     def _loop_category(low: str) -> FailureCategory | None:
@@ -1245,7 +1747,6 @@ class _LiveRun:
             return FailureCategory.DUPLICATE_RESEARCH_ACTION
         return None
 
-
     @staticmethod
     def _policy_category(low: str) -> FailureCategory | None:
         """Policy arms: explicit rejection > generic policy/denied."""
@@ -1254,7 +1755,6 @@ class _LiveRun:
         if "policy" in low or "denied" in low:
             return FailureCategory.POLICY_DENIED
         return None
-
 
     @staticmethod
     def _ladder_category(low: str) -> FailureCategory | None:
@@ -1266,7 +1766,6 @@ class _LiveRun:
             return hit
         return _LiveRun._policy_category(low)
 
-
     @staticmethod
     def _categorize_fetch_error(exc: Exception) -> FailureCategory:
         """Category for a fetch failure: pre-tagged wins, else keyword ladder."""
@@ -1276,8 +1775,15 @@ class _LiveRun:
         low_all = (type(exc).__name__ + " " + str(exc)).lower()
         return _LiveRun._ladder_category(low_all) or FailureCategory.TOOL_ERROR
 
-
-    def _fail_source_job(self, sid: str, src_job_id: str, cat: FailureCategory, message: str, exc: Exception, cancelled: bool) -> None:
+    def _fail_source_job(
+        self,
+        sid: str,
+        src_job_id: str,
+        cat: FailureCategory,
+        message: str,
+        exc: Exception,
+        cancelled: bool,
+    ) -> None:
         """Cancel or fail the source job on fetch error; silent when already closed."""
         try:
             src_job = self.store.get_job(src_job_id)
@@ -1287,22 +1793,33 @@ class _LiveRun:
                     self._emit(sid, "job.cancelled", {"job_id": src_job_id})
                 else:
                     self.store.save_job(_jobs.fail_job(src_job, cat, message))
-                    self._emit(sid, "job.failed", {"job_id": src_job_id, "stage": "source-scout", "failure_category": cat.value, "error": str(exc)[:2000]})
+                    self._emit(
+                        sid,
+                        "job.failed",
+                        {
+                            "job_id": src_job_id,
+                            "stage": "source-scout",
+                            "failure_category": cat.value,
+                            "error": str(exc)[:2000],
+                        },
+                    )
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
-
 
     def _fail_fetch_session(self, sid: str, cat: FailureCategory, message: str) -> None:
         """Stamp the fetch failure on the session and move it to FAILED."""
         try:
             sess_fail = self.store.get_session(sid)
-            sess_fail = replace(sess_fail, failure=Failure(category=cat.value, message=message), updated_at=utcnow())
+            sess_fail = replace(
+                sess_fail,
+                failure=Failure(category=cat.value, message=message),
+                updated_at=utcnow(),
+            )
             if sess_fail.status not in ("failed", "completed", "cancelled"):
                 sess_fail = _session.transition_session(sess_fail, SessionStatus.FAILED)
             self.store.save_session(sess_fail)
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
-
 
     def _raise_fetch_failed(self, sid: str, src_job_id: str, exc: Exception) -> None:
         """Persist a fetch failure on every surface and raise LiveModelError."""
@@ -1311,10 +1828,34 @@ class _LiveRun:
         detail = f"{type(exc).__name__}: {exc}"[:2000]
         message = f"source-scout: {detail}"[:2000]
         self._fail_source_job(sid, src_job_id, cat, message, exc, cancelled)
-        self._emit(sid, "model.failed", {"stage": "source-scout", "job_id": src_job_id, "error_type": type(exc).__name__, "error": str(exc)[:2000]})
+        self._emit(
+            sid,
+            "model.failed",
+            {
+                "stage": "source-scout",
+                "job_id": src_job_id,
+                "error_type": type(exc).__name__,
+                "error": str(exc)[:2000],
+            },
+        )
         self._fail_fetch_session(sid, cat, message)
-        self._emit(sid, "research.failed", {"stage": "source-scout", "failure_category": cat.value, "reason": "timeout:model-call" if cat == FailureCategory.TIMEOUT else f"scout:{cat.value}"})
-        self._emit(sid, "wave.stopped", {"reason": "timeout:model-call" if cat == FailureCategory.TIMEOUT else "failed:source-scout", "stage": "source-scout"})
+        self._emit(
+            sid,
+            "research.failed",
+            {
+                "stage": "source-scout",
+                "failure_category": cat.value,
+                "reason": "timeout:model-call" if cat == FailureCategory.TIMEOUT else f"scout:{cat.value}",
+            },
+        )
+        self._emit(
+            sid,
+            "wave.stopped",
+            {
+                "reason": "timeout:model-call" if cat == FailureCategory.TIMEOUT else "failed:source-scout",
+                "stage": "source-scout",
+            },
+        )
         self._save_budget_used(sid)
         try:
             if self.trace is not None:
@@ -1323,7 +1864,6 @@ class _LiveRun:
             pass
         raise LiveModelError(sid, "source-scout", detail, cat) from exc
 
-
     def _persist_fetch_success(self, sid: str, src_job_id: str, dossier_obj: object) -> list[str]:
         """Validate + persist the dossier, close the source job, return evidence ids."""
         ids: list[str] = []
@@ -1331,9 +1871,7 @@ class _LiveRun:
         if isinstance(dossier_obj, SECDossier):
             ids = list(dossier_obj.supporting_evidence_ids)
             did = dossier_obj.dossier_id
-            substantive = tuple(
-                e.evidence_id for e in self.ledger.list_session(sid) if e.record_kind == "evidence"
-            )
+            substantive = tuple(e.evidence_id for e in self.ledger.list_session(sid) if e.record_kind == "evidence")
             validate_dossier(dossier_obj, substantive)
             try:
                 self.store.save_dossier(dossier_to_dict(dossier_obj))
@@ -1358,13 +1896,11 @@ class _LiveRun:
         self._save_budget_used(sid)
         return ids
 
-
     def _fetch_wave(self, sid: str, wave: int, q: str, src_job_id: str, prefix: str) -> list[str]:
         existing_wave = sum(1 for e in self.ledger.list_session(sid) if e.wave_id == wave)
         counter: list[int] = [existing_wave]
         blocked: list[int] = [0]
         empty_actions: list[int] = [0]
-
 
         def _live_dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
             if name != "call_tool":
@@ -1394,14 +1930,16 @@ class _LiveRun:
             if not produced:
                 empty_actions[0] += 1
             return out
+
         scout_calls: list[int] = [0]
+
         def _scout_journal(event_type: str, payload: dict[str, object]) -> None:
             self._emit(sid, event_type, payload)
+
         def _scout_model(prompt: str) -> str:
             scout_calls[0] += 1
             stage: str = f"{prefix}scout-{scout_calls[0]}"
             return self._model_at_stage(stage, sid, src_job_id)(prompt)
-
 
         def _spawn_scout(assignment: ScoutAssignment) -> ScoutResult:
             existing_jobs: list[Job] = self.store.list_jobs(sid)
@@ -1410,6 +1948,7 @@ class _LiveRun:
                 return reused
             scout_job = self._open_or_reuse_scout_job(sid, wave, src_job_id, assignment, existing_jobs)
             self._seed_scout_deadline(scout_job, assignment)
+
             def _tagged_dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
                 try:
                     self._raise_if_deadline_exceeded("before dispatch ", name)
@@ -1417,18 +1956,35 @@ class _LiveRun:
                 except Exception as exc:
                     setattr(exc, "_scout_origin", "tool")  # noqa: B010 - dynamic boundary, no stubs; getattr keeps checker green
                     raise
+
             def _tagged_model(prompt: str) -> str:
                 return self._scout_model_call(sid, prefix, scout_job, scout_calls, prompt)
+
             try:
-                result = self._run_scout_assignment(sid, assignment, scout_job, _tagged_dispatch, _tagged_model, _scout_journal)
+                result = self._run_scout_assignment(
+                    sid,
+                    assignment,
+                    scout_job,
+                    _tagged_dispatch,
+                    _tagged_model,
+                    _scout_journal,
+                )
             except Exception as exc:  # noqa: BLE001 - one assignment's failure, not the run's
                 return self._degrade_scout_assignment(sid, assignment, scout_job, exc)
             self._complete_scout_job(sid, assignment, scout_job, result)
             return result
+
         try:
             dossier_obj: object = run_sec_assignment(
-                q, session_id=sid, wave_id=wave, as_of=self.as_of_str or "unbounded",
-                tickers=self.scoped, dispatch=_live_dispatch, model=_scout_model, journal=_scout_journal, spawn=_spawn_scout,
+                q,
+                session_id=sid,
+                wave_id=wave,
+                as_of=self.as_of_str or "unbounded",
+                tickers=self.scoped,
+                dispatch=_live_dispatch,
+                model=_scout_model,
+                journal=_scout_journal,
+                spawn=_spawn_scout,
             )
         except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             self._raise_fetch_failed(sid, src_job_id, exc)
@@ -1446,13 +2002,22 @@ class _LiveRun:
 
     def _freeze_wave(self, session_id: str, wave: int) -> str:
         sess = self.store.get_session(session_id)
-        if sess.status in (SessionStatus.RESEARCHING.value, SessionStatus.TARGETED_RESEARCH.value):
+        if sess.status in (
+            SessionStatus.RESEARCHING.value,
+            SessionStatus.TARGETED_RESEARCH.value,
+        ):
             sess = _session.transition_session(sess, SessionStatus.FREEZING)
             self.store.save_session(sess)
-        recs: list[Evidence] = [e for e in self.ledger.list_session(session_id) if e.wave_id <= wave and e.record_kind == "evidence"]
+        recs: list[Evidence] = [
+            e for e in self.ledger.list_session(session_id) if e.wave_id <= wave and e.record_kind == "evidence"
+        ]
         fid: str = f"{session_id}:{wave}:freeze"
         frozen = _freeze.create_freeze(
-            freeze_id=fid, session_id=session_id, wave_id=wave, records=recs, as_of=self.as_of,
+            freeze_id=fid,
+            session_id=session_id,
+            wave_id=wave,
+            records=recs,
+            as_of=self.as_of,
         )
         try:
             self.store.save_freeze(_freeze.freeze_to_dict(frozen))
@@ -1462,7 +2027,11 @@ class _LiveRun:
         if fid not in cur.freeze_ids:
             cur = replace(cur, freeze_ids=[*cur.freeze_ids, fid], updated_at=utcnow())
             self.store.save_session(cur)
-        self._emit(session_id, "freeze.created", {"freeze_id": fid, "evidence_ids": list(frozen.evidence_ids)})
+        self._emit(
+            session_id,
+            "freeze.created",
+            {"freeze_id": fid, "evidence_ids": list(frozen.evidence_ids)},
+        )
         return fid
 
     def _freeze_evidence_text(self, session_id: str, ev_ids: Sequence[str]) -> str:
@@ -1475,7 +2044,9 @@ class _LiveRun:
                 continue
             known = rec.known_at.isoformat() if rec.known_at else "unknown"
             content = rec.content if len(rec.content) <= 1000 else rec.content[:1000] + " […truncated]"
-            lines.append(f"[{rec.evidence_id}] {rec.subject} | {known} | {rec.source_name} {rec.source_uri or ''}".rstrip())
+            lines.append(
+                f"[{rec.evidence_id}] {rec.subject} | {known} | {rec.source_name} {rec.source_uri or ''}".rstrip()
+            )
             lines.append(f"claim_kind: {rec.claim_kind}")
             lines.append(f"claim: {rec.claim_text}")
             lines.append(f"content: {content}")
@@ -1500,37 +2071,68 @@ class _LiveRun:
         # No timeout evidence: a real timeout is a TimeoutError or says so above.
         return FailureCategory.MODEL_ERROR
 
-
-    def _fail_committee_jobs(self, session_id: str, ran: list[str], exc: Exception, cat: FailureCategory, msg: str) -> None:
+    def _fail_committee_jobs(
+        self,
+        session_id: str,
+        ran: list[str],
+        exc: Exception,
+        cat: FailureCategory,
+        msg: str,
+    ) -> None:
         """Fail every still-open committee job, then journal each one."""
         for jid in ran:
             with self._lock:
                 leftover: Job = self.store.get_job(jid)
                 if leftover.status in ("queued", "running"):
-                    self.store.save_job(_jobs.fail_job(
-                        leftover, cat, f"committee:{type(exc).__name__}:{msg}"[:2000]))
+                    self.store.save_job(
+                        _jobs.fail_job(
+                            leftover,
+                            cat,
+                            f"committee:{type(exc).__name__}:{msg}"[:2000],
+                        )
+                    )
             self._emit(session_id, "job.failed", {"job_id": jid, "failure_category": cat.value})
 
-
-    def _open_committee_jobs(self, session_id: str, wave: int, pending: list[Job], progressed: ResearchSession, ran: list[str]) -> ResearchSession:
+    def _open_committee_jobs(
+        self,
+        session_id: str,
+        wave: int,
+        pending: list[Job],
+        progressed: ResearchSession,
+        ran: list[str],
+    ) -> ResearchSession:
         """Create + start the stock/bull/bear trio; rolls back started jobs on partial failure."""
         prog: ResearchSession = progressed
         try:
             for kind in (JobType.STOCKBOT, JobType.BULLBOT, JobType.BEARBOT):
                 updated: tuple[ResearchSession, Job] = _jobs.create_job(
-                    prog, pending, job_type=kind, owner="runner", wave_id=wave,
+                    prog,
+                    pending,
+                    job_type=kind,
+                    owner="runner",
+                    wave_id=wave,
                 )
                 prog, job = updated
                 self.store.save_session(prog)
                 self.store.save_job(job)
-                self._emit(session_id, "job.created", {"job_id": job.job_id, "job_type": job.job_type})
+                self._emit(
+                    session_id,
+                    "job.created",
+                    {"job_id": job.job_id, "job_type": job.job_type},
+                )
                 started = _jobs.start_job(job)
                 self.store.save_job(started)
                 pending.append(started)
                 ran.append(started.job_id)
         except Exception as exc:
             # A half-created trio would leave RUNNING jobs pinning the session; fail them closed.
-            self._fail_committee_jobs(session_id, ran, exc, self._categorize_committee_error(exc), f"partial trio: {type(exc).__name__}")
+            self._fail_committee_jobs(
+                session_id,
+                ran,
+                exc,
+                self._categorize_committee_error(exc),
+                f"partial trio: {type(exc).__name__}",
+            )
             raise
         return prog
 
@@ -1550,13 +2152,22 @@ class _LiveRun:
         the persisted job replayable; a claims-only result cannot be rebuilt.
         """
         from dataclasses import asdict, is_dataclass
-        payload: dict[str, object] = dict(asdict(analysis)) if is_dataclass(analysis) and not isinstance(analysis, type) else {}
+
+        payload: dict[str, object] = (
+            dict(asdict(analysis)) if is_dataclass(analysis) and not isinstance(analysis, type) else {}
+        )
         raw_requests: object = payload.get("research_requests")
         requests: object = raw_requests if isinstance(raw_requests, list) else []
         payload.update({"role": role, "freeze_id": fid, "follow_ups": requests})
         return payload
 
-    def _run_member_stock(self, session_id: str, run_fn: Callable[[], StockbotAnalysis], job_id: str, fid: str) -> StockbotAnalysis:
+    def _run_member_stock(
+        self,
+        session_id: str,
+        run_fn: Callable[[], StockbotAnalysis],
+        job_id: str,
+        fid: str,
+    ) -> StockbotAnalysis:
         """Run the stockbot member and mark its job complete; exceptions propagate."""
         analysis = run_fn()
         with self._lock:
@@ -1565,7 +2176,9 @@ class _LiveRun:
             self.store.save_job(_jobs.complete_job(self.store.get_job(job_id), result=result))
         return analysis
 
-    def _run_member_bull(self, session_id: str, run_fn: Callable[[], BullAnalysis], job_id: str, fid: str) -> BullAnalysis:
+    def _run_member_bull(
+        self, session_id: str, run_fn: Callable[[], BullAnalysis], job_id: str, fid: str
+    ) -> BullAnalysis:
         """Run the bullbot member and mark its job complete; exceptions propagate."""
         analysis = run_fn()
         with self._lock:
@@ -1574,7 +2187,9 @@ class _LiveRun:
             self.store.save_job(_jobs.complete_job(self.store.get_job(job_id), result=result))
         return analysis
 
-    def _run_member_bear(self, session_id: str, run_fn: Callable[[], BearAnalysis], job_id: str, fid: str) -> BearAnalysis:
+    def _run_member_bear(
+        self, session_id: str, run_fn: Callable[[], BearAnalysis], job_id: str, fid: str
+    ) -> BearAnalysis:
         """Run the bearbot member and mark its job complete; exceptions propagate."""
         analysis = run_fn()
         with self._lock:
@@ -1583,8 +2198,12 @@ class _LiveRun:
             self.store.save_job(_jobs.complete_job(self.store.get_job(job_id), result=result))
         return analysis
 
-
-    def _run_trio(self, stock_fn: Callable[[], StockbotAnalysis], bull_fn: Callable[[], BullAnalysis], bear_fn: Callable[[], BearAnalysis]) -> tuple[StockbotAnalysis, BullAnalysis, BearAnalysis]:
+    def _run_trio(
+        self,
+        stock_fn: Callable[[], StockbotAnalysis],
+        bull_fn: Callable[[], BullAnalysis],
+        bear_fn: Callable[[], BearAnalysis],
+    ) -> tuple[StockbotAnalysis, BullAnalysis, BearAnalysis]:
         """Run the three member closures in parallel; first exception wins."""
         with ThreadPoolExecutor(max_workers=3) as _pool:
             stock_f = _pool.submit(stock_fn)
@@ -1592,8 +2211,9 @@ class _LiveRun:
             bear_f = _pool.submit(bear_fn)
             return stock_f.result(), bull_f.result(), bear_f.result()
 
-
-    def _committee_wave(self, session_id: str, wave: int, prefix: str) -> tuple[StockbotAnalysis, BullAnalysis, BearAnalysis]:
+    def _committee_wave(
+        self, session_id: str, wave: int, prefix: str
+    ) -> tuple[StockbotAnalysis, BullAnalysis, BearAnalysis]:
         sess = self.store.get_session(session_id)
         if sess.status == SessionStatus.FREEZING.value:
             sess = _session.transition_session(sess, SessionStatus.ANALYZING)
@@ -1605,27 +2225,58 @@ class _LiveRun:
         ran: list[str] = []
         self._open_committee_jobs(session_id, wave, pending, self.store.get_session(session_id), ran)
         shared_text = self._freeze_evidence_text(session_id, ev_ids)
+
         def _run_stock() -> StockbotAnalysis:
-            return self._run_member_stock(session_id, lambda: run_stockbot(
-                self.question, session_id=session_id, wave_id=wave, freeze_id=fid,
-                evidence_ids=ev_ids, as_of=self.as_of_str or "unbounded",
-                model=self._model_at_stage(f"{prefix}committee-stockbot", session_id, ran[0]),
-                evidence_text=shared_text,
-            ), ran[0], fid)
+            return self._run_member_stock(
+                session_id,
+                lambda: run_stockbot(
+                    self.question,
+                    session_id=session_id,
+                    wave_id=wave,
+                    freeze_id=fid,
+                    evidence_ids=ev_ids,
+                    as_of=self.as_of_str or "unbounded",
+                    model=self._model_at_stage(f"{prefix}committee-stockbot", session_id, ran[0]),
+                    evidence_text=shared_text,
+                ),
+                ran[0],
+                fid,
+            )
+
         def _run_bull() -> BullAnalysis:
-            return self._run_member_bull(session_id, lambda: run_bullbot(
-                self.question, session_id=session_id, wave_id=wave, freeze_id=fid,
-                evidence_ids=ev_ids, as_of=self.as_of_str or "unbounded",
-                model=self._model_at_stage(f"{prefix}committee-bullbot", session_id, ran[1]),
-                evidence_text=shared_text,
-            ), ran[1], fid)
+            return self._run_member_bull(
+                session_id,
+                lambda: run_bullbot(
+                    self.question,
+                    session_id=session_id,
+                    wave_id=wave,
+                    freeze_id=fid,
+                    evidence_ids=ev_ids,
+                    as_of=self.as_of_str or "unbounded",
+                    model=self._model_at_stage(f"{prefix}committee-bullbot", session_id, ran[1]),
+                    evidence_text=shared_text,
+                ),
+                ran[1],
+                fid,
+            )
+
         def _run_bear() -> BearAnalysis:
-            return self._run_member_bear(session_id, lambda: run_bearbot(
-                self.question, session_id=session_id, wave_id=wave, freeze_id=fid,
-                evidence_ids=ev_ids, as_of=self.as_of_str or "unbounded",
-                model=self._model_at_stage(f"{prefix}committee-bearbot", session_id, ran[2]),
-                evidence_text=shared_text,
-            ), ran[2], fid)
+            return self._run_member_bear(
+                session_id,
+                lambda: run_bearbot(
+                    self.question,
+                    session_id=session_id,
+                    wave_id=wave,
+                    freeze_id=fid,
+                    evidence_ids=ev_ids,
+                    as_of=self.as_of_str or "unbounded",
+                    model=self._model_at_stage(f"{prefix}committee-bearbot", session_id, ran[2]),
+                    evidence_text=shared_text,
+                ),
+                ran[2],
+                fid,
+            )
+
         try:
             stock, bull, bear = self._run_trio(_run_stock, _run_bull, _run_bear)
         except Exception as exc:
@@ -1633,9 +2284,17 @@ class _LiveRun:
             msg = str(exc)[:1500] or type(exc).__name__
             self._fail_committee_jobs(session_id, ran, exc, cat, msg)
             raise
-        self._emit(session_id, "committee.completed", {"freeze_id": fid, "evidence_ids": ev_ids})
+        self._emit(
+            session_id,
+            "committee.completed",
+            {"freeze_id": fid, "evidence_ids": ev_ids},
+        )
         entry_jobs: list[JSONValue] = list(ran)
-        entry: dict[str, JSONValue] = {"freeze_id": fid, "wave_id": wave, "jobs": entry_jobs}
+        entry: dict[str, JSONValue] = {
+            "freeze_id": fid,
+            "wave_id": wave,
+            "jobs": entry_jobs,
+        }
         latest = self.store.get_session(session_id)
         latest = replace(latest, committee_runs=[*latest.committee_runs, entry], updated_at=utcnow())
         self.store.save_session(latest)
@@ -1650,11 +2309,22 @@ class _LiveRun:
     def _store_final(self, session_id: str, freeze_id: str, answer: str, claims: Sequence[object]) -> None:
         """Persist the synthesis answer, then close the session as completed."""
         from app.research.agents import GroundedClaim as _GC
+
         claims_json: list[JSONValue] = []
         for claim in claims:
             if isinstance(claim, _GC):
-                claims_json.append({"text": claim.text, "claim_type": claim.claim_type, "evidence_ids": list(claim.evidence_ids)})
-        final: dict[str, JSONValue] = {"answer": answer, "freeze_id": freeze_id, "claims": claims_json}
+                claims_json.append(
+                    {
+                        "text": claim.text,
+                        "claim_type": claim.claim_type,
+                        "evidence_ids": list(claim.evidence_ids),
+                    }
+                )
+        final: dict[str, JSONValue] = {
+            "answer": answer,
+            "freeze_id": freeze_id,
+            "claims": claims_json,
+        }
         cur = self.store.get_session(session_id)
         cur = replace(cur, final_result=final, updated_at=utcnow())
         self.store.save_session(cur)
@@ -1666,9 +2336,11 @@ class _LiveRun:
         """Persist completed no-evidence result (limitations answer, empty claims)."""
         try:
             empty: dict[str, JSONValue] = {
-                "answer": ("No PIT-eligible SEC evidence was found; the question cannot be answered "
-                           "from SEC filings within the session scope. Limitations: SEC-only, "
-                           "as_of-filtered corpus."),
+                "answer": (
+                    "No PIT-eligible SEC evidence was found; the question cannot be answered "
+                    "from SEC filings within the session scope. Limitations: SEC-only, "
+                    "as_of-filtered corpus."
+                ),
                 "freeze_id": "",
                 "claims": [],
             }
@@ -1700,8 +2372,12 @@ class _LiveRun:
         raw_rels = row.get("relationships")
         raw_open = row.get("open_questions")
         result.coverage = dict(coverage) if isinstance(coverage, Mapping) else None
-        result.relationships = [dict(r) for r in raw_rels if isinstance(r, Mapping)] if isinstance(raw_rels, list) else []
-        result.open_questions = [q for q in raw_open if isinstance(q, str) and q.strip()] if isinstance(raw_open, list) else []
+        result.relationships = (
+            [dict(r) for r in raw_rels if isinstance(r, Mapping)] if isinstance(raw_rels, list) else []
+        )
+        result.open_questions = (
+            [q for q in raw_open if isinstance(q, str) and q.strip()] if isinstance(raw_open, list) else []
+        )
 
     def _wave_items(self, sid: str, wave: int) -> dict[str, set[str]]:
         """Raw items of one wave: evidence rows, documents, entities, relationships, claims, questions.
@@ -1797,14 +2473,28 @@ class _LiveRun:
             _merge_disagreement(result.disagreement, disagreement) if result.disagreement is not None else disagreement
         )
         next_result = Wave1Result(
-            session_id=sid, wave_id=wave, freeze_id=fid, evidence_ids=eids,
-            stock=stock, bull=bull, bear=bear, disagreement=merged, question=result.question,
+            session_id=sid,
+            wave_id=wave,
+            freeze_id=fid,
+            evidence_ids=eids,
+            stock=stock,
+            bull=bull,
+            bear=bear,
+            disagreement=merged,
+            question=result.question,
         )
         self._attach_dossier_state(next_result)
         return {
-            "wave_id": wave, "targeted": targeted, "freeze_id": fid, "evidence_ids": eids,
+            "wave_id": wave,
+            "targeted": targeted,
+            "freeze_id": fid,
+            "evidence_ids": eids,
             "dossier_id": self.dossier_ids[-1] if self.dossier_ids else "",
-            "stock": stock, "bull": bull, "bear": bear, "disagreement": merged, "result": next_result,
+            "stock": stock,
+            "bull": bull,
+            "bear": bear,
+            "disagreement": merged,
+            "result": next_result,
         }
 
     def _deps(self, interrupt_after: str | None = None) -> DirectorDeps:
@@ -1823,7 +2513,6 @@ class _LiveRun:
             sess = _session.transition_session(sess, SessionStatus.SYNTHESIZING)
             self.store.save_session(sess)
 
-
     def _close_trace(self, conclusion: object, fallback: str) -> None:
         """Finish the eval trace with the synthesis answer; never raises."""
         try:
@@ -1833,8 +2522,13 @@ class _LiveRun:
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
 
-
-    def _complete_wave_tail(self, result: Wave1Result, did_out: str, gate: str, waves: Sequence[Mapping[str, object]]) -> dict[str, object]:
+    def _complete_wave_tail(
+        self,
+        result: Wave1Result,
+        did_out: str,
+        gate: str,
+        waves: Sequence[Mapping[str, object]],
+    ) -> dict[str, object]:
         """Synthesis tail for the final wave: persist over its freeze, stop, trace."""
         reason: str = f"complete:wave{result.wave_id}"
         self._advance_to_synthesizing(result.session_id)
@@ -1844,15 +2538,20 @@ class _LiveRun:
         self._emit(result.session_id, "wave.stopped", {"reason": reason})
         self._close_trace(synth.answer if synth is not None else None, reason)
         return {
-            "session_id": result.session_id, "wave_id": result.wave_id,
-            "freeze_id": result.freeze_id, "evidence_ids": list(result.evidence_ids),
-            "dossier_id": did_out, "stock": result.stock, "bull": result.bull,
-            "bear": result.bear, "disagreement": result.disagreement,
-            "stop_reason": reason, "wave_decision": gate,
+            "session_id": result.session_id,
+            "wave_id": result.wave_id,
+            "freeze_id": result.freeze_id,
+            "evidence_ids": list(result.evidence_ids),
+            "dossier_id": did_out,
+            "stock": result.stock,
+            "bull": result.bull,
+            "bear": result.bear,
+            "disagreement": result.disagreement,
+            "stop_reason": reason,
+            "wave_decision": gate,
             "novelty": dict(result.novelty),
             "waves": [_wave_summary(w) for w in waves],
         }
-
 
     def _finish_completed(self, result: Wave1Result, did_out: str) -> dict[str, object]:
         """Sequential wave loop: gate each wave, run the next, synthesize when the gate stops."""
@@ -1862,7 +2561,9 @@ class _LiveRun:
             novelty = self._wave_novelty(result.session_id, result.wave_id)
             result.novelty = novelty
             decision = decide_next_wave(
-                result, deps=self._deps(), budgets=self.limits,
+                result,
+                deps=self._deps(),
+                budgets=self.limits,
                 waves_used=result.wave_id,
                 jobs_used=len(self.store.list_jobs(result.session_id)),
                 tool_calls_used=self.budget.used,
@@ -1894,24 +2595,36 @@ def _wave_summary(wave: Mapping[str, object]) -> dict[str, object]:
     }
 
 
-def _empty_terminal_result(session_id: str, wave_id: int, eids: list[str], dossier_id: str, reason: str) -> dict[str, object]:
+def _empty_terminal_result(
+    session_id: str, wave_id: int, eids: list[str], dossier_id: str, reason: str
+) -> dict[str, object]:
     """Terminal no-evidence result payload shared by run paths."""
     return {
-        "session_id": session_id, "wave_id": wave_id, "freeze_id": "",
-        "evidence_ids": eids, "dossier_id": dossier_id,
-        "stock": None, "bull": None, "bear": None, "disagreement": None,
+        "session_id": session_id,
+        "wave_id": wave_id,
+        "freeze_id": "",
+        "evidence_ids": eids,
+        "dossier_id": dossier_id,
+        "stock": None,
+        "bull": None,
+        "bear": None,
+        "disagreement": None,
         "stop_reason": reason,
     }
 
 
-def _run_one_committee(run: _LiveRun, store: ResearchRepository, question: str, as_of_str: str, wave_id: int) -> dict[str, object]:
+def _run_one_committee(
+    run: _LiveRun, store: ResearchRepository, question: str, as_of_str: str, wave_id: int
+) -> dict[str, object]:
     """Interrupted single-member path: fetch, freeze, stock-only analysis, stop."""
     sid = run._create_session(question, as_of_str, "one-committee")
     eids = run._fetch(sid)
     if not eids:
         run._emit(sid, "wave.stopped", {"reason": "complete:empty-with-limitations"})
         run._store_empty_terminal(sid)
-        return _empty_terminal_result(sid, wave_id, eids, run.dossier_ids[0] if run.dossier_ids else "", "complete:empty-with-limitations")
+        return _empty_terminal_result(
+            sid, wave_id, eids, run.dossier_ids[0] if run.dossier_ids else "", "complete:empty-with-limitations"
+        )
     fid = run._create_freeze(sid)
     sess = store.get_session(sid)
     if sess.status == SessionStatus.FREEZING.value:
@@ -1919,15 +2632,23 @@ def _run_one_committee(run: _LiveRun, store: ResearchRepository, question: str, 
         store.save_session(sess)
     existing_jobs = store.list_jobs(sid)
     sess, one = _jobs.create_job(
-        sess, existing_jobs, job_type=JobType.STOCKBOT, owner="runner", wave_id=wave_id,
+        sess,
+        existing_jobs,
+        job_type=JobType.STOCKBOT,
+        owner="runner",
+        wave_id=wave_id,
     )
     store.save_session(sess)
     store.save_job(one)
     run._emit(sid, "job.created", {"job_id": one.job_id, "job_type": one.job_type})
     store.save_job(_jobs.start_job(one))
     stock = run_stockbot(
-        question, session_id=sid, wave_id=wave_id, freeze_id=fid,
-        evidence_ids=eids, as_of=as_of_str or "unbounded",
+        question,
+        session_id=sid,
+        wave_id=wave_id,
+        freeze_id=fid,
+        evidence_ids=eids,
+        as_of=as_of_str or "unbounded",
         model=run._model_at_stage("committee-stockbot", sid, one.job_id),
         evidence_text=run._freeze_evidence_text(sid, eids),
     )
@@ -1940,14 +2661,22 @@ def _run_one_committee(run: _LiveRun, store: ResearchRepository, question: str, 
     run._emit(sid, "committee.completed", {"freeze_id": fid, "ran": ["stockbot"]})
     run._emit(sid, "wave.stopped", {"reason": "interrupted:one-committee"})
     return {
-        "session_id": sid, "wave_id": wave_id, "freeze_id": fid,
-        "evidence_ids": eids, "dossier_id": run.dossier_ids[0] if run.dossier_ids else "",
-        "stock": stock, "bull": None, "bear": None, "disagreement": None,
+        "session_id": sid,
+        "wave_id": wave_id,
+        "freeze_id": fid,
+        "evidence_ids": eids,
+        "dossier_id": run.dossier_ids[0] if run.dossier_ids else "",
+        "stock": stock,
+        "bull": None,
+        "bear": None,
+        "disagreement": None,
         "stop_reason": "interrupted:one-committee",
     }
 
 
-def _close_wave1_result(run: _LiveRun, result: Wave1Result, did_out: str, interrupt_after: str | None) -> dict[str, object]:
+def _close_wave1_result(
+    run: _LiveRun, result: Wave1Result, did_out: str, interrupt_after: str | None
+) -> dict[str, object]:
     """Close the opened wave: sequential loop when the trio ran, else interrupt/empty payload."""
     if (
         result.stock is not None
@@ -1958,13 +2687,21 @@ def _close_wave1_result(run: _LiveRun, result: Wave1Result, did_out: str, interr
         return run._finish_completed(result, did_out)
     if interrupt_after in ("source", "freeze"):
         return {
-            "session_id": result.session_id, "wave_id": result.wave_id,
-            "freeze_id": result.freeze_id, "evidence_ids": list(result.evidence_ids),
-            "dossier_id": did_out, "stock": None, "bull": None, "bear": None,
-            "disagreement": None, "stop_reason": f"interrupted:{interrupt_after}",
+            "session_id": result.session_id,
+            "wave_id": result.wave_id,
+            "freeze_id": result.freeze_id,
+            "evidence_ids": list(result.evidence_ids),
+            "dossier_id": did_out,
+            "stock": None,
+            "bull": None,
+            "bear": None,
+            "disagreement": None,
+            "stop_reason": f"interrupted:{interrupt_after}",
         }
     run._store_empty_terminal(result.session_id)
-    return _empty_terminal_result(result.session_id, result.wave_id, list(result.evidence_ids), did_out, "complete:empty-with-limitations")
+    return _empty_terminal_result(
+        result.session_id, result.wave_id, list(result.evidence_ids), did_out, "complete:empty-with-limitations"
+    )
 
 
 def run_live(
@@ -1996,16 +2733,32 @@ def run_live(
     limits: DirectorBudgets = budgets if budgets is not None else DirectorBudgets()
     as_of_str: str = as_of.strip() if isinstance(as_of, str) and as_of.strip() else ""
     scoped: list[str] = list(tickers)
-    run = _LiveRun(store, question, objective, as_of, as_of_str, scoped, dispatch, model, limits, wave_id, provider=provider, model_name=model_name)
+    run = _LiveRun(
+        store,
+        question,
+        objective,
+        as_of,
+        as_of_str,
+        scoped,
+        dispatch,
+        model,
+        limits,
+        wave_id,
+        provider=provider,
+        model_name=model_name,
+    )
     if interrupt_after == "one-committee":
         return _run_one_committee(run, store, question, as_of_str, wave_id)
     deps = run._deps(interrupt_after)
     result = run_wave1(
-        question, as_of_str or "unbounded", deps=deps,
-        tickers=scoped, wave_id=wave_id, interrupt_after=interrupt_after,
+        question,
+        as_of_str or "unbounded",
+        deps=deps,
+        tickers=scoped,
+        wave_id=wave_id,
+        interrupt_after=interrupt_after,
     )
     return _close_wave1_result(run, result, run.dossier_ids[0] if run.dossier_ids else "", interrupt_after)
-
 
 
 def _job_diagnostics_of(job: Job) -> dict[str, JSONValue]:
@@ -2069,6 +2822,7 @@ def _attach_resumed_trace(run: _LiveRun, session_id: str, wave: int, trace_id: s
     from pathlib import Path as _Path
 
     from app.config import get_data_root as _gdr
+
     try:
         events = get_trace_events(trace_id)
         seq = len(events)
@@ -2079,11 +2833,22 @@ def _attach_resumed_trace(run: _LiveRun, session_id: str, wave: int, trace_id: s
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         root = _Path("data")
     from app.research.evals.traces import TRACE_DB_NAME as _tdb
+
     try:
         db_path = root / _tdb
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         db_path = _Path("data") / _tdb
-    run.trace = TraceRecorder(trace_id=trace_id, session_id=session_id, wave_id=wave, db_path=db_path, jsonl_path=root / "traces" / f"{trace_id}.jsonl", _seq=seq, _start_perf=_time.perf_counter(), _start_iso="", _closed=False)
+    run.trace = TraceRecorder(
+        trace_id=trace_id,
+        session_id=session_id,
+        wave_id=wave,
+        db_path=db_path,
+        jsonl_path=root / "traces" / f"{trace_id}.jsonl",
+        _seq=seq,
+        _start_perf=_time.perf_counter(),
+        _start_iso="",
+        _closed=False,
+    )
     run.trace_id = trace_id
     run._trace_record("trace.resumed", {"trace_id": trace_id, "session_id": session_id, "wave_id": wave})
 
@@ -2091,11 +2856,19 @@ def _attach_resumed_trace(run: _LiveRun, session_id: str, wave: int, trace_id: s
 def _attach_fresh_trace(run: _LiveRun, session_id: str, wave: int) -> None:
     """Fresh trace for resume when no prior trace resolves."""
     import subprocess as _sp
+
     try:
         _sha = _sp.check_output(["git", "rev-parse", "--short", "HEAD"], text=True, timeout=2).strip() or "unknown"
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         _sha = "unknown"
-    tr = create_trace(session_id=session_id, wave_id=wave, provider=run.provider, model=run.model_name, prompt_version="v1", git_sha=_sha)
+    tr = create_trace(
+        session_id=session_id,
+        wave_id=wave,
+        provider=run.provider,
+        model=run.model_name,
+        prompt_version="v1",
+        git_sha=_sha,
+    )
     run.trace, run.trace_id = tr, tr.trace_id
     run._trace_record("trace.opened", {"trace_id": tr.trace_id, "session_id": session_id, "resume": True})
 
@@ -2107,6 +2880,7 @@ def _resume_trace(run: _LiveRun, session_id: str, wave: int, sess: ResearchSessi
         _attach_resumed_trace(run, session_id, wave, trace_id)
     else:
         _attach_fresh_trace(run, session_id, wave)
+
 
 def _append_resume_evidence(run: _LiveRun, rec_dict: Mapping[str, object]) -> None:
     """Append one persisted evidence record; corrupt and duplicate rows skipped."""
@@ -2133,7 +2907,9 @@ def _preload_resume_ledger(run: _LiveRun, store: ResearchRepository, session_id:
             run.dossier_ids.append(_did)
 
 
-def _completed_fetch_ids(run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, eids: list[str]) -> tuple[list[str], str] | None:
+def _completed_fetch_ids(
+    run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, eids: list[str]
+) -> tuple[list[str], str] | None:
     """Completed-source fast path: dossier + completed source mean fetch is done."""
     dossier_id = f"{session_id}:{wave}:sec"
     all_jobs = store.list_jobs(session_id)
@@ -2162,9 +2938,13 @@ def _restart_queued_fetch(run: _LiveRun, store: ResearchRepository, session_id: 
     run._trace_record("source.reused", {"job_id": reuse_job.job_id, "wave_id": reuse_job.wave_id})
 
 
-def _reuse_fetch_job(run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, question: str) -> tuple[str, str] | None:
+def _reuse_fetch_job(
+    run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, question: str
+) -> tuple[str, str] | None:
     """Running-source path: restart a queued job, reuse its question, return (src_id, fetch_q)."""
-    src_jobs = [j for j in store.list_jobs(session_id) if j.job_type == JobType.SOURCE_AGENT.value and j.wave_id == wave]
+    src_jobs = [
+        j for j in store.list_jobs(session_id) if j.job_type == JobType.SOURCE_AGENT.value and j.wave_id == wave
+    ]
     reuse_job = next((j for j in src_jobs if j.status in ("queued", "running")), None)
     if reuse_job is None:
         return None
@@ -2192,7 +2972,9 @@ def _fresh_fetch_question(store: ResearchRepository, session_id: str, question: 
         return question
 
 
-def _fetch_or_reuse_wave(run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, question: str, eids: list[str]) -> tuple[list[str], str]:
+def _fetch_or_reuse_wave(
+    run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, question: str, eids: list[str]
+) -> tuple[list[str], str]:
     """Fetch-or-reuse phase: skip fetch when the dossier + completed source exist."""
     done = _completed_fetch_ids(run, store, session_id, wave, eids)
     if done is not None:
@@ -2216,7 +2998,9 @@ def _substantive_ids(frozen: Sequence[str], substantive: set[str]) -> list[str]:
     return [e for e in frozen if not substantive or e in substantive]
 
 
-def _freeze_or_reuse(run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, eids: list[str]) -> tuple[str, list[str]]:
+def _freeze_or_reuse(
+    run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, eids: list[str]
+) -> tuple[str, list[str]]:
     """Freeze-or-reuse phase: existing freeze ids win, else create a fresh freeze.
 
     A resolved freeze id always wins - its analyses already happened - but only
@@ -2236,7 +3020,6 @@ def _freeze_or_reuse(run: _LiveRun, store: ResearchRepository, session_id: str, 
     return fid, _substantive_ids(frozen, {e.evidence_id for e in _ledger_evidence(run.ledger, session_id)})
 
 
-
 def _hydrate_resume_budget(run: _LiveRun, store: ResearchRepository, session_id: str, sess: ResearchSession) -> None:
     """Seed the run budget from persisted totals; evidence count fallback; never raises."""
     try:
@@ -2249,7 +3032,9 @@ def _hydrate_resume_budget(run: _LiveRun, store: ResearchRepository, session_id:
         pass
 
 
-def _close_resumed_wave(run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, eids: list[str]) -> dict[str, object]:
+def _close_resumed_wave(
+    run: _LiveRun, store: ResearchRepository, session_id: str, wave: int, eids: list[str]
+) -> dict[str, object]:
     """Committee + wave loop for a resumed wave with evidence."""
     fid, eids_for_committee = _freeze_or_reuse(run, store, session_id, wave, eids)
     # Analyses are never persisted, so the trio always reruns on the freeze —
@@ -2257,16 +3042,30 @@ def _close_resumed_wave(run: _LiveRun, store: ResearchRepository, session_id: st
     stock, bull, bear = run._committee_wave(session_id, wave, "")
     disagreement = compute_disagreement(stock, bull, bear)
     result = Wave1Result(
-        session_id=session_id, wave_id=wave, freeze_id=fid,
+        session_id=session_id,
+        wave_id=wave,
+        freeze_id=fid,
         evidence_ids=list(eids_for_committee),
-        stock=stock, bull=bull, bear=bear, disagreement=disagreement,
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=disagreement,
         question=run.question,
     )
     did_out: str = _first_dossier_id(run)
     return run._finish_completed(result, did_out)
 
 
-def _open_resume_run(store: ResearchRepository, sess: ResearchSession, session_id: str, dispatch: Callable[[str, dict[str, object]], dict[str, object]], model: Callable[[str], str], limits: DirectorBudgets, provider: str, model_name: str | None) -> tuple[_LiveRun, str, int]:
+def _open_resume_run(
+    store: ResearchRepository,
+    sess: ResearchSession,
+    session_id: str,
+    dispatch: Callable[[str, dict[str, object]], dict[str, object]],
+    model: Callable[[str], str],
+    limits: DirectorBudgets,
+    provider: str,
+    model_name: str | None,
+) -> tuple[_LiveRun, str, int]:
     """Build the resume run: question/scope/wave from persisted session. Returns (run, question, wave)."""
     question: str = sess.query
     objective: str = sess.objective
@@ -2276,7 +3075,21 @@ def _open_resume_run(store: ResearchRepository, sess: ResearchSession, session_i
     cur_wave = sess.current_wave
     wave: int = cur_wave if isinstance(cur_wave, int) and cur_wave >= 1 else 1
     scoped = _resolve_resume_scoped(store, session_id, wave)
-    run = _LiveRun(store, question, objective, as_of, as_of_str, scoped, dispatch, model, limits, wave, actor="resume_live", provider=provider, model_name=model_name)
+    run = _LiveRun(
+        store,
+        question,
+        objective,
+        as_of,
+        as_of_str,
+        scoped,
+        dispatch,
+        model,
+        limits,
+        wave,
+        actor="resume_live",
+        provider=provider,
+        model_name=model_name,
+    )
     return run, question, wave
 
 
@@ -2285,7 +3098,6 @@ def _merge_session_dossiers(run: _LiveRun, sess: ResearchSession) -> None:
     for _did in sess.dossier_ids:
         if isinstance(_did, str) and _did and _did not in run.dossier_ids:
             run.dossier_ids.append(_did)
-
 
 
 def resume_live(
@@ -2313,7 +3125,8 @@ def resume_live(
     sess = state.session
     if sess.status in ("failed", "completed", "cancelled"):
         raise LiveModelError(
-            session_id, "resume",
+            session_id,
+            "resume",
             f"resume: session {session_id} is {sess.status}"
             " (retry of failed waves is out of scope; start a new session)",
         )

@@ -36,17 +36,18 @@ _DEFAULT_FORMS = ("3", "3/A", "4", "4/A", "5", "5/A")
 _DEFAULT_144_FORMS = ("144", "144/A")
 
 
-def list_sec_filings(ticker_or_cik: str | int,
-                     forms: str | list[str] | tuple[str, ...] | None = None,
-                     start_date: str | date | datetime | None = None,
-                     end_date: str | date | datetime | None = None,
-                     as_of: str | date | datetime | None = None,
-                     limit: int | None = 50) -> list[Filing]:
+def list_sec_filings(
+    ticker_or_cik: str | int,
+    forms: str | list[str] | tuple[str, ...] | None = None,
+    start_date: str | date | datetime | None = None,
+    end_date: str | date | datetime | None = None,
+    as_of: str | date | datetime | None = None,
+    limit: int | None = 50,
+) -> list[Filing]:
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .filings import list_sec_filings as _real
 
-    return _real(ticker_or_cik, forms=forms, start_date=start_date,
-                 end_date=end_date, as_of=as_of, limit=limit)
+    return _real(ticker_or_cik, forms=forms, start_date=start_date, end_date=end_date, as_of=as_of, limit=limit)
 
 
 def classify_transaction(code: object) -> str:
@@ -67,7 +68,7 @@ def _safe_int(value: object) -> int | None:
         if not text or text.lower() in ("none", "nan", "na", "n/a", "--"):
             return None
         return int(float(text)) if "." in text else int(text)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 
@@ -79,7 +80,7 @@ def _safe_float(value: object) -> float | None:
         if not text or text.lower() in ("none", "nan", "na", "n/a", "--"):
             return None
         return float(text)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
 
 
@@ -87,7 +88,7 @@ def _first(obj: object, *names: str) -> object:
     for name in names:
         try:
             value: object = getattr(obj, name)
-        except Exception:  # noqa: BLE001 - failed attr read tries the next name, never raises
+        except Exception:  # noqa: BLE001, S112 - failed attr read tries the next name, never raises
             continue
         if value is not None:
             return value
@@ -143,41 +144,39 @@ def _owner_candidates_of(obj: object) -> list[object]:
 
 def _owner_record_of(owner: object) -> dict[str, object]:
     return {
-        "name": _str_or_none(_first(
-            owner, "name_unreversed", "name", "owner_name")),
-        "cik": _str_or_none(_first(
-            owner, "cik", "owner_cik", "reporting_owner_cik")),
+        "name": _str_or_none(_first(owner, "name_unreversed", "name", "owner_name")),
+        "cik": _str_or_none(_first(owner, "cik", "owner_cik", "reporting_owner_cik")),
         "is_director": _first(owner, "is_director"),
         "is_officer": _first(owner, "is_officer"),
-        "is_ten_percent": _first(
-            owner, "is_ten_pct_owner", "is_ten_percent"),
+        "is_ten_percent": _first(owner, "is_ten_pct_owner", "is_ten_percent"),
         "is_other": _first(owner, "is_other"),
-        "role_title": _str_or_none(_first(
-            owner, "officer_title", "role_title", "title")),
+        "role_title": _str_or_none(_first(owner, "officer_title", "role_title", "title")),
     }
 
 
-def _fallback_owner_of(fallback_name: str | None,
-                       fallback_cik: str | None) -> list[dict[str, object]]:
-    return [{
-        "name": _str_or_none(fallback_name),
-        "cik": _str_or_none(fallback_cik),
-        "is_director": None,
-        "is_officer": None,
-        "is_ten_percent": None,
-        "is_other": None,
-        "role_title": None,
-    }]
+def _fallback_owner_of(fallback_name: str | None, fallback_cik: str | None) -> list[dict[str, object]]:
+    return [
+        {
+            "name": _str_or_none(fallback_name),
+            "cik": _str_or_none(fallback_cik),
+            "is_director": None,
+            "is_officer": None,
+            "is_ten_percent": None,
+            "is_other": None,
+            "role_title": None,
+        }
+    ]
 
 
-def _owners_of(obj: object, fallback_name: str | None = None,
-               fallback_cik: str | None = None) -> list[dict[str, object]]:
+def _owners_of(
+    obj: object, fallback_name: str | None = None, fallback_cik: str | None = None
+) -> list[dict[str, object]]:
     """Reporting owners: structured list first, legacy attrs as one owner."""
     out: list[dict[str, object]] = []
     for owner in _owner_candidates_of(obj):
         try:
             out.append(_owner_record_of(owner))
-        except Exception:  # noqa: BLE001 - malformed owner is skipped, the batch continues
+        except Exception:  # noqa: BLE001, S112 - malformed owner is skipped, the batch continues
             continue
     return out or _fallback_owner_of(fallback_name, fallback_cik)
 
@@ -214,8 +213,7 @@ def _bool_or_none(value: object) -> bool | None:
 
 def _fallback_identity_of(obj: object) -> tuple[str | None, str | None] | None:
     try:
-        return (_str_or_none(_first(obj, "insider_name", "reporting_owner",
-                                    "owner_name", "name")), _insider_cik(obj))
+        return (_str_or_none(_first(obj, "insider_name", "reporting_owner", "owner_name", "name")), _insider_cik(obj))
     except Exception:  # noqa: BLE001 - fallback identity degrades to None on malformed payload, never raises
         return None
 
@@ -234,8 +232,7 @@ def _activity_rows_of(obj: object) -> list[object] | None:
         return None
 
 
-def _resolved_issuer_of(obj: object, issuer: str,
-                        issuer_cik: str | int | None) -> tuple[str, str | None]:
+def _resolved_issuer_of(obj: object, issuer: str, issuer_cik: str | int | None) -> tuple[str, str | None]:
     info_cik, info_name, _ticker = _issuer_of(obj)
     try:
         explicit_cik = str(issuer_cik).strip() if issuer_cik is not None else None
@@ -246,17 +243,23 @@ def _resolved_issuer_of(obj: object, issuer: str,
 
 def _known_at_of(known_at: str | None, filed_at: str | None) -> str | None:
     try:
-        return (known_at if isinstance(known_at, str)
-                else str(known_at) if known_at is not None
-                else filed_at)
+        return known_at if isinstance(known_at, str) else str(known_at) if known_at is not None else filed_at
     except Exception:  # noqa: BLE001 - known_at coerces to the filed_at fallback, never raises
         return filed_at
 
 
-def _activity_record_of(activity: object, owner: dict[str, object], *,
-                        issuer: str, form: str, filed_at: str | None,
-                        accession_no: str, issuer_cik: str | None,
-                        document_name: str | None, known: str | None) -> InsiderTransaction:
+def _activity_record_of(
+    activity: object,
+    owner: dict[str, object],
+    *,
+    issuer: str,
+    form: str,
+    filed_at: str | None,
+    accession_no: str,
+    issuer_cik: str | None,
+    document_name: str | None,
+    known: str | None,
+) -> InsiderTransaction:
     code = _str_or_none(_first(activity, "transaction_code", "code", "transaction_type"))
     return InsiderTransaction(
         insider_name=_str_or_none(owner["name"]),
@@ -265,22 +268,22 @@ def _activity_record_of(activity: object, owner: dict[str, object], *,
         form=form,
         filed_at=filed_at,
         accession_no=accession_no,
-        transaction_date=_str_or_none(_first(
-            activity, "transaction_date", "date", "execution_date")),
-        security=_str_or_none(_first(
-            activity, "security", "security_title", "title", "security_name")),
+        transaction_date=_str_or_none(_first(activity, "transaction_date", "date", "execution_date")),
+        security=_str_or_none(_first(activity, "security", "security_title", "title", "security_name")),
         transaction_code=code,
         transaction_kind=classify_transaction(code),
-        shares=_safe_int(_first(activity, "shares", "share_count", "num_shares",
-                                "amount", "shares_transacted", "shares_numeric")),
-        price=_safe_float(_first(activity, "price", "price_per_share",
-                                 "price_numeric", "execution_price")),
-        acquired_disposed=_str_or_none(_first(
-            activity, "acquired_disposed", "acquired_disposed_code",
-            "acquired_or_disposed", "action", "buy_or_sell")),
-        holdings_after=_safe_int(_first(
-            activity, "holdings_after", "shares_owned_after", "holdings",
-            "balance_after", "shares_held")),
+        shares=_safe_int(
+            _first(activity, "shares", "share_count", "num_shares", "amount", "shares_transacted", "shares_numeric")
+        ),
+        price=_safe_float(_first(activity, "price", "price_per_share", "price_numeric", "execution_price")),
+        acquired_disposed=_str_or_none(
+            _first(
+                activity, "acquired_disposed", "acquired_disposed_code", "acquired_or_disposed", "action", "buy_or_sell"
+            )
+        ),
+        holdings_after=_safe_int(
+            _first(activity, "holdings_after", "shares_owned_after", "holdings", "balance_after", "shares_held")
+        ),
         issuer_cik=issuer_cik,
         is_director=_bool_or_none(owner["is_director"]),
         is_officer=_bool_or_none(owner["is_officer"]),
@@ -292,11 +295,17 @@ def _activity_record_of(activity: object, owner: dict[str, object], *,
     )
 
 
-def normalize_ownership_filing(obj: object, *, issuer: str, form: str,
-                               filed_at: str | None, accession_no: str,
-                               issuer_cik: str | int | None = None,
-                               document_name: str | None = None,
-                               known_at: str | None = None) -> list[InsiderTransaction]:
+def normalize_ownership_filing(
+    obj: object,
+    *,
+    issuer: str,
+    form: str,
+    filed_at: str | None,
+    accession_no: str,
+    issuer_cik: str | int | None = None,
+    document_name: str | None = None,
+    known_at: str | None = None,
+) -> list[InsiderTransaction]:
     """One InsiderTransaction per (owner, activity) row; never raises."""
     fallback = _fallback_identity_of(obj)
     if fallback is None:
@@ -311,12 +320,20 @@ def normalize_ownership_filing(obj: object, *, issuer: str, form: str,
     for activity in rows:
         for owner in owners:
             try:
-                out.append(_activity_record_of(
-                    activity, owner, issuer=resolved_issuer, form=form,
-                    filed_at=filed_at, accession_no=accession_no,
-                    issuer_cik=resolved_issuer_cik, document_name=document_name,
-                    known=known))
-            except Exception:  # noqa: BLE001 - malformed activity is skipped, the filing continues
+                out.append(
+                    _activity_record_of(
+                        activity,
+                        owner,
+                        issuer=resolved_issuer,
+                        form=form,
+                        filed_at=filed_at,
+                        accession_no=accession_no,
+                        issuer_cik=resolved_issuer_cik,
+                        document_name=document_name,
+                        known=known,
+                    )
+                )
+            except Exception:  # noqa: BLE001, S112 - malformed activity is skipped, the filing continues
                 continue
     return out
 
@@ -343,22 +360,29 @@ def _activity_records_of(filing: object, ticker_or_cik: str | int) -> list[Insid
     issuer = getattr(filing, "filer_name", None) or str(ticker_or_cik)
     obj = load_ownership(accession)
     return normalize_ownership_filing(
-        obj, issuer=_issuer_name_of(obj, issuer), form=form, filed_at=filed_at,
+        obj,
+        issuer=_issuer_name_of(obj, issuer),
+        form=form,
+        filed_at=filed_at,
         accession_no=accession,
         document_name=getattr(filing, "primary_document", None),
-        known_at=getattr(filing, "known_at", None) or filed_at)
+        known_at=getattr(filing, "known_at", None) or filed_at,
+    )
 
 
-def get_insider_activity(ticker_or_cik: str | int, *, as_of: str | None = None,
-                         limit: int | None = 50,
-                         forms: tuple[str, ...] | list[str] = _DEFAULT_FORMS) -> list[InsiderTransaction]:
-    filings = list_sec_filings(ticker_or_cik, forms=list(forms),
-                               as_of=as_of, limit=limit)
+def get_insider_activity(
+    ticker_or_cik: str | int,
+    *,
+    as_of: str | None = None,
+    limit: int | None = 50,
+    forms: tuple[str, ...] | list[str] = _DEFAULT_FORMS,
+) -> list[InsiderTransaction]:
+    filings = list_sec_filings(ticker_or_cik, forms=list(forms), as_of=as_of, limit=limit)
     out: list[InsiderTransaction] = []
     for filing in filings:
         try:
             out.extend(_activity_records_of(filing, ticker_or_cik))
-        except Exception:  # noqa: BLE001 - failed filing is skipped, the batch continues
+        except Exception:  # noqa: BLE001, S112 - failed filing is skipped, the batch continues
             continue
     if limit is not None:
         out = out[:limit]
@@ -398,8 +422,16 @@ def _column_cells(rows: list[object], target: object) -> list[object]:
     out: list[object] = []
     for row in rows:
         try:
-            cell = row.get(target) if isinstance(row, dict) else (row[target] if isinstance(row, (list, tuple)) and isinstance(target, int) and 0 <= target < len(row) else None)
-        except Exception:  # noqa: BLE001 - bad row is skipped, the scan continues
+            cell = (
+                row.get(target)
+                if isinstance(row, dict)
+                else (
+                    row[target]
+                    if isinstance(row, (list, tuple)) and isinstance(target, int) and 0 <= target < len(row)
+                    else None
+                )
+            )
+        except Exception:  # noqa: BLE001, S112 - bad row is skipped, the scan continues
             continue
         if cell is not None:
             out.append(cell)
@@ -465,10 +497,8 @@ def _sum_shares_column(df: object) -> int | None:
 
 
 def _seller_identity_of(form144: object) -> tuple[str | None, str | None]:
-    seller = _str_or_none(_first(form144, "person_selling", "seller_name",
-                                 "seller", "reporting_owner", "name"))
-    seller_cik = _str_or_none(_first(form144, "seller_cik", "person_cik",
-                                     "cik", "owner_cik"))
+    seller = _str_or_none(_first(form144, "person_selling", "seller_name", "seller", "reporting_owner", "name"))
+    seller_cik = _str_or_none(_first(form144, "seller_cik", "person_cik", "cik", "owner_cik"))
     return seller, seller_cik
 
 
@@ -490,22 +520,32 @@ def _proposed_shares_of(form144: object) -> int | None:
     return _sum_shares_column(df) if df is not None else None
 
 
-def _empty_144_sale(*, issuer: str, filed_at: str | None,
-                    accession_no: str) -> ProposedInsiderSale:
+def _empty_144_sale(*, issuer: str, filed_at: str | None, accession_no: str) -> ProposedInsiderSale:
     return ProposedInsiderSale(
-        seller_name=None, seller_cik=None, issuer=issuer,
-        filed_at=filed_at, accession_no=accession_no,
-        shares_proposed=None)
+        seller_name=None,
+        seller_cik=None,
+        issuer=issuer,
+        filed_at=filed_at,
+        accession_no=accession_no,
+        shares_proposed=None,
+    )
 
 
 def _clean_issuer_cik(issuer_cik: str | int | None) -> str | None:
     return str(issuer_cik).strip() if issuer_cik is not None else None
 
 
-def normalize_144(form144: object, *, issuer: str, filed_at: str | None,
-                  accession_no: str, issuer_cik: str | int | None = None,
-                  form: str | None = None, document_name: str | None = None,
-                  known_at: str | None = None) -> ProposedInsiderSale:
+def normalize_144(
+    form144: object,
+    *,
+    issuer: str,
+    filed_at: str | None,
+    accession_no: str,
+    issuer_cik: str | int | None = None,
+    form: str | None = None,
+    document_name: str | None = None,
+    known_at: str | None = None,
+) -> ProposedInsiderSale:
     """Build a ProposedInsiderSale; never raises."""
     try:
         seller, seller_cik = _seller_identity_of(form144)
@@ -522,8 +562,7 @@ def normalize_144(form144: object, *, issuer: str, filed_at: str | None,
             known_at=_known_at_of(known_at, filed_at),
         )
     except Exception:  # noqa: BLE001 - 144 normalization degrades to an empty sale, never raises
-        return _empty_144_sale(issuer=issuer, filed_at=filed_at,
-                               accession_no=accession_no)
+        return _empty_144_sale(issuer=issuer, filed_at=filed_at, accession_no=accession_no)
 
 
 def load_144(accession_no: str) -> object:
@@ -539,23 +578,32 @@ def load_144(accession_no: str) -> object:
     return form
 
 
-def get_planned_insider_sales(ticker_or_cik: str | int, *, as_of: str | None = None,
-                              limit: int | None = 20,
-                              forms: tuple[str, ...] | list[str] = _DEFAULT_144_FORMS) -> list[ProposedInsiderSale]:
-    filings = list_sec_filings(ticker_or_cik, forms=list(forms),
-                               as_of=as_of, limit=limit)
+def get_planned_insider_sales(
+    ticker_or_cik: str | int,
+    *,
+    as_of: str | None = None,
+    limit: int | None = 20,
+    forms: tuple[str, ...] | list[str] = _DEFAULT_144_FORMS,
+) -> list[ProposedInsiderSale]:
+    filings = list_sec_filings(ticker_or_cik, forms=list(forms), as_of=as_of, limit=limit)
     out: list[ProposedInsiderSale] = []
     for filing in filings:
         try:
             accession = getattr(filing, "accession_no", "")
             filed_at = getattr(filing, "filed_at", None)
             issuer = getattr(filing, "filer_name", None) or str(ticker_or_cik)
-            out.append(normalize_144(
-                load_144(accession), issuer=issuer, filed_at=filed_at,
-                accession_no=accession, form=getattr(filing, "form", None),
-                document_name=getattr(filing, "primary_document", None),
-                known_at=getattr(filing, "known_at", None) or filed_at))
-        except Exception:  # noqa: BLE001 - failed 144 load is skipped, the batch continues
+            out.append(
+                normalize_144(
+                    load_144(accession),
+                    issuer=issuer,
+                    filed_at=filed_at,
+                    accession_no=accession,
+                    form=getattr(filing, "form", None),
+                    document_name=getattr(filing, "primary_document", None),
+                    known_at=getattr(filing, "known_at", None) or filed_at,
+                )
+            )
+        except Exception:  # noqa: BLE001, S112 - failed 144 load is skipped, the batch continues
             continue
     if limit is not None:
         out = out[:limit]
@@ -569,8 +617,7 @@ def _sale_rows_of(transactions: Iterable[InsiderTransaction] | None) -> list[Ins
         return []
 
 
-def _is_matching_sale(txn: InsiderTransaction, seller: str,
-                      filed_at: str | None) -> bool:
+def _is_matching_sale(txn: InsiderTransaction, seller: str, filed_at: str | None) -> bool:
     if getattr(txn, "transaction_kind", None) != "open_market_sale":
         return False
     name = getattr(txn, "insider_name", None) or ""
@@ -580,8 +627,7 @@ def _is_matching_sale(txn: InsiderTransaction, seller: str,
     return not (txn_date and filed_at and txn_date < filed_at)
 
 
-def _executed_sale_shares(rows: list[InsiderTransaction], seller: str,
-                          filed_at: str | None) -> int:
+def _executed_sale_shares(rows: list[InsiderTransaction], seller: str, filed_at: str | None) -> int:
     executed = 0
     for txn in rows:
         try:
@@ -590,22 +636,25 @@ def _executed_sale_shares(rows: list[InsiderTransaction], seller: str,
             shares = getattr(txn, "shares", None)
             if shares is not None:
                 executed += shares
-        except Exception:  # noqa: BLE001 - malformed transaction is skipped, the match continues
+        except Exception:  # noqa: BLE001, S112 - malformed transaction is skipped, the match continues
             continue
     return executed
 
 
 def _match_note_of(seller: str, proposed_shares: int | None, executed: int) -> str:
     if proposed_shares is not None:
-        return (f"{seller or 'seller'} proposed {proposed_shares} shares; "
-                f"{executed} executed in later open-market Form 4 sales")
-    return (f"{seller or 'seller'} proposed an unknown quantity; "
-            f"{executed} executed in later open-market Form 4 sales")
+        return (
+            f"{seller or 'seller'} proposed {proposed_shares} shares; "
+            f"{executed} executed in later open-market Form 4 sales"
+        )
+    return f"{seller or 'seller'} proposed an unknown quantity; {executed} executed in later open-market Form 4 sales"
 
 
-def compare_144_to_form4(proposed: ProposedInsiderSale, transactions: Iterable[InsiderTransaction] | None) -> dict[str, object]:
+def compare_144_to_form4(
+    proposed: ProposedInsiderSale, transactions: Iterable[InsiderTransaction] | None
+) -> dict[str, object]:
     """Match a 144 proposal against later open-market Form 4 sales."""
-    seller = (proposed.seller_name or "")
+    seller = proposed.seller_name or ""
     executed = _executed_sale_shares(_sale_rows_of(transactions), seller, proposed.filed_at)
     return {
         "seller_name": proposed.seller_name,
@@ -614,6 +663,7 @@ def compare_144_to_form4(proposed: ProposedInsiderSale, transactions: Iterable[I
         "matched": executed > 0,
         "note": _match_note_of(seller, proposed.shares_proposed, executed),
     }
+
 
 _FORMS_13F = ("13F-HR", "13F-HR/A", "13F-NT", "13F-NT/A")
 _FORMS_13F_HOLDINGS = ("13F-HR", "13F-HR/A")
@@ -638,15 +688,14 @@ def _13f_security_id(cusip: str | None, isin: str | None) -> str | None:
     return None
 
 
-def _voting_label(sole: int | None = None, shared: int | None = None,
-                  non: int | None = None) -> str | None:
+def _voting_label(sole: int | None = None, shared: int | None = None, non: int | None = None) -> str | None:
     parts: list[str] = []
     for label, value in (("sole", sole), ("shared", shared), ("none", non)):
         try:
             if value is None:
                 continue
             parts.append(f"{label}={value}")
-        except Exception:  # noqa: BLE001 - unstringable part is skipped, the sid continues
+        except Exception:  # noqa: BLE001, S112 - unstringable part is skipped, the sid continues
             continue
     return " ".join(parts) or None
 
@@ -687,8 +736,7 @@ def _cell_from_attr(row: object, name: str) -> object:
 
 def _holding_cell(row: object, *names: str) -> object:
     for name in names:
-        value = (_cell_from_dict(row, name) if isinstance(row, dict)
-                 else _cell_from_attr(row, name))
+        value = _cell_from_dict(row, name) if isinstance(row, dict) else _cell_from_attr(row, name)
         if value is not None and str(value).strip() != "":
             return value
     return None
@@ -708,8 +756,9 @@ def _holding_put_call(row: object) -> str | None:
 
 
 def _holding_shares_prn_type(row: object) -> str | None:
-    raw_type = _str_or_none(_holding_cell(row, "Type", "SSHPRNAMTTYPE", "SshPrnamtType",
-                                          "sshPrnamtType", "shares_prn_type"))
+    raw_type = _str_or_none(
+        _holding_cell(row, "Type", "SSHPRNAMTTYPE", "SshPrnamtType", "sshPrnamtType", "shares_prn_type")
+    )
     if raw_type is None:
         return None
     t = raw_type.strip().upper()
@@ -720,7 +769,9 @@ def _holding_shares_prn_type(row: object) -> str | None:
     return None
 
 
-def _holding_amounts_of(cell: Callable[..., object]) -> tuple[int | None, int | None, int | None, int | None, int | None]:
+def _holding_amounts_of(
+    cell: Callable[..., object],
+) -> tuple[int | None, int | None, int | None, int | None, int | None]:
     return (
         _safe_int(cell("SharesPrnAmount", "shares", "sshPrnamt", "share_count")),
         _safe_int(cell("Value", "value", "market_value")),
@@ -730,7 +781,9 @@ def _holding_amounts_of(cell: Callable[..., object]) -> tuple[int | None, int | 
     )
 
 
-def _holding_names_of(cell: Callable[..., object], report_period: str | None) -> tuple[str | None, str | None, str | None]:
+def _holding_names_of(
+    cell: Callable[..., object], report_period: str | None
+) -> tuple[str | None, str | None, str | None]:
     return (
         _str_or_none(cell("ReportPeriod", "report_period")) or _str_or_none(report_period),
         _str_or_none(cell("Issuer", "issuer_name", "nameOfIssuer", "issuer")),
@@ -740,16 +793,22 @@ def _holding_names_of(cell: Callable[..., object], report_period: str | None) ->
 
 def _holding_managers_of(cell: Callable[..., object], _row: object = None) -> tuple[str | None, str | None]:
     return (
-        _str_or_none(cell("InvestmentDiscretion", "discretion",
-                          "investment_discretion", "investmentDiscretion",
-                          "INVESTMENTDISCRETION")),
-        _str_or_none(cell("OtherManager", "other_manager",
-                          "otherManager", "OTHERMANAGER")),
+        _str_or_none(
+            cell(
+                "InvestmentDiscretion",
+                "discretion",
+                "investment_discretion",
+                "investmentDiscretion",
+                "INVESTMENTDISCRETION",
+            )
+        ),
+        _str_or_none(cell("OtherManager", "other_manager", "otherManager", "OTHERMANAGER")),
     )
 
-def _holding_identity_of(manager_name: str | None, manager_cik: str | int | None,
-                         accession_no: str, source_row: int,
-                         security_id: str | None) -> tuple[str | None, str | None, str]:
+
+def _holding_identity_of(
+    manager_name: str | None, manager_cik: str | int | None, accession_no: str, source_row: int, security_id: str | None
+) -> tuple[str | None, str | None, str]:
     from .models import institutional_holding_id
 
     return (
@@ -761,20 +820,26 @@ def _holding_identity_of(manager_name: str | None, manager_cik: str | int | None
 
 def _holding_known_at(known_at: str | None, filed_at: str | None) -> str | None:
     try:
-        return (known_at if isinstance(known_at, str)
-                else str(known_at) if known_at is not None
-                else filed_at)
+        return known_at if isinstance(known_at, str) else str(known_at) if known_at is not None else filed_at
     except Exception:  # noqa: BLE001 - known_at coerces to the filed_at fallback, never raises
         return filed_at
 
 
-def _holding_row_to_record(row: object, *, manager_name: str | None,
-                           manager_cik: str | int | None, accession_no: str,
-                           report_period: str | None, filed_at: str | None,
-                           document_name: str | None, known_at: str | None,
-                           source_url: str | None,
-                           source_row: int) -> InstitutionalHolding:
+def _holding_row_to_record(
+    row: object,
+    *,
+    manager_name: str | None,
+    manager_cik: str | int | None,
+    accession_no: str,
+    report_period: str | None,
+    filed_at: str | None,
+    document_name: str | None,
+    known_at: str | None,
+    source_url: str | None,
+    source_row: int,
+) -> InstitutionalHolding:
     """One information-table row -> InstitutionalHolding; raises on bad row."""
+
     def cell(*names: str) -> object:
         return _holding_cell(row, *names)
 
@@ -783,8 +848,7 @@ def _holding_row_to_record(row: object, *, manager_name: str | None,
     known = _holding_known_at(known_at, filed_at)
     period, issuer_name, class_title = _holding_names_of(cell, report_period)
     discretion, other_manager = _holding_managers_of(cell, row)
-    manager, cik, holding_id = _holding_identity_of(
-        manager_name, manager_cik, accession_no, source_row, security_id)
+    manager, cik, holding_id = _holding_identity_of(manager_name, manager_cik, accession_no, source_row, security_id)
     return InstitutionalHolding(
         manager_name=manager,
         manager_cik=cik,
@@ -838,30 +902,52 @@ def _clean_manager_cik(manager_cik: str | int | None) -> str | None:
         return None
 
 
-def _append_holding_record(out: list[InstitutionalHolding], row: object, *,
-                           manager_name: str | None, cik: str | None,
-                           accession_no: str, report_period: str | None,
-                           filed_at: str | None, document_name: str | None,
-                           known_at: str | None, source_url: str | None,
-                           source_row: int) -> None:
+def _append_holding_record(
+    out: list[InstitutionalHolding],
+    row: object,
+    *,
+    manager_name: str | None,
+    cik: str | None,
+    accession_no: str,
+    report_period: str | None,
+    filed_at: str | None,
+    document_name: str | None,
+    known_at: str | None,
+    source_url: str | None,
+    source_row: int,
+) -> None:
     try:
-        out.append(_holding_row_to_record(
-            row, manager_name=manager_name, manager_cik=cik,
-            accession_no=accession_no, report_period=report_period,
-            filed_at=filed_at, document_name=document_name,
-            known_at=known_at, source_url=source_url,
-            source_row=source_row))
+        out.append(
+            _holding_row_to_record(
+                row,
+                manager_name=manager_name,
+                manager_cik=cik,
+                accession_no=accession_no,
+                report_period=report_period,
+                filed_at=filed_at,
+                document_name=document_name,
+                known_at=known_at,
+                source_url=source_url,
+                source_row=source_row,
+            )
+        )
     except Exception:  # noqa: BLE001, S110 - malformed holding row is skipped, the batch continues
         pass
 
 
-def normalize_13f_holdings(infotable: object, *, manager_name: str | None = None,
-                           manager_cik: str | int | None = None,
-                           accession_no: str, report_period: str | None = None,
-                           filed_at: str | None = None, form: str | None = None,
-                           document_name: str | None = None,
-                           known_at: str | None = None,
-                           source_url: str | None = None) -> list[InstitutionalHolding]:
+def normalize_13f_holdings(
+    infotable: object,
+    *,
+    manager_name: str | None = None,
+    manager_cik: str | int | None = None,
+    accession_no: str,
+    report_period: str | None = None,
+    filed_at: str | None = None,
+    form: str | None = None,
+    document_name: str | None = None,
+    known_at: str | None = None,
+    source_url: str | None = None,
+) -> list[InstitutionalHolding]:
     """13F-HR/A information tables -> holdings; NT -> no holdings. Never raises."""
 
     if is_13f_notice(form):
@@ -873,10 +959,18 @@ def normalize_13f_holdings(infotable: object, *, manager_name: str | None = None
     out: list[InstitutionalHolding] = []
     for source_row, row in enumerate(rows, start=1):
         _append_holding_record(
-            out, row, manager_name=manager_name, cik=cik,
-            accession_no=accession_no, report_period=report_period,
-            filed_at=filed_at, document_name=document_name,
-            known_at=known_at, source_url=source_url, source_row=source_row)
+            out,
+            row,
+            manager_name=manager_name,
+            cik=cik,
+            accession_no=accession_no,
+            report_period=report_period,
+            filed_at=filed_at,
+            document_name=document_name,
+            known_at=known_at,
+            source_url=source_url,
+            source_row=source_row,
+        )
     return out
 
 
@@ -897,8 +991,10 @@ def _provenance_field_of(holding: InstitutionalHolding, *names: str) -> str | No
     return None
 
 
-def _holding_provenance_of(holding: InstitutionalHolding, raw_archive_path: str | Path | None,
-                           ) -> tuple[str | None, str, object, str | None]:
+def _holding_provenance_of(
+    holding: InstitutionalHolding,
+    raw_archive_path: str | Path | None,
+) -> tuple[str | None, str, object, str | None]:
     known = _provenance_field_of(holding, "known_at", "filed_at")
     accession = _provenance_field_of(holding, "accession_no", "accession") or ""
     try:
@@ -912,10 +1008,19 @@ def _holding_provenance_of(holding: InstitutionalHolding, raw_archive_path: str 
     return known, accession, source_url, raw_path
 
 
-def _security_row_of(*, security_id: str, known: str | None, retrieved_at: str | None,
-                     content_hash: str | None, accession: str, source_url: object,
-                     raw_path: str | None, cusip: str | None, isin: str | None,
-                     class_title: str | None) -> dict[str, object]:
+def _security_row_of(
+    *,
+    security_id: str,
+    known: str | None,
+    retrieved_at: str | None,
+    content_hash: str | None,
+    accession: str,
+    source_url: object,
+    raw_path: str | None,
+    cusip: str | None,
+    isin: str | None,
+    class_title: str | None,
+) -> dict[str, object]:
     return {
         "security_id": security_id,
         "entity_id": None,
@@ -949,27 +1054,30 @@ def _valid_period_of(holding: InstitutionalHolding) -> tuple[str, str | None]:
     if report_period is None:
         return issuer_name, None
     try:
-        datetime.strptime(report_period, "%Y-%m-%d")
+        date.fromisoformat(report_period)
         return issuer_name, report_period
     except Exception:  # noqa: BLE001 - malformed period validates to None, never raises
         return issuer_name, None
 
 
-def _issuer_candidates_of(issuer_name: str, valid_period: str, known: str | None,
-                          root: Path | str | None) -> list[dict[str, object]] | None:
+def _issuer_candidates_of(
+    issuer_name: str, valid_period: str, known: str | None, root: Path | str | None
+) -> list[dict[str, object]] | None:
     try:
         from . import store as _store
+
         return _store.query_13f_issuer_candidates(
-            issuer_name, report_period=valid_period, holding_known_at=known, root=root)
+            issuer_name, report_period=valid_period, holding_known_at=known, root=root
+        )
     except Exception:  # noqa: BLE001 - issuer candidates degrade to None on storage failure, never raises
         return None
 
 
 def _valid_to_of(valid_period: str) -> str | None:
     try:
-        from datetime import datetime as _dt
-        base = _dt.strptime(valid_period, "%Y-%m-%d")
+        base = date.fromisoformat(valid_period)
         from datetime import timedelta as _td
+
         return (base + _td(days=1)).strftime("%Y-%m-%d")
     except Exception:  # noqa: BLE001 - malformed period validates to None, never raises
         return None
@@ -987,60 +1095,99 @@ def _latest_stamp(own: str | None, candidate: str) -> str | None:
     return max(options) if options else own
 
 
-def _alias_times(known: str | None, retrieved_at: str | None,
-                 cand: dict[str, object]) -> tuple[str | None, str | None]:
-    return (_latest_stamp(known, _candidate_stamp_of(cand, "known_at")),
-            _latest_stamp(retrieved_at, _candidate_stamp_of(cand, "retrieved_at")))
+def _alias_times(known: str | None, retrieved_at: str | None, cand: dict[str, object]) -> tuple[str | None, str | None]:
+    return (
+        _latest_stamp(known, _candidate_stamp_of(cand, "known_at")),
+        _latest_stamp(retrieved_at, _candidate_stamp_of(cand, "retrieved_at")),
+    )
 
 
-def _write_alias_rows(*, cusip: str | None, isin: str | None, eid: str, security_id: str,
-                      valid_period: str, valid_to: str, alias_known: str | None,
-                      alias_ret: str | None, accession: str, source_url: object,
-                      parquet_root: Path | None, parquet: _ParquetWriter, _hash: Callable[[bytes], str]) -> int:
+def _write_alias_rows(
+    *,
+    cusip: str | None,
+    isin: str | None,
+    eid: str,
+    security_id: str,
+    valid_period: str,
+    valid_to: str,
+    alias_known: str | None,
+    alias_ret: str | None,
+    accession: str,
+    source_url: object,
+    parquet_root: Path | None,
+    parquet: _ParquetWriter,
+    _hash: Callable[[bytes], str],
+) -> int:
     written = 0
     for alias_type, alias_value in (("cusip", cusip), ("isin", isin)):
         if not alias_value:
             continue
         seed = f"{alias_type}|{alias_value}|{eid}|{security_id}|{valid_period}|{valid_to}"
         written += parquet.write_rows(
-            "entity_aliases", [{
-                "alias_type": alias_type,
-                "alias_value": alias_value,
-                "entity_id": eid,
-                "security_id": security_id,
-                "source": "sec-13f",
-                "valid_from": valid_period,
-                "valid_to": valid_to,
-                "known_at": alias_known,
-                "retrieved_at": alias_ret,
-                "content_hash": _hash(seed.encode("utf-8")),
-                "parser_version": "sec-13f-security-v1",
-                "cik": None,
-                "accession": accession or None,
-                "source_url": source_url,
-            }],
-            root=parquet_root)
+            "entity_aliases",
+            [
+                {
+                    "alias_type": alias_type,
+                    "alias_value": alias_value,
+                    "entity_id": eid,
+                    "security_id": security_id,
+                    "source": "sec-13f",
+                    "valid_from": valid_period,
+                    "valid_to": valid_to,
+                    "known_at": alias_known,
+                    "retrieved_at": alias_ret,
+                    "content_hash": _hash(seed.encode("utf-8")),
+                    "parser_version": "sec-13f-security-v1",
+                    "cik": None,
+                    "accession": accession or None,
+                    "source_url": source_url,
+                }
+            ],
+            root=parquet_root,
+        )
     return written
-def _write_candidate_aliases(*, candidates: list[dict[str, object]], cusip: str | None,
-                             isin: str | None, security_id: str, valid_period: str,
-                             valid_to: str, known: str | None, retrieved_at: str | None,
-                             accession: str, source_url: object,
-                             parquet_root: Path | None, parquet: _ParquetWriter, _hash: Callable[[bytes], str]) -> int:
+
+
+def _write_candidate_aliases(
+    *,
+    candidates: list[dict[str, object]],
+    cusip: str | None,
+    isin: str | None,
+    security_id: str,
+    valid_period: str,
+    valid_to: str,
+    known: str | None,
+    retrieved_at: str | None,
+    accession: str,
+    source_url: object,
+    parquet_root: Path | None,
+    parquet: _ParquetWriter,
+    _hash: Callable[[bytes], str],
+) -> int:
     written = 0
     for cand in candidates or []:
         try:
             eid = str((cand or {}).get("entity_id") or "").strip()
-        except Exception:  # noqa: BLE001 - malformed candidate is skipped, alias sync continues
+        except Exception:  # noqa: BLE001, S112 - malformed candidate is skipped, alias sync continues
             continue
         if not eid:
             continue
         alias_known, alias_ret = _alias_times(known, retrieved_at, cand)
         written += _write_alias_rows(
-            cusip=cusip, isin=isin, eid=eid, security_id=security_id,
-            valid_period=valid_period, valid_to=valid_to,
-            alias_known=alias_known, alias_ret=alias_ret, accession=accession,
-            source_url=source_url, parquet_root=parquet_root,
-            parquet=parquet, _hash=_hash)
+            cusip=cusip,
+            isin=isin,
+            eid=eid,
+            security_id=security_id,
+            valid_period=valid_period,
+            valid_to=valid_to,
+            alias_known=alias_known,
+            alias_ret=alias_ret,
+            accession=accession,
+            source_url=source_url,
+            parquet_root=parquet_root,
+            parquet=parquet,
+            _hash=_hash,
+        )
     return written
 
 
@@ -1051,10 +1198,20 @@ def _class_title_of(holding: InstitutionalHolding) -> str | None:
         return None
 
 
-def _write_security_row(*, security_id: str, known: str | None, retrieved_at: str | None,
-                        content_hash: str | None, accession: str, source_url: object,
-                        raw_path: str | None, cusip: str | None, isin: str | None,
-                        class_title: str | None, root: Path | str | None) -> tuple[int, Path | None]:
+def _write_security_row(
+    *,
+    security_id: str,
+    known: str | None,
+    retrieved_at: str | None,
+    content_hash: str | None,
+    accession: str,
+    source_url: object,
+    raw_path: str | None,
+    cusip: str | None,
+    isin: str | None,
+    class_title: str | None,
+    root: Path | str | None,
+) -> tuple[int, Path | None]:
     from pathlib import Path as _Path
 
     from ..storage import parquet
@@ -1062,19 +1219,38 @@ def _write_security_row(*, security_id: str, known: str | None, retrieved_at: st
     parquet_root = _Path(root) / "parquet" if root is not None else None
     written = parquet.write_rows(
         "securities",
-        [_security_row_of(security_id=security_id, known=known, retrieved_at=retrieved_at,
-                          content_hash=content_hash, accession=accession,
-                          source_url=source_url, raw_path=raw_path, cusip=cusip,
-                          isin=isin, class_title=class_title)],
-        root=parquet_root)
+        [
+            _security_row_of(
+                security_id=security_id,
+                known=known,
+                retrieved_at=retrieved_at,
+                content_hash=content_hash,
+                accession=accession,
+                source_url=source_url,
+                raw_path=raw_path,
+                cusip=cusip,
+                isin=isin,
+                class_title=class_title,
+            )
+        ],
+        root=parquet_root,
+    )
     return written, parquet_root
 
 
-def _write_governed_aliases(*, holding: InstitutionalHolding, cusip: str | None,
-                            isin: str | None, security_id: str, known: str | None,
-                            retrieved_at: str | None, accession: str,
-                            source_url: object, parquet_root: Path | None,
-                            root: Path | str | None) -> int | None:
+def _write_governed_aliases(
+    *,
+    holding: InstitutionalHolding,
+    cusip: str | None,
+    isin: str | None,
+    security_id: str,
+    known: str | None,
+    retrieved_at: str | None,
+    accession: str,
+    source_url: object,
+    parquet_root: Path | None,
+    root: Path | str | None,
+) -> int | None:
     from ..storage import parquet as _parquet
     from ..storage.raw_archive import content_hash as _hash
 
@@ -1088,13 +1264,30 @@ def _write_governed_aliases(*, holding: InstitutionalHolding, cusip: str | None,
     if valid_to is None:
         return None
     return _write_candidate_aliases(
-        candidates=candidates, cusip=cusip, isin=isin, security_id=security_id,
-        valid_period=valid_period, valid_to=valid_to, known=known,
-        retrieved_at=retrieved_at, accession=accession, source_url=source_url,
-        parquet_root=parquet_root, parquet=_parquet, _hash=_hash)
+        candidates=candidates,
+        cusip=cusip,
+        isin=isin,
+        security_id=security_id,
+        valid_period=valid_period,
+        valid_to=valid_to,
+        known=known,
+        retrieved_at=retrieved_at,
+        accession=accession,
+        source_url=source_url,
+        parquet_root=parquet_root,
+        parquet=_parquet,
+        _hash=_hash,
+    )
 
 
-def observe_13f_security(holding: InstitutionalHolding, *, raw_archive_path: str | Path | None, content_hash: str | None, retrieved_at: str | None, root: Path | str | None = None) -> int:
+def observe_13f_security(
+    holding: InstitutionalHolding,
+    *,
+    raw_archive_path: str | Path | None,
+    content_hash: str | None,
+    retrieved_at: str | None,
+    root: Path | str | None = None,
+) -> int:
     """Persist one 13F security + governed CUSIP/ISIN issuer aliases.
 
     Provisional security only; issuer mapping comes from exact
@@ -1103,50 +1296,71 @@ def observe_13f_security(holding: InstitutionalHolding, *, raw_archive_path: str
     """
     from ..storage import parquet
     from ..storage.raw_archive import content_hash as _hash
+
     cusip, isin, security_id = _holding_identifiers_of(holding)
     if not security_id:
         return 0
     known, accession, source_url, raw_path = _holding_provenance_of(holding, raw_archive_path)
     written, parquet_root = _write_security_row(
-        security_id=security_id, known=known, retrieved_at=retrieved_at,
-        content_hash=content_hash, accession=accession, source_url=source_url,
-        raw_path=raw_path, cusip=cusip, isin=isin,
-        class_title=_class_title_of(holding), root=root)
+        security_id=security_id,
+        known=known,
+        retrieved_at=retrieved_at,
+        content_hash=content_hash,
+        accession=accession,
+        source_url=source_url,
+        raw_path=raw_path,
+        cusip=cusip,
+        isin=isin,
+        class_title=_class_title_of(holding),
+        root=root,
+    )
     extra = _write_governed_aliases(
-        holding=holding, cusip=cusip, isin=isin, security_id=security_id,
-        known=known, retrieved_at=retrieved_at, accession=accession,
-        source_url=source_url, parquet_root=parquet_root, root=root)
+        holding=holding,
+        cusip=cusip,
+        isin=isin,
+        security_id=security_id,
+        known=known,
+        retrieved_at=retrieved_at,
+        accession=accession,
+        source_url=source_url,
+        parquet_root=parquet_root,
+        root=root,
+    )
     _ = (parquet, _hash)
     return written if extra is None else written + extra
 
 
-def query_issuer_insiders(issuer_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200) -> list[dict[str, object]]:
+def query_issuer_insiders(
+    issuer_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
+) -> list[dict[str, object]]:
     """Issuer -> reporting owners over ``sec_insider_transactions`` (PIT)."""
     from . import store as _store
 
-    return _store.query_insider_transactions(
-        issuer_cik=issuer_cik, as_of=as_of, root=root, limit=limit)
+    return _store.query_insider_transactions(issuer_cik=issuer_cik, as_of=as_of, root=root, limit=limit)
 
 
-def query_person_transactions(owner_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200) -> list[dict[str, object]]:
+def query_person_transactions(
+    owner_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
+) -> list[dict[str, object]]:
     """Person -> transactions over ``sec_insider_transactions`` (PIT)."""
     from . import store as _store
 
-    return _store.query_insider_transactions(
-        owner_cik=owner_cik, as_of=as_of, root=root, limit=limit)
+    return _store.query_insider_transactions(owner_cik=owner_cik, as_of=as_of, root=root, limit=limit)
 
 
-def query_manager_holdings(manager_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200) -> list[dict[str, object]]:
+def query_manager_holdings(
+    manager_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
+) -> list[dict[str, object]]:
     """Manager -> holdings over ``sec_13f_holdings`` (PIT)."""
     from . import store as _store
 
-    return _store.query_13f_holdings(
-        manager_cik=manager_cik, as_of=as_of, root=root, limit=limit)
+    return _store.query_13f_holdings(manager_cik=manager_cik, as_of=as_of, root=root, limit=limit)
 
 
-def query_security_managers(security: str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200) -> list[dict[str, object]]:
+def query_security_managers(
+    security: str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
+) -> list[dict[str, object]]:
     """Security (CUSIP/ISIN/security_id) -> managers over ``sec_13f_holdings``."""
     from . import store as _store
 
-    return _store.query_13f_holdings(
-        security=security, as_of=as_of, root=root, limit=limit)
+    return _store.query_13f_holdings(security=security, as_of=as_of, root=root, limit=limit)

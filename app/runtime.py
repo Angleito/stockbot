@@ -73,7 +73,6 @@ class ExecutionBudget:
             self.search_calls += 1
             return True
 
-
     def add_evidence_tokens(self, count: int) -> bool:
         """Register evidence tokens only while within budget; False refuses the addition."""
         with self._lock:

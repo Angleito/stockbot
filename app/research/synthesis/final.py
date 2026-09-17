@@ -5,9 +5,15 @@ the deep sections (bottom line, direct evidence, first/second-order impact,
 base/bull/bear, critical disagreements, unknowns, what would change the view,
 source limitations, filing references) with every claim's declared
 ``claim_type`` preserved, so an inference is never rendered as direct fact.
-Absence stays scoped ("No disclosure located within the searched SEC scope"),
-never a real-world nonexistence claim, and depth follows the researched
-material (no fixed word count, no caps).
+
+Epistemic typing is deterministic: the direct-evidence section is built only
+from the caller's canonical EvidenceLedger observations (raw documents), while
+committee claims are interpretations over those observations wherever they are
+rendered. An absence observation comes only from the session's coverage
+artifacts — a generic unknown claim stays an unknown and is never rewritten as
+"no disclosure was located". Absence stays scoped ("No disclosure located
+within the searched SEC scope"), never a real-world nonexistence claim, and
+depth follows the researched material (no fixed word count, no caps).
 
 Fake-model sketch (no live calls): canned trio of analyses -> canned
 ``CommitteeDisagreement`` -> ``synthesize_final``; assert claims stay
@@ -35,8 +41,7 @@ SEC_SCOPE_ABSENCE = "No disclosure located within the searched SEC scope"
 """Scoped-absence phrasing: a searched-scope observation, never nonexistence."""
 
 SEC_ONLY_LIMITATION = (
-    "SEC-only scope: no non-SEC source (news, transcripts, private documents, "
-    "market data) was searched."
+    "SEC-only scope: no non-SEC source (news, transcripts, private documents, market data) was searched."
 )
 
 _CLAIM_SEVERITY = {
@@ -82,8 +87,7 @@ class FinalSynthesis:
     def to_dict(self) -> dict[str, object]:
         """Deep FinalResearchResult dict (legacy answer/claims keys kept)."""
         claim_rows = [
-            {"text": c.text, "claim_type": c.claim_type, "evidence_ids": list(c.evidence_ids)}
-            for c in self.claims
+            {"text": c.text, "claim_type": c.claim_type, "evidence_ids": list(c.evidence_ids)} for c in self.claims
         ]
         return {
             "answer": self.answer,
@@ -222,8 +226,12 @@ def _channel_from_claim(claim: GroundedClaim) -> dict[str, object] | None:
     ids = [e for e in claim.evidence_ids if isinstance(e, str) and e.strip()]
     if not text or not ids:
         return None
-    return {"name": text[:80], "severity": _CLAIM_SEVERITY.get(claim.claim_type, "indirect"),
-            "explanation": text, "evidence_ids": ids}
+    return {
+        "name": text[:80],
+        "severity": _CLAIM_SEVERITY.get(claim.claim_type, "indirect"),
+        "explanation": text,
+        "evidence_ids": ids,
+    }
 
 
 def _channels_from_claims(claims: list[GroundedClaim]) -> list[dict[str, object]]:
@@ -245,6 +253,74 @@ def _channels_from_claims(claims: list[GroundedClaim]) -> list[dict[str, object]
 def _effect_row(claim: GroundedClaim) -> dict[str, object]:
     """One effect row: claim text with its declared type and freeze refs."""
     return {"text": claim.text, "claim_type": claim.claim_type, "evidence_ids": list(claim.evidence_ids)}
+
+
+def _observation_field(row: Mapping[str, object], key: str) -> str:
+    """One string field of a canonical ledger row ('' when absent/mistyped)."""
+    value = row.get(key)
+    return value.strip() if isinstance(value, str) else ""
+
+
+def _observation_provenance(row: Mapping[str, object]) -> Mapping[str, object]:
+    """The row's provenance mapping ({} when absent/mistyped)."""
+    prov = row.get("provenance")
+    return prov if isinstance(prov, Mapping) else {}
+
+
+def _observation_excerpt(row: Mapping[str, object], limit: int = 400) -> str:
+    """Canonical passage of one ledger row: its raw-document provenance text, else its content."""
+    prov = _observation_provenance(row)
+    for source in (prov.get("passage"), row.get("content")):
+        text = source.strip() if isinstance(source, str) else ""
+        if text:
+            return text[:limit]
+    return ""
+
+
+def _observation_row(row: Mapping[str, object]) -> dict[str, object] | None:
+    """One direct-evidence row built from a canonical EvidenceLedger record.
+
+    The direct-evidence section states what the source documents show, so its
+    text is the document identity plus the kernel-held passage — never a model
+    claim. The record's own claim text rides along as ``claim`` for the
+    structured payload; committee statements are interpretations over these rows.
+    """
+    evidence_id = _observation_field(row, "evidence_id")
+    document, accession = _observation_identity(row, _observation_provenance(row))
+    text = _observation_text(document, accession, _observation_excerpt(row))
+    if not evidence_id or not text:
+        return None
+    return {
+        "text": text,
+        "claim": _observation_field(row, "claim_text"),
+        "claim_type": "observed_fact",
+        "document": document,
+        "accession_no": accession,
+        "evidence_ids": [evidence_id],
+    }
+
+
+def _observation_identity(row: Mapping[str, object], prov: Mapping[str, object]) -> tuple[str, str]:
+    """(document, accession) of one ledger row: canonical provenance first, the row's own fields after."""
+    return (
+        _observation_field(prov, "document_name") or _observation_field(row, "source_name"),
+        _observation_field(prov, "accession_no") or _observation_field(row, "source_record_id"),
+    )
+
+
+def _observation_text(document: str, accession: str, excerpt: str) -> str:
+    """Direct-evidence text: the document identity plus the kernel-held passage (either alone if partial)."""
+    identity = " ".join(part for part in (document, accession) if part)
+    if identity and excerpt:
+        return f'{identity}: "{excerpt}"'
+    return identity or excerpt
+
+
+def _observation_rows(
+    observations: Sequence[Mapping[str, object]] | None,
+) -> list[dict[str, object]]:
+    """Canonical observations in render order (rows without an evidence id are dropped)."""
+    return [row for row in (_observation_row(item) for item in (observations or [])) if row is not None]
 
 
 def _split_effects(claims: Sequence[GroundedClaim]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
@@ -289,7 +365,11 @@ def _merge_claims(*groups: Sequence[GroundedClaim]) -> list[GroundedClaim]:
         prior_index = index.get(text)
         if prior_index is None:
             index[text] = len(merged)
-            merged.append(GroundedClaim(text=text, claim_type=claim.claim_type, evidence_ids=list(dict.fromkeys(claim.evidence_ids))))
+            merged.append(
+                GroundedClaim(
+                    text=text, claim_type=claim.claim_type, evidence_ids=list(dict.fromkeys(claim.evidence_ids))
+                )
+            )
             continue
         prior = merged[prior_index]
         merged[prior_index] = GroundedClaim(
@@ -305,18 +385,38 @@ def _normalize_scope(scope: Mapping[str, object] | None) -> dict[str, object]:
     candidates = (scope.get("allowed_sources"), scope.get("allowed")) if isinstance(scope, Mapping) else ()
     sources = next((_strs(raw) for raw in candidates if isinstance(raw, (list, tuple))), None) or ["SEC"]
     sec_only = [s.upper() for s in sources] == ["SEC"]
-    return {"allowed_sources": sources, "sec_only": sec_only,
-            "limitation": SEC_ONLY_LIMITATION if sec_only else ""}
+    return {"allowed_sources": sources, "sec_only": sec_only, "limitation": SEC_ONLY_LIMITATION if sec_only else ""}
 
 
-def _synth_unknowns(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis, disagreement: CommitteeDisagreement) -> list[str]:
+def _synth_unknowns(
+    stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis, disagreement: CommitteeDisagreement
+) -> list[str]:
     """Deduped uncertainties across the trio plus the committee critical list."""
-    return list(dict.fromkeys((*_analysis_uncertainties(stock, bull, bear), *_strs(getattr(disagreement, "critical_uncertainties", [])))))
+    return list(
+        dict.fromkeys(
+            (*_analysis_uncertainties(stock, bull, bear), *_strs(getattr(disagreement, "critical_uncertainties", [])))
+        )
+    )
+
+
+def _unknown_claims(claims: Sequence[GroundedClaim]) -> list[str]:
+    """Texts of committee claims declared unknown: an open question stays an unknown.
+
+    It is never rewritten as an absence observation (a search-coverage statement)
+    and never rendered as a direct finding.
+    """
+    return list(dict.fromkeys(c.text.strip() for c in claims if c.claim_type == "unknown" and c.text.strip()))
 
 
 def _synth_changes(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis) -> list[str]:
     """Union of the trio what-would-change lists in first-seen order."""
-    return _union_texts((list(getattr(stock, "what_would_change", []) or []), list(getattr(bull, "what_would_change", []) or []), list(getattr(bear, "what_would_change", []) or [])))
+    return _union_texts(
+        (
+            list(getattr(stock, "what_would_change", []) or []),
+            list(getattr(bull, "what_would_change", []) or []),
+            list(getattr(bear, "what_would_change", []) or []),
+        )
+    )
 
 
 def _synth_limitations(evidence_limitations: Sequence[str] | None, scope: Mapping[str, object]) -> list[str]:
@@ -376,6 +476,8 @@ def synthesize_final(
     extra_claims: Sequence[GroundedClaim | dict[str, object]] | None = None,
     evidence_limitations: Sequence[str] | None = None,
     research_scope: Mapping[str, object] | None = None,
+    observations: Sequence[Mapping[str, object]] | None = None,
+    absence_observations: Sequence[str] | None = None,
 ) -> FinalSynthesis:
     """Package the trio + disagreement + caller claims into the final record (no live calls).
 
@@ -383,6 +485,12 @@ def synthesize_final(
     (e.g. the caller's drafted answer); otherwise the sections are joined
     deterministically so synthesis stays reproducible. Cited ids derive only
     from accepted per-claim mappings, never the whole freeze.
+
+    ``observations`` are the freeze's canonical EvidenceLedger rows: the
+    direct-evidence section is built from them, never from a model-labeled
+    committee claim (committee statements are interpretations over these rows).
+    ``absence_observations`` are the session's coverage artifacts' texts: a
+    generic unknown stays an unknown and never becomes an absence claim.
     """
     claims = _merge_claims(
         list(getattr(stock, "claims", []) or []),
@@ -391,7 +499,7 @@ def synthesize_final(
         _normalize_extra(extra_claims),
     )
     scope = _normalize_scope(research_scope)
-    direct_evidence, second_order = _split_effects(claims)
+    first_order, second_order = _split_effects(claims)
     synth = FinalSynthesis(
         session_id=session_id,
         wave_id=_coerce_wave_id(wave_id),
@@ -403,21 +511,28 @@ def synthesize_final(
         bull_case=bull.bull_case,
         bear_case=bear.bear_case,
         disagreement=disagreement,
-        unknowns=_synth_unknowns(stock, bull, bear, disagreement),
+        unknowns=list(
+            dict.fromkeys(
+                (
+                    *_synth_unknowns(stock, bull, bear, disagreement),
+                    *_unknown_claims(claims),
+                )
+            )
+        ),
         what_would_change=_synth_changes(stock, bull, bear),
         claims=claims,
         executive_summary=stock.executive_view or stock.base_case or "No grounded SEC findings.",
         consensus=_consensus_text(disagreement),
         impact_channels=_channels_from_analyses(stock, bull, bear) or _channels_from_claims(claims),
-        first_order_effects=direct_evidence,
+        first_order_effects=first_order,
         second_order_effects=second_order,
         bull_evidence_ids=claims_refs(bull.claims),
         bear_evidence_ids=claims_refs(bear.claims),
         critical_disagreements=_critical_disagreements(disagreement),
         evidence_limitations=_synth_limitations(evidence_limitations, scope),
         research_scope=scope,
-        direct_evidence=direct_evidence,
-        absence_observations=[scoped_absence(c.text) for c in claims if c.claim_type == "unknown"],
+        direct_evidence=_observation_rows(observations),
+        absence_observations=[scoped_absence(text) for text in _strs(absence_observations)],
         filing_references=claims_refs(claims),
     )
     synth.answer = _deep_answer(synth) if model is None else str(model)

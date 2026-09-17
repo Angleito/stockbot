@@ -4,7 +4,6 @@ Deterministic and offline: price, consensus, EPS, and obligations inputs
 are injected via monkeypatch; nothing touches the network or cache.db.
 """
 
-
 from pathlib import Path
 
 import pytest
@@ -166,18 +165,10 @@ def fake_deps(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(valuation, "cache", FakeCache())
     monkeypatch.setattr(valuation, "get_live_price", _fake_price)
-    monkeypatch.setattr(
-        valuation.analyst_client, "get_analyst_estimates", _fake_estimates
-    )
-    monkeypatch.setattr(
-        valuation.edgar_client, "get_fundamentals", _fake_fundamentals
-    )
-    monkeypatch.setattr(
-        valuation.obligations, "get_obligations", _fake_obligations
-    )
-    monkeypatch.setattr(
-        valuation, "_revenue_matched_margin", _fake_margin
-    )
+    monkeypatch.setattr(valuation.analyst_client, "get_analyst_estimates", _fake_estimates)
+    monkeypatch.setattr(valuation.edgar_client, "get_fundamentals", _fake_fundamentals)
+    monkeypatch.setattr(valuation.obligations, "get_obligations", _fake_obligations)
+    monkeypatch.setattr(valuation, "_revenue_matched_margin", _fake_margin)
 
 
 def test_trailing_pe_from_live_price(fake_deps: None) -> None:
@@ -202,10 +193,7 @@ def test_three_eps_figures_never_conflated(fake_deps: None) -> None:
     assert scenario["eps_after_all_obligations"] is not None
     assert with_defaults["eps_after_all_obligations"] is not None
     # The OpenAI-default scenario is strictly worse than no-default.
-    assert (
-        with_defaults["eps_after_all_obligations"]
-        < scenario["eps_after_all_obligations"]
-    )
+    assert with_defaults["eps_after_all_obligations"] < scenario["eps_after_all_obligations"]
     # Labels are distinct and explicit.
     assert "contractual obligations included" in adjusted["label"]
     assert "no counterparty default" in scenario["label"]
@@ -243,8 +231,13 @@ def test_supply_front_loaded_is_revenue_matched_not_drag(fake_deps: None) -> Non
 
 def test_horizon_less_supply_falls_back_flat() -> None:
     rows: list[dict[str, object]] = [
-        {"type": "supply_commitments", "amount_billions": 119.0, "certainty": "contingent",
-         "status": "future_cash_obligation", "revenue_matched": True},
+        {
+            "type": "supply_commitments",
+            "amount_billions": 119.0,
+            "certainty": "contingent",
+            "status": "future_cash_obligation",
+            "revenue_matched": True,
+        },
     ]
     impact = valuation._obligation_annual_impact(rows, years=6)
     assert impact["revenue_matched_annual_billions"] == pytest.approx(119.0 / 6.0, abs=0.01)
@@ -296,9 +289,7 @@ def test_projected_prices_matrix(fake_deps: None) -> None:
 
 
 def test_projected_prices_math_direct() -> None:
-    pp = valuation._projected_prices(
-        {"Worst case FY27": 2.56, "Consensus FY28": 13.04}, price=213.05
-    )
+    pp = valuation._projected_prices({"Worst case FY27": 2.56, "Consensus FY28": 13.04}, price=213.05)
     tiers_raw = pp["tiers"]
     assert isinstance(tiers_raw, list)
     tiers = {t["tier"]: t for t in tiers_raw if isinstance(t, dict)}
@@ -307,25 +298,17 @@ def test_projected_prices_math_direct() -> None:
 
 
 def test_obligation_annual_impact_direct() -> None:
-    impact = valuation._obligation_annual_impact(
-        _obligation_rows(), years=6
-    )
+    impact = valuation._obligation_annual_impact(_obligation_rows(), years=6)
     assert impact["contractual_annual_billions"] == pytest.approx(0.934, abs=0.01)
     # Contingent (non-default): cloud schedule avg (6+7+7+5+3+2)/6 + vendor 6/6.
     expected_contingent = 30.0 / 6.0 + 6.0 / 6.0
-    assert impact["contingent_annual_billions"] == pytest.approx(
-        expected_contingent, abs=0.1
-    )
+    assert impact["contingent_annual_billions"] == pytest.approx(expected_contingent, abs=0.1)
     # Default-triggered: facility 3.5/6 + 8-K 105/6.
     expected_default = (3.5 + 105.0) / 6.0
-    assert impact["default_triggered_annual_billions"] == pytest.approx(
-        expected_default, abs=0.1
-    )
+    assert impact["default_triggered_annual_billions"] == pytest.approx(expected_default, abs=0.1)
     # Revenue-matched: supply front-loaded (95/0.75 + 24/5).
     expected_matched = 95.0 / 0.75 + 24.0 / 5.0
-    assert impact["revenue_matched_annual_billions"] == pytest.approx(
-        expected_matched, abs=0.1
-    )
+    assert impact["revenue_matched_annual_billions"] == pytest.approx(expected_matched, abs=0.1)
 
 
 def test_fy_schedule_separation_no_blended_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -365,15 +348,9 @@ def test_fy_schedule_separation_no_blended_fallback(monkeypatch: pytest.MonkeyPa
 
         monkeypatch.setattr(valuation, "cache", FakeCache())
         monkeypatch.setattr(valuation, "get_live_price", _run_price)
-        monkeypatch.setattr(
-            valuation.analyst_client, "get_analyst_estimates", _run_estimates
-        )
-        monkeypatch.setattr(
-            valuation.edgar_client, "get_fundamentals", _run_fundamentals
-        )
-        monkeypatch.setattr(
-            valuation.obligations, "get_obligations", _run_obligations
-        )
+        monkeypatch.setattr(valuation.analyst_client, "get_analyst_estimates", _run_estimates)
+        monkeypatch.setattr(valuation.edgar_client, "get_fundamentals", _run_fundamentals)
+        monkeypatch.setattr(valuation.obligations, "get_obligations", _run_obligations)
         return valuation.get_valuation_metrics("NVDA")
 
     shares = 24.221  # 24_221_000_000 from _estimates
@@ -381,9 +358,7 @@ def test_fy_schedule_separation_no_blended_fallback(monkeypatch: pytest.MonkeyPa
     fe = result["forward_eps"]
     assert isinstance(fe, dict)
     assert fe["scenario"].get("contingent_drag_per_share", 0.0) == 0.0
-    assert fe["scenario_next_fy"]["contingent_drag_per_share"] == pytest.approx(
-        10.0 / shares, abs=0.01
-    )
+    assert fe["scenario_next_fy"]["contingent_drag_per_share"] == pytest.approx(10.0 / shares, abs=0.01)
     impact = valuation._obligation_annual_impact([scheduled], years=6)
     assert "2027" not in impact["impact_by_fiscal_year"]
     assert impact["flat_annual_by_bucket"]["contingent"] == 0.0
@@ -391,9 +366,7 @@ def test_fy_schedule_separation_no_blended_fallback(monkeypatch: pytest.MonkeyPa
     result = _run([scheduled, flat_vendor])
     fe = result["forward_eps"]
     assert isinstance(fe, dict)
-    assert fe["scenario"]["contingent_drag_per_share"] == pytest.approx(
-        1.0 / shares, abs=0.01
-    )
+    assert fe["scenario"]["contingent_drag_per_share"] == pytest.approx(1.0 / shares, abs=0.01)
     impact = valuation._obligation_annual_impact([scheduled, flat_vendor], years=6)
     assert impact["impact_by_fiscal_year"].get("2027", {}).get("contingent", 0.0) == 0.0
     assert impact["flat_annual_by_bucket"]["contingent"] == pytest.approx(1.0, abs=0.01)
@@ -434,9 +407,12 @@ def test_generic_scheduled_impact_attributes_fys_no_bleed() -> None:
 
 def _snap_obligations() -> dict[str, object]:
     old: dict[str, object] = {
-        "type": "vendor_commitments", "amount_billions": 20.0,
-        "certainty": "contingent", "status": "future_cash_obligation",
-        "revenue_matched": False, "filed": "2026-02-01",
+        "type": "vendor_commitments",
+        "amount_billions": 20.0,
+        "certainty": "contingent",
+        "status": "future_cash_obligation",
+        "revenue_matched": False,
+        "filed": "2026-02-01",
     }
     new: dict[str, object] = {**old, "amount_billions": 13.0, "filed": "2026-04-01"}
     manifest: list[str] = []
@@ -444,33 +420,35 @@ def _snap_obligations() -> dict[str, object]:
     return {
         "obligations": [old, new],
         "current_snapshot": [new],
-        "coverage": {"scan_manifest": manifest, "quantified_count": 2,
-                     "unquantified_count": 0, "warnings": warnings},
+        "coverage": {"scan_manifest": manifest, "quantified_count": 2, "unquantified_count": 0, "warnings": warnings},
     }
 
 
 def test_valuation_uses_snapshot_not_ledger(monkeypatch: pytest.MonkeyPatch, fake_deps: None) -> None:
     """A superseded $20B + current $13B values at $13B, never $33B."""
+
     def _snap_fake(ticker: str) -> dict[str, object]:
         return _snap_obligations()
 
-    monkeypatch.setattr(
-        valuation.obligations, "get_obligations", _snap_fake
-    )
+    monkeypatch.setattr(valuation.obligations, "get_obligations", _snap_fake)
     result = valuation.get_valuation_metrics("SYN")
     obligations = result["obligations"]
     assert isinstance(obligations, dict)
-    assert obligations["contingent_annual_billions"] == pytest.approx(
-        13.0 / 6.0, abs=0.01
-    )
+    assert obligations["contingent_annual_billions"] == pytest.approx(13.0 / 6.0, abs=0.01)
 
 
 def test_eps_scenarios_missing_inputs_yield_none_with_reason() -> None:
-    ob = {"obligations": [{
-        "type": "vendor_commitments", "amount_billions": 6.0,
-        "certainty": "contingent", "status": "future_cash_obligation",
-        "revenue_matched": False,
-    }]}
+    ob = {
+        "obligations": [
+            {
+                "type": "vendor_commitments",
+                "amount_billions": 6.0,
+                "certainty": "contingent",
+                "status": "future_cash_obligation",
+                "revenue_matched": False,
+            }
+        ]
+    }
     out = valuation._obligation_eps_scenarios(ob, None, None)
     assert out["effective_tax_rate"] is None
     assert out["scenarios"]
@@ -495,7 +473,8 @@ def test_missing_margin_yields_none_with_reason(monkeypatch: pytest.MonkeyPatch,
         return (None, "unavailable: gross margin fact missing")
 
     monkeypatch.setattr(
-        valuation, "_revenue_matched_margin",
+        valuation,
+        "_revenue_matched_margin",
         _no_margin,
     )
     result = valuation.get_valuation_metrics("NVDA")
@@ -526,10 +505,15 @@ def test_unquantified_only_valuation_caveat(monkeypatch: pytest.MonkeyPatch, fak
         warnings: list[str] = []
         empty_rows: list[dict[str, object]] = []
         return {
-            "obligations": empty_rows, "current_snapshot": empty_rows,
+            "obligations": empty_rows,
+            "current_snapshot": empty_rows,
             "unquantified_exposures": [{"type": "indemnities", "trigger": "unknown"}],
-            "coverage": {"scan_manifest": manifest, "quantified_count": 0,
-                         "unquantified_count": 1, "warnings": warnings},
+            "coverage": {
+                "scan_manifest": manifest,
+                "quantified_count": 0,
+                "unquantified_count": 1,
+                "warnings": warnings,
+            },
         }
 
     monkeypatch.setattr(valuation.obligations, "get_obligations", _unquantified_only)
@@ -548,21 +532,35 @@ def test_unquantified_only_valuation_caveat(monkeypatch: pytest.MonkeyPatch, fak
 def test_valuation_skips_schedule_components() -> None:
     """Reconciled table components never double-count in EPS impact."""
     headline = {
-        "type": "vendor_commitments", "amount_billions": 13.3,
-        "certainty": "contingent", "status": "future_cash_obligation",
-        "revenue_matched": False, "default_triggered": False,
+        "type": "vendor_commitments",
+        "amount_billions": 13.3,
+        "certainty": "contingent",
+        "status": "future_cash_obligation",
+        "revenue_matched": False,
+        "default_triggered": False,
     }
     comps = [
-        {**headline, "amount_billions": 6.0, "fiscal_year": "2027",
-         "schedule_component": True, "headline_type": "vendor_commitments"},
-        {**headline, "amount_billions": 7.3, "fiscal_year": "2028",
-         "schedule_component": True, "headline_type": "vendor_commitments"},
+        {
+            **headline,
+            "amount_billions": 6.0,
+            "fiscal_year": "2027",
+            "schedule_component": True,
+            "headline_type": "vendor_commitments",
+        },
+        {
+            **headline,
+            "amount_billions": 7.3,
+            "fiscal_year": "2028",
+            "schedule_component": True,
+            "headline_type": "vendor_commitments",
+        },
     ]
-    assert valuation._obligation_annual_impact([headline, *comps], 6) == \
-        valuation._obligation_annual_impact([headline], 6)
-    assert valuation._obligation_annual_impact(
-        [headline, *comps], 6
-    )["contingent_annual_billions"] == pytest.approx(13.3 / 6.0, abs=0.01)
+    assert valuation._obligation_annual_impact([headline, *comps], 6) == valuation._obligation_annual_impact(
+        [headline], 6
+    )
+    assert valuation._obligation_annual_impact([headline, *comps], 6)["contingent_annual_billions"] == pytest.approx(
+        13.3 / 6.0, abs=0.01
+    )
 
 
 def test_get_live_quote_caches_retrieval_instant(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -573,7 +571,8 @@ def test_get_live_quote_caches_retrieval_instant(monkeypatch: pytest.MonkeyPatch
         return {"price": 100.0, "retrieved_at": "2026-08-10T12:00:00Z"}
 
     monkeypatch.setattr(
-        valuation.analyst_client, "get_quote_price",
+        valuation.analyst_client,
+        "get_quote_price",
         _fake_quote_100,
     )
     quote = valuation.get_live_quote("KO")
@@ -595,7 +594,8 @@ def test_get_live_price_returns_float_only(monkeypatch: pytest.MonkeyPatch) -> N
         return {"price": 65.0, "retrieved_at": "2026-08-10T12:00:00Z"}
 
     monkeypatch.setattr(
-        valuation.analyst_client, "get_quote_price",
+        valuation.analyst_client,
+        "get_quote_price",
         _fake_quote_65,
     )
     assert valuation.get_live_price("KO") == 65.0
@@ -605,11 +605,13 @@ def test_get_live_quote_ignores_stale_estimates_cache(monkeypatch: pytest.Monkey
     cache = FakeCache()
     cache.store["analyst_estimates:KO"] = {"quote": {"price": 100.0}, "as_of": "2026-08-10T12:01:00Z"}
     monkeypatch.setattr(valuation, "cache", cache)
+
     def _fake_summary(ticker: str, modules: str) -> dict[str, object]:
         return {"price": {"regularMarketPrice": {"raw": 101.0}}}
 
     monkeypatch.setattr(
-        valuation.analyst_client, "_quote_summary",
+        valuation.analyst_client,
+        "_quote_summary",
         _fake_summary,
     )
     assert valuation.get_live_quote("KO")["price"] == 101.0
@@ -620,5 +622,6 @@ def test_get_live_quote_yahoo_failure_yields_none(monkeypatch: pytest.MonkeyPatc
 
     def _boom(ticker: str, modules: str) -> dict[str, object]:
         raise RuntimeError("yahoo down")
+
     monkeypatch.setattr(valuation.analyst_client, "_quote_summary", _boom)
     assert valuation.get_live_quote("KO") == {"price": None, "retrieved_at": None}

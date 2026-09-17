@@ -13,7 +13,7 @@ import os
 import sqlite3
 from collections.abc import Mapping
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from ..config import get_data_root
@@ -77,6 +77,10 @@ CREATE TABLE IF NOT EXISTS dossiers (
   dossier_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
   created_at TEXT NOT NULL, record TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_dossiers_session ON dossiers(session_id);
+CREATE TABLE IF NOT EXISTS coverage_artifacts (
+  artifact_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+  created_at TEXT NOT NULL, record TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_coverage_artifacts_session ON coverage_artifacts(session_id);
 """
 
 
@@ -119,14 +123,19 @@ def _iso_or_none(value: object, key: str, where: str) -> str | None:
         parsed = datetime.fromisoformat(raw)
     except ValueError:
         raise ValueError(f"{where}: '{key}' must be ISO-8601, got {value!r}") from None
-    aware = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=timezone.utc)
+    aware = parsed if parsed.tzinfo is not None else parsed.replace(tzinfo=UTC)
     return aware.isoformat()
 
 
 def _chain_hash(prev_hash: str, event: JournalEvent) -> str:
     body = "|".join(
-        (prev_hash, event.event_id, str(event.sequence), event.timestamp.isoformat(),
-         json.dumps(event.to_dict()["payload"], sort_keys=True))
+        (
+            prev_hash,
+            event.event_id,
+            str(event.sequence),
+            event.timestamp.isoformat(),
+            json.dumps(event.to_dict()["payload"], sort_keys=True),
+        )
     )
     return hashlib.sha256(body.encode("utf-8")).hexdigest()
 
@@ -148,6 +157,7 @@ def _session_policy_doc(names: set[str], row: sqlite3.Row) -> object:
     parsed: object = json.loads(text)
     return parsed
 
+
 def _temporal_stored(names: set[str], row: sqlite3.Row) -> object:
     """Stored temporal_scope JSON; None when the column is absent or blank."""
     if "temporal_scope" not in names:
@@ -161,7 +171,9 @@ def _temporal_stored(names: set[str], row: sqlite3.Row) -> object:
 
 def _temporal_defaults(dts: object) -> dict[str, object]:
     """Default scope envelope; malformed factories fall back to latest-available."""
-    defaults = dts() if callable(dts) else {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
+    defaults = (
+        dts() if callable(dts) else {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
+    )
     if isinstance(defaults, dict):
         return dict(defaults)
     return {"as_of": None, "start": None, "end": None, "mode": "latest-available", "raw": None}
@@ -228,10 +240,14 @@ def _job_id(job: Job) -> str:
 
 def _job_action(job: Job) -> JSONValue:
     """EXECUTE_JOB payload for one runnable job."""
-    return {"verb": "EXECUTE_JOB", "job_id": job.job_id, "job_type": job.job_type,
-            "source_domain": job.source_domain or "sec",
-            "deadline": job.deadline.isoformat() if job.deadline is not None else None,
-            "budget_s": SOURCE_RUNTIME_BUDGET_S}
+    return {
+        "verb": "EXECUTE_JOB",
+        "job_id": job.job_id,
+        "job_type": job.job_type,
+        "source_domain": job.source_domain or "sec",
+        "deadline": job.deadline.isoformat() if job.deadline is not None else None,
+        "budget_s": SOURCE_RUNTIME_BUDGET_S,
+    }
 
 
 def _status_action(status: str) -> JSONValue:
@@ -289,25 +305,33 @@ def _session_params(session: ResearchSession) -> tuple[object, ...]:
     budget = json.dumps(validate_json_mapping(session.budget, "<session>"), sort_keys=True)
     from .models import validate_source_policy as _vsp
     from .models import validate_temporal_scope as _vts
+
     source_policy = json.dumps(_vsp(session.source_policy, "<session>"), sort_keys=True)
     temporal_scope = json.dumps(_vts(session.temporal_scope, "<session>"), sort_keys=True)
     doc = session.to_dict()
     return (
-        session.session_id, session.created_at.isoformat(), session.updated_at.isoformat(),
-        session.query, session.objective,
+        session.session_id,
+        session.created_at.isoformat(),
+        session.updated_at.isoformat(),
+        session.query,
+        session.objective,
         session.as_of.isoformat() if session.as_of is not None else None,
-        session.status, session.current_wave, policy, budget, source_policy, temporal_scope,
+        session.status,
+        session.current_wave,
+        policy,
+        budget,
+        source_policy,
+        temporal_scope,
         json.dumps(doc["job_ids"], sort_keys=True),
         json.dumps(doc["evidence_ids"], sort_keys=True),
         json.dumps(doc["freeze_ids"], sort_keys=True),
         json.dumps(doc["dossier_ids"], sort_keys=True),
         json.dumps(doc["committee_runs"], sort_keys=True),
         json.dumps(doc["unresolved_questions"], sort_keys=True),
-        session.targeted_question, session.targeted_domain,
-        json.dumps(doc["final_result"], sort_keys=True)
-        if session.final_result is not None else None,
-        json.dumps(doc["failure"], sort_keys=True)
-        if session.failure is not None else None,
+        session.targeted_question,
+        session.targeted_domain,
+        json.dumps(doc["final_result"], sort_keys=True) if session.final_result is not None else None,
+        json.dumps(doc["failure"], sort_keys=True) if session.failure is not None else None,
     )
 
 
@@ -315,17 +339,28 @@ def _job_params(job: Job) -> tuple[object, ...]:
     """Positional params for _JOB_SQL (caller validates first)."""
     doc = job.to_dict()
     return (
-        job.job_id, job.session_id, job.wave_id, job.parent_job_id, job.job_type, job.owner,
-        job.source_domain, job.status, job.created_at.isoformat(),
+        job.job_id,
+        job.session_id,
+        job.wave_id,
+        job.parent_job_id,
+        job.job_type,
+        job.owner,
+        job.source_domain,
+        job.status,
+        job.created_at.isoformat(),
         job.started_at.isoformat() if job.started_at is not None else None,
         job.completed_at.isoformat() if job.completed_at is not None else None,
         job.deadline.isoformat() if job.deadline is not None else None,
         job.last_heartbeat_at.isoformat() if job.last_heartbeat_at is not None else None,
-        job.model, job.token_budget, job.tool_budget, job.child_budget,
+        job.model,
+        job.token_budget,
+        job.tool_budget,
+        job.child_budget,
         json.dumps(doc["result"], sort_keys=True) if job.result is not None else None,
         json.dumps(doc["diagnostics"], sort_keys=True),
         json.dumps(doc["failure"], sort_keys=True) if job.failure is not None else None,
     )
+
 
 @dataclass(frozen=True)
 class ResumeState:
@@ -361,7 +396,10 @@ class ResearchRepository:
                 pass
         for col, default in (
             ("source_policy", '\'{"allowed":["SEC"],"denied":[],"mode":"allowlist"}\''),
-            ("temporal_scope", '\'{"as_of":null,"end":null,"mode":"latest-available","raw":null,"start":null}\''),
+            (
+                "temporal_scope",
+                '\'{"as_of":null,"end":null,"mode":"latest-available","raw":null,"start":null}\'',
+            ),
         ):
             try:
                 conn.execute(f"ALTER TABLE sessions ADD COLUMN {col} TEXT DEFAULT {default}")
@@ -410,8 +448,7 @@ class ResearchRepository:
         with self._connect() as conn:
             try:
                 rows = conn.execute(
-                    "SELECT session_id, status, updated_at, query FROM sessions"
-                    " ORDER BY updated_at DESC LIMIT ?",
+                    "SELECT session_id, status, updated_at, query FROM sessions ORDER BY updated_at DESC LIMIT ?",
                     (max(1, limit),),
                 ).fetchall()
             except sqlite3.Error:
@@ -429,13 +466,27 @@ class ResearchRepository:
     @staticmethod
     def _row_to_session(row: sqlite3.Row) -> ResearchSession:
         from .models import default_temporal_scope as _dts
+
         doc: dict[str, object] = {
-            "session_id": row["session_id"], "created_at": row["created_at"], "updated_at": row["updated_at"],
-            "query": row["query"], "objective": row["objective"], "as_of": row["as_of"],
-            "status": row["status"], "current_wave": row["current_wave"],
+            "session_id": row["session_id"],
+            "created_at": row["created_at"],
+            "updated_at": row["updated_at"],
+            "query": row["query"],
+            "objective": row["objective"],
+            "as_of": row["as_of"],
+            "status": row["status"],
+            "current_wave": row["current_wave"],
         }
-        for key in ("policy", "budget", "job_ids", "evidence_ids", "freeze_ids",
-                    "dossier_ids", "committee_runs", "unresolved_questions"):
+        for key in (
+            "policy",
+            "budget",
+            "job_ids",
+            "evidence_ids",
+            "freeze_ids",
+            "dossier_ids",
+            "committee_runs",
+            "unresolved_questions",
+        ):
             raw: object = json.loads(str(row[key]))
             doc[key] = raw
         for key in ("final_result", "failure"):
@@ -478,14 +529,10 @@ class ResearchRepository:
             conn.commit()
             conn.execute("BEGIN IMMEDIATE")
             try:
-                srow = conn.execute(
-                    "SELECT * FROM sessions WHERE session_id = ?", (session_id,)
-                ).fetchone()
+                srow = conn.execute("SELECT * FROM sessions WHERE session_id = ?", (session_id,)).fetchone()
                 if srow is None:
                     raise KeyError(f"unknown session_id: {session_id!r}")
-                jrow = conn.execute(
-                    "SELECT * FROM jobs WHERE job_id = ?", (job_id,)
-                ).fetchone()
+                jrow = conn.execute("SELECT * FROM jobs WHERE job_id = ?", (job_id,)).fetchone()
                 if jrow is None:
                     raise KeyError(f"unknown job_id: {job_id!r}")
                 session = self._row_to_session(srow)
@@ -498,8 +545,13 @@ class ResearchRepository:
                     deadline = normalize_time(job.deadline)
                     if utcnow() > deadline:
                         timed = replace(
-                            job, status="timed_out", completed_at=utcnow(),
-                            failure=Failure(category="timeout", message=f"deadline {job.deadline.isoformat()} expired"),
+                            job,
+                            status="timed_out",
+                            completed_at=utcnow(),
+                            failure=Failure(
+                                category="timeout",
+                                message=f"deadline {job.deadline.isoformat()} expired",
+                            ),
                         )
                         timed.validate("<research.sqlite>")
                         conn.execute(_JOB_SQL, _job_params(timed))
@@ -509,8 +561,15 @@ class ResearchRepository:
                 max_calls = _session_max_calls(session, default_max)
                 used = _session_used_calls(session)
                 _check_dispatch_budgets(job, session_id, job_id, max_calls, used)
-                spent = replace(job, tool_budget=job.tool_budget - 1 if job.tool_budget is not None else None)
-                billed = replace(session, budget={**session.budget, "tool_calls_used": used + 1}, updated_at=utcnow())
+                spent = replace(
+                    job,
+                    tool_budget=job.tool_budget - 1 if job.tool_budget is not None else None,
+                )
+                billed = replace(
+                    session,
+                    budget={**session.budget, "tool_calls_used": used + 1},
+                    updated_at=utcnow(),
+                )
                 billed.validate("<research.sqlite>")
                 spent.validate("<research.sqlite>")
                 conn.execute(_SESSION_SQL, _session_params(billed))
@@ -535,19 +594,30 @@ class ResearchRepository:
         """All jobs for one session, oldest first."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM jobs WHERE session_id = ? ORDER BY created_at, rowid", (session_id,)
+                "SELECT * FROM jobs WHERE session_id = ? ORDER BY created_at, rowid",
+                (session_id,),
             ).fetchall()
         return [self._row_to_job(r) for r in rows]
 
     @staticmethod
     def _row_to_job(row: sqlite3.Row) -> Job:
         doc: dict[str, object] = {
-            "job_id": row["job_id"], "session_id": row["session_id"], "wave_id": row["wave_id"],
-            "parent_job_id": row["parent_job_id"], "job_type": row["job_type"], "owner": row["owner"],
-            "source_domain": row["source_domain"], "status": row["status"], "created_at": row["created_at"],
-            "started_at": row["started_at"], "completed_at": row["completed_at"], "deadline": row["deadline"],
-            "last_heartbeat_at": row["last_heartbeat_at"] if "last_heartbeat_at" in row.keys() else None,
-            "model": row["model"], "token_budget": row["token_budget"], "tool_budget": row["tool_budget"],
+            "job_id": row["job_id"],
+            "session_id": row["session_id"],
+            "wave_id": row["wave_id"],
+            "parent_job_id": row["parent_job_id"],
+            "job_type": row["job_type"],
+            "owner": row["owner"],
+            "source_domain": row["source_domain"],
+            "status": row["status"],
+            "created_at": row["created_at"],
+            "started_at": row["started_at"],
+            "completed_at": row["completed_at"],
+            "deadline": row["deadline"],
+            "last_heartbeat_at": dict(row).get("last_heartbeat_at"),
+            "model": row["model"],
+            "token_budget": row["token_budget"],
+            "tool_budget": row["tool_budget"],
             "child_budget": row["child_budget"],
         }
         for key in ("result", "diagnostics", "failure"):
@@ -574,10 +644,18 @@ class ResearchRepository:
                     " actor_type, actor_id, payload, previous_state, new_state, prev_hash, hash)"
                     " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
                     (
-                        event.event_id, event.session_id, event.sequence, event.event_type,
-                        event.timestamp.isoformat(), event.actor_type, event.actor_id,
+                        event.event_id,
+                        event.session_id,
+                        event.sequence,
+                        event.event_type,
+                        event.timestamp.isoformat(),
+                        event.actor_type,
+                        event.actor_id,
                         json.dumps(event.to_dict()["payload"], sort_keys=True),
-                        event.previous_state, event.new_state, prev, digest,
+                        event.previous_state,
+                        event.new_state,
+                        prev,
+                        digest,
                     ),
                 )
             except sqlite3.IntegrityError:
@@ -588,7 +666,8 @@ class ResearchRepository:
         """Session events in sequence order; raises ValueError on a broken hash chain."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT * FROM journal WHERE session_id = ? ORDER BY sequence", (session_id,)
+                "SELECT * FROM journal WHERE session_id = ? ORDER BY sequence",
+                (session_id,),
             ).fetchall()
         events: list[JournalEvent] = []
         prev = "GENESIS"
@@ -598,10 +677,15 @@ class ResearchRepository:
                 raise ValueError(f"<research.sqlite>: event {row['event_id']!r} payload must be a mapping")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
             event = JournalEvent.from_dict(
                 {
-                    "event_id": row["event_id"], "session_id": row["session_id"], "sequence": row["sequence"],
-                    "event_type": row["event_type"], "timestamp": row["timestamp"],
-                    "actor_type": row["actor_type"], "actor_id": row["actor_id"],
-                    "payload": payload_raw, "previous_state": row["previous_state"],
+                    "event_id": row["event_id"],
+                    "session_id": row["session_id"],
+                    "sequence": row["sequence"],
+                    "event_type": row["event_type"],
+                    "timestamp": row["timestamp"],
+                    "actor_type": row["actor_type"],
+                    "actor_id": row["actor_id"],
+                    "payload": payload_raw,
+                    "previous_state": row["previous_state"],
                     "new_state": row["new_state"],
                 },
                 "<research.sqlite>",
@@ -628,10 +712,10 @@ class ResearchRepository:
         with self._connect() as conn:
             try:
                 conn.execute(
-                    "INSERT INTO evidence (evidence_id, session_id, known_at, as_of, record)"
-                    " VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO evidence (evidence_id, session_id, known_at, as_of, record) VALUES (?, ?, ?, ?, ?)",
                     (
-                        evidence_id, session_id,
+                        evidence_id,
+                        session_id,
                         _iso_or_none(record.get("known_at"), "known_at", where),
                         _iso_or_none(record.get("as_of"), "as_of", where),
                         _record_json(record, where),
@@ -653,7 +737,8 @@ class ResearchRepository:
         """All evidence records for one session, oldest first."""
         with self._connect() as conn:
             rows = conn.execute(
-                "SELECT record FROM evidence WHERE session_id = ? ORDER BY rowid", (session_id,)
+                "SELECT record FROM evidence WHERE session_id = ? ORDER BY rowid",
+                (session_id,),
             ).fetchall()
         return [validate_json_mapping(json.loads(str(r["record"])), "<research.sqlite>: evidence") for r in rows]
 
@@ -672,8 +757,7 @@ class ResearchRepository:
         with self._connect() as conn:
             try:
                 conn.execute(
-                    "INSERT INTO freezes (freeze_id, session_id, created_at, record)"
-                    " VALUES (?, ?, ?, ?)",
+                    "INSERT INTO freezes (freeze_id, session_id, created_at, record) VALUES (?, ?, ?, ?)",
                     (freeze_id, session_id, created, _record_json(record, where)),
                 )
             except sqlite3.IntegrityError:
@@ -703,8 +787,7 @@ class ResearchRepository:
         with self._connect() as conn:
             try:
                 conn.execute(
-                    "INSERT INTO dossiers (dossier_id, session_id, created_at, record)"
-                    " VALUES (?, ?, ?, ?)",
+                    "INSERT INTO dossiers (dossier_id, session_id, created_at, record) VALUES (?, ?, ?, ?)",
                     (dossier_id, session_id, created, _record_json(record, where)),
                 )
             except sqlite3.IntegrityError:
@@ -728,8 +811,48 @@ class ResearchRepository:
             ).fetchall()
         return [validate_json_mapping(json.loads(str(r["record"])), "<research.sqlite>: dossier") for r in rows]
 
+    def save_coverage_artifact(self, record: Mapping[str, object]) -> str:
+        """Insert one immutable coverage artifact (search scope + absence); duplicate ids raise ValueError.
+
+        Coverage artifacts are not evidence: they carry a SearchRun's scope, never
+        a raw document, and no citation path resolves them (see resource_stores'
+        ``coverage`` kind, which is inspection-only).
+        """
+        if not isinstance(record, Mapping):
+            raise ValueError(  # noqa: TRY004 - the public error contract pins ValueError, tests are oracle
+                "<research.sqlite>: coverage artifact record must be a mapping"
+            )
+        where = "<research.sqlite>: coverage artifact"
+        artifact_id = record.get("artifact_id")
+        session_id = record.get("session_id")
+        if not isinstance(artifact_id, str) or not artifact_id:
+            raise ValueError(f"{where}: 'artifact_id' must be a non-empty string")
+        if not isinstance(session_id, str) or not session_id:
+            raise ValueError(f"{where}: 'session_id' must be a non-empty string")
+        created = _iso_or_none(record.get("created_at"), "created_at", where) or utcnow().isoformat()
+        with self._connect() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO coverage_artifacts (artifact_id, session_id, created_at, record) VALUES (?, ?, ?, ?)",
+                    (artifact_id, session_id, created, _record_json(record, where)),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError(f"{where}: duplicate artifact_id {artifact_id!r}") from None
+        return artifact_id
+
+    def list_coverage_artifacts(self, session_id: str) -> list[dict[str, JSONValue]]:
+        """All coverage artifacts for one session, oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT record FROM coverage_artifacts WHERE session_id = ? ORDER BY created_at, artifact_id",
+                (session_id,),
+            ).fetchall()
+        return [
+            validate_json_mapping(json.loads(str(r["record"])), "<research.sqlite>: coverage artifact") for r in rows
+        ]
+
     def resource_stores(self, session_id: str) -> dict[str, dict[str, object]]:
-        """id->record mappings for read_resource: evidence/freeze/dossier/job/research."""
+        """id->record mappings for read_resource: evidence/freeze/dossier/coverage/job/research."""
         session = self.get_session(session_id)
         evidence: dict[str, object] = {str(r.get("evidence_id", "")): r for r in self.list_evidence(session_id)}
         freezes: dict[str, object] = {}
@@ -744,8 +867,20 @@ class ResearchRepository:
             if isinstance(key, str):
                 dossiers[key] = dossier
         jobs: dict[str, object] = {j.job_id: j.to_dict() for j in self.list_jobs(session_id)}
-        return {"evidence": evidence, "freeze": freezes, "dossier": dossiers,
-                "job": jobs, "research": {session_id: session.to_dict()}}
+        coverage: dict[str, object] = {}
+        for artifact in self.list_coverage_artifacts(session_id):
+            key = artifact.get("artifact_id")
+            if isinstance(key, str):
+                coverage[key] = artifact
+        return {
+            "evidence": evidence,
+            "freeze": freezes,
+            "dossier": dossiers,
+            "coverage": coverage,
+            "job": jobs,
+            "research": {session_id: session.to_dict()},
+        }
+
     # -- resume ----------------------------------------------------------
 
     def resume(self, session_id: str) -> ResumeState:

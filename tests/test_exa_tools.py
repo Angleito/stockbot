@@ -8,9 +8,9 @@ from types import TracebackType
 
 import pytest
 
-import scripts.pi_bridge as pi_bridge
 from app import tools
 from app.policy import Capability, RequestContext
+from scripts import pi_bridge
 
 RESEARCH_CONTEXT = RequestContext("test", frozenset({Capability.RESEARCH}))
 
@@ -64,9 +64,7 @@ def test_search_web_dispatcher_parity(monkeypatch: pytest.MonkeyPatch) -> None:
         return {"result_type": "web_search", "query": query, "evidence": list[dict[str, object]]()}
 
     monkeypatch.setattr(tools.exa_client, "search", fake_search)
-    result = tools.execute_tool(
-        "search_web", {"query": "AMD"}, model="test", context=RESEARCH_CONTEXT
-    )
+    result = tools.execute_tool("search_web", {"query": "AMD"}, model="test", context=RESEARCH_CONTEXT)
     assert result["result_type"] == "web_search"
     query, kwargs = calls[0]
     assert query == "AMD"
@@ -114,9 +112,7 @@ def test_search_web_dispatcher_passes_optional_args(monkeypatch: pytest.MonkeyPa
 def test_search_web_disabled_is_soft(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.delenv("EXA_ENABLED", raising=False)
     monkeypatch.delenv("EXA_API_KEY", raising=False)
-    result = tools.execute_tool(
-        "search_web", {"query": "AMD news"}, model="test", context=RESEARCH_CONTEXT
-    )
+    result = tools.execute_tool("search_web", {"query": "AMD news"}, model="test", context=RESEARCH_CONTEXT)
     assert result["error"] == "Exa search unavailable"
     assert result["source"] == "exa"
     assert result["soft"] is True
@@ -179,15 +175,11 @@ def _next_msg_id(tag: str) -> str:
 
 
 def _start_run(run_id: str) -> dict[str, object]:
-    return _bridge_request(
-        {"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_start"}
-    )
+    return _bridge_request({"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_start"})
 
 
 def _end_run(run_id: str) -> dict[str, object]:
-    return _bridge_request(
-        {"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_end"}
-    )
+    return _bridge_request({"id": _next_msg_id("ev"), "op": "pi_event", "run_id": run_id, "event": "agent_end"})
 
 
 def _bridge_search(run_id: str, query: str) -> dict[str, object]:
@@ -204,7 +196,9 @@ def _bridge_search(run_id: str, query: str) -> dict[str, object]:
     )
 
 
-def _fake_exa_search(calls: list[str], evidence: list[dict[str, object]] | None = None) -> Callable[..., dict[str, object]]:
+def _fake_exa_search(
+    calls: list[str], evidence: list[dict[str, object]] | None = None
+) -> Callable[..., dict[str, object]]:
     def fake_search(query: str, **kwargs: object) -> dict[str, object]:
         calls.append(query)
         return {
@@ -321,9 +315,7 @@ def test_pi_model_receives_exact_security_checked_text(monkeypatch: pytest.Monke
         envelope = envelope_for_tool("search_web", raw)
         outcome = prepare_context(envelope, rendered)
         assert not isinstance(outcome, QuarantinedContext)
-        expected = guard_response(
-            outcome.text, PiSessionContext(session_id="expected").run_security, "expected"
-        )
+        expected = guard_response(outcome.text, PiSessionContext(session_id="expected").run_security, "expected")
         assert text == expected
         assert "12345678" not in text
         assert "revenue grew" in text
@@ -387,9 +379,7 @@ def test_pi_search_web_cap_configured_per_run(monkeypatch: pytest.MonkeyPatch) -
     # Unlimited by default; the cap enforces only when explicitly configured.
     assert session.budget.max_search_calls is None
     session.budget.max_search_calls = 25
-    results = [
-        execute_pi_tool("search_web", {"query": f"probe {i}"}, session) for i in range(26)
-    ]
+    results = [execute_pi_tool("search_web", {"query": f"probe {i}"}, session) for i in range(26)]
     assert len(calls) == 25
     for result in results[:25]:
         assert "content" in result
@@ -491,20 +481,26 @@ def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch: pytes
     }
     answer = "AMD revenue grew 12 percent on data-center demand."
     try:
-        assert _bridge_request(
-            {"op": "pi_event", "run_id": run_id, "event": "agent_start", "question": question}
-        ) == {"ok": True}
+        assert _bridge_request({"op": "pi_event", "run_id": run_id, "event": "agent_start", "question": question}) == {
+            "ok": True
+        }
         assert _bridge_request(
             {
-                "op": "pi_event", "run_id": run_id, "event": "message_end",
-                "role": "assistant", "turn": 0, "model": model,
-                "started_at": started_at, "completed_at": completed_at,
-                "usage": usage, "tool_call_count": 2,
+                "op": "pi_event",
+                "run_id": run_id,
+                "event": "message_end",
+                "role": "assistant",
+                "turn": 0,
+                "model": model,
+                "started_at": started_at,
+                "completed_at": completed_at,
+                "usage": usage,
+                "tool_call_count": 2,
             }
         ) == {"ok": True}
-        assert _bridge_request(
-            {"op": "pi_event", "run_id": run_id, "event": "agent_end", "answer": answer}
-        ) == {"ok": True}
+        assert _bridge_request({"op": "pi_event", "run_id": run_id, "event": "agent_end", "answer": answer}) == {
+            "ok": True
+        }
         run = get_run(run_id)
         assert run is not None
         assert run["question"] == question
@@ -529,6 +525,7 @@ def test_pi_recorder_lifecycle_persists_question_model_answer(monkeypatch: pytes
     finally:
         _end_run(run_id)
 
+
 def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     from app.storage.runs import get_run
 
@@ -549,9 +546,13 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.Mon
             pi_bridge._inflight.pop(run_r, None)
         message = "Tool call timed out after 50ms"
         terminal: dict[str, object] = {
-            "op": "pi_event", "run_id": run_r, "event": "agent_end",
-            "status": "failed", "answer": "",
-            "error_type": "tool_timeout", "error_message": message,
+            "op": "pi_event",
+            "run_id": run_r,
+            "event": "agent_end",
+            "status": "failed",
+            "answer": "",
+            "error_type": "tool_timeout",
+            "error_message": message,
         }
         assert _bridge_request(terminal) == {"ok": True}
         run = get_run(run_r)
@@ -567,9 +568,7 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.Mon
         assert again["completed_at"] == first_completed
         assert again["status"] == "failed"
         assert _start_run(run_s) == {"ok": True}
-        end_ok: dict[str, object] = {
-            "op": "pi_event", "run_id": run_s, "event": "agent_end", "answer": "ok"
-        }
+        end_ok: dict[str, object] = {"op": "pi_event", "run_id": run_s, "event": "agent_end", "answer": "ok"}
         assert _bridge_request(end_ok) == {"ok": True}
         completed = get_run(run_s)
         assert completed is not None

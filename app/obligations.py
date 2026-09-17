@@ -25,7 +25,7 @@ import json
 import logging
 import re
 from collections.abc import Mapping, MutableMapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, TypedDict, runtime_checkable
@@ -73,6 +73,7 @@ class _Filing(Protocol):
 
     filing_date: str
     accession_no: str
+
     def obj(self) -> object: ...
 
 
@@ -158,7 +159,10 @@ def _positive_amount(row: Mapping[str, object]) -> float | None:
         return float(amount)
     return None
 
-def _publish_lifecycle(rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]) -> None:
+
+def _publish_lifecycle(
+    rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]
+) -> None:
     """Strip persist-internal keys; publish underscore lifecycle as public."""
     for row in rows + bucket + capital:  # archive annotations are persist-internal, not public
         row.pop("_archive_key", None)
@@ -172,6 +176,7 @@ def _publish_lifecycle(rows: list[dict[str, object]], bucket: list[dict[str, obj
             row["agreement_key"] = None
             row["lifecycle_event"] = None
             row["lifecycle_status"] = None
+
 
 # ---------------------------------------------------------------------------
 # Layer 1: standardized XBRL obligation concepts
@@ -334,7 +339,13 @@ def _unquantified_entry(kind: str, title: str, sentence: str, filing: _Filing) -
     }
 
 
-def _unquantified_route(entry: dict[str, object], kind: str, sentence: str, exposures: list[dict[str, object]], capital: list[dict[str, object]]) -> None:
+def _unquantified_route(
+    entry: dict[str, object],
+    kind: str,
+    sentence: str,
+    exposures: list[dict[str, object]],
+    capital: list[dict[str, object]],
+) -> None:
     """Route one entry to capital (board discretion) or exposures bucket."""
     if kind in ("buybacks", "dividends"):
         entry["trigger"] = "board_discretion"
@@ -346,7 +357,9 @@ def _unquantified_route(entry: dict[str, object], kind: str, sentence: str, expo
     exposures.append(entry)
 
 
-def _scan_unquantified_exposures(title: str, md: str, filing: _Filing, limit: int = 3) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+def _scan_unquantified_exposures(
+    title: str, md: str, filing: _Filing, limit: int = 3
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Sentences disclosing an exposure with no dollar amount.
 
     Returns ``(exposures, capital_allocation)``: buyback/dividend sentences
@@ -367,6 +380,7 @@ def _scan_unquantified_exposures(title: str, md: str, filing: _Filing, limit: in
         if len(exposures) + len(capital) >= limit:
             break
     return exposures, capital
+
 
 # 8-K material-agreement guarantee language.
 _8K_GUARANTEE_RE = re.compile(
@@ -426,10 +440,20 @@ _TAX_BENEFITS_RE = re.compile(
     re.IGNORECASE,
 )
 
+
 def _no_data(ticker: str, what: str) -> dict[str, object]:
     return {"error": f"No obligations data for {ticker}: {what}"}
 
-def _manifest_entry(form: str | None, filing: _Filing | None, sections: list[str], q_count: int, u_count: int, status: str, warning: str | None = None) -> dict[str, object]:
+
+def _manifest_entry(
+    form: str | None,
+    filing: _Filing | None,
+    sections: list[str],
+    q_count: int,
+    u_count: int,
+    status: str,
+    warning: str | None = None,
+) -> dict[str, object]:
     """One per-filing scan record: what was examined, what it yielded."""
     return {
         "form": form,
@@ -460,7 +484,8 @@ def _classify(text: str) -> str:
 
 def _excerpt(text: str, start: int, end: int, span: int = 350) -> str:
     return re.sub(
-        r"\s+", " ",
+        r"\s+",
+        " ",
         text[max(0, start - span // 2) : min(len(text), end + span)],
     ).strip()
 
@@ -471,7 +496,7 @@ def _amount_kind_window(context: str) -> str:
     anchor = lowered.rfind("commitment")
     if anchor < 0:
         return lowered
-    return lowered[max(0, anchor - 250):]
+    return lowered[max(0, anchor - 250) :]
 
 
 def _amount_kind_in(text: str) -> str | None:
@@ -530,9 +555,7 @@ def _parse_sentence_amounts(note_text: str) -> list[_SentenceAmount]:
                 "kind": kind,
                 "amount_billions": round(_billion(match.group(1), match.group(2)), 3),
                 "certainty": _classify(context),
-                "off_balance_sheet": any(
-                    phrase in context.lower() for phrase in _OFF_BALANCE_SHEET_LANGUAGE
-                ),
+                "off_balance_sheet": any(phrase in context.lower() for phrase in _OFF_BALANCE_SHEET_LANGUAGE),
                 "excerpt": _excerpt(note_text, match.start(), match.end()),
             }
         )
@@ -565,7 +588,9 @@ def _prose_year(fiscal_year: str, amount_billions: float) -> ObligationScheduleY
     return ObligationScheduleYear(fiscal_year=fiscal_year, amount_billions=amount_billions)
 
 
-def _prose_schedule_build(amounts: list[float], years: list[str], years_part: str) -> list[ObligationScheduleYear] | None:
+def _prose_schedule_build(
+    amounts: list[float], years: list[str], years_part: str
+) -> list[ObligationScheduleYear] | None:
     """Pair amounts with years (plus Thereafter tail), None when unpaired."""
     if len(amounts) < 2:
         return None
@@ -577,7 +602,10 @@ def _prose_schedule_build(amounts: list[float], years: list[str], years_part: st
         return sched
     return None
 
-def _prose_schedule_accept(sched: list[ObligationScheduleYear], amount_billions: float | None) -> list[ObligationScheduleYear] | None:
+
+def _prose_schedule_accept(
+    sched: list[ObligationScheduleYear], amount_billions: float | None
+) -> list[ObligationScheduleYear] | None:
     """Schedule kept as-is (no total) or only on 10% total reconciliation."""
     if amount_billions is None:
         return sched
@@ -612,7 +640,8 @@ def _parse_front_horizon(note_text: str, amount_billions: float) -> dict[str, ob
     """Front-loaded horizon when text says substantially all/majority paid through FY."""
     m = re.search(
         r"(substantially all|majority)[^.]{0,120}?paid through fiscal year\s*(20\d\d)",
-        note_text, re.IGNORECASE,
+        note_text,
+        re.IGNORECASE,
     )
     if not m:
         return None
@@ -679,10 +708,15 @@ def _store_fact_key(f: FinancialFactRow) -> StoredFactKey:
     )
 
 
-_XBRL_ON_BALANCE_KINDS = frozenset({
-    "debt", "deferred_revenue", "operating_leases",
-    "finance_leases", "unrecognized_tax_benefits",
-})
+_XBRL_ON_BALANCE_KINDS = frozenset(
+    {
+        "debt",
+        "deferred_revenue",
+        "operating_leases",
+        "finance_leases",
+        "unrecognized_tax_benefits",
+    }
+)
 
 
 def _xbrl_status(kind: str) -> str:
@@ -729,6 +763,7 @@ def _xbrl_load_store_facts(ticker: str) -> list[FinancialFactRow]:
     except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("xbrl store read failed for %s: %s", ticker, e)
         return []
+
 
 def _xbrl_live_facts(ticker: str) -> tuple[pd.DataFrame | None, str | None]:
     """Live Company Facts frame plus error text (None, None only on success path split)."""
@@ -792,7 +827,9 @@ def _xbrl_proxy_filing(ticker: str) -> tuple[str | None, str, Filing | None]:
     return None, "XBRL", None
 
 
-def _xbrl_live_row(kind: str, concept: str, value: float, period_end: str, filing_date: str | None, proxy_form: str) -> dict[str, object]:
+def _xbrl_live_row(
+    kind: str, concept: str, value: float, period_end: str, filing_date: str | None, proxy_form: str
+) -> dict[str, object]:
     """One live-fallback row with proxied-provenance coverage warning."""
     return {
         "type": kind,
@@ -808,8 +845,7 @@ def _xbrl_live_row(kind: str, concept: str, value: float, period_end: str, filin
         "concept": concept,
         "provenance": "proxied",
         "_coverage_warning": (
-            f"XBRL provenance is proxied for {concept}: store has no "
-            f"rows, filed date is the latest {proxy_form} proxy"
+            f"XBRL provenance is proxied for {concept}: store has no rows, filed date is the latest {proxy_form} proxy"
         ),
     }
 
@@ -820,7 +856,13 @@ def _xbrl_live_frame_concepts(facts: pd.DataFrame) -> list[str]:
     return [str(c) for c in list(unique)]
 
 
-def _xbrl_live_concept_rows(facts: pd.DataFrame, store_by_kind: dict[str, FinancialFactRow], seen: set[tuple[str, str]], filing_date: str | None, proxy_form: str) -> list[dict[str, object]]:
+def _xbrl_live_concept_rows(
+    facts: pd.DataFrame,
+    store_by_kind: dict[str, FinancialFactRow],
+    seen: set[tuple[str, str]],
+    filing_date: str | None,
+    proxy_form: str,
+) -> list[dict[str, object]]:
     """Live-fallback rows for concepts the store lacks (deduped, non-zero)."""
     rows: list[dict[str, object]] = []
     for concept in _xbrl_live_frame_concepts(facts):
@@ -848,7 +890,14 @@ def _xbrl_live_latest(facts: pd.DataFrame, concept: str) -> tuple[float, str]:
     return float(latest["value"]), str(latest["period_end"])
 
 
-def _xbrl_live_concept_row(facts: pd.DataFrame, concept: str, store_by_kind: dict[str, FinancialFactRow], seen: set[tuple[str, str]], filing_date: str | None, proxy_form: str) -> dict[str, object] | None:
+def _xbrl_live_concept_row(
+    facts: pd.DataFrame,
+    concept: str,
+    store_by_kind: dict[str, FinancialFactRow],
+    seen: set[tuple[str, str]],
+    filing_date: str | None,
+    proxy_form: str,
+) -> dict[str, object] | None:
     """One live-fallback concept row (None when stored/duplicate/zero)."""
     kind = _xbrl_live_concept_kind(concept, store_by_kind)
     if kind is None:
@@ -861,7 +910,15 @@ def _xbrl_live_concept_row(facts: pd.DataFrame, concept: str, store_by_kind: dic
     return _xbrl_live_row(kind, concept, value, period_end, filing_date, proxy_form)
 
 
-def _xbrl_record_manifest(manifest: list[dict[str, object]] | None, proxy_form: str, proxy_filing: Filing | None, count: int, live: bool, store_by_kind: dict[str, FinancialFactRow], error: str | None) -> None:
+def _xbrl_record_manifest(
+    manifest: list[dict[str, object]] | None,
+    proxy_form: str,
+    proxy_filing: Filing | None,
+    count: int,
+    live: bool,
+    store_by_kind: dict[str, FinancialFactRow],
+    error: str | None,
+) -> None:
     """Manifest entry for the XBRL scan (failed/scanned per source state)."""
     if manifest is None:
         return
@@ -905,33 +962,29 @@ def _targeted_balance_rows(title: str, md: str, filing: _Filing, present_kinds: 
     lower = title.lower()
     rows: list[dict[str, object]] = []
     if ("stock" in lower or "share" in lower) and "unearned_sbc" not in present_kinds:
-            m = _UNEARNED_SBC_RE.search(md)
-            if m:
-                rows.append(
-                    {
-                        "type": "unearned_sbc",
-                        "amount_billions": round(
-                            _billion(m.group(1), m.group(2)), 3
-                        ),
-                        "certainty": "contractual",
-                        "status": "on_balance_sheet",
-                        "revenue_matched": False,
-                        "default_triggered": False,
-                        "source": f"SEC EDGAR {filing.filing_date} {title} note",
-                        "filed": str(filing.filing_date),
-                        "as_of": str(filing.filing_date),
-                        "excerpt": _excerpt(md, m.start(), m.end()),
-                    }
-                )
+        m = _UNEARNED_SBC_RE.search(md)
+        if m:
+            rows.append(
+                {
+                    "type": "unearned_sbc",
+                    "amount_billions": round(_billion(m.group(1), m.group(2)), 3),
+                    "certainty": "contractual",
+                    "status": "on_balance_sheet",
+                    "revenue_matched": False,
+                    "default_triggered": False,
+                    "source": f"SEC EDGAR {filing.filing_date} {title} note",
+                    "filed": str(filing.filing_date),
+                    "as_of": str(filing.filing_date),
+                    "excerpt": _excerpt(md, m.start(), m.end()),
+                }
+            )
     if "tax" in lower and "unrecognized_tax_benefits" not in present_kinds:
         m = _TAX_BENEFITS_RE.search(md)
         if m:
             rows.append(
                 {
                     "type": "unrecognized_tax_benefits",
-                    "amount_billions": round(
-                        _billion(m.group(1), m.group(2)), 3
-                    ),
+                    "amount_billions": round(_billion(m.group(1), m.group(2)), 3),
                     "certainty": "contractual",
                     "status": "on_balance_sheet",
                     "revenue_matched": False,
@@ -959,7 +1012,13 @@ def _note_markdown_index(doc: object) -> dict[str, str]:
     return notes_md
 
 
-def _note_scan_markdown(notes_md: dict[str, str], filing: _Filing, rows: list[dict[str, object]], unquantified: list[dict[str, object]], capital: list[dict[str, object]]) -> None:
+def _note_scan_markdown(
+    notes_md: dict[str, str],
+    filing: _Filing,
+    rows: list[dict[str, object]],
+    unquantified: list[dict[str, object]],
+    capital: list[dict[str, object]],
+) -> None:
     """Collect quantified rows plus unquantified/capital splits per note."""
     for title, md in notes_md.items():
         _collect_note_rows(rows, title, md, filing)
@@ -973,7 +1032,20 @@ def _note_form_present_kinds(rows: list[dict[str, object]], filing: _Filing) -> 
     return {str(r["type"]) for r in rows if r.get("filed") == str(filing.filing_date)}
 
 
-def _note_annotate_form(rows: list[dict[str, object]], unquantified: list[dict[str, object]], capital: list[dict[str, object]], start: int, u_start: int, c_start: int, ticker: str, filing: _Filing, joined: str, has_notes: bool, *, archive: bool) -> None:
+def _note_annotate_form(
+    rows: list[dict[str, object]],
+    unquantified: list[dict[str, object]],
+    capital: list[dict[str, object]],
+    start: int,
+    u_start: int,
+    c_start: int,
+    ticker: str,
+    filing: _Filing,
+    joined: str,
+    has_notes: bool,
+    *,
+    archive: bool,
+) -> None:
     """Archive-annotate rows sliced from this form's window."""
     if has_notes:
         _annotate_archive(rows[start:], ticker, filing, joined, archive=archive)
@@ -981,7 +1053,18 @@ def _note_annotate_form(rows: list[dict[str, object]], unquantified: list[dict[s
     _annotate_archive(capital[c_start:], ticker, filing, joined, archive=archive)
 
 
-def _note_scan_form(ticker: str, form: str, filing: _Filing, doc: object, rows: list[dict[str, object]], unquantified: list[dict[str, object]], capital: list[dict[str, object]], *, archive: bool, manifest: list[dict[str, object]] | None) -> None:
+def _note_scan_form(
+    ticker: str,
+    form: str,
+    filing: _Filing,
+    doc: object,
+    rows: list[dict[str, object]],
+    unquantified: list[dict[str, object]],
+    capital: list[dict[str, object]],
+    *,
+    archive: bool,
+    manifest: list[dict[str, object]] | None,
+) -> None:
     """Scan one form's notes: rows, targeted balances, archive, manifest."""
     start, u_start, c_start = len(rows), len(unquantified), len(capital)
     notes_md = _note_markdown_index(doc)
@@ -990,15 +1073,25 @@ def _note_scan_form(ticker: str, form: str, filing: _Filing, doc: object, rows: 
     for title, md in notes_md.items():
         rows.extend(_targeted_balance_rows(title, md, filing, present_kinds))
     joined = "\n\n".join(notes_md.values())
-    _note_annotate_form(rows, unquantified, capital, start, u_start, c_start, ticker, filing, joined, bool(notes_md), archive=archive)
+    _note_annotate_form(
+        rows, unquantified, capital, start, u_start, c_start, ticker, filing, joined, bool(notes_md), archive=archive
+    )
     if manifest is not None:
-        manifest.append(_manifest_entry(
-            form, filing, sorted(notes_md),
-            len(rows) - start, len(unquantified) - u_start, "scanned",
-        ))
+        manifest.append(
+            _manifest_entry(
+                form,
+                filing,
+                sorted(notes_md),
+                len(rows) - start,
+                len(unquantified) - u_start,
+                "scanned",
+            )
+        )
 
 
-def _note_obligations(ticker: str, *, archive: bool = False, manifest: list[dict[str, object]] | None = None) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+def _note_obligations(
+    ticker: str, *, archive: bool = False, manifest: list[dict[str, object]] | None = None
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     """Layer 2: note-text extraction from latest 10-Q and 10-K."""
     rows: list[dict[str, object]] = []
     unquantified: list[dict[str, object]] = []
@@ -1014,6 +1107,7 @@ def _note_obligations(ticker: str, *, archive: bool = False, manifest: list[dict
             continue
         _note_scan_form(ticker, form, filing, doc, rows, unquantified, capital, archive=archive, manifest=manifest)
     return rows, unquantified, capital
+
 
 class _NoteTitleFlags:
     """Note-title classifiers routing rows to debt/lease/commitment paths."""
@@ -1056,7 +1150,9 @@ def _debt_issue_row(match: re.Match[str], title: str, md: str, filing: _Filing) 
     }
 
 
-def _collect_debt_issue_rows(rows: list[dict[str, object]], md: str, title: str, filing: _Filing, flags: _NoteTitleFlags) -> None:
+def _collect_debt_issue_rows(
+    rows: list[dict[str, object]], md: str, title: str, filing: _Filing, flags: _NoteTitleFlags
+) -> None:
     """Debt per-issue table rows (no-op outside debt notes)."""
     if not flags.is_debt:
         return
@@ -1079,7 +1175,9 @@ def _table_row_kind(flags: _NoteTitleFlags) -> tuple[str, str] | None:
     return None
 
 
-def _table_amount_row(row: _FiscalTableRow, kind: str, status: str, md: str, title: str, filing: _Filing) -> dict[str, object]:
+def _table_amount_row(
+    row: _FiscalTableRow, kind: str, status: str, md: str, title: str, filing: _Filing
+) -> dict[str, object]:
     """One fiscal-year table amount row with filing provenance."""
     return {
         "type": kind,
@@ -1096,7 +1194,9 @@ def _table_amount_row(row: _FiscalTableRow, kind: str, status: str, md: str, tit
     }
 
 
-def _collect_table_rows(rows: list[dict[str, object]], md: str, title: str, filing: _Filing, flags: _NoteTitleFlags) -> None:
+def _collect_table_rows(
+    rows: list[dict[str, object]], md: str, title: str, filing: _Filing, flags: _NoteTitleFlags
+) -> None:
     """Fiscal-year table amount rows (skipped when the title is unrouted)."""
     routed = _table_row_kind(flags)
     if routed is None:
@@ -1132,7 +1232,9 @@ def _sentence_status_certainty(s: _SentenceAmount, flags: _NoteTitleFlags) -> tu
     return status, s["certainty"]
 
 
-def _sentence_schedule(kind: str, md: str, amount: float) -> tuple[dict[str, object] | None, list[ObligationScheduleYear] | None]:
+def _sentence_schedule(
+    kind: str, md: str, amount: float
+) -> tuple[dict[str, object] | None, list[ObligationScheduleYear] | None]:
     """Payment-horizon/schedule pair for one sentence kind (reconciled only)."""
     if kind == "cloud":
         prose = _parse_prose_schedule(md)
@@ -1164,7 +1266,9 @@ def _reconciled_table_schedule(md: str, amount: float) -> list[ObligationSchedul
     return None
 
 
-def _sentence_row(s: _SentenceAmount, kind: str, status: str, certainty: str, md: str, title: str, filing: _Filing) -> dict[str, object]:
+def _sentence_row(
+    s: _SentenceAmount, kind: str, status: str, certainty: str, md: str, title: str, filing: _Filing
+) -> dict[str, object]:
     """One sentence-amount row with schedule pair and filing provenance."""
     payment_horizon, schedule = _sentence_schedule(kind, md, s["amount_billions"])
     return {
@@ -1183,7 +1287,9 @@ def _sentence_row(s: _SentenceAmount, kind: str, status: str, certainty: str, md
     }
 
 
-def _collect_sentence_rows(rows: list[dict[str, object]], md: str, title: str, filing: _Filing, flags: _NoteTitleFlags) -> None:
+def _collect_sentence_rows(
+    rows: list[dict[str, object]], md: str, title: str, filing: _Filing, flags: _NoteTitleFlags
+) -> None:
     """Sentence-amount rows (XBRL-owned notes and unrouted titles skipped)."""
     if flags.authoritative_balance_note():
         # Tax/SBC/intangible balances come from Layer 1 XBRL facts,
@@ -1226,13 +1332,11 @@ def _amount_gap(total: float, h: Mapping[str, object]) -> float:
     """Absolute gap between a headline amount and the table total."""
     return abs(total - (_positive_amount(h) or 0.0))
 
+
 def _reconcile_split(new: list[dict[str, object]]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Split one filing-note window into table rows plus headline rows."""
     table_rows = [r for r in new if _is_fiscal_component_row(r)]
-    headlines = [
-        r for r in new
-        if str(r.get("source") or "").endswith(" note") and _positive_amount(r) is not None
-    ]
+    headlines = [r for r in new if str(r.get("source") or "").endswith(" note") and _positive_amount(r) is not None]
     return table_rows, headlines
 
 
@@ -1246,7 +1350,9 @@ def _reconcile_close(total: float, headlines: list[dict[str, object]]) -> list[d
     return [h for h in headlines if abs(total - (_positive_amount(h) or 0.0)) / total < 0.1]
 
 
-def _reconcile_match(table_rows: list[dict[str, object]], headlines: list[dict[str, object]]) -> tuple[float, list[dict[str, object]]] | None:
+def _reconcile_match(
+    table_rows: list[dict[str, object]], headlines: list[dict[str, object]]
+) -> tuple[float, list[dict[str, object]]] | None:
     """Table total plus 10%-tolerance headline matches (None when no match)."""
     if not table_rows or not headlines:
         return None
@@ -1259,12 +1365,13 @@ def _reconcile_match(table_rows: list[dict[str, object]], headlines: list[dict[s
     return total, matches
 
 
-def _reconcile_attach(best: dict[str, object], table_rows: list[dict[str, object]], total: float, matches: list[dict[str, object]]) -> None:
+def _reconcile_attach(
+    best: dict[str, object], table_rows: list[dict[str, object]], total: float, matches: list[dict[str, object]]
+) -> None:
     """Attach the table breakdown to the closest headline; flag components."""
     if best.get("schedule") is None:
         best["schedule"] = [
-            {"fiscal_year": r.get("fiscal_year"), "amount_billions": r.get("amount_billions")}
-            for r in table_rows
+            {"fiscal_year": r.get("fiscal_year"), "amount_billions": r.get("amount_billions")} for r in table_rows
         ]
     for r in table_rows:
         r["schedule_component"] = True
@@ -1377,7 +1484,9 @@ def _balance_sheet_collect(rows: list[dict[str, object]], md: str, filing: Filin
             rows.append(row)
 
 
-def _balance_sheet_liabilities(ticker: str, *, archive: bool = False, manifest: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
+def _balance_sheet_liabilities(
+    ticker: str, *, archive: bool = False, manifest: list[dict[str, object]] | None = None
+) -> list[dict[str, object]]:
     """Layer 3: balance-sheet liabilities with on-balance-sheet status."""
     rows: list[dict[str, object]] = []
     form: str | None = None
@@ -1424,6 +1533,7 @@ def _agreement_key(window: str) -> str | None:
             return f"{cp_norm}||{type_norm}"
     return None
 
+
 def _8k_company_filings(ticker: str, manifest: list[dict[str, object]] | None) -> list[_Filing] | None:
     """8-K filing list, None with a failure manifest when the company read fails."""
     try:
@@ -1459,7 +1569,7 @@ def _8k_window_lifecycle(window: str) -> str | None:
 
 def _8k_guarantee_row(filing: _Filing, text: str, match: re.Match[str], amount_b: float) -> dict[str, object]:
     """One quantified 8-K guarantee row with lifecycle/agreement identity."""
-    window = text[max(0, match.start() - 500):match.end() + 500]
+    window = text[max(0, match.start() - 500) : match.end() + 500]
     return {
         "type": "8k_guarantees",
         "amount_billions": round(amount_b, 3),
@@ -1490,12 +1600,14 @@ def _8k_collect_quantified(rows: list[dict[str, object]], filing: _Filing, text:
 
 def _8k_lifecycle_triggers(text: str) -> list[tuple[re.Match[str], str]]:
     """Termination/amendment trigger sites in document order."""
-    return [(t, "termination") for t in _8K_TERMINATION_RE.finditer(text)] + [(a, "amendment") for a in _8K_AMENDMENT_RE.finditer(text)]
+    return [(t, "termination") for t in _8K_TERMINATION_RE.finditer(text)] + [
+        (a, "amendment") for a in _8K_AMENDMENT_RE.finditer(text)
+    ]
 
 
 def _8k_lifecycle_row(filing: _Filing, text: str, trig: re.Match[str], event: str) -> dict[str, object] | None:
     """One amount-less lifecycle row (None when no agreement language nearby)."""
-    window = text[max(0, trig.start() - 500):trig.end() + 500]
+    window = text[max(0, trig.start() - 500) : trig.end() + 500]
     if not _8K_AGREEMENT_RE.search(window):
         return None
     return {
@@ -1514,7 +1626,9 @@ def _8k_lifecycle_row(filing: _Filing, text: str, trig: re.Match[str], event: st
     }
 
 
-def _8k_collect_lifecycle(rows: list[dict[str, object]], filing: _Filing, text: str, quantified_windows: list[tuple[int, int]]) -> None:
+def _8k_collect_lifecycle(
+    rows: list[dict[str, object]], filing: _Filing, text: str, quantified_windows: list[tuple[int, int]]
+) -> None:
     """Lifecycle-only rows, one per trigger site outside quantified windows."""
     lifecycle_windows: list[tuple[int, int]] = []
     for trig, event in _8k_lifecycle_triggers(text):
@@ -1538,7 +1652,17 @@ def _8k_parsed_text(filing: _Filing) -> tuple[list[object], list[str], str]:
     return rows, [str(i) for i in rows], str(getattr(obj, "document", ""))
 
 
-def _8k_collect_filing(ticker: str, filing: _Filing, rows: list[dict[str, object]], start: int, text: str, sections: list[str], *, archive: bool, manifest: list[dict[str, object]] | None) -> None:
+def _8k_collect_filing(
+    ticker: str,
+    filing: _Filing,
+    rows: list[dict[str, object]],
+    start: int,
+    text: str,
+    sections: list[str],
+    *,
+    archive: bool,
+    manifest: list[dict[str, object]] | None,
+) -> None:
     """Collect quantified/lifecycle rows for one relevant filing, then manifest."""
     quantified_windows = _8k_collect_quantified(rows, filing, text)
     # Lifecycle-only mentions (e.g. amount-less Item 1.02 termination):
@@ -1550,14 +1674,28 @@ def _8k_collect_filing(ticker: str, filing: _Filing, rows: list[dict[str, object
         manifest.append(_manifest_entry("8-K", filing, sections, len(rows) - start, 0, "scanned"))
 
 
-def _8k_scan_error(filing: _Filing, rows: list[dict[str, object]], start: int, sections: list[str], e: Exception, manifest: list[dict[str, object]] | None) -> None:
+def _8k_scan_error(
+    filing: _Filing,
+    rows: list[dict[str, object]],
+    start: int,
+    sections: list[str],
+    e: Exception,
+    manifest: list[dict[str, object]] | None,
+) -> None:
     """Log one 8-K scan failure with a failed manifest entry."""
     logger.warning("8-K %s scan error: %s", getattr(filing, "accession_no", "?"), e)
     if manifest is not None:
         manifest.append(_manifest_entry("8-K", filing, sections, len(rows) - start, 0, "failed", str(e)))
 
 
-def _8k_scan_one(ticker: str, filing: _Filing, rows: list[dict[str, object]], *, archive: bool, manifest: list[dict[str, object]] | None) -> None:
+def _8k_scan_one(
+    ticker: str,
+    filing: _Filing,
+    rows: list[dict[str, object]],
+    *,
+    archive: bool,
+    manifest: list[dict[str, object]] | None,
+) -> None:
     """Scan one 8-K filing: quantified plus lifecycle rows, then manifest."""
     start = len(rows)
     sections: list[str] = []
@@ -1572,7 +1710,9 @@ def _8k_scan_one(ticker: str, filing: _Filing, rows: list[dict[str, object]], *,
         _8k_scan_error(filing, rows, start, sections, e, manifest)
 
 
-def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
+def _scan_8k_obligations(
+    ticker: str, *, archive: bool = False, manifest: list[dict[str, object]] | None = None
+) -> list[dict[str, object]]:
     """Recent 8-K material agreements with quantified guarantees."""
     rows: list[dict[str, object]] = []
     filings = _8k_company_filings(ticker, manifest)
@@ -1586,7 +1726,8 @@ def _scan_8k_obligations(ticker: str, *, archive: bool = False, manifest: list[d
 
 
 def _known_at() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+
 
 def _archive_filing_text(ticker: str, filing: _Filing, text: str, *, archive: bool = False) -> tuple[str, str] | None:
     """Archive one distinct report text write-once; returns (key, sha256)."""
@@ -1597,21 +1738,24 @@ def _archive_filing_text(ticker: str, filing: _Filing, text: str, *, archive: bo
     payload = text.encode("utf-8")
     sha = raw_archive.content_hash(payload)
     accession = str(getattr(filing, "accession_no", None) or "")
-    key = (
-        f"filing-text:{ticker}:{getattr(filing, 'filing_date', '')}:"
-        f"{accession or sha[:8]}"
-    )
+    key = f"filing-text:{ticker}:{getattr(filing, 'filing_date', '')}:{accession or sha[:8]}"
     try:
         record = raw_archive.archive(
-            "sec", _ARCHIVE_KIND, key, payload,
-            url="", retrieved_at=_known_at(),
+            "sec",
+            _ARCHIVE_KIND,
+            key,
+            payload,
+            url="",
+            retrieved_at=_known_at(),
         )
     except OSError:
         return None
     return record.key, sha
 
 
-def _annotate_archive(rows: list[dict[str, object]], ticker: str, filing: _Filing, text: str, *, archive: bool = False) -> None:
+def _annotate_archive(
+    rows: list[dict[str, object]], ticker: str, filing: _Filing, text: str, *, archive: bool = False
+) -> None:
     """Attach the archived report reference to rows produced from a filing."""
     # ponytail: accession is filing metadata, set on every path (not only persist)
     for row in rows:
@@ -1652,7 +1796,10 @@ def _hash_timing(horizon: object) -> dict[str, object] | None:
     """Timing payload for rows with horizon detail (None when absent)."""
     if not isinstance(horizon, dict):
         return None
-    if not any(horizon.get(k) is not None for k in ("schedule", "paid_in_remainder_of_fy", "paid_in_remainder_billions", "paid_after_remainder_billions")):
+    if not any(
+        horizon.get(k) is not None
+        for k in ("schedule", "paid_in_remainder_of_fy", "paid_in_remainder_billions", "paid_after_remainder_billions")
+    ):
         return None
     # ponytail: conditional key — rows without timing keep byte-identical
     # payloads (no quantified id churn); a 95/24 correction retunes identity.
@@ -1681,10 +1828,19 @@ def _content_hash(row: Mapping[str, object]) -> str:
     horizon = row.get("payment_horizon")
     horizon_map: Mapping[str, object] = horizon if isinstance(horizon, Mapping) else {}
     payload: dict[str, object] = {
-        **{k: row.get(k) for k in (
-            "type", "amount_billions", "filed", "certainty", "status",
-            "revenue_matched", "default_triggered", "fiscal_year",
-        )},
+        **{
+            k: row.get(k)
+            for k in (
+                "type",
+                "amount_billions",
+                "filed",
+                "certainty",
+                "status",
+                "revenue_matched",
+                "default_triggered",
+                "fiscal_year",
+            )
+        },
         "schedule": _hash_schedule(row, horizon_map),
     }
     timing = _hash_timing(horizon)
@@ -1709,15 +1865,19 @@ def _snapshot_layer(row: Mapping[str, object]) -> str:
 def _lifecycle_guarantees(rows: Sequence[MutableMapping[str, object]]) -> list[MutableMapping[str, object]]:
     """8-K guarantee rows eligible for lifecycle stamping (quantified/marks)."""
     return [
-        r for r in rows
-        if _snapshot_layer(r) == "8k" and (
+        r
+        for r in rows
+        if _snapshot_layer(r) == "8k"
+        and (
             _positive_amount(r) is not None
             or (r.get("amount_billions") is None and r.get("_lifecycle_event") in ("amendment", "termination"))
         )
     ]
 
 
-def _lifecycle_groups(guarantees: list[MutableMapping[str, object]]) -> dict[str | None, list[MutableMapping[str, object]]]:
+def _lifecycle_groups(
+    guarantees: list[MutableMapping[str, object]],
+) -> dict[str | None, list[MutableMapping[str, object]]]:
     """Guarantee rows grouped by agreement key (None = unlinkable)."""
     groups: dict[str | None, list[MutableMapping[str, object]]] = {}
     for r in guarantees:
@@ -1748,7 +1908,12 @@ def _lifecycle_mark_dates(members: list[MutableMapping[str, object]], event: str
     return sorted(dates)
 
 
-def _lifecycle_stamp_quantified(row: MutableMapping[str, object], term_marks: list[str], quant_amend_marks: list[str], amountless_amend_marks: list[str]) -> None:
+def _lifecycle_stamp_quantified(
+    row: MutableMapping[str, object],
+    term_marks: list[str],
+    quant_amend_marks: list[str],
+    amountless_amend_marks: list[str],
+) -> None:
     """Stamp one quantified row from later termination/amendment marks."""
     filed = str(row.get("filed") or "")
     if any(m > filed for m in term_marks) or any(m > filed for m in quant_amend_marks):
@@ -1759,7 +1924,12 @@ def _lifecycle_stamp_quantified(row: MutableMapping[str, object], term_marks: li
         row.pop("lifecycle_status", None)
 
 
-def _lifecycle_stamp_member(row: MutableMapping[str, object], term_marks: list[str], quant_amend_marks: list[str], amountless_amend_marks: list[str]) -> None:
+def _lifecycle_stamp_member(
+    row: MutableMapping[str, object],
+    term_marks: list[str],
+    quant_amend_marks: list[str],
+    amountless_amend_marks: list[str],
+) -> None:
     """Stamp one linked row: termination marks self, amount-less stays bare."""
     if row.get("_lifecycle_event") == "termination":
         row["lifecycle_status"] = "terminated"
@@ -1791,14 +1961,13 @@ def _lifecycle_unresolved_warning(guarantees: list[MutableMapping[str, object]])
     """Summation warning when multiple guarantees stay unresolved."""
     unresolved = [r for r in guarantees if "lifecycle_status" not in r and _positive_amount(r) is not None]
     if len(unresolved) > 1:
-        return (
-            f"{len(unresolved)} unresolved 8-K guarantees are summed without "
-            "lifecycle resolution"
-        )
+        return f"{len(unresolved)} unresolved 8-K guarantees are summed without lifecycle resolution"
     return ""
 
 
-def _lifecycle_retained_group_warnings(members: list[MutableMapping[str, object]], seen_retained: set[SnapshotBestKey]) -> list[str]:
+def _lifecycle_retained_group_warnings(
+    members: list[MutableMapping[str, object]], seen_retained: set[SnapshotBestKey]
+) -> list[str]:
     """Retention warnings for one linked group (deduped per key/filed)."""
     warnings: list[str] = []
     for m in members:
@@ -1830,15 +1999,26 @@ def _lifecycle_retained_warnings(groups: dict[str | None, list[MutableMapping[st
 
 def _lifecycle_prior_quant(members: list[MutableMapping[str, object]], t_filed: str) -> str | None:
     """Latest quantified filed date before one termination (None when none)."""
-    prior_quant = [str(m.get("filed") or "") for m in members if _positive_amount(m) is not None and str(m.get("filed") or "") < t_filed]
+    prior_quant = [
+        str(m.get("filed") or "")
+        for m in members
+        if _positive_amount(m) is not None and str(m.get("filed") or "") < t_filed
+    ]
     if not prior_quant:
         return None
     return max(prior_quant)
 
 
-def _lifecycle_latest_intervening(members: list[MutableMapping[str, object]], last_quant: str, t_filed: str) -> MutableMapping[str, object] | None:
+def _lifecycle_latest_intervening(
+    members: list[MutableMapping[str, object]], last_quant: str, t_filed: str
+) -> MutableMapping[str, object] | None:
     """Latest amendment/termination mark between last quant and termination."""
-    intervening = [m for m in members if last_quant < str(m.get("filed") or "") < t_filed and m.get("_lifecycle_event") in ("amendment", "termination")]
+    intervening = [
+        m
+        for m in members
+        if last_quant < str(m.get("filed") or "") < t_filed
+        and m.get("_lifecycle_event") in ("amendment", "termination")
+    ]
     if not intervening:
         return None
     return max(intervening, key=_filed_key)
@@ -1846,10 +2026,14 @@ def _lifecycle_latest_intervening(members: list[MutableMapping[str, object]], la
 
 def _lifecycle_is_stale_cancel(latest: MutableMapping[str, object] | None) -> bool:
     """True when the latest intervening mark is an amount-less amendment."""
-    return latest is not None and latest.get("_lifecycle_event") == "amendment" and latest.get("amount_billions") is None
+    return (
+        latest is not None and latest.get("_lifecycle_event") == "amendment" and latest.get("amount_billions") is None
+    )
 
 
-def _lifecycle_stale_termination_warning(key: str | None, members: list[MutableMapping[str, object]], seen: set[SnapshotBestKey]) -> list[str]:
+def _lifecycle_stale_termination_warning(
+    key: str | None, members: list[MutableMapping[str, object]], seen: set[SnapshotBestKey]
+) -> list[str]:
     """Stale-cancellation warnings for terminations after amount-less amendments."""
     warnings: list[str] = []
     assert key is not None
@@ -1895,7 +2079,9 @@ def _lifecycle_dangling_mark(m: MutableMapping[str, object]) -> tuple[str | None
     return None
 
 
-def _lifecycle_dangling_group_warnings(members: list[MutableMapping[str, object]], seen_dangling: set[tuple[str | None, str | None, str]]) -> list[str]:
+def _lifecycle_dangling_group_warnings(
+    members: list[MutableMapping[str, object]], seen_dangling: set[tuple[str | None, str | None, str]]
+) -> list[str]:
     """No-effect warnings for one group without any quantified agreement."""
     warnings: list[str] = []
     for m in members:
@@ -1979,13 +2165,12 @@ def _snapshot_warn_no_filed(row: dict[str, object], warned: set[str], warnings: 
     if wkey in warned:
         return
     warned.add(wkey)
-    warnings.append(
-        f"excluded from current snapshot (no filing date): "
-        f"{row.get('type')} {row.get('amount_billions')}B"
-    )
+    warnings.append(f"excluded from current snapshot (no filing date): {row.get('type')} {row.get('amount_billions')}B")
 
 
-def _snapshot_keep_layered(row: dict[str, object], best: dict[SnapshotBestKey, str], warned: set[str], warnings: list[str]) -> bool:
+def _snapshot_keep_layered(
+    row: dict[str, object], best: dict[SnapshotBestKey, str], warned: set[str], warnings: list[str]
+) -> bool:
     """True when a non-8-K row is the latest filing for its (type, layer)."""
     filed = str(row.get("filed") or "").strip()
     if not filed:
@@ -2031,7 +2216,9 @@ def _obligations_cached(ticker: str, persist: bool) -> dict[str, object] | None:
     return None
 
 
-def _obligations_fetch(ticker: str, persist: bool, manifest: list[dict[str, object]]) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]] | None:
+def _obligations_fetch(
+    ticker: str, persist: bool, manifest: list[dict[str, object]]
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]] | None:
     """Fetch all four layers into quantified rows plus exposure splits."""
     try:
         rows: list[dict[str, object]] = []
@@ -2135,7 +2322,9 @@ def _obligations_dedup_bucket(entries: list[dict[str, object]]) -> list[dict[str
     return bucket
 
 
-def _obligations_stamp_bucket(bucket: list[dict[str, object]], capital: list[dict[str, object]], ticker: str, known_at: str) -> None:
+def _obligations_stamp_bucket(
+    bucket: list[dict[str, object]], capital: list[dict[str, object]], ticker: str, known_at: str
+) -> None:
     """Stamp exposure/capital entries with ticker/hash/parser provenance."""
     for exp in bucket + capital:
         exp["ticker"] = ticker
@@ -2145,7 +2334,13 @@ def _obligations_stamp_bucket(bucket: list[dict[str, object]], capital: list[dic
         exp["accession"] = str(exp.get("_accession") or "") or None
 
 
-def _obligations_coverage(manifest: list[dict[str, object]], rows: list[dict[str, object]], bucket: list[dict[str, object]], snap_warnings: list[str], stashed: list[str]) -> dict[str, object]:
+def _obligations_coverage(
+    manifest: list[dict[str, object]],
+    rows: list[dict[str, object]],
+    bucket: list[dict[str, object]],
+    snap_warnings: list[str],
+    stashed: list[str],
+) -> dict[str, object]:
     """Coverage mapping from the scan manifest plus row counts/warnings."""
     return {
         "scan_manifest": manifest,
@@ -2155,7 +2350,9 @@ def _obligations_coverage(manifest: list[dict[str, object]], rows: list[dict[str
     }
 
 
-def _obligations_stash_warnings(rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]) -> list[str]:
+def _obligations_stash_warnings(
+    rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]
+) -> list[str]:
     """Pop persist-internal warning stashes into coverage warnings."""
     stashed: list[str] = []
     for row in rows + bucket + capital:
@@ -2164,32 +2361,53 @@ def _obligations_stash_warnings(rows: list[dict[str, object]], bucket: list[dict
             if warning:
                 stashed.append(str(warning))
     return stashed
+
+
 def _obligations_filings_examined(manifest: list[dict[str, object]], rows: list[dict[str, object]]) -> list[str]:
     """Filing dates examined (manifest first, row fallback when empty)."""
-    return sorted({str(m.get("filing_date")) for m in manifest if m.get("filing_date")}) or sorted({str(r.get("filed")) for r in rows if r.get("filed")})
+    return sorted({str(m.get("filing_date")) for m in manifest if m.get("filing_date")}) or sorted(
+        {str(r.get("filed")) for r in rows if r.get("filed")}
+    )
 
 
 def _obligations_sections_examined(manifest: list[dict[str, object]], rows: list[dict[str, object]]) -> list[str]:
     """Sections examined (manifest first, row-source fallback when empty)."""
-    sections = sorted({str(s) for m in manifest for s in (m.get("sections_examined") if isinstance(m.get("sections_examined"), list) else []) if s})
+    sections = sorted(
+        {
+            str(s)
+            for m in manifest
+            for s in (m.get("sections_examined") if isinstance(m.get("sections_examined"), list) else [])
+            if s
+        }
+    )
     return sections or sorted({str(r.get("source")) for r in rows if r.get("source")})
 
 
-def _obligations_persist_summary(ticker: str, rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]) -> None:
+def _obligations_persist_summary(
+    ticker: str, rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]
+) -> None:
     """Persist events with per-skip logging (failures logged, never raised)."""
     try:
         summary = persist_obligation_events(rows, unquantified=bucket, capital=capital)
         if summary["events_written"]:
             logger.info("persisted %d obligation events for %s", summary["events_written"], ticker)
         if summary["skipped_no_filing_date"]:
-            logger.warning("skipped %d obligation rows without a filing date for %s", summary["skipped_no_filing_date"], ticker)
+            logger.warning(
+                "skipped %d obligation rows without a filing date for %s", summary["skipped_no_filing_date"], ticker
+            )
         if summary["skipped_proxied"]:
             logger.warning("skipped %d proxied XBRL rows (live-only) for %s", summary["skipped_proxied"], ticker)
     except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("obligation persistence failed for %s: %s", ticker, e)
 
 
-def _obligations_stamp_all(fetched_rows: list[dict[str, object]], unquantified: list[dict[str, object]], capital_raw: list[dict[str, object]], ticker: str, known_at: str) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+def _obligations_stamp_all(
+    fetched_rows: list[dict[str, object]],
+    unquantified: list[dict[str, object]],
+    capital_raw: list[dict[str, object]],
+    ticker: str,
+    known_at: str,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     """Deduped plus stamped rows/bucket/capital for one ticker snapshot."""
     # Dedup: identical (type, amount, filed) rows appear from both the
     # 10-Q and 10-K or from table + sentence paths; drop negatives.
@@ -2203,7 +2421,15 @@ def _obligations_stamp_all(fetched_rows: list[dict[str, object]], unquantified: 
     return rows, bucket, capital
 
 
-def _obligations_finalize(ticker: str, known_at: str, manifest: list[dict[str, object]], rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]], persist: bool) -> dict[str, object]:
+def _obligations_finalize(
+    ticker: str,
+    known_at: str,
+    manifest: list[dict[str, object]],
+    rows: list[dict[str, object]],
+    bucket: list[dict[str, object]],
+    capital: list[dict[str, object]],
+    persist: bool,
+) -> dict[str, object]:
     """Coverage-checked picture assembly plus cache/persist/publish."""
     snapshot, snap_warnings = _current_snapshot(rows)
     stashed = _obligations_stash_warnings(rows, bucket, capital)
@@ -2286,7 +2512,11 @@ def _persist_normalize_exposure(exp: Mapping[str, object]) -> dict[str, object]:
     return norm
 
 
-def _persist_work_lists(rows: Sequence[Mapping[str, object]], unquantified: Sequence[Mapping[str, object]] | None, capital: Sequence[Mapping[str, object]] | None) -> tuple[list[Mapping[str, object]], list[Mapping[str, object]]]:
+def _persist_work_lists(
+    rows: Sequence[Mapping[str, object]],
+    unquantified: Sequence[Mapping[str, object]] | None,
+    capital: Sequence[Mapping[str, object]] | None,
+) -> tuple[list[Mapping[str, object]], list[Mapping[str, object]]]:
     """Event work list plus hashed capital work list for one persist call."""
     work: list[Mapping[str, object]] = list(rows or [])
     for exp in unquantified or []:
@@ -2308,12 +2538,17 @@ def _persist_timing_jsons(row: Mapping[str, object]) -> tuple[str | None, str | 
     schedule_json = json.dumps(sched) if sched else None
     if sched:
         return schedule_json, schedule_json
-    if any(horizon.get(k) is not None for k in ("paid_in_remainder_of_fy", "paid_in_remainder_billions", "paid_after_remainder_billions")):
-        return schedule_json, json.dumps({
-            "paid_in_remainder_of_fy": horizon.get("paid_in_remainder_of_fy"),
-            "paid_in_remainder_billions": horizon.get("paid_in_remainder_billions"),
-            "paid_after_remainder_billions": horizon.get("paid_after_remainder_billions"),
-        })
+    if any(
+        horizon.get(k) is not None
+        for k in ("paid_in_remainder_of_fy", "paid_in_remainder_billions", "paid_after_remainder_billions")
+    ):
+        return schedule_json, json.dumps(
+            {
+                "paid_in_remainder_of_fy": horizon.get("paid_in_remainder_of_fy"),
+                "paid_in_remainder_billions": horizon.get("paid_in_remainder_billions"),
+                "paid_after_remainder_billions": horizon.get("paid_after_remainder_billions"),
+            }
+        )
     return schedule_json, None
 
 
@@ -2340,7 +2575,9 @@ def _persist_entity_id(row: Mapping[str, object], ticker: str, filed: str, data_
     return _resolve_entity(ticker, date.fromisoformat(filed[:10]), data_root)
 
 
-def _persist_build_event(row: Mapping[str, object], filed: str, target: list[dict[str, object]], sink: _PersistBuild) -> None:
+def _persist_build_event(
+    row: Mapping[str, object], filed: str, target: list[dict[str, object]], sink: _PersistBuild
+) -> None:
     """Append one CorporateEvent dict for a filed, non-proxied row."""
     from dataclasses import asdict
 
@@ -2381,7 +2618,9 @@ def _persist_build_event(row: Mapping[str, object], filed: str, target: list[dic
     target.append(event_dict)
 
 
-def _persist_evidence_span(row: Mapping[str, object], archive_key: str, sink: _PersistBuild) -> tuple[str | None, int | None, int | None]:
+def _persist_evidence_span(
+    row: Mapping[str, object], archive_key: str, sink: _PersistBuild
+) -> tuple[str | None, int | None, int | None]:
     """Archived SHA plus excerpt span for one filing-text evidence row."""
     from .storage import raw_archive
 
@@ -2442,20 +2681,29 @@ def _persist_build_row(row: Mapping[str, object], sink: _PersistBuild, target: l
     _persist_build_evidence(row, event_id, content_hash, sink)
     return event_id
 
+
 def _persist_write_sink(sink: _PersistBuild) -> dict[str, object]:
     """Flush the sink to parquet tables with skip counts."""
     from .storage import parquet
 
     return {
         "events_written": parquet.write_rows("events", sink.event_rows, root=sink.data_root / "parquet"),
-        "capital_events_written": parquet.write_rows("capital_events", sink.capital_rows, root=sink.data_root / "parquet"),
+        "capital_events_written": parquet.write_rows(
+            "capital_events", sink.capital_rows, root=sink.data_root / "parquet"
+        ),
         "evidence_written": parquet.write_rows("evidence", sink.evidence_rows, root=sink.data_root / "parquet"),
         "skipped_no_filing_date": sink.skipped,
         "skipped_proxied": sink.skipped_proxied,
     }
 
 
-def persist_obligation_events(rows: Sequence[Mapping[str, object]], data_root: str | Path | None = None, *, unquantified: Sequence[Mapping[str, object]] | None = None, capital: Sequence[Mapping[str, object]] | None = None) -> dict[str, object]:
+def persist_obligation_events(
+    rows: Sequence[Mapping[str, object]],
+    data_root: str | Path | None = None,
+    *,
+    unquantified: Sequence[Mapping[str, object]] | None = None,
+    capital: Sequence[Mapping[str, object]] | None = None,
+) -> dict[str, object]:
     """Write obligations rows as CorporateEvent + Evidence rows.
 
     One source row -> one CorporateEvent plus one Evidence row.  Event
@@ -2490,7 +2738,9 @@ def persist_obligation_events(rows: Sequence[Mapping[str, object]], data_root: s
     return _persist_write_sink(sink)
 
 
-def _asof_read_tables(data_root: Path) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
+def _asof_read_tables(
+    data_root: Path,
+) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     """Stored events/capital/evidence tables (capital empty when absent)."""
     from .storage import parquet
 
@@ -2551,14 +2801,18 @@ def _rebuild_horizon(event: Mapping[str, object]) -> object:
     return None
 
 
-def _rebuild_evidence(event: Mapping[str, object], ticker: str, evidence_by_event: dict[str, dict[str, object]]) -> dict[str, object] | None:
+def _rebuild_evidence(
+    event: Mapping[str, object], ticker: str, evidence_by_event: dict[str, dict[str, object]]
+) -> dict[str, object] | None:
     """Evidence row for one event (either event-id form, None when absent)."""
     content_hash = str(event.get("content_hash") or "")
     eid = str(event.get("event_id") or "") or sec_event_id(ticker, content_hash)
     return evidence_by_event.get(eid) or evidence_by_event.get(sec_event_id(ticker, content_hash))
 
 
-def _rebuild_event_row(event: Mapping[str, object], ticker: str, evidence_by_event: dict[str, dict[str, object]]) -> dict[str, object]:
+def _rebuild_event_row(
+    event: Mapping[str, object], ticker: str, evidence_by_event: dict[str, dict[str, object]]
+) -> dict[str, object]:
     """One ledger row rebuilt from a stored event plus its evidence excerpt."""
     content_hash = str(event.get("content_hash") or "")
     ev = _rebuild_evidence(event, ticker, evidence_by_event)
@@ -2596,7 +2850,9 @@ def _asof_is_unquantified(row: dict[str, object]) -> bool:
     return row.get("amount_billions") is None and row.get("_lifecycle_event") not in ("amendment", "termination")
 
 
-def _asof_split_rows(kept: list[dict[str, object]], ticker: str, evidence_by_event: dict[str, dict[str, object]]) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+def _asof_split_rows(
+    kept: list[dict[str, object]], ticker: str, evidence_by_event: dict[str, dict[str, object]]
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """Rebuilt rows split into quantified rows plus unquantified bucket."""
     rows: list[dict[str, object]] = []
     bucket: list[dict[str, object]] = []
@@ -2610,7 +2866,9 @@ def _asof_split_rows(kept: list[dict[str, object]], ticker: str, evidence_by_eve
     return rows, bucket
 
 
-def _asof_rebuild_capital(kept_capital: list[dict[str, object]], ticker: str, evidence_by_event: dict[str, dict[str, object]]) -> list[dict[str, object]]:
+def _asof_rebuild_capital(
+    kept_capital: list[dict[str, object]], ticker: str, evidence_by_event: dict[str, dict[str, object]]
+) -> list[dict[str, object]]:
     """Rebuilt capital rows (board-discretion trigger, never obligations)."""
     capital: list[dict[str, object]] = []
     for e in kept_capital:
@@ -2627,14 +2885,24 @@ def _asof_event_ids(kept: list[dict[str, object]], kept_capital: list[dict[str, 
     return event_ids
 
 
-def _asof_provenance(rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]) -> tuple[list[str], list[str]]:
+def _asof_provenance(
+    rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]
+) -> tuple[list[str], list[str]]:
     """Filings/sections examined from rebuilt rows (sorted, present only)."""
     filings = sorted({str(r.get("filed")) for r in rows + bucket + capital if r.get("filed")})
     sections = sorted({str(r.get("source")) for r in rows + bucket + capital if r.get("source")})
     return filings, sections
 
 
-def _asof_assemble(ticker: str, as_of: str, rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]], snapshot: list[dict[str, object]], snap_warnings: list[str]) -> dict[str, object]:
+def _asof_assemble(
+    ticker: str,
+    as_of: str,
+    rows: list[dict[str, object]],
+    bucket: list[dict[str, object]],
+    capital: list[dict[str, object]],
+    snapshot: list[dict[str, object]],
+    snap_warnings: list[str],
+) -> dict[str, object]:
     """Assembled replay picture from rebuilt rows plus snapshot/coverage."""
     filings, sections = _asof_provenance(rows, bucket, capital)
     return {
@@ -2682,4 +2950,10 @@ def get_obligations_as_of(ticker: str, as_of: str, data_root: str | Path | None 
     return _asof_assemble(ticker, as_of, rows, bucket, capital, snapshot, snap_warnings)
 
 
-__all__ = ["DEFAULT_TRIGGERED_TYPES", "REVENUE_MATCHED_KINDS", "get_obligations", "get_obligations_as_of", "persist_obligation_events"]
+__all__ = [
+    "DEFAULT_TRIGGERED_TYPES",
+    "REVENUE_MATCHED_KINDS",
+    "get_obligations",
+    "get_obligations_as_of",
+    "persist_obligation_events",
+]

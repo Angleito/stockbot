@@ -98,6 +98,7 @@ def _as_seq(value: object):
     assert isinstance(value, (list, tuple))
     return value
 
+
 def test_get_analyst_estimates_normalized(yahoo_session: None, fake_cache: FakeCache) -> None:
     result = analyst_client.get_analyst_estimates("NVDA")
 

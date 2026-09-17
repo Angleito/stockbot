@@ -6,19 +6,29 @@ Pipeline (models decide content; infra owns everything else)::
       > launch stockbot/bullbot/bearbot on the same freeze (parallel)
       > collect > compute disagreement
       > decide_next_wave: budgets when explicitly configured, then coverage
-        challenge (sufficient claim with missing branches / material open /
-        unsearched routes -> targeted SEC follow-up), then material +
-        actionable committee follow-up, then the novelty/loop stop
-        (zero-novelty or exact-repeat convergence -> no_novelty/loop_detected).
-        Waves are sequence numbers, not a two-wave architecture: the runner
-        loops 1..N and each wave resolves one uncertainty, then a new freeze +
-        rerun analysis; the loop never redefines the objective (original
-        question + covered vs remaining branches ride Wave1Result across waves).
+        challenge (missing branches / material open questions / unsearched
+        routes -> targeted SEC follow-up, for a sufficient claim and equally
+        for an honest insufficient dossier), then material + actionable
+        committee follow-up, then the novelty/loop stop: zero novelty with
+        nothing unexplored left on the branch (no_novelty) or blocked exact
+        repeats (loop_detected). Waves are sequence numbers, not a two-wave
+        architecture: the runner loops 1..N and each wave resolves one
+        uncertainty, then a new freeze + rerun analysis; the loop never
+        redefines the objective (original question + covered vs remaining
+        branches ride Wave1Result across waves).
 
 Stopping reasons (persisted via ``record_stop``): ``complete``,
 ``max_waves``/``runtime_exceeded``/``jobs_exceeded`` (only when that budget is
 explicitly configured; never a completeness proof), ``no_questions``,
 ``not_actionable``, ``low_gain``, ``no_novelty``, ``loop_detected``.
+
+``no_novelty`` is termination by exhaustion, not by a count: the wave produced
+zero novelty and nothing unexplored remains (no residual route, branch,
+entity, material open question, or material committee request). It fires at
+the first such wave. An operator may additionally configure
+``DirectorBudgets.zero_novelty_limit`` as a runaway guard: at that many
+consecutive zero-novelty waves the branch stops whether or not residuals
+remain. That limit is explicit operator policy, never research semantics.
 
 Fake-model sketch (no live calls): inject ``DirectorDeps`` with lambdas
 returning canned ids/evidence/analyses; call ``run_wave1`` then
@@ -61,17 +71,19 @@ WAVE1_ID = 1
 
 # Zero-novelty counts that make a wave unproductive (all four zero -> zero-novelty).
 NOVELTY_ZERO_KEYS = ("new_raw_documents", "new_evidence_records", "new_relationships", "resolved_questions")
-# Consecutive zero-novelty waves on the same branch before that branch stops.
-ZERO_NOVELTY_LIMIT = 2
 
 
 @dataclass
 class DirectorBudgets:
     """Runaway-test budget guard; None means unlimited (never a completeness proof)."""
+
     max_waves: int | None = None
     max_jobs: int | None = None
     max_tool_calls: int | None = None
     runtime_budget_s: float | None = None
+    # Explicit operator runaway guard on a branch's zero-novelty streak; None leaves
+    # termination to research semantics (zero novelty with nothing unexplored left).
+    zero_novelty_limit: int | None = None
 
 
 @dataclass
@@ -115,17 +127,41 @@ class WaveDecision:
     targeted_domain: str = ""
 
 
-def normalize_research_action(source: str, tool: str, query: str, ticker: str, forms: Sequence[str] | str, as_of: str, accession: str, objective: str) -> tuple[str, str, str, str, tuple[str, ...], str, str, str]:
+def normalize_research_action(
+    source: str,
+    tool: str,
+    query: str,
+    ticker: str,
+    forms: Sequence[str] | str,
+    as_of: str,
+    accession: str,
+    objective: str,
+) -> tuple[str, str, str, str, tuple[str, ...], str, str, str]:
     """Semantic action key: exact-tuple equality only (no fuzzy/lexical similarity)."""
-    form_tuple = tuple(forms) if isinstance(forms, Sequence) and not isinstance(forms, str) else ((forms,) if isinstance(forms, str) and forms else ())
-    return (source.strip().lower(), tool.strip(), query.strip(), ticker.strip().upper(), tuple(f.strip().upper() for f in form_tuple if isinstance(f, str)), as_of.strip(), accession.strip(), objective.strip())
+    form_tuple = (
+        tuple(forms)
+        if isinstance(forms, Sequence) and not isinstance(forms, str)
+        else ((forms,) if isinstance(forms, str) and forms else ())
+    )
+    return (
+        source.strip().lower(),
+        tool.strip(),
+        query.strip(),
+        ticker.strip().upper(),
+        tuple(f.strip().upper() for f in form_tuple if isinstance(f, str)),
+        as_of.strip(),
+        accession.strip(),
+        objective.strip(),
+    )
 
 
 @dataclass
 class LoopDetector:
     """Exact-repeat detector: same action + same result + no evidence progress."""
+
     seen: dict[tuple[str, str, str, str, tuple[str, ...], str, str, str], tuple[str, int]] = field(default_factory=dict)
     telemetry: list[dict[str, object]] = field(default_factory=list)
+
     def precheck(self, action: tuple[str, str, str, str, tuple[str, ...], str, str, str]) -> dict[str, object]:
         """Pre-dispatch gate: an exact repeat of a no-progress action is never re-executed.
 
@@ -138,11 +174,18 @@ class LoopDetector:
             self.telemetry.append(entry)
             return {"duplicate": True, "reason": "research_loop_detected"}
         return {"duplicate": False, "reason": ""}
-    def check(self, action: tuple[str, str, str, str, tuple[str, ...], str, str, str], result_hash: str, evidence_delta: int) -> dict[str, object]:
+
+    def check(
+        self, action: tuple[str, str, str, str, tuple[str, ...], str, str, str], result_hash: str, evidence_delta: int
+    ) -> dict[str, object]:
         """Record one action outcome; reject exact no-progress repeats."""
         prior = self.seen.get(action)
         if prior is not None and prior[0] == result_hash and evidence_delta <= 0:
-            entry: dict[str, object] = {"action": list(action), "result_hash": result_hash, "reason": "research_loop_detected"}
+            entry: dict[str, object] = {
+                "action": list(action),
+                "result_hash": result_hash,
+                "reason": "research_loop_detected",
+            }
             self.telemetry.append(entry)
             return {"duplicate": True, "reason": "research_loop_detected"}
         self.seen[action] = (result_hash, evidence_delta)
@@ -176,7 +219,9 @@ def run_wave1(
     evidence_ids = deps.fetch_wave_evidence(session_id)
     if interrupt_after == "source":
         deps.record_stop(session_id, "interrupted:source")
-        return Wave1Result(session_id=session_id, wave_id=wid, freeze_id="", evidence_ids=list(evidence_ids), question=question)
+        return Wave1Result(
+            session_id=session_id, wave_id=wid, freeze_id="", evidence_ids=list(evidence_ids), question=question
+        )
     freeze_id = deps.create_freeze(session_id)
     if interrupt_after == "freeze":
         deps.record_stop(session_id, "interrupted:freeze")
@@ -215,7 +260,9 @@ def _is_actionable(request: ResearchRequest) -> bool:
     return request.requested_source_domain.strip().upper() == "SEC"
 
 
-def _budget_stop(budgets: DirectorBudgets, waves_used: int, jobs_used: int, tool_calls_used: int, elapsed_s: float) -> WaveDecision | None:
+def _budget_stop(
+    budgets: DirectorBudgets, waves_used: int, jobs_used: int, tool_calls_used: int, elapsed_s: float
+) -> WaveDecision | None:
     """First exhausted budget wins; None when all budgets hold.
 
     Every budget is optional: a field left at None is unlimited and never fires.
@@ -267,15 +314,21 @@ def _coverage_branches(coverage: Mapping[str, object] | None) -> tuple[list[str]
 
 
 def _coverage_challenge(wave1: Wave1Result) -> WaveDecision | None:
-    """Reject a sufficient claim with missing branches / material open questions / unsearched routes.
+    """Continue on the dossier's own coverage state: a sufficient claim with missing branches / material open questions / unsearched routes, and equally an honest insufficient dossier whose SEC coverage still carries actionable residuals.
+
+    Coverage drives continuation independently of the committee remembering to
+    ask. An insufficient dossier with no actionable SEC residual (SEC drained,
+    or the question needs a source that is not available) returns None so the
+    run settles with its explicit unknowns/limitations.
 
     Targeted wave resolves one uncertainty (first remaining/material item);
     the original question + covered-vs-remaining branches (+ relationship
     count as impact-channel proxy) ride the decision detail so the next wave
     keeps its objective and never redefines it.
     """
-    coverage = wave1.coverage if isinstance(wave1.coverage, Mapping) and wave1.coverage.get("useful_for_question") == "sufficient" else None
-    if coverage is None:
+    coverage = wave1.coverage if isinstance(wave1.coverage, Mapping) else None
+    verdict = coverage.get("useful_for_question") if coverage is not None else None
+    if verdict not in ("sufficient", "insufficient"):
         return None
     covered, remaining = _coverage_branches(coverage)
     open_q = _coverage_questions(coverage, wave1.open_questions)
@@ -284,8 +337,14 @@ def _coverage_challenge(wave1: Wave1Result) -> WaveDecision | None:
     if not target:
         return None
     question = wave1.question.strip() or target[0]
-    detail = (f"coverage challenge: {len(missing)} branch(es) remaining, {len(open_q)} material open question(s), {len(wave1.relationships)} relationship(s); targeted follow-up on {target[0]!r} (original question: {question[:160]!r}; covered: {covered[:5]}; remaining: {missing[:5]})")
-    return WaveDecision(True, "continue", detail, targeted_question=f"{question} :: targeted follow-up: {target[0]}", targeted_domain="SEC")
+    detail = f"coverage challenge: {len(missing)} branch(es) remaining, {len(open_q)} material open question(s), {len(wave1.relationships)} relationship(s); targeted follow-up on {target[0]!r} (original question: {question[:160]!r}; covered: {covered[:5]}; remaining: {missing[:5]})"
+    return WaveDecision(
+        True,
+        "continue",
+        detail,
+        targeted_question=f"{question} :: targeted follow-up: {target[0]}",
+        targeted_domain="SEC",
+    )
 
 
 def _research_stop(wave1: Wave1Result) -> WaveDecision:
@@ -300,8 +359,13 @@ def _research_stop(wave1: Wave1Result) -> WaveDecision:
         return WaveDecision(False, "not_actionable", "material requests need non-SEC domains")
     actionable.sort(key=_decision_key, reverse=True)
     top = actionable[0]
-    return WaveDecision(True, "continue", f"wave {wave1.wave_id + 1} authorized: {top.question}",
-                        targeted_question=top.question, targeted_domain=top.requested_source_domain)
+    return WaveDecision(
+        True,
+        "continue",
+        f"wave {wave1.wave_id + 1} authorized: {top.question}",
+        targeted_question=top.question,
+        targeted_domain=top.requested_source_domain,
+    )
 
 
 def _novelty_count(novelty: Mapping[str, object], key: str) -> int:
@@ -310,34 +374,83 @@ def _novelty_count(novelty: Mapping[str, object], key: str) -> int:
     return value if isinstance(value, int) and not isinstance(value, bool) and value > 0 else 0
 
 
-def _novelty_stop(wave1: Wave1Result, novelty: Mapping[str, object] | None) -> WaveDecision | None:
-    """Convergence gate: an unproductive branch, or a blocked exact repeat, stops the run.
+def _branch_exhausted(wave1: Wave1Result) -> bool:
+    """Nothing unexplored remains on this branch: no residual coverage item and no material committee question.
 
-    Zero-novelty means the wave produced no new raw document, no new evidence
-    record, no new relationship, and no resolved question. One such wave may
-    retry the branch; ZERO_NOVELTY_LIMIT consecutive ones stop it. A blocked
-    exact repeat inside a zero-novelty wave stops it immediately. Counts never
-    stop research: only the absence of material progress does.
+    Needs the wave's committee verdict (no completed wave, no verdict). The
+    residual definition matches the coverage challenge, so an authorized
+    coverage follow-up always keeps the branch open.
     """
+    disagreement = wave1.disagreement
+    if disagreement is None:
+        return False
+    covered, remaining = _coverage_branches(wave1.coverage)
+    if [r for r in remaining if r not in covered]:
+        return False
+    if _coverage_questions(wave1.coverage, wave1.open_questions):
+        return False
+    return not any(_is_material(request) for request in disagreement.requested_research)
+
+
+def _zero_novelty_counts(wave1: Wave1Result, novelty: Mapping[str, object] | None) -> Mapping[str, object] | None:
+    """The wave's novelty counts; None when nothing usable is reported or any progress was made."""
     counts: object = novelty if isinstance(novelty, Mapping) and novelty else wave1.novelty
     if not isinstance(counts, Mapping) or not counts:
         return None
     if any(_novelty_count(counts, key) > 0 for key in NOVELTY_ZERO_KEYS):
         return None
-    blocked = _novelty_count(counts, "duplicate_actions_blocked")
+    return counts
+
+
+def _limit_stop(wave1: Wave1Result, counts: Mapping[str, object], limit: int) -> WaveDecision | None:
+    """Explicit runaway policy: stop after ``limit`` consecutive zero-novelty waves on this branch."""
     streak = _novelty_count(counts, "zero_novelty_waves") or 1
+    if streak < limit:
+        return None
+    return WaveDecision(
+        False,
+        "no_novelty",
+        f"wave {wave1.wave_id}: {streak} consecutive zero-novelty wave(s) on this branch; "
+        f"zero_novelty_limit={limit} (explicit operator policy, not research semantics)",
+    )
+
+
+def _novelty_stop(
+    wave1: Wave1Result, novelty: Mapping[str, object] | None, limit: int | None = None
+) -> WaveDecision | None:
+    """Convergence gate: an exhausted branch with zero novelty, or a blocked exact repeat, stops the run.
+
+    Zero-novelty means the wave produced no new raw document, no new evidence
+    record, no new relationship, and no resolved question: every remaining
+    attempt is a normalized repeat of work already done. A zero-novelty wave
+    with a blocked exact repeat stops immediately (``loop_detected``);
+    otherwise the run stops (``no_novelty``) only when nothing unexplored
+    remains on the branch, and then at the first such wave.
+
+    ``limit`` is explicit operator runaway policy, never research semantics:
+    with one configured, that many consecutive zero-novelty waves stop the
+    branch whether or not residuals remain.
+    """
+    counts = _zero_novelty_counts(wave1, novelty)
+    if counts is None:
+        return None
+    blocked = _novelty_count(counts, "duplicate_actions_blocked")
     if blocked:
         return WaveDecision(
-            False, "loop_detected",
+            False,
+            "loop_detected",
             f"wave {wave1.wave_id}: {blocked} exact repeated action(s) with no evidence progress and a zero-novelty wave",
         )
-    if streak >= ZERO_NOVELTY_LIMIT:
-        return WaveDecision(
-            False, "no_novelty",
-            f"wave {wave1.wave_id}: {streak} consecutive zero-novelty wave(s) on this branch "
-            "(no new raw documents, evidence, relationships, or resolved questions)",
-        )
-    return None
+    if limit is not None:
+        return _limit_stop(wave1, counts, limit)
+    if not _branch_exhausted(wave1):
+        return None
+    return WaveDecision(
+        False,
+        "no_novelty",
+        f"wave {wave1.wave_id}: zero-novelty wave with nothing unexplored left on this branch "
+        "(no remaining route, branch, entity, material open question, or material committee request)",
+    )
 
 
 def decide_next_wave(
@@ -356,19 +469,19 @@ def decide_next_wave(
     ``waves_used`` is the wave number the caller has completed; waves are
     sequence numbers, so there is no fixed wave ceiling: every gate is decided
     by coverage, the committee, and measured progress. Budgets fire only when
-    explicitly configured. The novelty/loop gate runs last and vetoes an
-    otherwise-authorized wave when the branch just finished produced zero
-    novelty (``no_novelty``) or blocked an exact repeated action
-    (``loop_detected``).
+    explicitly configured and keep precedence over the novelty/loop gate. The
+    novelty/loop gate runs last: it vetoes a wave the coverage challenge or
+    committee just authorized only for blocked exact repeats
+    (``loop_detected``) or when ``DirectorBudgets.zero_novelty_limit`` is
+    explicitly configured; otherwise ``no_novelty`` reports an exhausted
+    branch (zero novelty, nothing unexplored left) instead of the softer
+    ``no_questions``/``low_gain`` reason.
     """
     budgets = budgets if budgets is not None else DirectorBudgets()
     decision = _budget_stop(budgets, waves_used, jobs_used, tool_calls_used, elapsed_s)
     if decision is None:
-        decision = _coverage_challenge(wave1)
-    if decision is None:
-        decision = _research_stop(wave1)
-    if decision.authorized:
-        decision = _novelty_stop(wave1, novelty) or decision
+        decision = _coverage_challenge(wave1) or _research_stop(wave1)
+        decision = _novelty_stop(wave1, novelty, budgets.zero_novelty_limit) or decision
     deps.record_stop(wave1.session_id, f"{decision.stop_reason}:{decision.reason_detail}")
     return decision
 
@@ -399,7 +512,6 @@ def synthesize_wave1(
 __all__ = [
     "NOVELTY_ZERO_KEYS",
     "WAVE1_ID",
-    "ZERO_NOVELTY_LIMIT",
     "DirectorBudgets",
     "DirectorDeps",
     "LoopDetector",

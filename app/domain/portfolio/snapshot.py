@@ -2,17 +2,17 @@
 
 from __future__ import annotations
 
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from datetime import datetime
 from decimal import Decimal
-from typing import Sequence
 
 from .models import PortfolioSnapshot, Position
 from .valuation import portfolio_market_value, position_weight
 
 
 def _cash_total(
-    account_ids: Sequence[str], cash_balances: Mapping[str, Decimal | None],
+    account_ids: Sequence[str],
+    cash_balances: Mapping[str, Decimal | None],
 ) -> Decimal | None:
     """All-or-nothing cash sum (existing boundary)."""
     cash_complete = (
@@ -33,17 +33,16 @@ def _total_value(
 ) -> Decimal | None:
     """Denominator with valuation-completeness gate (existing boundary)."""
     total = invested_value + cash if invested_value is not None and cash is not None else None
-    valuation_complete = all(
-        position.market_value is not None or position.quantity == 0
-        for position in positions
-    )
+    valuation_complete = all(position.market_value is not None or position.quantity == 0 for position in positions)
     if not valuation_complete:
         return None
     return total
 
 
 def _weighted_positions(
-    snapshot_id: str, positions: Sequence[Position], total_value: Decimal | None,
+    snapshot_id: str,
+    positions: Sequence[Position],
+    total_value: Decimal | None,
 ) -> tuple[Position, ...]:
     """Rebuild positions with deterministic ids and weights (existing boundary)."""
     built: list[Position] = []
@@ -99,8 +98,7 @@ def build_portfolio_snapshot(
     if not positions and cash is not None:
         invested_value: Decimal | None = Decimal(0)
     else:
-        invested_value = portfolio_market_value(
-            [position.market_value for position in positions])[0]
+        invested_value = portfolio_market_value([position.market_value for position in positions])[0]
     total_value = _total_value(positions, invested_value, cash)
 
     snapshot_id = f"portfolio:{broker}:{created_at.isoformat()}"

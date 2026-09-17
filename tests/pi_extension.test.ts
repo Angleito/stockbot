@@ -8,7 +8,7 @@ import { expect, test } from "bun:test";
 import fc from "fast-check";
 import type { Subprocess } from "bun";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import stockbotExtension from "../.stockbot/omp/index.ts";
@@ -1327,7 +1327,6 @@ test("browse_tools round-trips the hierarchy", async () => {
 	expect(famDump).toContain("use_it_for");
 });
 
-
 function matchNames(details: unknown): string[] {
 	const inner = ((details as Json).result ?? {}) as Json;
 	const meta = (inner.meta ?? {}) as Json;
@@ -2075,7 +2074,6 @@ test("research director restart: stale wave-1 running role never covers wave-2 t
 	expectFreezeIds(resumed.prompt, F2, [E1, E2]);
 });
 
-
 test("research director restart: authorized wave-2 reuses running source until new evidence freezes F2", async () => {
 	const SID = "rs:resume-w2";
 	const F1 = `${SID}:1:freeze`;
@@ -2602,9 +2600,10 @@ test("director prompts carry the raw-source item shape and the rich analysis env
 	expect(fetching.prompt).toContain("task batch");
 	expect(fetching.prompt).toContain("sec-agent");
 	expect(fetching.prompt).toContain("research_add_evidence");
-	// Accession + document name + raw passage: search hits alone are not evidence.
+	// Canonical handle + cited passage: search hits alone are not evidence.
 	expect(fetching.prompt).toContain("source_record_id");
 	expect(fetching.prompt).toContain("document_name");
+	expect(fetching.prompt).toContain("source_handle");
 	expect(fetching.prompt).toContain("matching_passage");
 	expect(fetching.prompt).toContain("claim_kind");
 	expect(fetching.prompt).toContain("absence_observation");
@@ -2949,9 +2948,9 @@ test("Freeze parity mirrors kernel hash and drift", async () => {
 	expect(checkFreezeDrift("E1", ["ev:a", "ev:b"], recs)).toBeNull();
 	expect(checkFreezeDrift("E1", ["ev:a"], recs)).toContain("drifted");
 	expect(checkFreezeDrift("E1", ["ev:a", "ev:b"], [...recs, recs[0]])).toContain("duplicate");
+});
 	// Shared-corpus differential 2026-09-17: py hash d2e13c22...746eb11e AGREE,
 	// order-stable AGREE, empty sha256 AGREE; drift ok/short/dup all AGREE.
-});
 test("committee results record three analyses", async () => {
 	const SID = "rs:task-record";
 	const F1 = `${SID}:1:freeze`;

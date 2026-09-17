@@ -1,7 +1,7 @@
 {
   "answer_excerpt": "SpaceX has no SEC issuer record: no SpaceX filings were located within the searched SEC scope, so the finding is a scoped absence observation and not a statement about the real-world relationship (SEC-only limitation). Alphabet's 10-K [rs:spacex-openai-2026-09-15:ev:2] discloses no SpaceX counterparty exposure and Microsoft's 10-K [rs:spacex-openai-2026-09-15:ev:1] bounds the OpenAI chain; SpaceX's private terms remain UNKNOWN.",
   "as_of": null,
-  "budget_cap": 60,
+  "budget_cap": null,
   "budget_used": 14,
   "evidence_ids": [
     "rs:spacex-openai-2026-09-15:ev:1",

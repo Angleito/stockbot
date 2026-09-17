@@ -21,9 +21,7 @@ import pytest
 from app import finra_client
 from app.tool_render import render_tool_result
 
-_HAS_CREDS = bool(os.getenv("FINRA_CLIENT_ID")) and bool(
-    os.getenv("FINRA_CLIENT_SECRET")
-)
+_HAS_CREDS = bool(os.getenv("FINRA_CLIENT_ID")) and bool(os.getenv("FINRA_CLIENT_SECRET"))
 _SMOKE_ENABLED = os.getenv("RUN_FINRA_SMOKE") == "1"
 
 pytestmark = [
@@ -87,9 +85,7 @@ def test_smoke_catalog_ranked_weekly_summary_discovery():
     assert "error" not in result, result
     datasets = _as_seq(result["datasets"])
     assert datasets, "expected ranked matches"
-    assert datasets[0]["dataset"] == "otcMarket/weeklySummary", [
-        d["dataset"] for d in datasets
-    ]
+    assert datasets[0]["dataset"] == "otcMarket/weeklySummary", [d["dataset"] for d in datasets]
     described = finra_client.describe_dataset("otcMarket/weeklySummary")
     assert "error" not in described, described
     assert described["ticker_field"] == "issueSymbolIdentifier"
@@ -97,9 +93,7 @@ def test_smoke_catalog_ranked_weekly_summary_discovery():
 
 
 def test_smoke_short_interest_uses_canonical_fields():
-    result = finra_client.query_dataset(
-        "otcMarket/consolidatedShortInterest", ticker="AAPL", limit=5
-    )
+    result = finra_client.query_dataset("otcMarket/consolidatedShortInterest", ticker="AAPL", limit=5)
     if "metrics" in result:
         fields = _as_dict(result["metrics"])["fields"]
         assert isinstance(fields, list)

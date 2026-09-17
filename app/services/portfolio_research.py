@@ -58,12 +58,14 @@ def enrich_portfolio_research(
             finra_metrics = _finra_metrics(ticker, as_of_str, data_root)
         else:
             finra_metrics: dict[str, object] = {}
-        results.append(PortfolioResearchPosition(
-            position=position,
-            latest_sec_metrics=sec_metrics,
-            latest_finra_metrics=finra_metrics,
-            research_data_freshness=_freshness(as_of_str, sec_metrics, finra_metrics),
-        ))
+        results.append(
+            PortfolioResearchPosition(
+                position=position,
+                latest_sec_metrics=sec_metrics,
+                latest_finra_metrics=finra_metrics,
+                research_data_freshness=_freshness(as_of_str, sec_metrics, finra_metrics),
+            )
+        )
     return results
 
 
@@ -172,7 +174,7 @@ def _parse_date(value: object) -> date | None:
         return None
     try:
         return date.fromisoformat(str(value)[:10])
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -181,5 +183,5 @@ def _decimal(value: object) -> Decimal | None:
         return None
     try:
         return Decimal(str(value))
-    except (TypeError, ValueError, ArithmeticError):
+    except TypeError, ValueError, ArithmeticError:
         return None

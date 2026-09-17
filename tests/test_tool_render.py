@@ -6,7 +6,7 @@ renderer unit tests. Offline and deterministic.
 """
 
 import re
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.tool_render import (
     MAX_TOOL_MESSAGE_BYTES,
@@ -41,9 +41,7 @@ def _briefing_result(total_records: int | None = 12):
         },
         "metrics": {
             "fields": {
-                "currentShortPositionQuantity": {
-                    "min": 100, "max": 200, "mean": 150, "median": 150, "sum": 1800
-                }
+                "currentShortPositionQuantity": {"min": 100, "max": 200, "mean": 150, "median": 150, "sum": 1800}
             },
             "latest_vs_prior": [
                 {
@@ -58,10 +56,7 @@ def _briefing_result(total_records: int | None = 12):
             ],
             "categorical": {"symbolCode": {"AAPL": 12}},
         },
-        "trends": [
-            "currentShortPositionQuantity: 12400000 vs prior 10800000 "
-            "(+1600000, +14.81%) — up"
-        ],
+        "trends": [("currentShortPositionQuantity: 12400000 vs prior 10800000 (+1600000, +14.81%) — up")],
         "warnings": list[str](),
         "briefing": {
             "summary": "Short interest rose 14.8%.",
@@ -89,10 +84,7 @@ def _datapoints_result(n_fields: int = 5, n_rows: int = 5, cell: str = "v"):
         "dataset_id": "otcMarket/consolidatedShortInterest",
         "source": "FINRA Query API otcMarket/consolidatedShortInterest",
         "fields": fields,
-        "records": [
-            {f: f"{cell}{i}-{j}" for j, f in enumerate(fields)}
-            for i in range(n_rows)
-        ],
+        "records": [{f: f"{cell}{i}-{j}" for j, f in enumerate(fields)} for i in range(n_rows)],
         "returned_count": n_rows,
         "limit": n_rows,
         "offset": 0,
@@ -103,13 +95,11 @@ def _datapoints_result(n_fields: int = 5, n_rows: int = 5, cell: str = "v"):
     }
 
 
-
 def test_small_result_rendered_without_markers():
     result = {"a": 1, "b": "hello"}
     text = render_tool_result(result)
     assert text == "a: 1\nb: hello"
     assert TRUNCATED_MARKER not in text
-
 
 
 def test_web_search_claims_shape_renders():
@@ -213,9 +203,7 @@ def test_briefing_completeness_statuses_rendered():
 def test_render_always_fits_budget():
     result = {
         "source": "S",
-        "records": [
-            {"a": "x" * 1_000_000} for _ in range(100)
-        ],
+        "records": [{"a": "x" * 1_000_000} for _ in range(100)],
         "fields": ["a"],
     }
     text = render_tool_result(result, max_bytes=2048)
@@ -236,33 +224,35 @@ def test_non_dict_results_are_handled():
 def _portfolio_snapshot_result(n_positions: int = 3, omitted: int = 0):
     positions = []
     for i in range(n_positions):
-        positions.append({
-            "ticker": f"T{i}",
-            "quantity": "10",
-            "market_price": "100.00",
-            "price_type": "last",
-            "market_value": "1000.00",
-            "portfolio_weight": "0.25",
-            "unrealized_gain": "50.00",
-            "security_id": f"sec:equity:{i}",
-            "entity_id": f"sec:cik:{i}",
-            "resolved": True,
-            "sec": {
-                "Revenue": {"value": "1000000", "period_end": "2026-06-30"},
-                "NetIncomeLoss": {"value": "200000", "period_end": "2026-06-30"},
-                "CashAndCashEquivalents": {"value": "300000", "period_end": "2026-06-30"},
-                "LongTermDebt": {"value": "400000", "period_end": "2026-06-30"},
-                "EntityCommonStockSharesOutstanding": {"value": "500000", "period_end": "2026-07-01"},
-            },
-            "finra": {
-                "short_position": "100",
-                "prev_position": "90",
-                "change": "10",
-                "change_pct": "0.1111111111",
-                "days_to_cover": "1.5",
-                "settlement_date": "2026-08-14",
-            },
-        })
+        positions.append(
+            {
+                "ticker": f"T{i}",
+                "quantity": "10",
+                "market_price": "100.00",
+                "price_type": "last",
+                "market_value": "1000.00",
+                "portfolio_weight": "0.25",
+                "unrealized_gain": "50.00",
+                "security_id": f"sec:equity:{i}",
+                "entity_id": f"sec:cik:{i}",
+                "resolved": True,
+                "sec": {
+                    "Revenue": {"value": "1000000", "period_end": "2026-06-30"},
+                    "NetIncomeLoss": {"value": "200000", "period_end": "2026-06-30"},
+                    "CashAndCashEquivalents": {"value": "300000", "period_end": "2026-06-30"},
+                    "LongTermDebt": {"value": "400000", "period_end": "2026-06-30"},
+                    "EntityCommonStockSharesOutstanding": {"value": "500000", "period_end": "2026-07-01"},
+                },
+                "finra": {
+                    "short_position": "100",
+                    "prev_position": "90",
+                    "change": "10",
+                    "change_pct": "0.1111111111",
+                    "days_to_cover": "1.5",
+                    "settlement_date": "2026-08-14",
+                },
+            }
+        )
     positions[0]["resolved"] = False
     return {
         "result_type": "portfolio_snapshot",
@@ -309,7 +299,7 @@ def test_portfolio_snapshot_reports_unresolved_and_research_freshness():
     assert "SEC latest filing 2026-08-20" in text
     assert "FINRA settlement 2026-08-14" in text
     assert "Source: robinhood_mcp" in text
-    expected_local = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc).astimezone().isoformat()
+    expected_local = datetime(2026, 8, 25, 12, 0, tzinfo=UTC).astimezone().isoformat()
     result["created_at_local"] = expected_local
     result["freshness"]["snapshot_created_at_local"] = expected_local
     text = render_tool_result(result)
@@ -329,6 +319,7 @@ def test_portfolio_snapshot_truncated_when_budget_tiny():
     text = render_tool_result(result, max_bytes=128)
     assert len(text.encode("utf-8")) <= 128
     assert text  # non-empty
+
 
 def test_mandate_evaluation_renders_breaches_and_exposures():
     result = {
@@ -380,7 +371,7 @@ def test_mandate_evaluation_renders_breaches_and_exposures():
     text = render_tool_result(result)
     assert "Mandate evaluation" in text
     assert "Snapshot created: 2026-08-25T12:00:00+00:00" in text
-    expected_local = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc).astimezone().isoformat()
+    expected_local = datetime(2026, 8, 25, 12, 0, tzinfo=UTC).astimezone().isoformat()
     result["snapshot_created_at_local"] = expected_local
     text = render_tool_result(result)
     assert f"(local {expected_local})" in text
@@ -438,9 +429,7 @@ def _valuation_result(**kwargs: str):
 
 
 def test_valuation_forward_eps_labels_follow_fiscal_year_metadata():
-    text = render_tool_result(
-        _valuation_result(fiscal_year_current="2026", fiscal_year_next="2027")
-    )
+    text = render_tool_result(_valuation_result(fiscal_year_current="2026", fiscal_year_next="2027"))
     assert "Consensus FY2026" in text
     assert "Consensus FY2027" in text
     assert "Adjusted FY2026 (contractual incl.)" in text
@@ -456,20 +445,31 @@ def test_obligations_ledger_dispatch_suppresses_schedule_components():
     """Live-shaped ledger (no `form` key) reaches the obligations renderer;
     headline + FY lines render once, components never standalone."""
     headline = {
-        "type": "supply", "amount_billions": 13.3, "certainty": "contingent",
-        "status": "future_cash_obligation", "revenue_matched": True,
-        "filed": "2026-02-01", "accession": "0001",
+        "type": "supply",
+        "amount_billions": 13.3,
+        "certainty": "contingent",
+        "status": "future_cash_obligation",
+        "revenue_matched": True,
+        "filed": "2026-02-01",
+        "accession": "0001",
         "excerpt": "Supply commitments were $13.3 billion.",
         "payment_horizon": {},
         "schedule": [{"fiscal_year": "2027", "amount_billions": 4.0}],
     }
     component = {
-        "type": "supply", "amount_billions": 4.0, "schedule_component": True,
-        "headline_type": "supply", "filed": "2026-02-01", "excerpt": "x",
+        "type": "supply",
+        "amount_billions": 4.0,
+        "schedule_component": True,
+        "headline_type": "supply",
+        "filed": "2026-02-01",
+        "excerpt": "x",
     }
     result = {
-        "ticker": "SYN", "filed": "2026-02-01", "source": "SEC EDGAR notes",
-        "obligations": [headline, component], "current_snapshot": [headline],
+        "ticker": "SYN",
+        "filed": "2026-02-01",
+        "source": "SEC EDGAR notes",
+        "obligations": [headline, component],
+        "current_snapshot": [headline],
     }
     assert "form" not in result
     text = render_tool_result(result)
@@ -545,8 +545,10 @@ def test_absence_observation_card_states_the_searched_scope():
     assert text.splitlines() == [
         "Absence observation — searched SEC scope only",
         "Searched scope: search s1 | query 'GS OpenAI bankruptcy'",
-        "No disclosure was located within the searched SEC scope: "
-        "No OpenAI bankruptcy exposure in the scoped GS filing sections",
+        (
+            "No disclosure was located within the searched SEC scope: "
+            "No OpenAI bankruptcy exposure in the scoped GS filing sections"
+        ),
         "Evidence: rs:1:ev:1",
     ]
 
@@ -582,8 +584,7 @@ def test_paged_search_card_reports_retrieval_truth_and_next_page():
     assert "query: NVDA AI demand" in text
     assert "coverage: partial; pagination complete: no; source exhausted: no" in text
     assert (
-        "- 10-Q 2025-05-28 0001045810-25-000023 nvda-20250427.htm (score 9.5):"
-        " Data center revenue grew on AI demand."
+        "- 10-Q 2025-05-28 0001045810-25-000023 nvda-20250427.htm (score 9.5): Data center revenue grew on AI demand."
     ) in text
     assert "- 10-K 2025-02-20 0001045810-25-000001 nvda-20250126.htm (score 7.0)" in text
     assert "Hits are navigation artifacts" in text
@@ -593,12 +594,14 @@ def test_paged_search_card_reports_retrieval_truth_and_next_page():
 
 
 def test_paged_search_card_last_page_and_unknown_retrieval_flags():
-    text = render_tool_result(_read_search_result(
-        offset=38,
-        more=False,
-        hits=[{"document": "nvda-20250126.htm"}, {}, {"score": 3.0}],
-        coverage={"status": "complete", "pagination_complete": True, "source_exhausted": True},
-    ))
+    text = render_tool_result(
+        _read_search_result(
+            offset=38,
+            more=False,
+            hits=[{"document": "nvda-20250126.htm"}, {}, {"score": 3.0}],
+            coverage={"status": "complete", "pagination_complete": True, "source_exhausted": True},
+        )
+    )
     assert "SEC search s1 — 3 hit(s) at offset 38 of 40 persisted" in text
     assert "coverage: complete; pagination complete: yes; source exhausted: yes" in text
     assert "More hits: none (every persisted hit is shown)" in text
@@ -664,12 +667,14 @@ def test_finalize_card_is_a_short_confirmation_never_the_answer():
 def test_final_answer_card_delivers_the_grounded_answer_instead_of_a_count():
     """The substantive card carries the answer text; the finalize confirmation never does."""
     answer = "NVDA AI demand stays supply-constrained through FY2027."
-    text = render_tool_result({
-        "executive_summary": answer,
-        "impact_channels": [{"name": "AI capex", "severity": "direct", "evidence_ids": ["rs:1:ev:1"]}],
-        "grounded_claims": [{"text": "AI demand", "claim_type": "observed_fact", "evidence_ids": ["rs:1:ev:1"]}],
-        "research_scope": {"allowed_sources": ["SEC"]},
-    })
+    text = render_tool_result(
+        {
+            "executive_summary": answer,
+            "impact_channels": [{"name": "AI capex", "severity": "direct", "evidence_ids": ["rs:1:ev:1"]}],
+            "grounded_claims": [{"text": "AI demand", "claim_type": "observed_fact", "evidence_ids": ["rs:1:ev:1"]}],
+            "research_scope": {"allowed_sources": ["SEC"]},
+        }
+    )
     assert f"Bottom line: {answer}" in text
     assert "## Major direct exposures" in text
     assert "- AI capex (direct) [rs:1:ev:1]" in text

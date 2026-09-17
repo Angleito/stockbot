@@ -14,10 +14,10 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.policy import Capability  # noqa: E402
-from app.security.action_policy import TOOL_DOMAINS  # noqa: E402
-from app.security.context_gateway import TOOL_ENVELOPES  # noqa: E402
-from app.tools import (  # noqa: E402
+from app.policy import Capability
+from app.security.action_policy import TOOL_DOMAINS
+from app.security.context_gateway import TOOL_ENVELOPES
+from app.tools import (
     _DIRECT_HANDLERS,
     _FINRA_HANDLERS,
     _ROBINHOOD_HANDLERS,
@@ -51,10 +51,13 @@ def get_registry_sets() -> dict[str, set[str]]:
     # call_tool has no _MODEL_HANDLERS entry by design; the Pi gateway
     # intercepts it before execute_tool and tail-calls the inner tool once.
     handlers = set(_DIRECT_HANDLERS) | set(_FINRA_HANDLERS) | set(_ROBINHOOD_HANDLERS) | {"call_tool"}
-    research = {
-        tool_schema_name(t)
-        for t in tools_for_capabilities(frozenset({Capability.RESEARCH}))
-    } - {"search_tools", "list_tool_domains", "describe_tool", "browse_tools", "call_tool"}
+    research = {tool_schema_name(t) for t in tools_for_capabilities(frozenset({Capability.RESEARCH}))} - {
+        "search_tools",
+        "list_tool_domains",
+        "describe_tool",
+        "browse_tools",
+        "call_tool",
+    }
     return {
         "schemas": schemas,
         "handlers": handlers,
@@ -87,6 +90,7 @@ def _expected_catalog_pages() -> tuple[Path, dict[str, str]]:
         index_yaml,
         tool_markdown,
     )
+
     names = sorted(n for n in TOOL_DISCOVERY_REGISTRY if n not in EXCLUDED)
     expected = {"index.yaml": index_yaml(names)}
     for name in names:

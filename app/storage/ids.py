@@ -6,14 +6,14 @@ and document identity derivation lives in ``app/domain/market/ids.py``.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 
 def run_id() -> str:
     """New run identity for a research run."""
-    return f"run:{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}"
+    return f"run:{datetime.now(UTC):%Y%m%dT%H%M%S%f}"
 
 
 def request_id() -> str:
     """New request identity for a research request."""
-    return f"req:{datetime.now(timezone.utc):%Y%m%dT%H%M%S%f}"
+    return f"req:{datetime.now(UTC):%Y%m%dT%H%M%S%f}"

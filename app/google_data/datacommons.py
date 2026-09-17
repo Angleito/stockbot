@@ -12,7 +12,7 @@ the request stays one bounded call.
 from __future__ import annotations
 
 import logging
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 import requests
 
@@ -46,27 +46,43 @@ def _key_headers() -> dict[str, str] | None:
 
 def _map_http_error(exc: Exception) -> dict[str, object]:
     if isinstance(exc, (requests.Timeout, requests.ConnectionError)):
-        return {"status": "unavailable", "source": SOURCE,
-                "error": f"data commons unreachable: {exc}",
-                "error_type": "source_unavailable"}
-    return {"status": "error", "source": SOURCE,
-            "error": f"data commons request failed: {exc}", "error_type": "request_failed"}
+        return {
+            "status": "unavailable",
+            "source": SOURCE,
+            "error": f"data commons unreachable: {exc}",
+            "error_type": "source_unavailable",
+        }
+    return {
+        "status": "error",
+        "source": SOURCE,
+        "error": f"data commons request failed: {exc}",
+        "error_type": "request_failed",
+    }
 
 
 def _map_status(response: requests.Response) -> dict[str, object] | None:
     code = response.status_code
     if code in (401, 403):
-        return {"status": "unavailable", "source": SOURCE,
-                "error": f"data commons refused (HTTP {code}): DATACOMMONS_AUTH_REQUIRED",
-                "error_type": "auth_required"}
+        return {
+            "status": "unavailable",
+            "source": SOURCE,
+            "error": f"data commons refused (HTTP {code}): DATACOMMONS_AUTH_REQUIRED",
+            "error_type": "auth_required",
+        }
     if code == 429:
-        return {"status": "unavailable", "source": SOURCE,
-                "error": f"data commons refused (HTTP {code}): DATACOMMONS_RATE_LIMITED",
-                "error_type": "rate_limited"}
+        return {
+            "status": "unavailable",
+            "source": SOURCE,
+            "error": f"data commons refused (HTTP {code}): DATACOMMONS_RATE_LIMITED",
+            "error_type": "rate_limited",
+        }
     if code >= 400:
-        return {"status": "error", "source": SOURCE,
-                "error": f"data commons error (HTTP {code})",
-                "error_type": "request_failed"}
+        return {
+            "status": "error",
+            "source": SOURCE,
+            "error": f"data commons error (HTTP {code})",
+            "error_type": "request_failed",
+        }
     return None
 
 
@@ -81,20 +97,29 @@ def _clamp_limit(limit: int) -> tuple[dict[str, object] | None, int]:
     """Clamped limit or (invalid-params error, max)."""
     try:
         return None, max(1, min(limit, _MAX_LIMIT))
-    except (TypeError, ValueError):
-        return ({"status": "error", "source": SOURCE,
-                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"},
-                _MAX_LIMIT)
+    except TypeError, ValueError:
+        return (
+            {"status": "error", "source": SOURCE, "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"},
+            _MAX_LIMIT,
+        )
 
 
 def _auth_error() -> dict[str, object] | None:
     """Disabled/auth-required error, or None with headers ready."""
     if not _data_enabled():
-        return {"status": "disabled", "source": SOURCE,
-                "reason": "google data disabled", "error": "DATACOMMONS_DISABLED"}
+        return {
+            "status": "disabled",
+            "source": SOURCE,
+            "reason": "google data disabled",
+            "error": "DATACOMMONS_DISABLED",
+        }
     if _key_headers() is None:
-        return {"status": "unavailable", "source": SOURCE,
-                "error": "DATACOMMONS_AUTH_REQUIRED", "error_type": "auth_required"}
+        return {
+            "status": "unavailable",
+            "source": SOURCE,
+            "error": "DATACOMMONS_AUTH_REQUIRED",
+            "error_type": "auth_required",
+        }
     return None
 
 
@@ -115,13 +140,25 @@ def _decode_body(response: requests.Response) -> tuple[dict[str, object] | None,
     try:
         body = response.json()
     except ValueError:
-        return ({"status": "error", "source": SOURCE,
-                 "error": "data commons returned non-JSON",
-                 "error_type": "malformed_response"}, None)
+        return (
+            {
+                "status": "error",
+                "source": SOURCE,
+                "error": "data commons returned non-JSON",
+                "error_type": "malformed_response",
+            },
+            None,
+        )
     if not isinstance(body, dict):
-        return ({"status": "error", "source": SOURCE,
-                 "error": "data commons returned non-JSON",
-                 "error_type": "malformed_response"}, None)
+        return (
+            {
+                "status": "error",
+                "source": SOURCE,
+                "error": "data commons returned non-JSON",
+                "error_type": "malformed_response",
+            },
+            None,
+        )
     return None, body
 
 
@@ -129,9 +166,7 @@ def _in_window(when: object, start_date: str | None, end_date: str | None) -> bo
     """True when the observation date survives client-side date filtering."""
     if start_date and str(when) < start_date:
         return False
-    if end_date and str(when) > end_date:
-        return False
-    return True
+    return not (end_date and str(when) > end_date)
 
 
 def _facet_meta(facets: object, facet_id: object) -> dict[str, object]:
@@ -151,8 +186,7 @@ def _section_map(body: dict[str, object], key: str) -> dict[str, object]:
     return {}
 
 
-def _facet_points(facet: dict[str, object], start_date: str | None,
-                  end_date: str | None) -> list[dict[str, object]]:
+def _facet_points(facet: dict[str, object], start_date: str | None, end_date: str | None) -> list[dict[str, object]]:
     """Dated observations for one facet, sorted by date."""
     points: list[dict[str, object]] = []
     raw_obs = facet.get("observations", [])
@@ -169,17 +203,27 @@ def _facet_points(facet: dict[str, object], start_date: str | None,
     return points
 
 
-def _facet_entry(variable: str, entity: str, facet: dict[str, object],
-                 meta: dict[str, object], points: list[dict[str, object]],
-                 retrieved_at: str) -> dict[str, object]:
+def _facet_entry(
+    variable: str,
+    entity: str,
+    facet: dict[str, object],
+    meta: dict[str, object],
+    points: list[dict[str, object]],
+    retrieved_at: str,
+) -> dict[str, object]:
     """One faceted series entry with original unit/provider preserved."""
     return {
-        "geo": entity, "variable": variable,
+        "geo": entity,
+        "variable": variable,
         "facet": facet.get("facetId"),
         "unit": facet.get("unit", meta.get("unit")),
-        "provider": (facet.get("provenanceName") or meta.get("importName")
-                     or facet.get("seriesSource") or meta.get("provenanceUrl")
-                     or facet.get("provenanceUrl")),
+        "provider": (
+            facet.get("provenanceName")
+            or meta.get("importName")
+            or facet.get("seriesSource")
+            or meta.get("provenanceUrl")
+            or facet.get("provenanceUrl")
+        ),
         "provenanceUrl": meta.get("provenanceUrl") or facet.get("provenanceUrl"),
         "importName": meta.get("importName"),
         "measurementMethod": meta.get("measurementMethod"),
@@ -187,7 +231,8 @@ def _facet_entry(variable: str, entity: str, facet: dict[str, object],
         "scalingFactor": meta.get("scalingFactor"),
         "isDcAggregate": meta.get("isDcAggregate"),
         "observations": points,
-        "retrieved_at": retrieved_at, "known_at": retrieved_at,
+        "retrieved_at": retrieved_at,
+        "known_at": retrieved_at,
     }
 
 
@@ -201,10 +246,15 @@ def _ordered_facets(by_ent: object) -> list[dict[str, object]]:
     return [f for f in facets if isinstance(f, dict)]
 
 
-def _series_for_entity(variable: str, entity: str, by_ent: object,
-                       facets: object, start_date: str | None,
-                       end_date: str | None,
-                       retrieved_at: str) -> list[dict[str, object]]:
+def _series_for_entity(
+    variable: str,
+    entity: str,
+    by_ent: object,
+    facets: object,
+    start_date: str | None,
+    end_date: str | None,
+    retrieved_at: str,
+) -> list[dict[str, object]]:
     """Non-empty faceted series for one entity."""
     out: list[dict[str, object]] = []
     for facet in _ordered_facets(by_ent):
@@ -227,8 +277,7 @@ def _by_entity_map(by_var: object) -> list[tuple[str, object]]:
     return list(by_entity.items())
 
 
-def _append_entry(series: list[dict[str, object]], entry: dict[str, object],
-                  remaining: int) -> tuple[int, bool]:
+def _append_entry(series: list[dict[str, object]], entry: dict[str, object], remaining: int) -> tuple[int, bool]:
     """Append one capped entry; returns (remaining, continuation)."""
     if remaining <= 0:
         return remaining, True
@@ -241,9 +290,9 @@ def _append_entry(series: list[dict[str, object]], entry: dict[str, object],
     return remaining - len(take), len(take) >= remaining
 
 
-def _collect_series(body: dict[str, object], start_date: str | None,
-                    end_date: str | None, limit: int,
-                    retrieved_at: str) -> tuple[list[dict[str, object]], bool]:
+def _collect_series(
+    body: dict[str, object], start_date: str | None, end_date: str | None, limit: int, retrieved_at: str
+) -> tuple[list[dict[str, object]], bool]:
     """Bounded series plus continuation flag; per-facet observations capped."""
     facets = _section_map(body, "facets")
     series: list[dict[str, object]] = []
@@ -253,21 +302,31 @@ def _collect_series(body: dict[str, object], start_date: str | None,
     variables_iter = by_variable.items()
     for variable, by_var in variables_iter:
         for entity, by_ent in _by_entity_map(by_var):
-            for entry in _series_for_entity(variable, entity, by_ent, facets,
-                                            start_date, end_date, retrieved_at):
+            for entry in _series_for_entity(variable, entity, by_ent, facets, start_date, end_date, retrieved_at):
                 remaining, done = _append_entry(series, entry, remaining)
                 continuation = continuation or done
     return series, continuation
 
 
-def _macro_payload(geos: list[str], variables: list[str],
-                   series: list[dict[str, object]], continuation: bool,
-                   body: dict[str, object], retrieved_at: str) -> dict[str, object]:
+def _macro_payload(
+    geos: list[str],
+    variables: list[str],
+    series: list[dict[str, object]],
+    continuation: bool,
+    body: dict[str, object],
+    retrieved_at: str,
+) -> dict[str, object]:
     """Fixed-shape ok payload for macro observations."""
-    out: dict[str, object] = {"status": "ok", "source": SOURCE, "series": series, "count": len(series),
-                 "coverage": {"geos": geos, "variables": variables},
-                 "continuation": continuation or bool(body.get("nextToken")),
-                 "retrieved_at": retrieved_at, "known_at": retrieved_at}
+    out: dict[str, object] = {
+        "status": "ok",
+        "source": SOURCE,
+        "series": series,
+        "count": len(series),
+        "coverage": {"geos": geos, "variables": variables},
+        "continuation": continuation or bool(body.get("nextToken")),
+        "retrieved_at": retrieved_at,
+        "known_at": retrieved_at,
+    }
     if body.get("nextToken"):
         out["nextToken"] = body["nextToken"]
     return out
@@ -281,17 +340,23 @@ def _resolve_nodes(nodes: list[str] | str | None) -> list[str]:
 def _nodes_error(nodes: list[str]) -> dict[str, object] | None:
     """Invalid-params error for empty or over-bound node lists, else None."""
     if not nodes:
-        return {"status": "error", "source": SOURCE,
-                "error": "at least one node is required", "error_type": "invalid_params"}
+        return {
+            "status": "error",
+            "source": SOURCE,
+            "error": "at least one node is required",
+            "error_type": "invalid_params",
+        }
     if len(nodes) > _MAX_NODES:
-        return {"status": "error", "source": SOURCE,
-                "error": f"{len(nodes)} nodes exceeds bound {_MAX_NODES}",
-                "error_type": "invalid_params"}
+        return {
+            "status": "error",
+            "source": SOURCE,
+            "error": f"{len(nodes)} nodes exceeds bound {_MAX_NODES}",
+            "error_type": "invalid_params",
+        }
     return None
 
 
-def _resolve_payload(nodes: list[str], resolver: str | None,
-                     property: str | None) -> dict[str, object]:
+def _resolve_payload(nodes: list[str], resolver: str | None, property: str | None) -> dict[str, object]:
     """Resolve payload with optional resolver/property selectors."""
     payload: dict[str, object] = {"nodes": nodes}
     if resolver:
@@ -306,40 +371,55 @@ def _obs_date(point: dict[str, object]) -> str:
     return str(point["date"])
 
 
-def get_macro_context(geos: list[str] | str | None, variables: list[str] | str | None, *,
-                      start_date: str | None = None, end_date: str | None = None,
-                      limit: int = 100) -> dict[str, object]:
+def get_macro_context(
+    geos: list[str] | str | None,
+    variables: list[str] | str | None,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 100,
+) -> dict[str, object]:
     """Bounded statistical observations for geos x variables, faceted series."""
     geos = _clean_ids(geos)
     variables = _clean_ids(variables)
     if not geos or not variables:
-        return {"status": "error", "source": SOURCE,
-                "error": "geos and variables are both required",
-                "error_type": "invalid_params"}
+        return {
+            "status": "error",
+            "source": SOURCE,
+            "error": "geos and variables are both required",
+            "error_type": "invalid_params",
+        }
     lim_err, limit = _clamp_limit(limit)
     if lim_err is not None:
         return lim_err
     gate = _auth_error()
     if gate is not None:
         return gate
-    payload: dict[str, object] = {"date": "", "entity": {"dcids": geos},
-                                  "variable": {"dcids": variables},
-                                  "select": ["date", "entity", "variable", "value", "facet"]}
+    payload: dict[str, object] = {
+        "date": "",
+        "entity": {"dcids": geos},
+        "variable": {"dcids": variables},
+        "select": ["date", "entity", "variable", "value", "facet"],
+    }
     response = _post(_DC_URL, payload)
     if isinstance(response, dict):
         return response
     body_err, body = _decode_body(response)
     if body_err is not None or body is None:
-        return body_err or {"status": "error", "source": SOURCE,
-                            "error": "data commons returned non-JSON",
-                            "error_type": "malformed_response"}
-    retrieved_at = datetime.now(timezone.utc).isoformat()
+        return body_err or {
+            "status": "error",
+            "source": SOURCE,
+            "error": "data commons returned non-JSON",
+            "error_type": "malformed_response",
+        }
+    retrieved_at = datetime.now(UTC).isoformat()
     series, continuation = _collect_series(body, start_date, end_date, limit, retrieved_at)
     return _macro_payload(geos, variables, series, continuation, body, retrieved_at)
 
 
-def resolve_entities(nodes: list[str] | str | None, *, resolver: str | None = None,
-                     property: str | None = None) -> dict[str, object]:
+def resolve_entities(
+    nodes: list[str] | str | None, *, resolver: str | None = None, property: str | None = None
+) -> dict[str, object]:
     """Resolve up to 50 nodes to DCIDs via the V2 resolve API (key header)."""
     cleaned = _resolve_nodes(nodes)
     nodes_err = _nodes_error(cleaned)
@@ -353,24 +433,38 @@ def resolve_entities(nodes: list[str] | str | None, *, resolver: str | None = No
         return response
     body_err, body = _decode_body(response)
     if body_err is not None or body is None:
-        return body_err or {"status": "error", "source": SOURCE,
-                            "error": "data commons returned non-JSON",
-                            "error_type": "malformed_response"}
-    return {"status": "ok", "source": SOURCE, "entities": body.get("entities", body),
-            "retrieved_at": datetime.now(timezone.utc).isoformat()}
+        return body_err or {
+            "status": "error",
+            "source": SOURCE,
+            "error": "data commons returned non-JSON",
+            "error_type": "malformed_response",
+        }
+    return {
+        "status": "ok",
+        "source": SOURCE,
+        "entities": body.get("entities", body),
+        "retrieved_at": datetime.now(UTC).isoformat(),
+    }
 
 
 def _hierarchy_gate(dcid: str) -> dict[str, object] | None:
     """Param/disabled/auth gates for hierarchy lookup; None when the request may proceed."""
     if not dcid or not dcid.strip():
-        return {"status": "error", "source": SOURCE,
-                "error": "dcid is required", "error_type": "invalid_params"}
+        return {"status": "error", "source": SOURCE, "error": "dcid is required", "error_type": "invalid_params"}
     if not _data_enabled():
-        return {"status": "disabled", "source": SOURCE,
-                "reason": "google data disabled", "error": "DATACOMMONS_DISABLED"}
+        return {
+            "status": "disabled",
+            "source": SOURCE,
+            "reason": "google data disabled",
+            "error": "DATACOMMONS_DISABLED",
+        }
     if _key_headers() is None:
-        return {"status": "unavailable", "source": SOURCE,
-                "error": "DATACOMMONS_AUTH_REQUIRED", "error_type": "auth_required"}
+        return {
+            "status": "unavailable",
+            "source": SOURCE,
+            "error": "DATACOMMONS_AUTH_REQUIRED",
+            "error_type": "auth_required",
+        }
     return None
 
 
@@ -391,7 +485,16 @@ def get_place_hierarchy(dcid: str) -> dict[str, object]:
     try:
         body = response.json()
     except ValueError:
-        return {"status": "error", "source": SOURCE,
-                "error": "data commons returned non-JSON", "error_type": "malformed_response"}
-    return {"status": "ok", "source": SOURCE, "dcid": dcid, "hierarchy": body.get("data", body),
-            "retrieved_at": datetime.now(timezone.utc).isoformat()}
+        return {
+            "status": "error",
+            "source": SOURCE,
+            "error": "data commons returned non-JSON",
+            "error_type": "malformed_response",
+        }
+    return {
+        "status": "ok",
+        "source": SOURCE,
+        "dcid": dcid,
+        "hierarchy": body.get("data", body),
+        "retrieved_at": datetime.now(UTC).isoformat(),
+    }

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import json
 from collections.abc import Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from typing import Protocol
 
 from .account import (
@@ -29,8 +29,7 @@ _QUOTE_LIST_KEYS = ("quotes", "data", "results", "items", "records")
 class ToolClient(Protocol):
     """Structural MCP tool surface the provider consumes (real client + test fakes)."""
 
-    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object:
-        ...
+    def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> object: ...
 
 
 def _structured_data(payload: Mapping[str, object]) -> object | None:
@@ -47,7 +46,7 @@ def _parsed_content_block(block: object) -> tuple[bool, object]:
         return False, None
     try:
         parsed: object = json.loads(text)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return False, None
     if not isinstance(parsed, dict):
         return False, None
@@ -139,15 +138,15 @@ def _quote_retrieved_at(row: Mapping[str, object]) -> datetime:
     raw = _first_present(row, "retrieved_at", "retrievedAt", "timestamp", "venue_last_trade_time", "venueLastTradeTime")
     if isinstance(raw, str):
         try:
-            value = datetime.fromisoformat(raw.replace("Z", "+00:00"))
+            value = datetime.fromisoformat(raw)
         except ValueError:
-            value = datetime.now(timezone.utc)
+            value = datetime.now(UTC)
     elif isinstance(raw, datetime):
         value = raw
     else:
-        value = datetime.now(timezone.utc)
+        value = datetime.now(UTC)
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     return value
 
 
@@ -188,9 +187,7 @@ class RobinhoodPortfolioProvider:
         elif isinstance(data, dict):
             row = data
         else:
-            raise ValueError(
-                "Unexpected get_portfolio payload shape: expected an object or a 'portfolios' list"
-            )
+            raise ValueError("Unexpected get_portfolio payload shape: expected an object or a 'portfolios' list")
         return normalize_cash_balance(row, account_id=account_id)
 
     def get_scanner_filter_specs(self) -> dict[str, object]:
@@ -205,9 +202,7 @@ class RobinhoodPortfolioProvider:
         data = _provider_data(self._client.call_tool("get_scans", {}))
         rows = _rows(data, "scans", "results", "items")
         if rows is None:
-            raise ValueError(
-                "Unexpected get_scans payload shape: expected a list or an object with a 'scans' key"
-            )
+            raise ValueError("Unexpected get_scans payload shape: expected a list or an object with a 'scans' key")
         return rows
 
     def run_scan(self, scan_id: str) -> dict[str, object]:

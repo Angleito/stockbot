@@ -7,6 +7,7 @@ app/services/**, app/storage/runs.py, app/storage/parquet.py,
 app/domain/**, app/analytics/**, app/tools.py, app/research/runner.py.
 Plain pytest, tmp_path DBs, fakes for models/dispatch.
 """
+
 from __future__ import annotations
 
 import dataclasses
@@ -16,15 +17,16 @@ import re
 import socket
 import sqlite3
 from collections.abc import Buffer, Callable, Mapping, Sequence
-from datetime import date, datetime, timedelta, timezone
+from datetime import date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from typing import override
+from typing import Self, override
 
 import pytest
 
 import app.pi_gateway as gw
+import tests.research_source_seam as seam
 from app import tools as tools_mod
 from app.analytics import options as opt
 from app.analytics import screens
@@ -103,8 +105,10 @@ from app.tools import execute_tool
 
 # --- gateway: pi_gateway gates (from /tmp/rc_coregateway.py) ---
 
+
 def _svc_sid(repo: ResearchRepository, q: str = "NVDA demand?") -> tuple[str, str]:
     from app.research import service as _svc
+
     sid = _svc.create_research(q, "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
     jobs = repo.list_jobs(sid)
     return sid, jobs[0].job_id
@@ -119,6 +123,7 @@ def test_permit_deny_unknown_tool() -> None:
 
 def test_invalid_context_unknown_staged_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.repository import ResearchRepository
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     ResearchRepository()  # ensure file exists
     ctx = PiSessionContext(session_id="gw-unknown-sid")
@@ -130,6 +135,7 @@ def test_invalid_context_unknown_staged_session(tmp_path: Path, monkeypatch: pyt
 
 def test_invalid_context_dispatch_missing_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.repository import ResearchRepository
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, _jid = _svc_sid(repo)
@@ -142,6 +148,7 @@ def test_invalid_context_dispatch_missing_job(tmp_path: Path, monkeypatch: pytes
 
 def test_dispatch_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.repository import ResearchRepository
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, jid = _svc_sid(repo)
@@ -151,7 +158,9 @@ def test_dispatch_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     ctx.active_research_job_id = jid
     calls: list[tuple[str, dict[str, object]]] = []
 
-    def _fake_execute(name: str, arguments: dict[str, object], model: str, context: RequestContext | None = None) -> dict[str, object]:
+    def _fake_execute(
+        name: str, arguments: dict[str, object], model: str, context: RequestContext | None = None
+    ) -> dict[str, object]:
         calls.append((name, dict(arguments)))
         return {"result_type": "web_search", "query": arguments.get("query"), "results": [], "source": "exa"}
 
@@ -166,13 +175,15 @@ def test_dispatch_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 def test_source_refs_prefers_record_id_and_collects_all() -> None:
-    out = gw._extract_source_refs({
-        "source": "SEC",
-        "filings": [
-            {"url": "https://sec.gov/a", "known_at": "2025-01-01"},
-            {"accession_no": "0001", "url": "https://sec.gov/b", "known_at": "2025-02-01"},
-        ],
-    })
+    out = gw._extract_source_refs(
+        {
+            "source": "SEC",
+            "filings": [
+                {"url": "https://sec.gov/a", "known_at": "2025-01-01"},
+                {"accession_no": "0001", "url": "https://sec.gov/b", "known_at": "2025-02-01"},
+            ],
+        }
+    )
     assert out["record_id"] == "0001"
     assert out["uri"] == "https://sec.gov/b"
     all_refs = out["all"]
@@ -181,10 +192,15 @@ def test_source_refs_prefers_record_id_and_collects_all() -> None:
 
 
 def test_tool_meta_counts_and_truncation() -> None:
-    meta = gw._tool_result_meta({
-        "source": "exa", "as_of": "2025-01-01",
-        "rows": [{"a": 1}, {"a": 2}], "returned_count": 2, "total_records": 5,
-    })
+    meta = gw._tool_result_meta(
+        {
+            "source": "exa",
+            "as_of": "2025-01-01",
+            "rows": [{"a": 1}, {"a": 2}],
+            "returned_count": 2,
+            "total_records": 5,
+        }
+    )
     assert meta.row_count == 2
     assert meta.returned_count == 2
     assert meta.truncated is True
@@ -215,7 +231,7 @@ def test_discovery_meta_names_shapes() -> None:
     assert m == ["a"] and t is None
     m2, _ = gw._discovery_meta_names({"schemas": [{"function": {"name": "b"}}]})
     assert m2 == ["b"]
-    m3, t3 = gw._discovery_meta_names({"tools": [{"name": "c"}]})
+    _m3, t3 = gw._discovery_meta_names({"tools": [{"name": "c"}]})
     assert t3 == ["c"]
 
 
@@ -232,16 +248,27 @@ def test_failure_outcome_soft_and_denied() -> None:
 
 def test_success_meta_discovery_and_refs() -> None:
     import app.pi_gateway as _g
+
     meta = _g._tool_result_meta({"source": "s", "rows": [1]})
-    env = type("E", (), {"source": "s", "sensitivity": type("S", (), {"value": "public"})(), "integrity": type("I", (), {"value": "ok"})()})()
+    env = type(
+        "E",
+        (),
+        {
+            "source": "s",
+            "sensitivity": type("S", (), {"value": "public"})(),
+            "integrity": type("I", (), {"value": "ok"})(),
+        },
+    )()
     out = _g._success_meta("search_tools", {"matches": [{"name": "z"}], "accession_no": "1"}, meta, env, "completed")
     assert out["matches"] == ["z"] and out["status"] == "completed"
 
 
 def test_company_name_fills_missing_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.pi_gateway as _g
+
     def _ticker_aapl(name: str) -> str | None:
         return "AAPL"
+
     monkeypatch.setattr(_g, "_resolve_company_to_ticker", _ticker_aapl)
     out = _g._resolve_company_arguments("get_obligations", {"company_name": "Apple Inc."})
     assert out.get("ticker") == "AAPL"
@@ -249,8 +276,10 @@ def test_company_name_fills_missing_ticker(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_company_name_unresolved_keeps_args(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.pi_gateway as _g
+
     def _ticker_none(name: str) -> str | None:
         return None
+
     monkeypatch.setattr(_g, "_resolve_company_to_ticker", _ticker_none)
     args: dict[str, object] = {"company_name": "Unknown Co"}
     assert _g._resolve_company_arguments("get_obligations", args) == args
@@ -258,20 +287,28 @@ def test_company_name_unresolved_keeps_args(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_try_company_to_ticker_swallows_error(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.pi_gateway as _g
+
     def _boom(name: str) -> str | None:
         raise RuntimeError("lookup down")
+
     monkeypatch.setattr(_g, "_resolve_company_to_ticker", _boom)
     assert _g._try_company_to_ticker("x") is None
 
 
 def test_call_tool_dispatch_success_no_budget_slot(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.pi_gateway as _g
-    def _fake_execute(name: str, arguments: dict[str, object], model: str, context: RequestContext | None = None) -> dict[str, object]:
+
+    def _fake_execute(
+        name: str, arguments: dict[str, object], model: str, context: RequestContext | None = None
+    ) -> dict[str, object]:
         assert name == "get_fundamentals"
         return {"result_type": "fundamentals", "ticker": "AAPL", "source": "test"}
+
     monkeypatch.setattr(_g, "execute_tool", _fake_execute)
     session = PiSessionContext(session_id="gw-call-tool-ok")
-    out = execute_pi_tool("call_tool", {"name": "get_fundamentals", "arguments": {"ticker": "AAPL", "metric": "overview"}}, session)
+    out = execute_pi_tool(
+        "call_tool", {"name": "get_fundamentals", "arguments": {"ticker": "AAPL", "metric": "overview"}}, session
+    )
     assert "content" in out, out
 
 
@@ -300,45 +337,76 @@ def _sid(repo: ResearchRepository, q: str = "NVDA demand?") -> tuple[str, str]:
 
 
 def _item(eid: str, wave: int = 1, **kw: object) -> dict[str, object]:
-    d: dict[str, object] = {"evidence_id": eid, "wave_id": wave, "content": "c-" + eid,
-         "claim_text": "c", "subject": "NVDA", "source_name": "SEC",
-         "source_uri": "https://sec.gov/x",
-         "source_record_id": "0000320193-25-000079",
-         "document_name": "nvda-20250331.htm", "matching_passage": "passage-" + eid,
-         "known_at": KNOWN}
+    """One evidence item carrying the canonical handle for its own cited passage.
+
+    A caller override of source_record_id/document_name/matching_passage re-mints
+    the handle for that filing, so the kernel reloads what the item declares.
+    """
+    d: dict[str, object] = {
+        "evidence_id": eid,
+        "wave_id": wave,
+        "content": "c-" + eid,
+        "claim_text": "c",
+        "subject": "NVDA",
+        "source_name": "SEC",
+        "source_uri": "https://sec.gov/x",
+        "source_record_id": seam.DEFAULT_ACCESSION,
+        "document_name": seam.DEFAULT_DOCUMENT,
+        "matching_passage": "passage-" + eid,
+        "known_at": KNOWN,
+    }
     d.update(kw)
+    if "source_handle" not in kw:
+        d["source_handle"] = seam.handle_for(
+            str(d["matching_passage"]),
+            accession=str(d["source_record_id"]),
+            document=str(d["document_name"]),
+        )
     return d
 
 
 def _cov(**kw: object) -> dict[str, object]:
     """Absence-observation coverage envelope: searched scope + paging completeness."""
-    d: dict[str, object] = {"forms": [], "dates": [], "partitions": [], "entities": [],
-                            "docs": [], "gaps": [], "pagination_complete": True,
-                            "complete": True}
+    d: dict[str, object] = {
+        "forms": [],
+        "dates": [],
+        "partitions": [],
+        "entities": [],
+        "docs": [],
+        "gaps": [],
+        "pagination_complete": True,
+        "complete": True,
+    }
     d.update(kw)
     return d
 
 
 def _sufficient_coverage(**kw: object) -> dict[str, object]:
     """Full sufficiency envelope: investigated scope + spent searches/branches, no residuals."""
-    d: dict[str, object] = {"useful_for_question": "sufficient",
-                            "major_entities_investigated": ["NVDA"],
-                            "relationship_types_checked": ["supplier"],
-                            "forms_examined": ["10-K"], "exhibits_examined": ["EX-10.1"],
-                            "material_open_questions": [],
-                            "search_runs": ["sr:1"], "covered_branches": ["datacenter demand"]}
+    d: dict[str, object] = {
+        "useful_for_question": "sufficient",
+        "major_entities_investigated": ["NVDA"],
+        "relationship_types_checked": ["supplier"],
+        "forms_examined": ["10-K"],
+        "exhibits_examined": ["EX-10.1"],
+        "material_open_questions": [],
+        "search_runs": ["sr:1"],
+        "covered_branches": ["datacenter demand"],
+    }
     d.update(kw)
     return d
 
 
 def _ana(eid: str, follow_ups: Sequence[object] = ()) -> dict[str, object]:
-    return {"executive_view": "view",
-            "claims": [{"text": "finding", "evidence_ids": [eid]}],
-            "impact_channels": [{"text": "channel", "direction": "up", "evidence_ids": [eid]}],
-            "materiality": {"overall": "medium", "reasoning": "material"},
-            "uncertainties": ["scope remains SEC-only"],
-            "what_would_change": ["a materially new filing"],
-            "follow_ups": list(follow_ups)}
+    return {
+        "executive_view": "view",
+        "claims": [{"text": "finding", "evidence_ids": [eid]}],
+        "impact_channels": [{"text": "channel", "direction": "up", "evidence_ids": [eid]}],
+        "materiality": {"overall": "medium", "reasoning": "material"},
+        "uncertainties": ["scope remains SEC-only"],
+        "what_would_change": ["a materially new filing"],
+        "follow_ups": list(follow_ups),
+    }
 
 
 def _freeze1(repo: ResearchRepository, sid: str, src: str, eid: str) -> dict[str, object]:
@@ -361,10 +429,11 @@ def _trio(repo: ResearchRepository, sid: str, eid: str, follow_ups: Sequence[obj
 
 # -- authorize_and_consume_dispatch (unc 1013, 1017-1018, 1020-1021, 1025) --
 
+
 def test_dispatch_cross_session_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid_a, _ = _sid(repo)
-    sid_b, src_b = _sid(repo, "AMD demand?")
+    _sid_b, src_b = _sid(repo, "AMD demand?")
     with pytest.raises(ValueError, match="belongs to"):
         svc.authorize_and_consume_dispatch(sid_a, src_b, "get_sec_filing", repo=repo)
 
@@ -402,13 +471,18 @@ def test_dispatch_unknown_session_raises_not_found(tmp_path: Path, monkeypatch: 
 
 # -- decide_wave2 (unc 857-858 no-freeze, 897-900 targeted transition) --
 
+
 def test_decide_no_freeze_builds_empty_wave1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, _ = _sid(repo)
     out = svc.decide_wave2(sid, repo=repo)
-    assert out == {"authorized": False, "stop_reason": "no_questions",
-                   "reason_detail": "committee requested no follow-up research",
-                   "targeted_question": "", "targeted_domain": ""}
+    assert out == {
+        "authorized": False,
+        "stop_reason": "no_questions",
+        "reason_detail": "committee requested no follow-up research",
+        "targeted_question": "",
+        "targeted_domain": "",
+    }
     assert repo.get_session(sid).status == "created"
 
 
@@ -442,9 +516,10 @@ def test_decide_stop_moves_analyzing_to_synthesizing(tmp_path: Path, monkeypatch
 
 # -- research_events (unc 84-92: clamp + job filter) --
 
+
 def test_events_clamp_limit_cursor(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
-    sid, src = _sid(repo)
+    sid, _src = _sid(repo)
     assert svc.research_events(sid, limit=0, repo=repo)["limit"] == 1
     assert svc.research_events(sid, limit=999, repo=repo)["limit"] == 200
     bad_limit: int = json.loads('"x"')
@@ -472,6 +547,7 @@ def test_events_job_filter(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 
 # -- job_diagnostics (unc 162-170: stale + deadline arms) --
 
+
 def test_diagnostics_fresh_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from datetime import timedelta
 
@@ -496,8 +572,7 @@ def test_diagnostics_stale_no_deadline_counts_evidence(tmp_path: Path, monkeypat
     eid = f"{sid}:ev:1"
     svc.record_evidence(sid, src, _item(eid), repo=repo)
     old = utcnow() - timedelta(seconds=600)
-    repo.save_job(dataclasses.replace(repo.get_job(src),
-                                      last_heartbeat_at=old, started_at=old, deadline=None))
+    repo.save_job(dataclasses.replace(repo.get_job(src), last_heartbeat_at=old, started_at=old, deadline=None))
     out = svc.job_diagnostics(sid, src, repo=repo)
     assert out["stale"] is True
     stale_s = out["staleness_s"]
@@ -507,6 +582,7 @@ def test_diagnostics_stale_no_deadline_counts_evidence(tmp_path: Path, monkeypat
 
 
 # -- run_research (running-reuse + queued-start + create arms) --
+
 
 def test_run_reuses_running_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
@@ -545,9 +621,10 @@ def test_run_creates_job_for_empty_session(tmp_path: Path, monkeypatch: pytest.M
 
 # -- create_committee_jobs (role-reuse + started-transition arms) --
 
+
 def test_committee_jobs_create_then_reuse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
-    sid, src = _sid(repo)
+    sid, _src = _sid(repo)
     first = svc.create_committee_jobs(sid, 1, repo=repo)
     first_jobs = first["jobs"]
     assert isinstance(first_jobs, list)
@@ -566,6 +643,7 @@ def test_committee_jobs_create_then_reuse(tmp_path: Path, monkeypatch: pytest.Mo
 
 
 # -- record_evidence guards --
+
 
 def test_evidence_rejects_non_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
@@ -594,12 +672,22 @@ def test_evidence_rejects_terminal_session(tmp_path: Path, monkeypatch: pytest.M
 def test_evidence_claim_and_json_content_fallback(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
-    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:1", content="  ",
-                                              claim_text="  the claim  "), repo=repo)
+    out = svc.record_evidence(
+        sid,
+        src,
+        _item(f"{sid}:ev:1", content="  ", claim_text="  the claim  "),
+        repo=repo,
+    )
     assert out["content"] == "the claim"
-    minimal = {"wave_id": 1, "known_at": KNOWN, "source_uri": "https://sec.gov/x",
-               "source_record_id": "0000320193-25-000079",
-               "document_name": "nvda-20250331.htm", "matching_passage": "revenue grew"}
+    minimal = {
+        "wave_id": 1,
+        "known_at": KNOWN,
+        "source_uri": "https://sec.gov/x",
+        "source_record_id": "0000320193-25-000079",
+        "document_name": "nvda-20250331.htm",
+        "matching_passage": "revenue grew",
+        "source_handle": seam.handle_for("revenue grew"),
+    }
     out2 = svc.record_evidence(sid, src, dict(minimal, evidence_id=f"{sid}:ev:2"), repo=repo)
     content = out2["content"]
     assert isinstance(content, str)
@@ -655,8 +743,14 @@ def test_evidence_rejects_refrozen_wave(tmp_path: Path, monkeypatch: pytest.Monk
 def test_evidence_search_coverage_requires_query_and_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
-    base = _item(f"{sid}:ev:1", type="search_coverage", search_id="s1",
-                 query="NVDA filings", subject="NVDA", coverage=_cov())
+    base = _item(
+        f"{sid}:ev:1",
+        type="search_coverage",
+        search_id="s1",
+        query="NVDA filings",
+        subject="NVDA",
+        coverage=_cov(),
+    )
     base.pop("source_record_id", None)  # an absence cites the SearchRun only, never a filing
     with pytest.raises(ValueError, match="ERR_COVERAGE_REQUIRED"):
         svc.record_evidence(sid, src, {**base, "query": "  "}, repo=repo)
@@ -666,22 +760,26 @@ def test_evidence_search_coverage_requires_query_and_id(tmp_path: Path, monkeypa
         svc.record_evidence(sid, src, {**base, "source_record_id": "0000320193-25-000079"}, repo=repo)
     out = svc.record_evidence(sid, src, base, repo=repo)
     assert out["claim_kind"] == "absence_observation"
-    prov = out["provenance"]
-    assert isinstance(prov, dict)
-    assert prov == {"kind": "search_run", "search_id": "s1", "query": "NVDA filings"}
+    # A search-scope absence is a coverage artifact: scoped to its search, never citable evidence.
+    assert out["recorded_as"] == "coverage_artifact" and out["citable"] is False
+    assert out["search_id"] == "s1" and out["query"] == "NVDA filings"
+    assert out["evidence_ids"] == [] and "provenance" not in out
+    artifacts = repo.list_coverage_artifacts(sid)
+    assert [a["artifact_id"] for a in artifacts] == [out["artifact_id"]]
+    assert repo.list_evidence(sid) == []
 
 
 def test_evidence_provenance_mismatch_and_match(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
-    nav = _item(f"{sid}:ev:1", subject="OpenAI", source_record_id="sr:1",
-                search_id="sr:1", query="OpenAI contracts")
+    nav = _item(f"{sid}:ev:1", subject="OpenAI", source_record_id="sr:1", search_id="sr:1", query="OpenAI contracts")
     with pytest.raises(ValueError, match="ERR_PROVENANCE_MISMATCH"):
         svc.record_evidence(sid, src, nav, repo=repo)  # a search id is navigation, not an accession
     with pytest.raises(ValueError, match="ERR_ACCESSION_FORMAT"):
         svc.record_evidence(sid, src, _item(f"{sid}:ev:1", source_record_id="abc"), repo=repo)
-    good = _item(f"{sid}:ev:1", subject="OpenAI", source_record_id="0000320193-25-000081",
-                 source_uri="https://sec.gov/openai")
+    good = _item(
+        f"{sid}:ev:1", subject="OpenAI", source_record_id="0000320193-25-000081", source_uri="https://sec.gov/openai"
+    )
     stored = svc.record_evidence(sid, src, good, repo=repo)
     assert stored["evidence_id"] == f"{sid}:ev:1"
     assert stored["source_record_id"] == "0000320193-25-000081"
@@ -690,13 +788,87 @@ def test_evidence_provenance_mismatch_and_match(tmp_path: Path, monkeypatch: pyt
     assert prov["kind"] == "sec_source" and prov["document_name"] == "nvda-20250331.htm"
 
 
+def test_materialize_sec_passage_fails_closed_per_handle_defect() -> None:
+    """The kernel reload is the admission gate: every handle defect carries its own code."""
+    from app.research.service import materialize_sec_passage
+
+    passage = "Data center revenue grew 142% year over year."
+    handle = seam.handle_for(passage)
+    materialized = materialize_sec_passage(handle, "Data   center revenue grew 142% year over year")
+    # The stored text is the archive's slice of the cited span, not the locator string.
+    cited = "Data center revenue grew 142% year over year"
+    assert materialized["passage"] == cited and materialized["basis"] == "rendered"
+    assert (materialized["offset"], materialized["end"]) == (0, len(cited))
+    assert materialized["text_hash"] == handle["text_hash"]
+    # Malformed locators are deliberately outside the handle type; getattr keeps the
+    # checker green without an escape hatch (those are forbidden in this tree).
+    call_untyped = getattr(svc, "materialize_sec_passage")  # noqa: B009 - malformed-input contract; getattr keeps checker green
+    for defect, code in (
+        (None, "ERR_SEC_HANDLE_INVALID"),
+        ({**handle, "basis": "guessed"}, "ERR_SEC_HANDLE_INVALID"),
+        ({**handle, "accession_no": "not-an-accession"}, "ERR_SEC_HANDLE_INVALID"),
+        ({**handle, "offset": -1}, "ERR_SEC_HANDLE_INVALID"),
+        ({**handle, "text_hash": "0" * 64}, "ERR_SEC_HANDLE_STALE"),
+        ({**handle, "document_name": "never-stored.htm"}, "ERR_SEC_HANDLE_UNREADABLE"),
+    ):
+        with pytest.raises(ValueError, match=code):
+            call_untyped(defect, passage)
+    # A locator the reloaded window does not contain is never admitted, blank included.
+    with pytest.raises(ValueError, match="ERR_PASSAGE_NOT_IN_SOURCE"):
+        materialize_sec_passage(handle, "this sentence is not in the window")
+    with pytest.raises(ValueError, match="ERR_PASSAGE_NOT_IN_SOURCE"):
+        materialize_sec_passage(handle, "   ")
+
+
+def test_provenance_validation_arms_and_legacy_rows() -> None:
+    """sec_source_ref validates its coordinates; validate_provenance reads canonical and legacy rows."""
+    from app.research.evidence import EvidenceIntegrityError, sec_source_ref, validate_provenance
+
+    ref = sec_source_ref(
+        accession_no="0000320193-25-000079",
+        document_name="nvda-20250331.htm",
+        passage="revenue grew",
+        offset=3,
+        end=15,
+        basis="rendered",
+        text_hash="a" * 64,
+    )
+    assert validate_provenance({"kind": "sec_source", **{k: v for k, v in ref.items() if k != "kind"}}) == ref
+    # A row persisted before coordinates existed still reads exactly as it was written.
+    legacy = {
+        "kind": "sec_source",
+        "accession_no": "0000320193-25-000079",
+        "document_name": "nvda-20250331.htm",
+        "passage": "revenue grew",
+        "source_uri": "https://sec.gov/x",
+    }
+    assert validate_provenance(legacy) == legacy
+    for bad, message in (
+        (
+            {"document_name": " ", "passage": "p", "offset": 0, "end": 1, "basis": "rendered", "text_hash": "a" * 64},
+            "non-empty",
+        ),
+        (
+            {"document_name": "d", "passage": "p", "offset": 0, "end": 1, "basis": "other", "text_hash": "a" * 64},
+            "basis must be",
+        ),
+        (
+            {"document_name": "d", "passage": "p", "offset": 4, "end": 4, "basis": "rendered", "text_hash": "a" * 64},
+            "greater than offset",
+        ),
+    ):
+        with pytest.raises(ValueError, match=message):
+            sec_source_ref(accession_no="0000320193-25-000079", **bad)
+        with pytest.raises(EvidenceIntegrityError):
+            validate_provenance({"kind": "sec_source", "accession_no": "0000320193-25-000079", **bad})
+
+
 def test_evidence_duplicate_identity_returns_prior(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
     svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
     dup = svc.record_evidence(sid, src, _item(f"{sid}:ev:2"), repo=repo)
-    assert dup == {"evidence_id": f"{sid}:ev:1", "accepted": False,
-                   "duplicate_of": f"{sid}:ev:1"}
+    assert dup == {"evidence_id": f"{sid}:ev:1", "accepted": False, "duplicate_of": f"{sid}:ev:1"}
 
 
 def test_evidence_no_per_job_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -704,8 +876,9 @@ def test_evidence_no_per_job_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     sid, src = _sid(repo)
     accepted: list[str] = []
     for i in range(12):
-        out = svc.record_evidence(sid, src, _item(f"{sid}:ev:{i}", source_record_id=f"0000320193-25-{i:06d}"),
-                                  repo=repo)
+        out = svc.record_evidence(
+            sid, src, _item(f"{sid}:ev:{i}", source_record_id=f"0000320193-25-{i:06d}"), repo=repo
+        )
         accepted.append(str(out.get("evidence_id")))
     assert accepted == [f"{sid}:ev:{i}" for i in range(12)]  # no per-job evidence cap
     assert len(repo.list_evidence(sid)) == 12
@@ -723,6 +896,7 @@ def test_evidence_skips_unparseable_ledger_rows(tmp_path: Path, monkeypatch: pyt
 
 # -- submit_source_result (unc 518-560: coverage/envelope vs persist) --
 
+
 def test_submit_requires_coverage_marker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     _, src = _sid(repo)
@@ -738,16 +912,16 @@ def test_submit_rejects_empty_sufficient_result(tmp_path: Path, monkeypatch: pyt
     repo = _repo(tmp_path, monkeypatch)
     _, src = _sid(repo)
     with pytest.raises(ValueError, match="ERR_EMPTY_RESULT"):
-        svc.submit_source_result(src, coverage={"useful_for_question": "sufficient"},
-                                 evidence_ids=[], repo=repo)
+        svc.submit_source_result(src, coverage={"useful_for_question": "sufficient"}, evidence_ids=[], repo=repo)
 
 
 def test_submit_rejects_dangling_evidence_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     _, src = _sid(repo)
     with pytest.raises(ValueError, match="ERR_EVIDENCE_NOT_FOUND"):
-        svc.submit_source_result(src, coverage={"useful_for_question": "sufficient"},
-                                 evidence_ids=["ev:ghost"], repo=repo)
+        svc.submit_source_result(
+            src, coverage={"useful_for_question": "sufficient"}, evidence_ids=["ev:ghost"], repo=repo
+        )
 
 
 def test_submit_happy_then_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -767,13 +941,13 @@ def test_submit_happy_then_closed(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 def test_submit_insufficient_without_evidence_ok(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     _, src = _sid(repo)
-    out = svc.submit_source_result(src, coverage={"useful_for_question": "insufficient"},
-                                   evidence_ids=[], repo=repo)
+    out = svc.submit_source_result(src, coverage={"useful_for_question": "insufficient"}, evidence_ids=[], repo=repo)
     assert out["job_status"] == "completed"
     assert out["evidence_ids"] == []
 
 
 # -- freeze_session (status-ladder vs freeze-create vs coverage-gate) --
+
 
 def test_freeze_rejects_bad_wave_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
@@ -806,8 +980,7 @@ def test_freeze_rejects_wrong_status_on_refreeze(tmp_path: Path, monkeypatch: py
 def test_freeze_empty_wave_proceeds_with_limitations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
-    svc.submit_source_result(src, coverage={"useful_for_question": "insufficient"},
-                             evidence_ids=[], repo=repo)
+    svc.submit_source_result(src, coverage={"useful_for_question": "insufficient"}, evidence_ids=[], repo=repo)
     out = svc.freeze_session(sid, 1, repo=repo)
     assert out["freeze_id"] == f"{sid}:1:freeze"
     pna = out["pending_next_action"]
@@ -826,13 +999,14 @@ def test_freeze_tolerates_duplicate_save_and_reports_gate(tmp_path: Path, monkey
     assert out["freeze_id"] == f"{sid}:1:freeze"
 
 
-def test_freeze_insufficient_coverage_proceeds_with_limitations(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_freeze_insufficient_coverage_proceeds_with_limitations(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
     eid = f"{sid}:ev:1"
     svc.record_evidence(sid, src, _item(eid), repo=repo)
-    svc.submit_source_result(src, coverage={"useful_for_question": "insufficient"},
-                             evidence_ids=[eid], repo=repo)
+    svc.submit_source_result(src, coverage={"useful_for_question": "insufficient"}, evidence_ids=[eid], repo=repo)
     out = svc.freeze_session(sid, 1, repo=repo)
     assert out["coverage_gate"] == "insufficient"
     pna = out["pending_next_action"]
@@ -862,6 +1036,7 @@ def test_freeze_wave2_from_targeted_research(tmp_path: Path, monkeypatch: pytest
 
 # -- _wave1_state --
 
+
 def test_wave1_no_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, _ = _sid(repo)
@@ -887,19 +1062,23 @@ def test_wave1_skips_dangling_open_and_uncited_jobs(tmp_path: Path, monkeypatch:
     trio_raw = svc.create_committee_jobs(sid, 1, repo=repo)["jobs"]
     assert isinstance(trio_raw, list)
     trio = [j for j in trio_raw if isinstance(j, str)]
-    stock_j, bull_j, bear_j = trio
+    stock_j, bull_j, _bear_j = trio
     svc.record_committee_analysis(sid, stock_j, "stockbot", _ana(eid), repo=repo)
     svc.complete_job(bull_j, {"nope": 1}, repo=repo)
     cur = repo.get_session(sid)
-    _, queued = _jobs.create_job(cur, repo.list_jobs(sid), job_type="bearbot",
-                                 owner="pi", wave_id=1)
+    _, queued = _jobs.create_job(cur, repo.list_jobs(sid), job_type="bearbot", owner="pi", wave_id=1)
     repo.save_session(repo.get_session(sid))
     repo.save_job(queued)
     cur = repo.get_session(sid)
-    repo.save_session(dataclasses.replace(
-        cur, committee_runs=[{"freeze_id": fid, "wave_id": 1,
-                              "jobs": [stock_j, bull_j, queued.job_id, "job:does-not-exist"]}],
-        updated_at=utcnow()))
+    repo.save_session(
+        dataclasses.replace(
+            cur,
+            committee_runs=[
+                {"freeze_id": fid, "wave_id": 1, "jobs": [stock_j, bull_j, queued.job_id, "job:does-not-exist"]}
+            ],
+            updated_at=utcnow(),
+        )
+    )
     wave1, meta = svc._wave1_state(repo, repo.get_session(sid))
     assert wave1.stock is not None
     assert wave1.bull is None
@@ -908,6 +1087,7 @@ def test_wave1_skips_dangling_open_and_uncited_jobs(tmp_path: Path, monkeypatch:
 
 
 # -- record_committee_analysis guards --
+
 
 def test_committee_bad_role_and_bad_analysis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
@@ -979,11 +1159,11 @@ def test_committee_rejects_unjsonable_analysis(tmp_path: Path, monkeypatch: pyte
     assert isinstance(stock_j_raw, str)
     stock_j = stock_j_raw
     with pytest.raises(ValueError, match="JSON-able"):
-        svc.record_committee_analysis(sid, stock_j, "stockbot",
-                                      {"unjsonable": object()}, repo=repo)
+        svc.record_committee_analysis(sid, stock_j, "stockbot", {"unjsonable": object()}, repo=repo)
 
 
 # -- finalize_session guards --
+
 
 def _full_trio(repo: ResearchRepository, sid: str, src: str, eid: str, follow_ups: Sequence[object] = ()) -> list[str]:
     _freeze1(repo, sid, src, eid)
@@ -996,12 +1176,10 @@ def test_finalize_terminal_on_repeat(tmp_path: Path, monkeypatch: pytest.MonkeyP
     eid = f"{sid}:ev:1"
     _full_trio(repo, sid, src, eid)
     svc.decide_wave2(sid, repo=repo)
-    out = svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}],
-                               repo=repo)
+    out = svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=repo)
     assert out["status"] == "completed"
     with pytest.raises(ValueError, match="terminal"):
-        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}],
-                             repo=repo)
+        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=repo)
 
 
 def test_finalize_missing_trio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1015,8 +1193,7 @@ def test_finalize_missing_trio(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert isinstance(first_trio, str)
     svc.record_committee_analysis(sid, first_trio, "stockbot", _ana(eid), repo=repo)
     with pytest.raises(ValueError, match="missing committee"):
-        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}],
-                             repo=repo)
+        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=repo)
 
 
 def test_finalize_missing_disagreement(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1024,13 +1201,13 @@ def test_finalize_missing_disagreement(tmp_path: Path, monkeypatch: pytest.Monke
     sid, src = _sid(repo)
     eid = f"{sid}:ev:1"
     _full_trio(repo, sid, src, eid)
+
     def _dis_none(*a: object) -> None:
         return None
-    monkeypatch.setattr("app.research.synthesis.committee.compute_disagreement",
-                        _dis_none)
+
+    monkeypatch.setattr("app.research.synthesis.committee.compute_disagreement", _dis_none)
     with pytest.raises(ValueError, match="missing disagreement"):
-        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}],
-                             repo=repo)
+        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=repo)
 
 
 def test_finalize_bad_claims_and_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1057,8 +1234,7 @@ def test_finalize_rejects_open_jobs(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     assert isinstance(extra_raw, str)
     extra = extra_raw
     with pytest.raises(ValueError, match="still open") as exc:
-        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}],
-                             repo=repo)
+        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=repo)
     assert isinstance(extra, str) and extra in str(exc.value)
 
 
@@ -1071,8 +1247,7 @@ def test_finalize_rejects_bad_and_unjsonable_claims(tmp_path: Path, monkeypatch:
     with pytest.raises(ValueError, match="must be a mapping"):
         svc.finalize_session(sid, "answer", bad_list, repo=repo)
     with pytest.raises(ValueError, match="JSON-able"):
-        svc.finalize_session(sid, "answer",
-                             [{"text": object(), "evidence_ids": [eid]}], repo=repo)
+        svc.finalize_session(sid, "answer", [{"text": object(), "evidence_ids": [eid]}], repo=repo)
 
 
 def test_finalize_rejects_empty_synthesis(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1082,18 +1257,18 @@ def test_finalize_rejects_empty_synthesis(tmp_path: Path, monkeypatch: pytest.Mo
     sid, src = _sid(repo)
     eid = f"{sid}:ev:1"
     _full_trio(repo, sid, src, eid)
+
     def _synth_blank(*a: object, **k: object) -> object:
         return types.SimpleNamespace(answer="   ")
-    monkeypatch.setattr("app.research.synthesis.final.synthesize_final",
-                        _synth_blank)
+
+    monkeypatch.setattr("app.research.synthesis.final.synthesize_final", _synth_blank)
     with pytest.raises(ValueError, match="empty answer"):
-        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}],
-                             repo=repo)
+        svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=repo)
 
 
 # --- kernel: repository/jobs/director/agents (from /tmp/rc_corekernel.py) ---
 
-KERN_ASOF = datetime(2025, 6, 30, tzinfo=timezone.utc)
+KERN_ASOF = datetime(2025, 6, 30, tzinfo=_dt.UTC)
 
 
 def _sess(**kw: object) -> ResearchSession:
@@ -1125,11 +1300,27 @@ def _committee_env(claims: object, follows: object, **kw: object) -> str:
     return json.dumps(env)
 
 
-def _mkjob(session: ResearchSession, jid: str, status: str = "queued", jtype: str = "scout", deadline: datetime | None = None, domain: str | None = None) -> Job:
-    now = datetime.now(timezone.utc)
-    return Job(job_id=jid, session_id=session.session_id, wave_id=1, parent_job_id=None,
-               job_type=jtype, owner="t", source_domain=domain, status=status,
-               created_at=now, deadline=deadline)
+def _mkjob(
+    session: ResearchSession,
+    jid: str,
+    status: str = "queued",
+    jtype: str = "scout",
+    deadline: datetime | None = None,
+    domain: str | None = None,
+) -> Job:
+    now = datetime.now(_dt.UTC)
+    return Job(
+        job_id=jid,
+        session_id=session.session_id,
+        wave_id=1,
+        parent_job_id=None,
+        job_type=jtype,
+        owner="t",
+        source_domain=domain,
+        status=status,
+        created_at=now,
+        deadline=deadline,
+    )
 
 
 # ---- parse_grounded_claims arms ----
@@ -1208,13 +1399,19 @@ def test_pco_rich_envelope_required() -> None:
     with pytest.raises(ModelOutputFailure, match="ERR_COMMITTEE_ENVELOPE_INCOMPLETE"):
         parse_committee_output('{"claims": [], "follow_ups": []}', frozen=["EV-1"], agent="stockbot")
     with pytest.raises(ModelOutputFailure, match="ERR_COMMITTEE_ENVELOPE_INCOMPLETE"):
-        parse_committee_output(_committee_env([], [], materiality={"overall": "huge", "reasoning": "r"}),
-                               frozen=["EV-1"], agent="stockbot")
+        parse_committee_output(
+            _committee_env([], [], materiality={"overall": "huge", "reasoning": "r"}), frozen=["EV-1"], agent="stockbot"
+        )
     env = parse_committee_envelope(
-        _committee_env([{"text": "finding one", "evidence_ids": ["EV-1"]}], [],
-                       impact_channels=[{"text": "channel", "direction": "up", "evidence_ids": ["EV-1"]}],
-                       uncertainties=["scope remains SEC-only"]),
-        frozen=["EV-1"], agent="stockbot")
+        _committee_env(
+            [{"text": "finding one", "evidence_ids": ["EV-1"]}],
+            [],
+            impact_channels=[{"text": "channel", "direction": "up", "evidence_ids": ["EV-1"]}],
+            uncertainties=["scope remains SEC-only"],
+        ),
+        frozen=["EV-1"],
+        agent="stockbot",
+    )
     assert env.materiality.overall == "medium"
     assert env.executive_view == "view"
     assert env.impact_channels[0].evidence_ids == ["EV-1"]
@@ -1233,9 +1430,11 @@ def test_pco_malformed_followup() -> None:
 
 
 def test_pco_ok_tags_agent() -> None:
-    c, f = parse_committee_output(_committee_env(
-        [{"text": "finding one", "evidence_ids": ["EV-1"]}], ["What drove Q2 revenue growth?"]),
-        frozen=["EV-1"], agent="stockbot")
+    c, f = parse_committee_output(
+        _committee_env([{"text": "finding one", "evidence_ids": ["EV-1"]}], ["What drove Q2 revenue growth?"]),
+        frozen=["EV-1"],
+        agent="stockbot",
+    )
     assert c[0].evidence_ids == ["EV-1"]
     assert f[0].requesting_agents == ["stockbot"]
 
@@ -1244,7 +1443,8 @@ def test_pco_ok_tags_agent() -> None:
 @pytest.mark.parametrize("mod", ["bearbot", "bullbot", "stockbot", "source_agent", "sec_agent"])
 def test_coerce_wave_all_copies(mod: str) -> None:
     import importlib
-    m = importlib.import_module(f"app.research.agents.{mod}" if mod not in ("source_agent", "sec_agent") else f"app.research.agents.{mod}")
+
+    m = importlib.import_module(f"app.research.agents.{mod}")
     fn = m._coerce_wave
     assert fn(1) == 1 and fn("2") == 2
     for bad in (True, 0, -1, "x", "", "1.5", None, 1.5):
@@ -1269,80 +1469,144 @@ def _model_ev1(p: str) -> str:
 
 
 # ---- run_* committee arms x3 ----
-@pytest.mark.parametrize("runner,name", [(run_stockbot, "stockbot"), (run_bullbot, "bullbot"), (run_bearbot, "bearbot")])
+@pytest.mark.parametrize(
+    "runner,name", [(run_stockbot, "stockbot"), (run_bullbot, "bullbot"), (run_bearbot, "bearbot")]
+)
 def test_committee_unknown_evidence_fails(runner: Callable[..., object], name: str) -> None:
     with pytest.raises(ModelOutputFailure):
-        runner("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-               as_of="x", model=_model_ev999, evidence_text="[EV-1] a")
+        runner(
+            "Q?",
+            session_id="rs:t",
+            wave_id=1,
+            freeze_id="F1",
+            evidence_ids=["EV-1"],
+            as_of="x",
+            model=_model_ev999,
+            evidence_text="[EV-1] a",
+        )
 
 
-@pytest.mark.parametrize("runner,name", [(run_stockbot, "stockbot"), (run_bullbot, "bullbot"), (run_bearbot, "bearbot")])
+@pytest.mark.parametrize(
+    "runner,name", [(run_stockbot, "stockbot"), (run_bullbot, "bullbot"), (run_bearbot, "bearbot")]
+)
 def test_committee_bad_model_output_fails(runner: Callable[..., object], name: str) -> None:
     with pytest.raises(ModelOutputFailure):
-        runner("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-               as_of="x", model=_model_raw, evidence_text="[EV-1] a")
+        runner(
+            "Q?",
+            session_id="rs:t",
+            wave_id=1,
+            freeze_id="F1",
+            evidence_ids=["EV-1"],
+            as_of="x",
+            model=_model_raw,
+            evidence_text="[EV-1] a",
+        )
 
 
-@pytest.mark.parametrize("runner,name", [(run_stockbot, "stockbot"), (run_bullbot, "bullbot"), (run_bearbot, "bearbot")])
+@pytest.mark.parametrize(
+    "runner,name", [(run_stockbot, "stockbot"), (run_bullbot, "bullbot"), (run_bearbot, "bearbot")]
+)
 def test_committee_empty_freeze_unknowns(runner: Callable[..., object], name: str) -> None:
-    out = runner("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=[],
-                 as_of="x", model=_model_empty, evidence_text="")
+    out = runner(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=[],
+        as_of="x",
+        model=_model_empty,
+        evidence_text="",
+    )
     assert isinstance(out, (StockbotAnalysis, BullAnalysis, BearAnalysis))
     assert out.unknowns == ["freeze holds no evidence"]
 
 
 # ---- assemble_dossier arms ----
-def _kern_res(coverage: str = "c", findings: Sequence[object] | None = None, unknowns: Sequence[object] = (), limitations: Sequence[object] = ()) -> ScoutResult:
+def _kern_res(
+    coverage: str = "c",
+    findings: Sequence[object] | None = None,
+    unknowns: Sequence[object] = (),
+    limitations: Sequence[object] = (),
+) -> ScoutResult:
     found: list[GroundedClaim] = [f for f in (findings or []) if isinstance(f, GroundedClaim)]
     unk: list[str] = [u for u in unknowns if isinstance(u, str)]
     lim: list[str] = [lm for lm in limitations if isinstance(lm, str)]
-    return ScoutResult(assignment_id="a", session_id="rs:t", coverage=coverage,
-                       findings=found, unknowns=unk,
-                       limitations=lim)
+    return ScoutResult(
+        assignment_id="a", session_id="rs:t", coverage=coverage, findings=found, unknowns=unk, limitations=lim
+    )
 
 
 def test_dossier_blank_claim() -> None:
     with pytest.raises(ModelOutputFailure):
-        assemble_dossier(dossier_id="d", session_id="rs:t", wave_id=1, as_of="x",
-                         results=[_kern_res(findings=[GroundedClaim(text="  ", evidence_ids=["EV-1"])])],
-                         known_evidence_ids=["EV-1"])
+        assemble_dossier(
+            dossier_id="d",
+            session_id="rs:t",
+            wave_id=1,
+            as_of="x",
+            results=[_kern_res(findings=[GroundedClaim(text="  ", evidence_ids=["EV-1"])])],
+            known_evidence_ids=["EV-1"],
+        )
 
 
 def test_dossier_uncited() -> None:
     with pytest.raises(ModelOutputFailure):
-        assemble_dossier(dossier_id="d", session_id="rs:t", wave_id=1, as_of="x",
-                         results=[_kern_res(findings=[GroundedClaim(text="t", evidence_ids=[])])],
-                         known_evidence_ids=["EV-1"])
+        assemble_dossier(
+            dossier_id="d",
+            session_id="rs:t",
+            wave_id=1,
+            as_of="x",
+            results=[_kern_res(findings=[GroundedClaim(text="t", evidence_ids=[])])],
+            known_evidence_ids=["EV-1"],
+        )
 
 
 def _journal_seen(seen: list[tuple[str, dict[str, object]]]) -> Callable[[str, dict[str, object]], None]:
     def _j(t: str, p: dict[str, object]) -> None:
         seen.append((t, p))
+
     return _j
 
 
 def test_dossier_unknown_id_journals() -> None:
     seen: list[tuple[str, dict[str, object]]] = []
     with pytest.raises(ModelOutputFailure):
-        assemble_dossier(dossier_id="d", session_id="rs:t", wave_id=1, as_of="x",
-                         results=[_kern_res(findings=[GroundedClaim(text="t", evidence_ids=["EV-9"])])],
-                         known_evidence_ids=["EV-1"],
-                         journal=_journal_seen(seen))
+        assemble_dossier(
+            dossier_id="d",
+            session_id="rs:t",
+            wave_id=1,
+            as_of="x",
+            results=[_kern_res(findings=[GroundedClaim(text="t", evidence_ids=["EV-9"])])],
+            known_evidence_ids=["EV-1"],
+            journal=_journal_seen(seen),
+        )
     assert seen and seen[0][0] == "evidence.rejected"
 
 
 def test_dossier_dedup_merge() -> None:
-    d = assemble_dossier(dossier_id="d", session_id="rs:t", wave_id=1, as_of="x",
-                         results=[_kern_res(findings=[GroundedClaim(text="same", evidence_ids=["EV-1"])]),
-                                  _kern_res(findings=[GroundedClaim(text="same", evidence_ids=["EV-2"])])],
-                         known_evidence_ids=["EV-1", "EV-2"])
+    d = assemble_dossier(
+        dossier_id="d",
+        session_id="rs:t",
+        wave_id=1,
+        as_of="x",
+        results=[
+            _kern_res(findings=[GroundedClaim(text="same", evidence_ids=["EV-1"])]),
+            _kern_res(findings=[GroundedClaim(text="same", evidence_ids=["EV-2"])]),
+        ],
+        known_evidence_ids=["EV-1", "EV-2"],
+    )
     assert d.findings[0].evidence_ids == ["EV-1", "EV-2"]
 
 
 # ---- scout _collect arms ----
 def _assign(**kw: object) -> ScoutAssignment:
-    base: dict[str, object] = dict(assignment_id="a", session_id="rs:t", as_of="2025-06-30", role="filings",
-                question="Q?", tickers=["NVDA"])
+    base: dict[str, object] = {
+        "assignment_id": "a",
+        "session_id": "rs:t",
+        "as_of": "2025-06-30",
+        "role": "filings",
+        "question": "Q?",
+        "tickers": ["NVDA"],
+    }
     base.update(kw)
     role_raw = base.get("role")
     assert isinstance(role_raw, str)
@@ -1365,18 +1629,30 @@ def _assign(**kw: object) -> ScoutAssignment:
     assert isinstance(tick, list)
     mtc = base.get("max_tool_calls")
     assert mtc is None or isinstance(mtc, int)
-    return ScoutAssignment(assignment_id=aid, session_id=sess_id, as_of=asof, role=role,
-                question=q, tickers=[t for t in tick if isinstance(t, str)],
-                max_tool_calls=8 if mtc is None else mtc)
+    return ScoutAssignment(
+        assignment_id=aid,
+        session_id=sess_id,
+        as_of=asof,
+        role=role,
+        question=q,
+        tickers=[t for t in tick if isinstance(t, str)],
+        max_tool_calls=8 if mtc is None else mtc,
+    )
 
 
 def _scout_model(text: str) -> Callable[[str], str]:
     def _m(p: str) -> str:
         return text
+
     return _m
 
 
-def _scout_with(dispatch: DispatchFn, model_text: str = "[]", journal: Callable[[str, dict[str, object]], None] | None = None, **kw: object) -> ScoutResult:
+def _scout_with(
+    dispatch: DispatchFn,
+    model_text: str = "[]",
+    journal: Callable[[str, dict[str, object]], None] | None = None,
+    **kw: object,
+) -> ScoutResult:
     return run_scout(_assign(**kw), dispatch=dispatch, model=_scout_model(model_text), journal=journal)
 
 
@@ -1385,6 +1661,7 @@ def test_collect_non_dict_candidate_skipped() -> None:
         if name == "browse_tools":
             return {}
         return {"evidence_ids": ["EV-1", {"evidence_id": "EV-2", "known_at": "2025-05-01"}]}
+
     out = _scout_with(_d, model_text=json.dumps([{"text": "t", "evidence_ids": ["EV-2"]}]))
     assert [c.evidence_ids for c in out.findings] == [["EV-2"]]
 
@@ -1394,6 +1671,7 @@ def test_collect_blank_id_skipped_and_coverage_path() -> None:
         if name == "browse_tools":
             return {}
         return {"evidence_ids": [{"evidence_id": ""}, {"evidence_id": "EV-2", "known_at": "2025-05-01"}]}
+
     out = _scout_with(_d, model_text=json.dumps([{"text": "t", "evidence_ids": ["EV-2"]}]))
     assert [c.evidence_ids for c in out.findings] == [["EV-2"]]
 
@@ -1405,10 +1683,10 @@ def test_collect_pit_reject_journals(cap_calls: object = None) -> None:
         if name == "browse_tools":
             return {}
         return {"evidence_ids": [{"evidence_id": "EV-9", "known_at": "2025-07-01"}]}
+
     # The PIT-ineligible id is rejected + journalled; the claim citing it is dropped,
     # never accepted (scout boundary tolerates the bad record instead of aborting).
-    out = _scout_with(_d, model_text=json.dumps([{"text": "t", "evidence_ids": ["EV-1"]}]),
-                      journal=_journal_seen(seen))
+    out = _scout_with(_d, model_text=json.dumps([{"text": "t", "evidence_ids": ["EV-1"]}]), journal=_journal_seen(seen))
     assert seen and seen[0] == ("evidence.rejected", {"session_id": "rs:t", "evidence_id": "EV-9"})
     assert out.findings == []
     assert any("dropped" in line for line in out.limitations)
@@ -1417,6 +1695,7 @@ def test_collect_pit_reject_journals(cap_calls: object = None) -> None:
 def test_run_scout_budget_exhausted_soft_return() -> None:
     def _d(name: str, args: dict[str, object]) -> dict[str, object]:
         return {"evidence_ids": [{"evidence_id": "EV-1", "known_at": "2025-05-01"}]}
+
     out = _scout_with(_d, model_text="[]", max_tool_calls=0)
     assert out.unknowns and "no PIT-eligible" in out.unknowns[0]
 
@@ -1426,14 +1705,19 @@ def test_run_scout_cap_break_six() -> None:
 
     def _d(name: str, args: dict[str, object]) -> dict[str, object]:
         return {"evidence_ids": ids}
+
     out = _scout_with(_d, model_text="[]")
     assert out.findings == []
 
 
 def _fallback():
-    return SourceDossier(dossier_id="d", session_id="rs:t", wave_id=1, as_of="unbounded",
-                         findings=[GroundedClaim(text="t", evidence_ids=["EV-1"])])
-
+    return SourceDossier(
+        dossier_id="d",
+        session_id="rs:t",
+        wave_id=1,
+        as_of="unbounded",
+        findings=[GroundedClaim(text="t", evidence_ids=["EV-1"])],
+    )
 
 
 def test_coerce_dossier_import_error_simple(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1441,6 +1725,7 @@ def test_coerce_dossier_import_error_simple(monkeypatch: pytest.MonkeyPatch) -> 
 
     def _raise(*a: object, **k: object) -> object:
         raise ImportError("nope")
+
     monkeypatch.setattr("app.research.agents.sec_agent.import_module", _raise)
     fb = _fallback()
     assert sec._coerce_dossier(fb) is fb
@@ -1450,9 +1735,12 @@ def test_coerce_dossier_non_callable_factory(monkeypatch: pytest.MonkeyPatch) ->
     import types
 
     import app.research.agents.sec_agent as sec
+
     fake = types.SimpleNamespace(create_dossier=None)
+
     def _fake_import(*a: object, **k: object) -> object:
         return fake
+
     monkeypatch.setattr("app.research.agents.sec_agent.import_module", _fake_import)
     fb = _fallback()
     assert sec._coerce_dossier(fb) is fb
@@ -1488,12 +1776,12 @@ def test_iso_none() -> None:
 
 
 def test_iso_naive_datetime_gets_utc() -> None:
-    out = _iso_or_none(datetime(2025, 5, 1), "k", "w")
+    out = _iso_or_none(datetime(2025, 5, 1), "k", "w")  # noqa: DTZ001 - naive input is the case under test
     assert out is not None and out.endswith("+00:00")
 
 
 def test_iso_aware_datetime() -> None:
-    out = _iso_or_none(datetime(2025, 5, 1, tzinfo=timezone.utc), "k", "w")
+    out = _iso_or_none(datetime(2025, 5, 1, tzinfo=_dt.UTC), "k", "w")
     assert out is not None and "+00:00" in out
 
 
@@ -1540,6 +1828,7 @@ def test_pna_execute_queued() -> None:
 
 def test_pna_targeted_research_verb() -> None:
     import dataclasses
+
     s = dataclasses.replace(_sess(), status="targeted_research")
     out = pending_next_action(s, [])
     assert isinstance(out, dict)
@@ -1555,7 +1844,9 @@ def test_pna_running_beats_queued() -> None:
 
 
 # ---- consume_dispatch_budget arms ----
-def _running_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **sess_kw: object) -> tuple[ResearchRepository, ResearchSession, Job]:
+def _running_repo(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, **sess_kw: object
+) -> tuple[ResearchRepository, ResearchSession, Job]:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     s = _sess(**sess_kw)
@@ -1577,7 +1868,7 @@ def test_consume_unknown_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 
 
 def test_consume_unknown_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo, s, j = _running_repo(tmp_path, monkeypatch)
+    repo, s, _j = _running_repo(tmp_path, monkeypatch)
     with pytest.raises(KeyError):
         repo.consume_dispatch_budget(s.session_id, "nope")
 
@@ -1599,7 +1890,7 @@ def test_consume_cross_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 def test_consume_timed_out(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo, s, j = _running_repo(tmp_path, monkeypatch)
-    past = datetime.now(timezone.utc) - timedelta(seconds=5)
+    past = datetime.now(_dt.UTC) - timedelta(seconds=5)
     repo.save_job(dataclasses.replace(j, deadline=past))
     with pytest.raises(ValueError, match="deadline"):
         repo.consume_dispatch_budget(s.session_id, j.job_id)
@@ -1614,27 +1905,67 @@ def test_consume_not_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
 
 def test_committee_tags_followups() -> None:
-    req = ResearchRequest(question="What drove Q2 revenue growth?", why_material="m",
-                          requested_source_domain="SEC", expected_gain="high", requesting_agents=[])
-    out = run_stockbot("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                       as_of="x", model=_model_ev1,
-                       evidence_text="[EV-1] a", follow_ups=[req])
+    req = ResearchRequest(
+        question="What drove Q2 revenue growth?",
+        why_material="m",
+        requested_source_domain="SEC",
+        expected_gain="high",
+        requesting_agents=[],
+    )
+    out = run_stockbot(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        model=_model_ev1,
+        evidence_text="[EV-1] a",
+        follow_ups=[req],
+    )
     assert req.requesting_agents == ["stockbot"]
-    out2 = run_bullbot("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                       as_of="x", model=_model_ev1,
-                       evidence_text="[EV-1] a",
-                       follow_ups=[ResearchRequest(question="What drove Q2 revenue growth?", why_material="m",
-                                                  requested_source_domain="SEC", expected_gain="high",
-                                                  requesting_agents=[])])
+    out2 = run_bullbot(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        model=_model_ev1,
+        evidence_text="[EV-1] a",
+        follow_ups=[
+            ResearchRequest(
+                question="What drove Q2 revenue growth?",
+                why_material="m",
+                requested_source_domain="SEC",
+                expected_gain="high",
+                requesting_agents=[],
+            )
+        ],
+    )
     assert out2.research_requests[-1].requesting_agents == ["bullbot"]
-    out3 = run_bearbot("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                       as_of="x", model=_model_ev1,
-                       evidence_text="[EV-1] a",
-                       follow_ups=[ResearchRequest(question="What drove Q2 revenue growth?", why_material="m",
-                                                  requested_source_domain="SEC", expected_gain="high",
-                                                  requesting_agents=[])])
+    out3 = run_bearbot(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        model=_model_ev1,
+        evidence_text="[EV-1] a",
+        follow_ups=[
+            ResearchRequest(
+                question="What drove Q2 revenue growth?",
+                why_material="m",
+                requested_source_domain="SEC",
+                expected_gain="high",
+                requesting_agents=[],
+            )
+        ],
+    )
     assert out3.research_requests[-1].requesting_agents == ["bearbot"]
     assert out.unknowns == []
+
 
 def test_consume_exhausted_job_budget(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo, s, j = _running_repo(tmp_path, monkeypatch)
@@ -1744,52 +2075,96 @@ def test_create_nullish_deadline() -> None:
 
 
 def test_create_deadline_ok_and_defaults() -> None:
-    s, j = _jobs.create_job(_sess(), [], job_type="scout", owner="t", deadline="2025-06-01T00:00:00+00:00")
+    _s, j = _jobs.create_job(_sess(), [], job_type="scout", owner="t", deadline="2025-06-01T00:00:00+00:00")
     assert j.deadline is not None
-    s2, j2 = _jobs.create_job(_sess(), [], job_type="source_agent", owner="t")
+    _s2, j2 = _jobs.create_job(_sess(), [], job_type="source_agent", owner="t")
     assert j2.deadline is None  # §1 default budget deadline_seconds is None: no deadline
     assert j2.tool_budget is None  # §1 unlimited default
-    _s3, j3 = _jobs.create_job(_sess(budget={"deadline_seconds": 60}),
-                              [], job_type="source_agent", owner="t")
+    _s3, j3 = _jobs.create_job(_sess(budget={"deadline_seconds": 60}), [], job_type="source_agent", owner="t")
     assert j3.deadline is not None  # explicit configured deadline_seconds still enforced
 
 
 # ---- decide_wave2 arms ----
 def _deps() -> tuple[DirectorDeps, list[tuple[str, str]]]:
     seen: list[tuple[str, str]] = []
+
     def _mk_session(q: str, a: str) -> str:
         return "rs:x"
+
     def _fetch(s: str) -> list[str]:
         return ["EV-1"]
+
     def _freeze(s: str) -> str:
         return "F1"
+
     def _committee(s: str) -> tuple[StockbotAnalysis, BullAnalysis, BearAnalysis]:
         raise AssertionError("no")
+
     def _stop(s: str, r: str) -> None:
         seen.append((s, r))
-    return DirectorDeps(create_session=_mk_session, fetch_wave_evidence=_fetch,
-                        create_freeze=_freeze,
-                        run_committee=_committee,
-                        record_stop=_stop), seen
+
+    return DirectorDeps(
+        create_session=_mk_session,
+        fetch_wave_evidence=_fetch,
+        create_freeze=_freeze,
+        run_committee=_committee,
+        record_stop=_stop,
+    ), seen
 
 
 def _w1_with(reqs: Sequence[ResearchRequest]) -> Wave1Result:
-    stock = run_stockbot("Q?", session_id="rs:x", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                         as_of="x", model=_model_ev1, evidence_text="[EV-1] a")
-    bull = run_bullbot("Q?", session_id="rs:x", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                       as_of="x", model=_model_ev1, evidence_text="[EV-1] a")
-    bear = run_bearbot("Q?", session_id="rs:x", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                       as_of="x", model=_model_ev1, evidence_text="[EV-1] a")
+    stock = run_stockbot(
+        "Q?",
+        session_id="rs:x",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        model=_model_ev1,
+        evidence_text="[EV-1] a",
+    )
+    bull = run_bullbot(
+        "Q?",
+        session_id="rs:x",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        model=_model_ev1,
+        evidence_text="[EV-1] a",
+    )
+    bear = run_bearbot(
+        "Q?",
+        session_id="rs:x",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        model=_model_ev1,
+        evidence_text="[EV-1] a",
+    )
     object.__setattr__(stock, "research_requests", list(reqs))
     from app.research.synthesis.committee import compute_disagreement
+
     dis = compute_disagreement(stock, bull, bear)
-    return Wave1Result(session_id="rs:x", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                       stock=stock, bull=bull, bear=bear, disagreement=dis)
+    return Wave1Result(
+        session_id="rs:x",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=dis,
+    )
 
 
-def _req(gain: str = "high", domain: str = "SEC", why: str = "matters", q: str = "What drove Q2 revenue growth?") -> ResearchRequest:
-    return ResearchRequest(question=q, why_material=why, requested_source_domain=domain,
-                           expected_gain=gain, requesting_agents=["stockbot"])
+def _req(
+    gain: str = "high", domain: str = "SEC", why: str = "matters", q: str = "What drove Q2 revenue growth?"
+) -> ResearchRequest:
+    return ResearchRequest(
+        question=q, why_material=why, requested_source_domain=domain, expected_gain=gain, requesting_agents=["stockbot"]
+    )
 
 
 def test_next_wave_max_waves() -> None:
@@ -1845,39 +2220,94 @@ def test_next_wave_not_actionable() -> None:
 
 def test_next_wave_continue_picks_best() -> None:
     deps, _ = _deps()
-    w1 = _w1_with([_req(gain="medium", q="What drove Q2 revenue growth?"),
-                   _req(gain="high", q="What caused the Q3 margin expansion?")])
+    w1 = _w1_with(
+        [
+            _req(gain="medium", q="What drove Q2 revenue growth?"),
+            _req(gain="high", q="What caused the Q3 margin expansion?"),
+        ]
+    )
     d = decide_next_wave(w1, deps=deps)
     assert d.authorized and d.targeted_question == "What caused the Q3 margin expansion?"
 
 
 # --- services: sec_facts/research_data/resolution/dividends/claims/sync/herdr (from /tmp/rc_coreservices.py) ---
 
-def _fact(concept: str = "EarningsPerShareDiluted", value: float = 1.0, start: str = "2025-01-01", end: str = "2025-03-31",
-          filed: str = "2025-04-28", accn: str = "a1", fy: int = 2025, fp: str = "Q1") -> FinancialFactRow:
-    return {"concept": concept, "value": value, "period_start": start, "period_end": end,
-            "filed_at": filed, "accession": accn, "known_at": filed + "T00:00:00Z",
-            "fiscal_year": fy, "fiscal_period": fp, "source_url": None}
+
+def _fact(
+    concept: str = "EarningsPerShareDiluted",
+    value: float = 1.0,
+    start: str = "2025-01-01",
+    end: str = "2025-03-31",
+    filed: str = "2025-04-28",
+    accn: str = "a1",
+    fy: int = 2025,
+    fp: str = "Q1",
+) -> FinancialFactRow:
+    return {
+        "concept": concept,
+        "value": value,
+        "period_start": start,
+        "period_end": end,
+        "filed_at": filed,
+        "accession": accn,
+        "known_at": filed + "T00:00:00Z",
+        "fiscal_year": fy,
+        "fiscal_period": fp,
+        "source_url": None,
+    }
 
 
 def _fact_copy(row: FinancialFactRow, concept: str | None = None, value: float | None = None) -> FinancialFactRow:
-    return {"concept": concept if concept is not None else row["concept"],
-            "value": value if value is not None else row["value"],
-            "period_start": row["period_start"], "period_end": row["period_end"],
-            "filed_at": row["filed_at"], "accession": row["accession"],
-            "known_at": row["known_at"], "fiscal_year": row["fiscal_year"],
-            "fiscal_period": row["fiscal_period"], "source_url": row["source_url"]}
+    return {
+        "concept": concept if concept is not None else row["concept"],
+        "value": value if value is not None else row["value"],
+        "period_start": row["period_start"],
+        "period_end": row["period_end"],
+        "filed_at": row["filed_at"],
+        "accession": row["accession"],
+        "known_at": row["known_at"],
+        "fiscal_year": row["fiscal_year"],
+        "fiscal_period": row["fiscal_period"],
+        "source_url": row["source_url"],
+    }
 
 
-def _ev(eid: str, amount: float | None = 0.5, pay: str | None = "2026-05-01", record: str | None = "2026-04-10", dtype: str = "regular",
-        known: str | None = "2026-05-02T00:00:00Z", stype: str = "structured_xbrl", excerpt: str | None = None, concept: str | None = None) -> DividendEventRow:
-    return {"dividend_event_id": eid, "entity_id": "e", "security_id": "s", "ticker": "KO",
-            "amount_per_share": amount, "currency": "USD", "dividend_type": dtype,
-            "declaration_date": None, "record_date": record, "payment_date": pay,
-            "ex_dividend_date": None, "ex_dividend_date_source": None, "status": None,
-            "source_form": "10-Q", "accession": "a", "filed_at": known, "known_at": known,
-            "source_url": None, "source_concept": concept, "source_type": stype,
-            "evidence_excerpt": excerpt, "content_hash": "h", "parser_version": "v"}
+def _ev(
+    eid: str,
+    amount: float | None = 0.5,
+    pay: str | None = "2026-05-01",
+    record: str | None = "2026-04-10",
+    dtype: str = "regular",
+    known: str | None = "2026-05-02T00:00:00Z",
+    stype: str = "structured_xbrl",
+    excerpt: str | None = None,
+    concept: str | None = None,
+) -> DividendEventRow:
+    return {
+        "dividend_event_id": eid,
+        "entity_id": "e",
+        "security_id": "s",
+        "ticker": "KO",
+        "amount_per_share": amount,
+        "currency": "USD",
+        "dividend_type": dtype,
+        "declaration_date": None,
+        "record_date": record,
+        "payment_date": pay,
+        "ex_dividend_date": None,
+        "ex_dividend_date_source": None,
+        "status": None,
+        "source_form": "10-Q",
+        "accession": "a",
+        "filed_at": known,
+        "known_at": known,
+        "source_url": None,
+        "source_concept": concept,
+        "source_type": stype,
+        "evidence_excerpt": excerpt,
+        "content_hash": "h",
+        "parser_version": "v",
+    }
 
 
 # --- _validated_fact_row: auth of store rows (valid / missing concept / bad value / coercions) ---
@@ -1885,10 +2315,20 @@ def test_validated_fact_row_accepts_and_rejects() -> None:
     assert sec_facts._validated_fact_row({}) is None
     assert sec_facts._validated_fact_row({"concept": "X", "period_end": "2025-01-01", "value": "bad"}) is None
     assert sec_facts._validated_fact_row({"concept": "", "period_end": "2025-01-01", "value": 1.0}) is None
-    good = sec_facts._validated_fact_row({"concept": "X", "period_end": "2025-01-01", "value": 2,
-                                           "filed_at": None, "accession": 5, "known_at": None,
-                                           "period_start": 7, "fiscal_year": "2025", "fiscal_period": 3,
-                                           "source_url": 9})
+    good = sec_facts._validated_fact_row(
+        {
+            "concept": "X",
+            "period_end": "2025-01-01",
+            "value": 2,
+            "filed_at": None,
+            "accession": 5,
+            "known_at": None,
+            "period_start": 7,
+            "fiscal_year": "2025",
+            "fiscal_period": 3,
+            "source_url": 9,
+        }
+    )
     assert good is not None and good["value"] == 2.0 and good["filed_at"] == ""
     assert good["accession"] == "5" and good["period_start"] is None
     assert good["fiscal_year"] is None and good["source_url"] is None
@@ -1896,10 +2336,12 @@ def test_validated_fact_row_accepts_and_rejects() -> None:
 
 # --- _duration_rows: concept filter + restatement dedup + duration window ---
 def test_duration_rows_filters_and_dedups() -> None:
-    rows = [_fact(value=1.0, accn="a1", filed="2025-04-28"),
-            _fact(value=2.0, accn="a2", filed="2025-05-28"),  # restatement wins
-            _fact(concept="Other", value=9.0),
-            _fact(value=3.0, start="2025-01-01", end="2025-12-31")]  # FY duration excluded
+    rows = [
+        _fact(value=1.0, accn="a1", filed="2025-04-28"),
+        _fact(value=2.0, accn="a2", filed="2025-05-28"),  # restatement wins
+        _fact(concept="Other", value=9.0),
+        _fact(value=3.0, start="2025-01-01", end="2025-12-31"),
+    ]  # FY duration excluded
     out = sec_facts._duration_rows(rows, "EarningsPerShareDiluted", (60, 115))
     assert len(out) == 1 and out[0]["value"] == 2.0
 
@@ -1917,11 +2359,15 @@ def test_derive_q4_paths() -> None:
 # --- _assemble_eps_payload: empty, diluted-only, basic join, TTM totals ---
 def test_assemble_eps_payload_paths() -> None:
     assert sec_facts._assemble_eps_payload("T", []) is None
-    quarters = [_fact(value=1.0, start=s, end=e, filed=f, accn=a, fp=fp)
-                for s, e, f, a, fp in [("2025-01-01", "2025-03-31", "2025-04-28", "a1", "Q1"),
-                                       ("2025-04-01", "2025-06-30", "2025-07-28", "a2", "Q2"),
-                                       ("2025-07-01", "2025-09-30", "2025-10-28", "a3", "Q3"),
-                                       ("2025-10-01", "2025-12-31", "2026-02-10", "a4", "Q4")]]
+    quarters = [
+        _fact(value=1.0, start=s, end=e, filed=f, accn=a, fp=fp)
+        for s, e, f, a, fp in [
+            ("2025-01-01", "2025-03-31", "2025-04-28", "a1", "Q1"),
+            ("2025-04-01", "2025-06-30", "2025-07-28", "a2", "Q2"),
+            ("2025-07-01", "2025-09-30", "2025-10-28", "a3", "Q3"),
+            ("2025-10-01", "2025-12-31", "2026-02-10", "a4", "Q4"),
+        ]
+    ]
     p = sec_facts._assemble_eps_payload("T", quarters)
     assert p is not None and p["ttm_eps_diluted"] == 4.0 and "ttm_eps_basic" not in p
     basic: list[FinancialFactRow] = [_fact_copy(q, concept="EarningsPerShareBasic", value=0.5) for q in quarters]
@@ -1982,8 +2428,10 @@ def test_dividend_event_payload_coverage_arms() -> None:
 
 # --- _debt_up_yoy: up / down / missing / unparsable ---
 def test_debt_up_yoy_paths() -> None:
-    up = [_fact(concept="LongTermDebt", value=100.0, start="2024-01-01", end="2024-12-31", filed="2025-02-10", accn="d1"),
-          _fact(concept="LongTermDebt", value=150.0, start="2025-01-01", end="2025-12-31", filed="2026-02-10", accn="d2")]
+    up = [
+        _fact(concept="LongTermDebt", value=100.0, start="2024-01-01", end="2024-12-31", filed="2025-02-10", accn="d1"),
+        _fact(concept="LongTermDebt", value=150.0, start="2025-01-01", end="2025-12-31", filed="2026-02-10", accn="d2"),
+    ]
     assert sec_facts._debt_up_yoy(up) is True
     down: list[FinancialFactRow] = [_fact_copy(r, value=50.0 if r["accession"] == "d2" else 100.0) for r in up]
     assert sec_facts._debt_up_yoy(down) is False
@@ -2011,11 +2459,12 @@ def test_safety_ratio_arms() -> None:
 # --- _dividend_fundamental via store: store hit + PIT miss ---
 def test_dividend_fundamental_store_and_pit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.normalization import normalize_sec_company_facts, normalize_sec_tickers
+
     monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", tmp_path)
     cik, ret = 21344, "2026-08-01T00:00:00Z"
     for name, rows in normalize_sec_tickers(
-            {"0": {"cik_str": cik, "ticker": "KO", "title": "KO Corp"}},
-            retrieved_at=ret, content_hash="t").items():
+        {"0": {"cik_str": cik, "ticker": "KO", "title": "KO Corp"}}, retrieved_at=ret, content_hash="t"
+    ).items():
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
     div_units = [
         {"start": s, "end": e, "val": v, "accn": a, "fy": fy, "fp": fp, "filed": f}
@@ -2023,12 +2472,17 @@ def test_dividend_fundamental_store_and_pit(tmp_path: Path, monkeypatch: pytest.
             (0.51, "2025-07-01", "2025-09-30", 2025, "Q3", "2025-10-28", "q3"),
             (0.51, "2025-10-01", "2025-12-31", 2025, "Q4", "2026-02-10", "q4"),
             (0.54, "2026-01-01", "2026-03-31", 2026, "Q1", "2026-04-28", "q1"),
-            (0.54, "2026-04-01", "2026-06-30", 2026, "Q2", "2026-07-28", "q2")]]
-    payload = {"cik": cik, "entityName": "KO", "facts": {"us-gaap": {
-        "CommonStockDividendsPerShareDeclared": {"units": {"USD/shares": div_units}}}}}
+            (0.54, "2026-04-01", "2026-06-30", 2026, "Q2", "2026-07-28", "q2"),
+        ]
+    ]
+    payload = {
+        "cik": cik,
+        "entityName": "KO",
+        "facts": {"us-gaap": {"CommonStockDividendsPerShareDeclared": {"units": {"USD/shares": div_units}}}},
+    }
     for name, rows in normalize_sec_company_facts(
-            payload, retrieved_at=ret, content_hash="d",
-            source_url="u", source_record_id="r").items():
+        payload, retrieved_at=ret, content_hash="d", source_url="u", source_record_id="r"
+    ).items():
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
     hit = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-08-10")
     assert hit["data_source"] == "store" and hit["ttm_dividend_per_share"] == 2.10
@@ -2049,26 +2503,37 @@ class _Resp:
 def _mocks(monkeypatch: pytest.MonkeyPatch, get_script: list[object], page_script: list[object]) -> None:
     def _fake_get(url: str, **k: object) -> object:
         return get_script.pop(0)
+
     def _fake_page(g: object, n: object, p: object) -> object:
         return page_script.pop(0)
+
     def _no_sleep(s: float) -> None:
         return None
+
     monkeypatch.setattr(research_data.requests, "get", _fake_get)
-    monkeypatch.setattr(research_data.finra_client, "ingestion_post_query",
-                        _fake_page)
+    monkeypatch.setattr(research_data.finra_client, "ingestion_post_query", _fake_page)
     monkeypatch.setattr(research_data.time, "sleep", _no_sleep)
 
 
 def test_refresh_sec_tickers_skips_malformed(monkeypatch: pytest.MonkeyPatch) -> None:
-    payload = {"0": {"ticker": "AAPL", "cik_str": 320193}, "1": {"ticker": "", "cik_str": 1},
-               "2": "junk", "3": {"ticker": "BAD", "cik_str": "xx"}, "4": {"ticker": "NOCIK"}}
+    payload = {
+        "0": {"ticker": "AAPL", "cik_str": 320193},
+        "1": {"ticker": "", "cik_str": 1},
+        "2": "junk",
+        "3": {"ticker": "BAD", "cik_str": "xx"},
+        "4": {"ticker": "NOCIK"},
+    }
+
     def _fake_sec(url: str) -> bytes:
         return json.dumps(payload).encode()
+
     def _fake_now() -> str:
         return "2026-08-01T00:00:00Z"
+
     monkeypatch.setattr(research_data, "_sec_get", _fake_sec)
     monkeypatch.setattr(research_data, "_utc_now", _fake_now)
     import tempfile
+
     root = Path(tempfile.mkdtemp())
     out = refresh_sec_tickers(data_root=root)
     assert out["ticker_ciks"] == {"AAPL": 320193}
@@ -2082,10 +2547,14 @@ def test_refresh_finra_missing_total_raises(tmp_path: Path, monkeypatch: pytest.
 
 def test_refresh_finra_changing_total_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [{"symbolCode": "A"}]
-    _mocks(monkeypatch, [], [
-        (b"[]", rows, {"record-total": "2"}),
-        (b"[]", rows, {"record-total": "3"}),
-    ])
+    _mocks(
+        monkeypatch,
+        [],
+        [
+            (b"[]", rows, {"record-total": "2"}),
+            (b"[]", rows, {"record-total": "3"}),
+        ],
+    )
     with pytest.raises(ValueError, match="changed"):
         refresh_finra_short_interest("2026-08-14", data_root=tmp_path)
 
@@ -2093,12 +2562,12 @@ def test_refresh_finra_changing_total_raises(tmp_path: Path, monkeypatch: pytest
 def test_prepare_unresolved_and_enrichment_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ticks = {"0": {"cik_str": 320193, "ticker": "AAPL", "title": "Apple"}}
     facts: dict[str, object] = {"cik": 320193, "entityName": "x", "facts": {}}
-    finra_rows = [{"symbolCode": "AAPL", "settlementDate": "2026-08-14",
-                   "currentShortPositionQuantity": 5}]
-    _mocks(monkeypatch,
-            [_Resp(json.dumps(ticks).encode()), _Resp(b"boom", 500),
-             _Resp(json.dumps(facts).encode())],
-            [(json.dumps(finra_rows).encode(), finra_rows, {"record-total": "1"})])
+    finra_rows = [{"symbolCode": "AAPL", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 5}]
+    _mocks(
+        monkeypatch,
+        [_Resp(json.dumps(ticks).encode()), _Resp(b"boom", 500), _Resp(json.dumps(facts).encode())],
+        [(json.dumps(finra_rows).encode(), finra_rows, {"record-total": "1"})],
+    )
     out = prepare_short_interest_data("2026-08-14", tickers=["AAPL", "ZZZ"], data_root=tmp_path)
     assert out["unresolved_tickers"] == ["ZZZ"]
     assert out["failed_enrichments"] == [] or isinstance(out["failed_enrichments"], list)
@@ -2108,12 +2577,24 @@ def test_short_interest_legacy_probe_and_backfill(tmp_path: Path) -> None:
     root = tmp_path / "parquet"
     root.mkdir(parents=True, exist_ok=True)
     assert _short_interest_has_legacy_v1(root) is False  # empty table, no legacy rows
-    v2: dict[str, object] = {"row_id": "r1", "entity_id": None, "security_id": None, "symbol_code": "A",
-          "issue_name": "A", "settlement_date": "2026-08-14", "short_position": 1.0,
-          "prev_position": None, "avg_daily_volume": None, "days_to_cover": None,
-          "source_url": "u", "source_record_id": "r", "known_at": "2026-08-30T00:00:00Z",
-          "retrieved_at": "2026-08-30T00:00:00Z", "content_hash": "h",
-          "parser_version": "finra-short-interest-v2"}
+    v2: dict[str, object] = {
+        "row_id": "r1",
+        "entity_id": None,
+        "security_id": None,
+        "symbol_code": "A",
+        "issue_name": "A",
+        "settlement_date": "2026-08-14",
+        "short_position": 1.0,
+        "prev_position": None,
+        "avg_daily_volume": None,
+        "days_to_cover": None,
+        "source_url": "u",
+        "source_record_id": "r",
+        "known_at": "2026-08-30T00:00:00Z",
+        "retrieved_at": "2026-08-30T00:00:00Z",
+        "content_hash": "h",
+        "parser_version": "finra-short-interest-v2",
+    }
     parquet.write_rows("short_interest", [v2], root=root)
     assert _short_interest_has_legacy_v1(root) is False
     assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
@@ -2137,24 +2618,34 @@ def _name_acme(n: str) -> str | None:
 
 
 def _svcs_alias(entity: str = "e1", ticker: str = "ACME") -> TickerAlias:
-    return TickerAlias(alias_type="ticker", alias_value=ticker, entity_id=entity,
-                       security_id="s1", source="t", valid_from=None, valid_to=None,
-                       known_at="2026-01-01T00:00:00Z", retrieved_at="2026-01-01T00:00:00Z")
+    return TickerAlias(
+        alias_type="ticker",
+        alias_value=ticker,
+        entity_id=entity,
+        security_id="s1",
+        source="t",
+        valid_from=None,
+        valid_to=None,
+        known_at="2026-01-01T00:00:00Z",
+        retrieved_at="2026-01-01T00:00:00Z",
+    )
 
 
 def test_resolve_subject_ticker_name_unresolved() -> None:
-    asof = datetime(2026, 6, 1, tzinfo=timezone.utc)
-    r = resolve_subject(ticker="acme", name=None, aliases_by_ticker=_aliases_one,
-                        name_to_ticker=_name_none, as_of=asof)
+    asof = datetime(2026, 6, 1, tzinfo=_dt.UTC)
+    r = resolve_subject(ticker="acme", name=None, aliases_by_ticker=_aliases_one, name_to_ticker=_name_none, as_of=asof)
     assert r.resolved and r.ticker == "ACME"
-    r2 = resolve_subject(ticker=None, name="Acme Corp", aliases_by_ticker=_aliases_one,
-                         name_to_ticker=_name_acme, as_of=asof)
+    r2 = resolve_subject(
+        ticker=None, name="Acme Corp", aliases_by_ticker=_aliases_one, name_to_ticker=_name_acme, as_of=asof
+    )
     assert r2.resolved
-    r3 = resolve_subject(ticker=None, name="Nope", aliases_by_ticker=_aliases_empty,
-                         name_to_ticker=_name_none, as_of=asof)
+    r3 = resolve_subject(
+        ticker=None, name="Nope", aliases_by_ticker=_aliases_empty, name_to_ticker=_name_none, as_of=asof
+    )
     assert not r3.resolved
-    r4 = resolve_subject(ticker=None, name=None, aliases_by_ticker=_aliases_empty,
-                         name_to_ticker=_name_none, as_of=asof)
+    r4 = resolve_subject(
+        ticker=None, name=None, aliases_by_ticker=_aliases_empty, name_to_ticker=_name_none, as_of=asof
+    )
     assert not r4.resolved
 
 
@@ -2182,8 +2673,7 @@ def test_cadence_arms() -> None:
 
 
 def test_lifecycle_arms() -> None:
-    q = [_pay(f"2025-{m:02d}-01", amt=a) for m, a in
-         [(1, 0.5), (4, 0.5), (7, 0.5), (10, 0.5), (1, 0.6)]]
+    q = [_pay(f"2025-{m:02d}-01", amt=a) for m, a in [(1, 0.5), (4, 0.5), (7, 0.5), (10, 0.5), (1, 0.6)]]
     q[-1]["payment_date"] = "2026-01-01"
     life = lifecycle_from_events(q)
     assert life["increase"] is not None and life["cut"] is None
@@ -2209,31 +2699,41 @@ def test_build_claims_paths() -> None:
     assert build_evidence_claims(reader_items=[], retrieved_fallback="t") == []
     bad_items: list[dict[str, object]] = json.loads('"nope"')
     assert build_evidence_claims(reader_items=bad_items, retrieved_fallback="t") == []
-    mixed_items: list[dict[str, object]] = json.loads('[{"subject_ticker": "acme", "claim": "x", "claim_type": "other", "source_url": "https://example.com", "retrieved_at": "2026-01-01T00:00:00+00:00", "object_name": "Beta"}, "junk", {"subject_ticker": 5, "claim": 5, "source_url": 5}]')
-    def _resolve_none(ticker: str | None = None, name: str | None = None, as_of: str | None = None) -> SecurityResolution:
+    mixed_items: list[dict[str, object]] = json.loads(
+        '[{"subject_ticker": "acme", "claim": "x", "claim_type": "other", "source_url": "https://example.com", "retrieved_at": "2026-01-01T00:00:00+00:00", "object_name": "Beta"}, "junk", {"subject_ticker": 5, "claim": 5, "source_url": 5}]'
+    )
+
+    def _resolve_none(
+        ticker: str | None = None, name: str | None = None, as_of: str | None = None
+    ) -> SecurityResolution:
         return _svcs_res()
+
     claims = build_evidence_claims(
-        reader_items=mixed_items,
-        resolve=_resolve_none,
-        retrieved_fallback="2026-01-01T00:00:00+00:00")
+        reader_items=mixed_items, resolve=_resolve_none, retrieved_fallback="2026-01-01T00:00:00+00:00"
+    )
     assert len(claims) == 2 and claims[0].ticker == "ACME"
 
 
 # --- portfolio_sync legacy account path ---
 def test_read_latest_snapshot_empty_and_legacy(tmp_path: Path) -> None:
     assert read_latest_snapshot(data_root=tmp_path) is None
-    from datetime import timezone as _tz
 
     from app.domain.portfolio.snapshot import build_portfolio_snapshot
-    now = datetime(2026, 8, 25, 12, tzinfo=_tz.utc)
-    snap = build_portfolio_snapshot(broker="robinhood", account_ids=["a1"], positions=[],
-                                    cash_balances={"a1": __import__("decimal").Decimal("10")},
-                                    created_at=now)
+
+    now = datetime(2026, 8, 25, 12, tzinfo=_dt.UTC)
+    snap = build_portfolio_snapshot(
+        broker="robinhood",
+        account_ids=["a1"],
+        positions=[],
+        cash_balances={"a1": __import__("decimal").Decimal("10")},
+        created_at=now,
+    )
     persist_snapshot(snap, data_root=tmp_path)
     restored = read_latest_snapshot(data_root=tmp_path)
     assert restored is not None and restored.cash is not None
     # legacy: drop portfolio_accounts -> reconstruct from positions is empty-safe
     import shutil
+
     shutil.rmtree(tmp_path / "parquet" / "portfolio_accounts", ignore_errors=True)
     restored2 = read_latest_snapshot(data_root=tmp_path)
     assert restored2 is not None
@@ -2254,7 +2754,7 @@ class _FakeSock(socket.socket):
         self.sent.append(bytes(data))
 
     @override
-    def __enter__(self) -> _FakeSock:
+    def __enter__(self) -> Self:
         return self
 
     @override
@@ -2280,7 +2780,7 @@ def test_herdr_init_read_subscribe_request(monkeypatch: pytest.MonkeyPatch) -> N
     assert HerdrClient().socket_path == "/tmp/env.sock"
     sock = _FakeSock([b'{"a":1}\n', b'{"b":2}\n'])
     assert list(HerdrClient._read_lines(sock)) == [{"a": 1}, {"b": 2}]
-    partial = _FakeSock([b'{"a":', b'1}\n'])
+    partial = _FakeSock([b'{"a":', b"1}\n"])
     assert list(HerdrClient._read_lines(partial)) == [{"a": 1}]
     blank = _FakeSock([b'\n\n{"a":1}\n'])
     assert list(HerdrClient._read_lines(blank)) == [{"a": 1}]
@@ -2305,7 +2805,7 @@ def test_herdr_init_read_subscribe_request(monkeypatch: pytest.MonkeyPatch) -> N
 
 # --- store: storage/domain/analytics (from /tmp/rc_corestore.py) ---
 
-NOW = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 25, 12, 0, tzinfo=_dt.UTC)
 A = "sec:cik:0000000001"
 B = "sec:cik:0000000002"
 
@@ -2314,11 +2814,20 @@ B = "sec:cik:0000000002"
 # runs.py: recorder lifecycle + query helpers
 # ---------------------------------------------------------------------------
 
+
 def _recorder(run_id: str) -> RunRecorder:
     return RunRecorder(
-        run_id=run_id, request_id="req", question="q", as_of=None, model="t",
-        provider="p", model_parameters={}, agent_version="0",
-        prompt_version="0", tool_registry_version="t", git_sha="g",
+        run_id=run_id,
+        request_id="req",
+        question="q",
+        as_of=None,
+        model="t",
+        provider="p",
+        model_parameters={},
+        agent_version="0",
+        prompt_version="0",
+        tool_registry_version="t",
+        git_sha="g",
     )
 
 
@@ -2368,21 +2877,30 @@ def test_runs_record_event_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
         t0 = "2026-08-25T12:00:00+00:00"
         t1 = "2026-08-25T12:00:01+00:00"
         eid = rec.record_event(
-            EventType.TOOL_COMPLETED, round=2, started_at=t0, completed_at=t1,
-            result_summary="s" * 10, success=True, arguments={"k": 1},
-            evidence_ids=["e1"], metadata={"m": 1},
+            EventType.TOOL_COMPLETED,
+            round=2,
+            started_at=t0,
+            completed_at=t1,
+            result_summary="s" * 10,
+            success=True,
+            arguments={"k": 1},
+            evidence_ids=["e1"],
+            metadata={"m": 1},
         )
         assert eid == "run-ev-1:ev:0001"
         big = rec.record_event(EventType.TOOL_COMPLETED, result_summary="x" * (rec.max_result_bytes + 5))
         assert big is not None
         ev = rec.record_event(EventType.EVIDENCE_ADDED, result_summary="abcd1234")
         assert ev is not None and rec.evidence_tokens > 0
-        explicit = rec.record_event(
-            EventType.TOOL_COMPLETED, started_at=t0, completed_at=t1, duration_ms=5.0)
+        explicit = rec.record_event(EventType.TOOL_COMPLETED, started_at=t0, completed_at=t1, duration_ms=5.0)
         assert explicit is not None
     rows = runs_mod.get_events("run-ev-1")
     assert [r["event_id"] for r in rows] == [
-        "run-ev-1:ev:0001", "run-ev-1:ev:0002", "run-ev-1:ev:0003", "run-ev-1:ev:0004"]
+        "run-ev-1:ev:0001",
+        "run-ev-1:ev:0002",
+        "run-ev-1:ev:0003",
+        "run-ev-1:ev:0004",
+    ]
     assert rows[0]["duration_ms"] == 1000.0
     s = rows[1]["result_summary"]
     assert isinstance(s, str) and s.endswith("...[truncated]")
@@ -2400,23 +2918,38 @@ def test_runs_query_helpers_empty_and_filter_arms(tmp_path: Path, monkeypatch: p
     assert runs_mod.get_security_events("nope") == []
     assert runs_mod.get_evidence("nope") == []
     assert runs_mod.get_security_summary("nope") == {
-        "allowed": 0, "quarantined": 0, "blocked": 0,
-        "action_blocked": 0, "egress_blocked": 0, "response_stripped": 0,
+        "allowed": 0,
+        "quarantined": 0,
+        "blocked": 0,
+        "action_blocked": 0,
+        "egress_blocked": 0,
+        "response_stripped": 0,
     }
     with _recorder("run-q-1") as rec:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(_dt.UTC).isoformat()
+        rec.record_security_event(source="s", sha256="h", score=1, verdict="v", rule_ids=["r"], decision="allowed")
         rec.record_security_event(
-            source="s", sha256="h", score=1, verdict="v",
-            rule_ids=["r"], decision="allowed")
-        rec.record_security_event(
-            source="s", sha256="h", score=1, verdict="v",
-            rule_ids=["r"], decision="weird-decision")
+            source="s", sha256="h", score=1, verdict="v", rule_ids=["r"], decision="weird-decision"
+        )
         rec.record_tool_call(
-            tool_call_id="run-q-1:tc:1", round=0, tool_name="t", arguments_json="{}",
-            started_at=now, completed_at=now, status="completed", result_row_count=0,
-            returned_count=0, truncated=False, result_bytes=2, result_hash="h",
-            source_names="[]", source_freshness="{}", as_of=None,
-            error_type=None, error_message=None)
+            tool_call_id="run-q-1:tc:1",
+            round=0,
+            tool_name="t",
+            arguments_json="{}",
+            started_at=now,
+            completed_at=now,
+            status="completed",
+            result_row_count=0,
+            returned_count=0,
+            truncated=False,
+            result_bytes=2,
+            result_hash="h",
+            source_names="[]",
+            source_freshness="{}",
+            as_of=None,
+            error_type=None,
+            error_message=None,
+        )
         rec.record_event("run_started")
     assert len(runs_mod.list_runs()) == 1
     run = runs_mod.get_run("run-q-1")
@@ -2444,10 +2977,15 @@ def test_runs_db_path_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 # parquet.py: write stages
 # ---------------------------------------------------------------------------
 
-def _fact_row(entity_id: str = "sec:cik:0000320193", value: float = 100.0,
-              period_end: str = "2026-08-01", filed: str = "2026-08-02",
-              accession: str = "0000320193-26-000001",
-              known_at: str = "2026-08-02T00:00:00Z") -> dict[str, object]:
+
+def _fact_row(
+    entity_id: str = "sec:cik:0000320193",
+    value: float = 100.0,
+    period_end: str = "2026-08-01",
+    filed: str = "2026-08-02",
+    accession: str = "0000320193-26-000001",
+    known_at: str = "2026-08-02T00:00:00Z",
+) -> dict[str, object]:
     from app.domain.market import ids
 
     cik = int(entity_id.removeprefix("sec:cik:"))
@@ -2494,16 +3032,27 @@ def test_parquet_write_stages(tmp_path: Path) -> None:
 # options.py: per-stage calculators
 # ---------------------------------------------------------------------------
 
+
 def _quote(**overrides: object) -> OptionQuote:
     base: dict[str, object] = {
-        "contract_id": "c1", "ticker": "WING", "expiration": date(2027, 1, 15),
-        "strike": Decimal(80), "option_type": "put",
-        "underlying_price": Decimal("116.84"), "bid": Decimal("2.00"),
-        "ask": Decimal("2.40"), "mark": Decimal("2.20"),
-        "implied_volatility": Decimal("0.55"), "delta": Decimal("-0.12"),
-        "gamma": Decimal("0.01"), "theta": Decimal("-0.02"),
-        "vega": Decimal("0.10"), "rho": None, "volume": 10, "open_interest": 100,
-        "retrieved_at": datetime(2026, 8, 25, tzinfo=timezone.utc),
+        "contract_id": "c1",
+        "ticker": "WING",
+        "expiration": date(2027, 1, 15),
+        "strike": Decimal(80),
+        "option_type": "put",
+        "underlying_price": Decimal("116.84"),
+        "bid": Decimal("2.00"),
+        "ask": Decimal("2.40"),
+        "mark": Decimal("2.20"),
+        "implied_volatility": Decimal("0.55"),
+        "delta": Decimal("-0.12"),
+        "gamma": Decimal("0.01"),
+        "theta": Decimal("-0.02"),
+        "vega": Decimal("0.10"),
+        "rho": None,
+        "volume": 10,
+        "open_interest": 100,
+        "retrieved_at": datetime(2026, 8, 25, tzinfo=_dt.UTC),
     }
     base.update(overrides)
     contract_id = base["contract_id"]
@@ -2542,11 +3091,26 @@ def _quote(**overrides: object) -> OptionQuote:
     assert open_interest is None or isinstance(open_interest, int)
     retrieved_at = base["retrieved_at"]
     assert isinstance(retrieved_at, datetime)
-    return OptionQuote(contract_id=contract_id, ticker=ticker, expiration=expiration,
-        strike=strike, option_type=option_type, underlying_price=underlying_price,
-        bid=bid, ask=ask, mark=mark, implied_volatility=implied_volatility,
-        delta=delta, gamma=gamma, theta=theta, vega=vega, rho=rho,
-        volume=volume, open_interest=open_interest, retrieved_at=retrieved_at)
+    return OptionQuote(
+        contract_id=contract_id,
+        ticker=ticker,
+        expiration=expiration,
+        strike=strike,
+        option_type=option_type,
+        underlying_price=underlying_price,
+        bid=bid,
+        ask=ask,
+        mark=mark,
+        implied_volatility=implied_volatility,
+        delta=delta,
+        gamma=gamma,
+        theta=theta,
+        vega=vega,
+        rho=rho,
+        volume=volume,
+        open_interest=open_interest,
+        retrieved_at=retrieved_at,
+    )
 
 
 def test_options_stages() -> None:
@@ -2555,9 +3119,10 @@ def test_options_stages() -> None:
     assert put["dte"] == 143 and put["spread"] == "0.40"
     assert put["intrinsic_value"] == "0" and put["target_pnl"] == "-220.00"
     call = opt.analyze_option(
-        _quote(option_type="call", strike=Decimal(120), bid=Decimal(3),
-               ask=Decimal(5), mark=Decimal(4)),
-        as_of=date(2026, 8, 25), target_price=150)
+        _quote(option_type="call", strike=Decimal(120), bid=Decimal(3), ask=Decimal(5), mark=Decimal(4)),
+        as_of=date(2026, 8, 25),
+        target_price=150,
+    )
     assert call["target_pnl"] == "2600"
     assert call["intrinsic_value"] == "0"
     assert call["breakeven_at_expiration"] == "124"
@@ -2569,15 +3134,13 @@ def test_options_stages() -> None:
     no_under = opt.analyze_option(_quote(underlying_price=None), as_of=date(2026, 8, 25))
     assert no_under["intrinsic_value"] is None and no_under["extrinsic_value"] is None
     assert no_under["distance_from_underlying"] is None
-    call_itm = opt.analyze_option(
-        _quote(option_type="call", underlying_price=Decimal(130)), as_of=date(2026, 8, 25))
+    call_itm = opt.analyze_option(_quote(option_type="call", underlying_price=Decimal(130)), as_of=date(2026, 8, 25))
     assert call_itm["intrinsic_value"] == "50"
-    put_itm = opt.analyze_option(
-        _quote(underlying_price=Decimal(60)), as_of=date(2026, 8, 25))
+    put_itm = opt.analyze_option(_quote(underlying_price=Decimal(60)), as_of=date(2026, 8, 25))
     assert put_itm["intrinsic_value"] == "20"
     zero_mid = opt.analyze_option(
-        _quote(bid=Decimal(0), ask=Decimal(0), mark=Decimal(0)),
-        as_of=date(2026, 8, 25), target_price=80)
+        _quote(bid=Decimal(0), ask=Decimal(0), mark=Decimal(0)), as_of=date(2026, 8, 25), target_price=80
+    )
     assert zero_mid["target_return_pct"] is None
     assert opt._ratio(Decimal(1), Decimal(0)) is None
     assert opt._ratio(None, Decimal(1)) is None
@@ -2587,46 +3150,73 @@ def test_options_stages() -> None:
 # identity.py: resolver arms
 # ---------------------------------------------------------------------------
 
-def _store_alias(known_at: str, *, entity_id: str = "sec:cik:0000000001",
-           security_id: str | None = "sec:equity:0000000001",
-           valid_from: str | None = None, valid_to: str | None = None,
-           retrieved_at: str | None = None) -> TickerAlias:
+
+def _store_alias(
+    known_at: str,
+    *,
+    entity_id: str = "sec:cik:0000000001",
+    security_id: str | None = "sec:equity:0000000001",
+    valid_from: str | None = None,
+    valid_to: str | None = None,
+    retrieved_at: str | None = None,
+) -> TickerAlias:
     return TickerAlias(
-        alias_type="ticker", alias_value="AMD", entity_id=entity_id,
-        security_id=security_id, source="sec", valid_from=valid_from,
-        valid_to=valid_to, known_at=known_at, retrieved_at=retrieved_at or known_at,
+        alias_type="ticker",
+        alias_value="AMD",
+        entity_id=entity_id,
+        security_id=security_id,
+        source="sec",
+        valid_from=valid_from,
+        valid_to=valid_to,
+        known_at=known_at,
+        retrieved_at=retrieved_at or known_at,
     )
 
 
 def test_identity_resolver_arms() -> None:
     """Visibility, ambiguity, newest-wins, derived-id agreement arms."""
-    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=_dt.UTC)
     assert resolve_ticker_aliases("AMD", [], as_of=as_of).resolved is False
-    assert resolve_ticker_aliases(
-        "AMD", [_store_alias("2026-08-26T00:00:00Z")], as_of=as_of).resolution_method == "unresolved"
-    assert resolve_ticker_aliases(
-        "AMD", [_store_alias("2026-08-01T00:00:00Z", valid_to="2026-08-24")],
-        as_of=as_of).resolved is False
+    assert (
+        resolve_ticker_aliases("AMD", [_store_alias("2026-08-26T00:00:00Z")], as_of=as_of).resolution_method
+        == "unresolved"
+    )
+    assert (
+        resolve_ticker_aliases(
+            "AMD", [_store_alias("2026-08-01T00:00:00Z", valid_to="2026-08-24")], as_of=as_of
+        ).resolved
+        is False
+    )
     amb = resolve_ticker_aliases(
-        "AMD", [_store_alias("2026-01-01T00:00:00Z"),
-                _store_alias("2026-01-01T00:00:00Z", entity_id="sec:cik:0000000002",
-                       security_id="sec:equity:0000000002")],
-        as_of=as_of)
+        "AMD",
+        [
+            _store_alias("2026-01-01T00:00:00Z"),
+            _store_alias("2026-01-01T00:00:00Z", entity_id="sec:cik:0000000002", security_id="sec:equity:0000000002"),
+        ],
+        as_of=as_of,
+    )
     assert amb.resolution_method == "ambiguous"
     sec_amb = resolve_ticker_aliases(
-        "AMD", [_store_alias("2026-08-25T12:00:00Z", security_id="sec:equity:0000000009"),
-                _store_alias("2026-08-25T12:00:00Z", security_id="sec:equity:0000000010")],
-        as_of=as_of)
+        "AMD",
+        [
+            _store_alias("2026-08-25T12:00:00Z", security_id="sec:equity:0000000009"),
+            _store_alias("2026-08-25T12:00:00Z", security_id="sec:equity:0000000010"),
+        ],
+        as_of=as_of,
+    )
     assert sec_amb.resolved is False and sec_amb.entity_id == "sec:cik:0000000001"
     ok = resolve_ticker_aliases("AMD", [_store_alias("2026-08-01T00:00:00Z")], as_of=as_of)
     assert ok.resolved is True and ok.resolution_method == "entity_alias"
-    derived = resolve_ticker_aliases(
-        "AMD", [_store_alias("2026-08-01T00:00:00Z", security_id=None)], as_of=as_of)
+    derived = resolve_ticker_aliases("AMD", [_store_alias("2026-08-01T00:00:00Z", security_id=None)], as_of=as_of)
     assert derived.resolved is True and derived.security_id == "sec:equity:0000000001"
     newest = resolve_ticker_aliases(
-        "AMD", [_store_alias("2026-08-01T00:00:00Z", security_id="sec:equity:0000000009"),
-                _store_alias("2026-08-20T00:00:00Z", security_id="sec:equity:0000000001")],
-        as_of=as_of)
+        "AMD",
+        [
+            _store_alias("2026-08-01T00:00:00Z", security_id="sec:equity:0000000009"),
+            _store_alias("2026-08-20T00:00:00Z", security_id="sec:equity:0000000001"),
+        ],
+        as_of=as_of,
+    )
     assert newest.security_id == "sec:equity:0000000001"
 
 
@@ -2634,15 +3224,23 @@ def test_identity_resolver_arms() -> None:
 # snapshot.py: builder arms
 # ---------------------------------------------------------------------------
 
+
 def _pos(market_value: Decimal | None = Decimal(500), **overrides: object) -> Position:
     base: dict[str, object] = {
-        "position_id": "pos-1", "account_id": local_account_id("100000001"),
-        "security_id": "sec:equity:0000320193", "entity_id": "sec:cik:0000320193",
-        "ticker": "AMD", "quantity": Decimal(1), "average_cost": Decimal(400),
-        "market_price": market_value, "market_value": market_value,
+        "position_id": "pos-1",
+        "account_id": local_account_id("100000001"),
+        "security_id": "sec:equity:0000320193",
+        "entity_id": "sec:cik:0000320193",
+        "ticker": "AMD",
+        "quantity": Decimal(1),
+        "average_cost": Decimal(400),
+        "market_price": market_value,
+        "market_value": market_value,
         "unrealized_gain": Decimal(100) if market_value is not None else None,
         "unrealized_gain_pct": Decimal("0.25") if market_value is not None else None,
-        "portfolio_weight": None, "source": "robinhood_mcp", "retrieved_at": NOW,
+        "portfolio_weight": None,
+        "source": "robinhood_mcp",
+        "retrieved_at": NOW,
     }
     base.update(overrides)
     position_id = base["position_id"]
@@ -2673,45 +3271,69 @@ def _pos(market_value: Decimal | None = Decimal(500), **overrides: object) -> Po
     assert isinstance(source, str)
     retrieved_at = base["retrieved_at"]
     assert isinstance(retrieved_at, datetime)
-    return Position(position_id=position_id, account_id=account_id,
-        security_id=security_id, entity_id=entity_id, ticker=ticker,
-        quantity=quantity, average_cost=average_cost, market_price=market_price,
-        market_value=market_value_raw, unrealized_gain=unrealized_gain,
-        unrealized_gain_pct=unrealized_gain_pct, portfolio_weight=portfolio_weight,
-        source=source, retrieved_at=retrieved_at)
+    return Position(
+        position_id=position_id,
+        account_id=account_id,
+        security_id=security_id,
+        entity_id=entity_id,
+        ticker=ticker,
+        quantity=quantity,
+        average_cost=average_cost,
+        market_price=market_price,
+        market_value=market_value_raw,
+        unrealized_gain=unrealized_gain,
+        unrealized_gain_pct=unrealized_gain_pct,
+        portfolio_weight=portfolio_weight,
+        source=source,
+        retrieved_at=retrieved_at,
+    )
 
 
 def test_snapshot_builder_arms() -> None:
     """Cash/total/weight boundaries: complete, partial, unpriced, cash-only."""
     a1, a2 = local_account_id("100000001"), local_account_id("100000002")
     full = build_portfolio_snapshot(
-        broker="robinhood", account_ids=[a1, a2], positions=[_pos()],
-        cash_balances={a1: Decimal(1000), a2: Decimal(2000)}, created_at=NOW)
+        broker="robinhood",
+        account_ids=[a1, a2],
+        positions=[_pos()],
+        cash_balances={a1: Decimal(1000), a2: Decimal(2000)},
+        created_at=NOW,
+    )
     assert full.cash == Decimal(3000) and full.total_value == Decimal(3500)
     assert full.positions[0].position_id.startswith("portfolio:robinhood:")
     partial = build_portfolio_snapshot(
-        broker="robinhood", account_ids=[a1, a2], positions=[_pos()],
-        cash_balances={a1: Decimal(1000), a2: None}, created_at=NOW)
+        broker="robinhood",
+        account_ids=[a1, a2],
+        positions=[_pos()],
+        cash_balances={a1: Decimal(1000), a2: None},
+        created_at=NOW,
+    )
     assert partial.cash is None and partial.total_value is None
     assert all(p.portfolio_weight is None for p in partial.positions)
     unpriced = build_portfolio_snapshot(
-        broker="robinhood", account_ids=[a1], positions=[_pos(None)],
-        cash_balances={a1: Decimal(100)}, created_at=NOW)
+        broker="robinhood", account_ids=[a1], positions=[_pos(None)], cash_balances={a1: Decimal(100)}, created_at=NOW
+    )
     assert unpriced.total_value is None
     zero_qty = build_portfolio_snapshot(
-        broker="robinhood", account_ids=[a1],
+        broker="robinhood",
+        account_ids=[a1],
         positions=[_pos(None, quantity=Decimal(0))],
-        cash_balances={a1: Decimal(100)}, created_at=NOW)
+        cash_balances={a1: Decimal(100)},
+        created_at=NOW,
+    )
     # unpriced zero-quantity: valuation gate passes but invested is None -> total None
     assert zero_qty.total_value is None
     zero_priced = build_portfolio_snapshot(
-        broker="robinhood", account_ids=[a1],
+        broker="robinhood",
+        account_ids=[a1],
         positions=[_pos(Decimal(0), quantity=Decimal(0))],
-        cash_balances={a1: Decimal(100)}, created_at=NOW)
+        cash_balances={a1: Decimal(100)},
+        created_at=NOW,
+    )
     assert zero_priced.total_value == Decimal(100)
     cash_only = build_portfolio_snapshot(
-        broker="robinhood", account_ids=[a1], positions=[],
-        cash_balances={a1: Decimal(5000)}, created_at=NOW)
+        broker="robinhood", account_ids=[a1], positions=[], cash_balances={a1: Decimal(5000)}, created_at=NOW
+    )
     assert cash_only.invested_value == Decimal(0) and cash_only.total_value == Decimal(5000)
 
 
@@ -2719,16 +3341,19 @@ def test_snapshot_builder_arms() -> None:
 # mandate.py + evaluation.py: parser and evaluator arms
 # ---------------------------------------------------------------------------
 
+
 def test_mandate_parser_arms() -> None:
     """Bad-config arms: root, limits, vocab, threshold, target, prohibited."""
-    m = parse_mandate({
-        "limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}],
-        "prohibited_assets": [" GME "],
-    })
+    m = parse_mandate(
+        {
+            "limits": [{"metric": "minimum_cash", "operator": ">=", "threshold": 0.1}],
+            "prohibited_assets": [" GME "],
+        }
+    )
     assert m.prohibited_assets == ("GME",)
     cases: list[str] = [
-        '[]',
-        '{}',
+        "[]",
+        "{}",
         '{"limits": {}}',
         '{"limits": ["x"]}',
         '{"limits": [{"metric": "nope", "operator": ">=", "threshold": 0.1}]}',
@@ -2755,35 +3380,48 @@ def test_mandate_parser_arms() -> None:
             raise AssertionError(f"accepted {raw!r}")
 
 
-def _risk_position(weight: Decimal | None, ticker: str = "WING",
-                   entity_id: str | None = "sec:cik:0000320193") -> Position:
+def _risk_position(
+    weight: Decimal | None, ticker: str = "WING", entity_id: str | None = "sec:cik:0000320193"
+) -> Position:
     return Position(
-        position_id=f"snap-1:acc-1:{ticker}", account_id="acc-1",
+        position_id=f"snap-1:acc-1:{ticker}",
+        account_id="acc-1",
         security_id="sec:equity:0000320193" if entity_id else None,
-        entity_id=entity_id, ticker=ticker, quantity=Decimal(10),
-        average_cost=Decimal("95.50"), market_price=Decimal("116.84"),
-        market_value=Decimal("1168.40"), unrealized_gain=Decimal("213.40"),
-        unrealized_gain_pct=Decimal("0.22"), portfolio_weight=weight,
+        entity_id=entity_id,
+        ticker=ticker,
+        quantity=Decimal(10),
+        average_cost=Decimal("95.50"),
+        market_price=Decimal("116.84"),
+        market_value=Decimal("1168.40"),
+        unrealized_gain=Decimal("213.40"),
+        unrealized_gain_pct=Decimal("0.22"),
+        portfolio_weight=weight,
         source="robinhood_mcp",
-        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=_dt.UTC),
         price_type="last",
-        quote_retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        quote_retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=_dt.UTC),
     )
 
 
-def _risk_snapshot(weight: Decimal | None = Decimal("0.75"), cash: Decimal | None = Decimal("1234.56"),
-                   total: Decimal | None = Decimal("2462.96")) -> PortfolioSnapshot:
+def _risk_snapshot(
+    weight: Decimal | None = Decimal("0.75"),
+    cash: Decimal | None = Decimal("1234.56"),
+    total: Decimal | None = Decimal("2462.96"),
+) -> PortfolioSnapshot:
     return PortfolioSnapshot(
         snapshot_id="portfolio:robinhood:2026-08-25T12:00:00+00:00",
-        created_at=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
-        broker="robinhood", account_ids=("acc-1",), cash=cash,
-        invested_value=Decimal("1228.40"), total_value=total,
+        created_at=datetime(2026, 8, 25, 12, 0, tzinfo=_dt.UTC),
+        broker="robinhood",
+        account_ids=("acc-1",),
+        cash=cash,
+        invested_value=Decimal("1228.40"),
+        total_value=total,
         positions=(_risk_position(weight), _risk_position(Decimal("0.25"), "ZZZZ", None)),
     )
 
 
 def _limit(metric: str, operator: str, threshold: str, **overrides: str) -> RiskLimit:
-    values = dict(metric=metric, operator=operator, threshold=Decimal(threshold))
+    values = {"metric": metric, "operator": operator, "threshold": Decimal(threshold)}
     values.update(overrides)
     return RiskLimit(**values)
 
@@ -2791,52 +3429,77 @@ def _limit(metric: str, operator: str, threshold: str, **overrides: str) -> Risk
 def test_risk_evaluator_arms() -> None:
     """Per-limit arms: sector cap/floor, unknown target, weight, cash, prohibited."""
     cap = evaluate_mandate(
-        _risk_snapshot(), Mandate((_limit("sector_exposure", "<=", "0.20", target="x"),), ()),
-        sector_map={"sec:cik:0000320193": "x"})
+        _risk_snapshot(),
+        Mandate((_limit("sector_exposure", "<=", "0.20", target="x"),), ()),
+        sector_map={"sec:cik:0000320193": "x"},
+    )
     assert any(b.metric == "sector_exposure" for b in cap.breaches)
     floor_ok = evaluate_mandate(
-        _risk_snapshot(), Mandate((_limit("sector_exposure", ">=", "0.70", target="x"),), ()),
-        sector_map={"sec:cik:0000320193": "x"})
+        _risk_snapshot(),
+        Mandate((_limit("sector_exposure", ">=", "0.70", target="x"),), ()),
+        sector_map={"sec:cik:0000320193": "x"},
+    )
     assert floor_ok.issues == ()
     floor_short = evaluate_mandate(
-        _risk_snapshot(), Mandate((_limit("sector_exposure", ">=", "0.80", target="x"),), ()),
-        sector_map={"sec:cik:0000320193": "x"})
+        _risk_snapshot(),
+        Mandate((_limit("sector_exposure", ">=", "0.80", target="x"),), ()),
+        sector_map={"sec:cik:0000320193": "x"},
+    )
     assert any(i.code == "unknown_sector_exposure" for i in floor_short.issues)
     floor_breach = evaluate_mandate(
         PortfolioSnapshot(
-            snapshot_id="s", created_at=NOW, broker="b", account_ids=("a",),
-            cash=Decimal(1), invested_value=Decimal(1), total_value=Decimal(2),
-            positions=(_risk_position(Decimal("0.1"), "WING", "sec:cik:1"),)),
+            snapshot_id="s",
+            created_at=NOW,
+            broker="b",
+            account_ids=("a",),
+            cash=Decimal(1),
+            invested_value=Decimal(1),
+            total_value=Decimal(2),
+            positions=(_risk_position(Decimal("0.1"), "WING", "sec:cik:1"),),
+        ),
         Mandate((_limit("sector_exposure", ">=", "0.80", target="x"),), ()),
-        sector_map={"sec:cik:1": "x"})
+        sector_map={"sec:cik:1": "x"},
+    )
     assert any(b.metric == "sector_exposure" for b in floor_breach.breaches)
     unk = evaluate_mandate(
-        _risk_snapshot(), Mandate((_limit("sector_exposure", "<=", "0.20", target=UNKNOWN_SECTOR),), ()))
+        _risk_snapshot(), Mandate((_limit("sector_exposure", "<=", "0.20", target=UNKNOWN_SECTOR),), ())
+    )
     assert unk.breaches or unk.issues == ()
     w_none = evaluate_mandate(
-        _risk_snapshot(weight=None),
-        Mandate((_limit("single_position_weight", "<=", "0.25"),), ()))
+        _risk_snapshot(weight=None), Mandate((_limit("single_position_weight", "<=", "0.25"),), ())
+    )
     assert any(i.code == "position_weight_unavailable" for i in w_none.issues)
-    w_breach = evaluate_mandate(
-        _risk_snapshot(), Mandate((_limit("single_position_weight", "<=", "0.25"),), ()))
+    w_breach = evaluate_mandate(_risk_snapshot(), Mandate((_limit("single_position_weight", "<=", "0.25"),), ()))
     assert any(b.metric == "single_position_weight" for b in w_breach.breaches)
-    cash_ratio = evaluate_mandate(
-        _risk_snapshot(), Mandate((_limit("minimum_cash", ">=", "0.60"),), ()))
+    cash_ratio = evaluate_mandate(_risk_snapshot(), Mandate((_limit("minimum_cash", ">=", "0.60"),), ()))
     assert any(b.metric == "minimum_cash" for b in cash_ratio.breaches)
     cash_dollars = evaluate_mandate(
-        _risk_snapshot(), Mandate((_limit("minimum_cash", ">=", "5000", unit="dollars"),), ()))
+        _risk_snapshot(), Mandate((_limit("minimum_cash", ">=", "5000", unit="dollars"),), ())
+    )
     assert any(b.metric == "minimum_cash" and b.unit == "dollars" for b in cash_dollars.breaches)
-    assert any(i.code == "cash_unavailable" for i in evaluate_mandate(
-        _risk_snapshot(cash=None), Mandate((_limit("minimum_cash", ">=", "0.1"),), ())).issues)
-    assert any(i.code == "total_value_unavailable" for i in evaluate_mandate(
-        _risk_snapshot(total=None), Mandate((_limit("minimum_cash", ">=", "0.1"),), ())).issues)
-    assert any(i.code == "total_value_zero" for i in evaluate_mandate(
-        _risk_snapshot(total=Decimal(0)), Mandate((_limit("minimum_cash", ">=", "0.1"),), ())).issues)
-    assert any(i.code == "cash_unavailable" for i in evaluate_mandate(
-        _risk_snapshot(cash=None),
-        Mandate((_limit("minimum_cash", ">=", "5", unit="dollars"),), ())).issues)
-    prohib = evaluate_mandate(
-        _risk_snapshot(), Mandate((), ("wing", "sec:cik:0000320193", "NOPE")))
+    assert any(
+        i.code == "cash_unavailable"
+        for i in evaluate_mandate(_risk_snapshot(cash=None), Mandate((_limit("minimum_cash", ">=", "0.1"),), ())).issues
+    )
+    assert any(
+        i.code == "total_value_unavailable"
+        for i in evaluate_mandate(
+            _risk_snapshot(total=None), Mandate((_limit("minimum_cash", ">=", "0.1"),), ())
+        ).issues
+    )
+    assert any(
+        i.code == "total_value_zero"
+        for i in evaluate_mandate(
+            _risk_snapshot(total=Decimal(0)), Mandate((_limit("minimum_cash", ">=", "0.1"),), ())
+        ).issues
+    )
+    assert any(
+        i.code == "cash_unavailable"
+        for i in evaluate_mandate(
+            _risk_snapshot(cash=None), Mandate((_limit("minimum_cash", ">=", "5", unit="dollars"),), ())
+        ).issues
+    )
+    prohib = evaluate_mandate(_risk_snapshot(), Mandate((), ("wing", "sec:cik:0000320193", "NOPE")))
     assert {b.target for b in prohib.breaches} == {"wing", "sec:cik:0000320193"}
     assert evaluate_mandate(_risk_snapshot(), Mandate((), ())).breaches == ()
 
@@ -2845,39 +3508,64 @@ def test_risk_evaluator_arms() -> None:
 # relationships.py: validation / verify / propose / supersede arms
 # ---------------------------------------------------------------------------
 
-def _proposed(rid: str = "rel:t1", label: str = "Supplier Of",
-              known_at: str = "2024-01-01T00:00:00Z") -> R.Relationship:
+
+def _proposed(
+    rid: str = "rel:t1", label: str = "Supplier Of", known_at: str = "2024-01-01T00:00:00Z"
+) -> R.Relationship:
     return R.propose_relationship(
-        A, B, label, span="span", accession="a1", document_name="d1",
-        extraction_method="structured", confidence=0.99,
-        known_at=known_at, relationship_id=rid)
+        A,
+        B,
+        label,
+        span="span",
+        accession="a1",
+        document_name="d1",
+        extraction_method="structured",
+        confidence=0.99,
+        known_at=known_at,
+        relationship_id=rid,
+    )
 
 
 def _second(rel: R.Relationship, acc: str = "a2", doc: str = "d2", conf: float = 0.96) -> None:
     R.attach_relationship_evidence(
-        rel, source_span="span2", accession=acc, document_name=doc,
-        extraction_method="structured", confidence=conf,
-        known_at="2024-02-01T00:00:00Z")
+        rel,
+        source_span="span2",
+        accession=acc,
+        document_name=doc,
+        extraction_method="structured",
+        confidence=conf,
+        known_at="2024-02-01T00:00:00Z",
+    )
 
 
 def test_relationship_validation_arms() -> None:
     """Endpoint/span/PIT/conflict/provenance decision arms."""
-    naked = R.Relationship(relationship_id="r", relationship_type="supplier_of",
-                           raw_label="x", from_entity_id=None, to_entity_id=None)
+    naked = R.Relationship(
+        relationship_id="r", relationship_type="supplier_of", raw_label="x", from_entity_id=None, to_entity_id=None
+    )
     assert "unresolved-endpoint" in R.validate_relationship(naked)
-    loop = R.Relationship(relationship_id="r", relationship_type="t", raw_label="x",
-                          from_entity_id=A, to_entity_id=A)
+    loop = R.Relationship(relationship_id="r", relationship_type="t", raw_label="x", from_entity_id=A, to_entity_id=A)
     assert "invalid-direction" in R.validate_relationship(loop)
     rel = _proposed()
     R.attach_relationship_evidence(rel, source_span="   ", accession="a9", document_name="d9")
     assert any(e.startswith("empty-span:") for e in R.validate_relationship(rel))
     rel2 = _proposed(rid="rel:pit")
     assert "pit-unsafe-evidence" in R.validate_relationship(rel2, as_of="2023-01-01")
-    assert any("endpoint-conflict" in e for e in R.validate_relationship(
-        _proposed(rid="rel:cf"), endpoints_verified={A: False}))
+    assert any(
+        "endpoint-conflict" in e
+        for e in R.validate_relationship(_proposed(rid="rel:cf"), endpoints_verified={A: False})
+    )
     det = R.propose_relationship(
-        A, B, "Holding Manager", span="s", accession="a1", document_name="d1",
-        confidence=1.0, deterministic=True, relationship_id="rel:det")
+        A,
+        B,
+        "Holding Manager",
+        span="s",
+        accession="a1",
+        document_name="d1",
+        confidence=1.0,
+        deterministic=True,
+        relationship_id="rel:det",
+    )
     R.attach_relationship_evidence(det, source_span="s", confidence=1.0)
     assert any("deterministic-missing-provenance" in e for e in R.validate_relationship(det))
     try:
@@ -2898,18 +3586,15 @@ def test_relationship_verify_arms() -> None:
     assert ok_reasons == []
     low = _proposed(rid="rel:low")
     R.attach_relationship_evidence(
-        low, source_span="s", accession="a2", document_name="d2",
-        extraction_method="structured", confidence=0.1)
-    assert any("below-0.95" in r for r in R._auto_verify_errors(
-        low, as_of=None, endpoints_verified={A: True, B: True}))
+        low, source_span="s", accession="a2", document_name="d2", extraction_method="structured", confidence=0.1
+    )
+    assert any("below-0.95" in r for r in R._auto_verify_errors(low, as_of=None, endpoints_verified={A: True, B: True}))
     empty = R.propose_relationship(A, B, "Supplier Of", relationship_id="rel:empty")
-    assert "no-supporting-evidence" in R._auto_verify_errors(
-        empty, as_of=None, endpoints_verified={A: True, B: True})
+    assert "no-supporting-evidence" in R._auto_verify_errors(empty, as_of=None, endpoints_verified={A: True, B: True})
     ce = _proposed(rid="rel:ce")
     _second(ce)
     R.attach_relationship_counterevidence(ce, source_span="nope")
-    assert "unresolved-counterevidence" in R._auto_verify_errors(
-        ce, as_of=None, endpoints_verified={A: True, B: True})
+    assert "unresolved-counterevidence" in R._auto_verify_errors(ce, as_of=None, endpoints_verified={A: True, B: True})
     decision, _ = R.evaluate_relationship(ce)
     assert decision == "rejected" and ce.status == "rejected"
 
@@ -2939,11 +3624,9 @@ def test_relationship_propose_supersede_arms() -> None:
     rev = R.supersede_relationship(rel, reason="new evidence rel:sup:e2", known_at="2024-03-01T00:00:00Z")
     assert rev.superseded_revision_id == rel.revisions[-2].revision_id
     assert human.revision_id in [r.revision_id for r in rel.revisions]
-    dup = R.RelationshipEvidence(
-        evidence_id=f"{rel.relationship_id}:e2", relationship_id=rel.relationship_id)
+    dup = R.RelationshipEvidence(evidence_id=f"{rel.relationship_id}:e2", relationship_id=rel.relationship_id)
     R.supersede_relationship(rel, evidence=[dup], reason="dup evidence e2 ignored")
-    ce = R.RelationshipEvidence(
-        evidence_id="rel:sup:ce9", relationship_id=rel.relationship_id, is_counterevidence=True)
+    ce = R.RelationshipEvidence(evidence_id="rel:sup:ce9", relationship_id=rel.relationship_id, is_counterevidence=True)
     R.supersede_relationship(rel, evidence=[ce], reason="counterevidence rel:sup:ce9 noted")
     assert ce in rel.counterevidence
 
@@ -2963,13 +3646,19 @@ def _eval_instances(n: int = 4, start: int = 31, flip: bool = False) -> list[dic
     insts: list[dict[str, object]] = []
     for i in range(n):
         day = _day(start + i)
-        insts.append({
-            "instance_id": f"i{i}", "entity_id": "E",
-            "prediction_date": day, "evidence_known_at": _day(start + i - 1),
-            "relevant": True, "predicted": (i % 2 == 0) != flip,
-            "baseline_predicted": (i % 2 == 1) != flip,
-            "identity_correct": True, "baseline_identity_correct": True,
-        })
+        insts.append(
+            {
+                "instance_id": f"i{i}",
+                "entity_id": "E",
+                "prediction_date": day,
+                "evidence_known_at": _day(start + i - 1),
+                "relevant": True,
+                "predicted": (i % 2 == 0) != flip,
+                "baseline_predicted": (i % 2 == 1) != flip,
+                "identity_correct": True,
+                "baseline_identity_correct": True,
+            }
+        )
     return insts
 
 
@@ -2998,15 +3687,13 @@ def test_window_type_arms() -> None:
     """Empty/missing-data/missing-price/incomplete/threshold decision arms."""
     empty = EV.evaluate_window([], None, None, "2024-01-01", "2024-02-01")
     assert empty["complete"] is True and empty["qualifying"] is False
-    no_market = EV.evaluate_window(
-        _eval_instances(), None, None, "2024-01-01", "2024-03-01")
+    no_market = EV.evaluate_window(_eval_instances(), None, None, "2024-01-01", "2024-03-01")
     assert no_market["incomplete_reason"] == "missing-observations-or-benchmark"
     cal = [_day(i) for i in range(120)]
     bench = {d: 100.0 for d in cal}
     obs = {("E", d): 100.0 for d in cal}
     partial_obs = {("E", cal[0]): 100.0}
-    missing_price = EV.evaluate_window(
-        _eval_instances(4, 31), partial_obs, bench, "2024-01-01", "2024-03-01")
+    missing_price = EV.evaluate_window(_eval_instances(4, 31), partial_obs, bench, "2024-01-01", "2024-03-01")
     assert missing_price["incomplete_reason"] == "missing-market-prices"
     windows = [(_day(31), _day(59)), (_day(60), _day(90))]
     few = EV.evaluate_type("supplier_of", _eval_instances(4, 31), obs, bench, windows)
@@ -3023,6 +3710,7 @@ def test_window_type_arms() -> None:
 # ---------------------------------------------------------------------------
 # screens.py: candidate dates + empty-screen + leaderboard arms
 # ---------------------------------------------------------------------------
+
 
 def test_candidate_dates_arms() -> None:
     """Month-end/mid-month, weekend skip, dedupe, year rollover."""
@@ -3047,11 +3735,9 @@ def test_leaderboard_explicit_date_arms(tmp_path: Path, monkeypatch: pytest.Monk
         return 0
 
     monkeypatch.setattr(_rd, "refresh_finra_short_interest", _fake_refresh)
-    hist = screens.get_short_interest_leaderboard(
-        settlement_date="2026-08-14", as_of="2026-08-14", data_root=data_root)
+    hist = screens.get_short_interest_leaderboard(settlement_date="2026-08-14", as_of="2026-08-14", data_root=data_root)
     assert "error" in hist and calls == []
-    live = screens.get_short_interest_leaderboard(
-        settlement_date="2026-08-14", data_root=data_root)
+    live = screens.get_short_interest_leaderboard(settlement_date="2026-08-14", data_root=data_root)
     assert "error" in live and calls == ["2026-08-14"]
     assert screens._refresh_published_cycle("2099-01-31", data_root) is None or True
 
@@ -3059,7 +3745,9 @@ def test_leaderboard_explicit_date_arms(tmp_path: Path, monkeypatch: pytest.Monk
 # --- tools: envelopes/routing (from /tmp/rc_coretools.py) ---
 
 RCTX = RequestContext("test", frozenset({Capability.RESEARCH}))
-RBCTX = RequestContext("test-broker", frozenset({Capability.RESEARCH, Capability.BROKER_MARKET_READ, Capability.PORTFOLIO_READ}))
+RBCTX = RequestContext(
+    "test-broker", frozenset({Capability.RESEARCH, Capability.BROKER_MARKET_READ, Capability.PORTFOLIO_READ})
+)
 T0 = "2026-01-01T00:00:00+00:00"
 
 
@@ -3071,6 +3759,7 @@ def _rctx(tmp_path: Path, **kw: object) -> RequestContext:
 
 def _thesis(tmp_path: Path, scope: str = "NVDA") -> tuple[ThesisRepository, Thesis]:
     from app.thesis.repository import ThesisRepository
+
     r = ThesisRepository(tmp_path / "thesis")
     t = r.create_thesis(f"{scope} thesis", scope=scope, claims=[f"{scope} demand grows"], effective_at=T0)
     return r, t
@@ -3078,6 +3767,7 @@ def _thesis(tmp_path: Path, scope: str = "NVDA") -> tuple[ThesisRepository, Thes
 
 def _started_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> ResearchRepository:
     from app.research.repository import ResearchRepository
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     return ResearchRepository()
 
@@ -3132,19 +3822,26 @@ def _opt_quote(iid: str = "inst-1") -> dict[str, object]:
     return {"id": iid, "bid": "1.0", "ask": "1.2", "mark": "1.1"}
 
 
-def _opt_client(monkeypatch: pytest.MonkeyPatch, instruments: Sequence[object], quotes: Sequence[object] = (), cid: str = "chain-1") -> _FakeClient:
-    fake = _FakeClient({
-        "get_option_chains": _chain_payload(cid),
-        "get_option_instruments": _inst_payload(list(instruments)),
-        "get_option_quotes": _quote_payload(list(quotes)),
-    })
+def _opt_client(
+    monkeypatch: pytest.MonkeyPatch, instruments: Sequence[object], quotes: Sequence[object] = (), cid: str = "chain-1"
+) -> _FakeClient:
+    fake = _FakeClient(
+        {
+            "get_option_chains": _chain_payload(cid),
+            "get_option_instruments": _inst_payload(list(instruments)),
+            "get_option_quotes": _quote_payload(list(quotes)),
+        }
+    )
+
     def _fake_rh(**kw: object) -> object:
         return fake
+
     monkeypatch.setattr(tools_mod, "_robinhood_client", _fake_rh)
     return fake
 
 
 # -- _provider_payload: structured, camelCase, content JSON, content text, passthrough --
+
 
 def test_provider_payload_structured_and_camel() -> None:
     assert tools_mod._provider_payload({"structured_content": {"a": 1}}) == {"a": 1}
@@ -3171,6 +3868,7 @@ def test_rows_shapes() -> None:
 
 # -- execute_tool: permission, PIT cutoff default/reject, unsafe, invalid args,
 # -- unknown-context handler, unknown-model handler, KeyError, auth, provider, generic --
+
 
 def test_execute_not_permitted() -> None:
     ctx = RequestContext("t", frozenset())
@@ -3212,6 +3910,7 @@ def test_execute_invalid_args_executes_nothing(monkeypatch: pytest.MonkeyPatch) 
 def test_execute_unknown_context_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     def _bogus_ctx(a: dict[str, object], c: RequestContext) -> dict[str, object]:
         return {"ok": True}
+
     monkeypatch.setitem(tools_mod._THESIS_HANDLERS, "thesis_bogus_ctx", _bogus_ctx)
     monkeypatch.setattr(tools_mod, "_CONTEXT_CALL_HANDLERS", frozenset({"thesis_bogus_ctx"}))
     assert tools_mod._lookup_context_handler("thesis_bogus_ctx") is not None
@@ -3222,6 +3921,7 @@ def test_execute_unknown_context_handler(monkeypatch: pytest.MonkeyPatch) -> Non
 
 def test_execute_unknown_model_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.policy import Capability as _Cap
+
     monkeypatch.setitem(tools_mod.TOOL_CAPABILITIES, "zz_missing", _Cap.RESEARCH)
     out = execute_tool("zz_missing", {}, "m", context=RCTX)
     assert out["error_type"] == "unknown_tool"
@@ -3262,16 +3962,19 @@ def test_execute_keyerror_and_generic_and_auth(monkeypatch: pytest.MonkeyPatch) 
 
 def test_execute_pit_flag_set(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     ctx = _rctx(tmp_path, as_of="2026-06-01T00:00:00+00:00")
+
     def _ok_model(a: dict[str, object], m: str) -> dict[str, object]:
         return {"ok": True}
-    monkeypatch.setitem(tools_mod._MODEL_HANDLERS, "find_sec_entities", _ok_model)
-    out = execute_tool("find_sec_entities", {"query": "x"}, "m", context=ctx)
+
+    monkeypatch.setitem(tools_mod._MODEL_HANDLERS, "get_fundamentals", _ok_model)
+    out = execute_tool("get_fundamentals", {"ticker": "NVDA", "metric": "revenue"}, "m", context=ctx)
     assert out.get("ok") is True
     out2 = tools_mod._with_pit_flag("search_web", {"ok": True}, ctx)
     assert out2.get("pit_safe") is False
 
 
 # -- options: loader arms (type filter, bad expiry/strike, dte/strike bounds, merge/drop) --
+
 
 def test_load_option_quotes_type_expiry_strike_bounds(monkeypatch: pytest.MonkeyPatch) -> None:
     rows = [
@@ -3327,21 +4030,36 @@ def test_analyze_option_contract_hit_and_miss(monkeypatch: pytest.MonkeyPatch) -
 
 # -- mandate / optional_int / arg helpers --
 
+
 def test_evaluate_mandate_errors_and_ok(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.tools as t
+
     def _no_mandate(*a: object, **k: object) -> object:
         raise FileNotFoundError("no mandate")
+
     monkeypatch.setattr(t.risk_service, "evaluate_latest_mandate", _no_mandate)
     assert "error" in tools_mod.evaluate_mandate()
+
     def _bad_mandate(*a: object, **k: object) -> object:
         raise ValueError("bad")
+
     monkeypatch.setattr(t.risk_service, "evaluate_latest_mandate", _bad_mandate)
     assert "error" in tools_mod.evaluate_mandate()
-    ev = SimpleNamespace(snapshot_id="s", created_at=datetime(2026, 1, 1, tzinfo=timezone.utc),
-                         breaches=[SimpleNamespace(metric="m", target="t", severity="high", actual=None, limit=None, excess=None, note="n", unit="u")],
-                         sector_exposures={"tech": Decimal(1)}, issues=[SimpleNamespace(code="c", metric="m", target="t", position_id="p", ticker="A")])
+    ev = SimpleNamespace(
+        snapshot_id="s",
+        created_at=datetime(2026, 1, 1, tzinfo=_dt.UTC),
+        breaches=[
+            SimpleNamespace(
+                metric="m", target="t", severity="high", actual=None, limit=None, excess=None, note="n", unit="u"
+            )
+        ],
+        sector_exposures={"tech": Decimal(1)},
+        issues=[SimpleNamespace(code="c", metric="m", target="t", position_id="p", ticker="A")],
+    )
+
     def _ev_mandate(*a: object, **k: object) -> object:
         return ev
+
     monkeypatch.setattr(t.risk_service, "evaluate_latest_mandate", _ev_mandate)
     out = tools_mod.evaluate_mandate()
     assert out["result_type"] == "mandate_evaluation"
@@ -3373,10 +4091,12 @@ def test_arg_helpers() -> None:
 
 # -- google handlers: import error, ok, failure; trend geos/window; patents; suggest --
 
+
 def test_alternative_signals_import_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     import sys as _sys
 
     import app.google_data as _gd
+
     monkeypatch.setitem(_sys.modules, "app.google_data.signals", None)
     monkeypatch.delattr(_gd, "signals", raising=False)
     out = tools_mod._find_alternative_signals({"limit": 5}, "m")
@@ -3385,13 +4105,17 @@ def test_alternative_signals_import_failure(monkeypatch: pytest.MonkeyPatch) -> 
 
 def test_alternative_signals_ok_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.google_data.signals as sig
+
     def _qs_ok(**k: object) -> list[dict[str, object]]:
         return [{"id": 1}] * 3
+
     monkeypatch.setattr(sig, "query_signals", _qs_ok)
     out = tools_mod._find_alternative_signals({"limit": 2}, "m")
     assert out["status"] == "ok" and out["continuation"] is True
+
     def _qs_boom(**k: object) -> list[dict[str, object]]:
         raise RuntimeError("x")
+
     monkeypatch.setattr(sig, "query_signals", _qs_boom)
     err = tools_mod._find_alternative_signals({}, "m")
     assert err["soft"] is True
@@ -3406,6 +4130,7 @@ def test_trend_geos_window_and_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     s2, e2 = tools_mod._trend_window({})
     assert s2 is not None and e2 is not None and s2 < e2
     import app.google_data.trends as tr
+
     seen = {}
 
     def _fake(**k: object) -> dict[str, object]:
@@ -3415,13 +4140,16 @@ def test_trend_geos_window_and_handler(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(tr, "collect_trends", _fake)
     out = tools_mod._get_trend_evidence({"geos": ["US"], "term": "Stanley"}, "m")
     assert out == {"status": "ok"} and seen["term"] == "Stanley"
+
     def _trends_boom(**k: object) -> dict[str, object]:
         raise RuntimeError("z")
+
     monkeypatch.setattr(tr, "collect_trends", _trends_boom)
     assert tools_mod._get_trend_evidence({}, "m")["soft"] is True
     import sys as _sys2
 
     import app.google_data as _gd2
+
     monkeypatch.setitem(_sys2.modules, "app.google_data.trends", None)
     monkeypatch.delattr(_gd2, "trends", raising=False)
     assert tools_mod._get_trend_evidence({}, "m")["error_type"] == "source_unavailable"
@@ -3434,14 +4162,17 @@ def test_patents_company_assignees_and_handler(monkeypatch: pytest.MonkeyPatch) 
     assert tools_mod._patent_assignees({"assignees": ["a", 1]}) == ["a"]
     assert tools_mod._patent_assignees({}) is None
     import app.google_data.patents as pat
+
     def _pat_ok(*a: object, **k: object) -> dict[str, object]:
         return {"status": "ok"}
+
     monkeypatch.setattr(pat, "search_company_patents", _pat_ok)
     assert tools_mod._search_company_patents({"company_id": "c"}, "m") == {"status": "ok"}
     assert tools_mod._search_company_patents({"company_id": ""}, "m")["soft"] is True
     import sys as _sys3
 
     import app.google_data as _gd3
+
     monkeypatch.setitem(_sys3.modules, "app.google_data.patents", None)
     monkeypatch.delattr(_gd3, "patents", raising=False)
     assert tools_mod._search_company_patents({"company_id": "c"}, "m")["error_type"] == "source_unavailable"
@@ -3461,23 +4192,31 @@ def test_wrap_list_shapes() -> None:
 
 def test_suggest_queries_edges() -> None:
     from app.domain.market.entities import EntityRelationship
-    rel: EntityRelationship = EntityRelationship(relationship_id="r", relationship_type="owns", from_entity_id="e1", to_entity_id="e2",
-                             status="v", known_at=T0)
-    out = tools_mod.suggest_public_search_queries("e1", "Acme", "ACME", relationships=[rel], names_by_entity={"e2": "Beta"})
+
+    rel: EntityRelationship = EntityRelationship(
+        relationship_id="r", relationship_type="owns", from_entity_id="e1", to_entity_id="e2", status="v", known_at=T0
+    )
+    out = tools_mod.suggest_public_search_queries(
+        "e1", "Acme", "ACME", relationships=[rel], names_by_entity={"e2": "Beta"}
+    )
     assert out
     q0 = out[0]["query"]
     assert isinstance(q0, str) and ("Beta" in q0 or "Acme" in q0)
     assert tools_mod.suggest_public_search_queries(None, "Acme", None) == [{"query": "Acme recent announcements"}]
     assert tools_mod.suggest_public_search_queries("e1", None, None, relationships=[rel], names_by_entity=None) == []
-    bad_rel: EntityRelationship = json.loads('{"relationship_id": "x", "relationship_type": "owns", "from_entity_id": null, "to_entity_id": null, "status": "v", "known_at": "2026-01-01T00:00:00+00:00"}')
+    bad_rel: EntityRelationship = json.loads(
+        '{"relationship_id": "x", "relationship_type": "owns", "from_entity_id": null, "to_entity_id": null, "status": "v", "known_at": "2026-01-01T00:00:00+00:00"}'
+    )
     assert tools_mod._other_end(bad_rel, "e1") is None
     assert tools_mod._related_names("e1", [rel], None) == []
 
 
 def test_investigate_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.google_data.signals as sig
+
     def _sig_down(**k: object) -> list[dict[str, object]]:
         raise RuntimeError("down")
+
     monkeypatch.setattr(sig, "query_signals", _sig_down)
     out = execute_tool("investigate_social_arbitrage_candidate", {"term": "Stanley"}, "m", context=RCTX)
     gaps = out["gaps"]
@@ -3486,12 +4225,23 @@ def test_investigate_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["status"] == "unavailable" or out["evidence"] == {} or True
     ent = SimpleNamespace(name="Acme", cik="123", verification_status="verified")
     import app.sec.discovery.service as disc
-    def _find_ent(query: str, *, as_of: str | None = None, exhaustive: bool = False, max_results: int | None = 20, data_root: Path | str | None = None) -> object:
+
+    def _find_ent(
+        query: str,
+        *,
+        as_of: str | None = None,
+        exhaustive: bool = False,
+        max_results: int | None = 20,
+        data_root: Path | str | None = None,
+    ) -> object:
         return SimpleNamespace(entities=[ent])
+
     monkeypatch.setattr(disc, "find_sec_entities", _find_ent)
     import app.domain.market.identity as ident
+
     def _alias_down(*a: object, **k: object) -> SecurityResolution:
         raise RuntimeError("alias down")
+
     monkeypatch.setattr(ident, "resolve_ticker_aliases", _alias_down)
     out2 = execute_tool("investigate_social_arbitrage_candidate", {"term": "Acme", "limit": 999}, "m", context=RCTX)
     gaps2 = out2["gaps"]
@@ -3499,8 +4249,10 @@ def test_investigate_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     ents2 = out2["entities"]
     assert isinstance(ents2, dict)
     assert any(isinstance(g, str) and "entity resolution unavailable" in g for g in gaps2) or ents2["confirmed"]
+
     def _find_down(**k: object) -> object:
         raise RuntimeError("no sec")
+
     monkeypatch.setattr(disc, "find_sec_entities", _find_down)
     out3 = tools_mod._investigate_social_arbitrage_candidate({"term": 123}, "m")
     assert out3["term"] == "123"
@@ -3508,11 +4260,13 @@ def test_investigate_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # -- registry / search / browse / describe / validators --
 
+
 def test_registry_entry_checks() -> None:
     import copy
+
     reg = tools_mod.TOOL_DISCOVERY_REGISTRY
     probe = {k: copy.deepcopy(v) for k, v in reg.items()}
-    name = sorted(probe)[0]
+    name = min(probe)
     tools_mod._check_discovery_entry(name, probe[name], set(tools_mod.DOMAIN_DESCRIPTIONS))
     with pytest.raises(AssertionError):
         tools_mod._check_discovery_domain(name, probe[name], {"nope"})
@@ -3556,9 +4310,15 @@ def test_ambiguity_and_search_arms() -> None:
 
 def test_browse_arms() -> None:
     assert execute_tool("browse_tools", {"name": "nope"}, "m", context=RCTX)["error"] == "unknown_tool"
-    assert execute_tool("browse_tools", {"family": "short-interest"}, "m", context=RCTX)["error"] == "family_requires_domain"
+    assert (
+        execute_tool("browse_tools", {"family": "short-interest"}, "m", context=RCTX)["error"]
+        == "family_requires_domain"
+    )
     assert execute_tool("browse_tools", {"domain": "nope"}, "m", context=RCTX)["error"] == "unknown_domain"
-    assert execute_tool("browse_tools", {"domain": "finra", "family": "nope"}, "m", context=RCTX)["error"] == "unknown_family"
+    assert (
+        execute_tool("browse_tools", {"domain": "finra", "family": "nope"}, "m", context=RCTX)["error"]
+        == "unknown_family"
+    )
     fam = execute_tool("browse_tools", {"domain": "finra", "family": "short-interest"}, "m", context=RCTX)
     assert fam["count"] == 4
     contrast = fam["contrast_table"]
@@ -3589,7 +4349,7 @@ def test_validators_and_schema() -> None:
     assert tools_mod._validate_tool_arguments("search_tools", [1]) is not None
     assert tools_mod._validate_tool_arguments("search_tools", {}) is not None
     assert tools_mod._validate_tool_arguments("search_tools", {"query": "x"}) is None
-    params, req, opt = tools_mod._canonical_tool_schema("search_tools")
+    _params, req, opt = tools_mod._canonical_tool_schema("search_tools")
     assert "query" in req and isinstance(opt, list)
     assert tools_mod._tool_has_as_of("find_sec_entities") is True
     assert tools_mod._tool_has_as_of("search_web") is False
@@ -3599,6 +4359,7 @@ def test_validators_and_schema() -> None:
 
 
 # -- envelope / SEC handlers --
+
 
 def test_envelope_helpers() -> None:
     assert tools_mod._envelope_dict("x") == {}
@@ -3613,7 +4374,15 @@ def test_envelope_helpers() -> None:
 def test_sec_document_offsets(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: dict[str, object] = {}
 
-    def _fake(acc: str, doc: str | None = None, *, as_of: str | None = None, offset: int = 0, max_chars: int | None = None, data_root: Path | str | None = None) -> dict[str, object]:
+    def _fake(
+        acc: str,
+        doc: str | None = None,
+        *,
+        as_of: str | None = None,
+        offset: int = 0,
+        max_chars: int | None = None,
+        data_root: Path | str | None = None,
+    ) -> dict[str, object]:
         seen.update(offset=offset, max_chars=max_chars)
         return {"ok": True}
 
@@ -3630,8 +4399,10 @@ def test_sec_document_offsets(monkeypatch: pytest.MonkeyPatch) -> None:
     assert tools_mod._doc_max_chars("") == 12000
     out = execute_tool("get_sec_document", {"accession_no": "a", "offset": "3", "max_chars": "9"}, "m", context=RCTX)
     assert out == {"ok": True} and seen == {"offset": 3, "max_chars": 9}
+
     def _doc_boom(*a: object, **k: object) -> dict[str, object]:
         raise ValueError("bad acc")
+
     monkeypatch.setattr(tools_mod.sec, "get_sec_document", _doc_boom)
     err = execute_tool("get_sec_document", {"accession_no": "a"}, "m", context=RCTX)
     assert err["error_type"] == "invalid_tool_arguments"
@@ -3649,24 +4420,51 @@ def test_relationships_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert tools_mod._rel_ciks({"ciks": ["a"]}) == ["a"]
 
     def _fake(entity: str, **k: object) -> dict[str, object]:
-        return {"entity": entity, "ciks": ["1"], "typed": [{"a": 1}], "relationships": [], "mentions": [],
-                "groups": {}, "attempts": [{"status": "failed"}], "warnings": ["w"], "errors": []}
+        return {
+            "entity": entity,
+            "ciks": ["1"],
+            "typed": [{"a": 1}],
+            "relationships": [],
+            "mentions": [],
+            "groups": {},
+            "attempts": [{"status": "failed"}],
+            "warnings": ["w"],
+            "errors": [],
+        }
 
     monkeypatch.setattr(tools_mod.sec, "search_sec_relationships", _fake)
     out = execute_tool("search_sec_relationships", {"entity": "AAPL"}, "m", context=RCTX)
     assert out["coverage"] == {"status": "partial"} and out["count"] == 1
 
     def _empty(entity: str, **k: object) -> dict[str, object]:
-        return {"entity": entity, "ciks": [], "typed": [], "relationships": [], "mentions": [],
-                "groups": {}, "attempts": [{"status": "failed"}], "warnings": [], "errors": ["e"]}
+        return {
+            "entity": entity,
+            "ciks": [],
+            "typed": [],
+            "relationships": [],
+            "mentions": [],
+            "groups": {},
+            "attempts": [{"status": "failed"}],
+            "warnings": [],
+            "errors": ["e"],
+        }
 
     monkeypatch.setattr(tools_mod.sec, "search_sec_relationships", _empty)
     out2 = tools_mod._sec_relationships_result({"entity": "X", "relationship_types": "t"})
     assert out2["coverage"] == {"status": "failed"}
 
     def _clean(entity: str, **k: object) -> dict[str, object]:
-        return {"entity": entity, "ciks": [], "typed": [{"a": 1}], "relationships": [], "mentions": [],
-                "groups": {}, "attempts": [{"status": "complete"}], "warnings": [], "errors": []}
+        return {
+            "entity": entity,
+            "ciks": [],
+            "typed": [{"a": 1}],
+            "relationships": [],
+            "mentions": [],
+            "groups": {},
+            "attempts": [{"status": "complete"}],
+            "warnings": [],
+            "errors": [],
+        }
 
     monkeypatch.setattr(tools_mod.sec, "search_sec_relationships", _clean)
     out3 = tools_mod._sec_relationships_result({"entity": "X", "relationship_types": ["t"], "as_of": "2026-01-01"})
@@ -3682,36 +4480,58 @@ def test_diff_filings_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert tools_mod._filing_forms("10-K") == "10-K"
     assert tools_mod._filing_forms(["10-K", 1]) == ("10-K", "1")
     assert tools_mod._filing_forms(5) is None
+
     def _filings_down(*a: object, **k: object) -> list[object]:
         raise RuntimeError("down")
+
     monkeypatch.setattr(tools_mod.sec, "list_sec_filings", _filings_down)
     assert tools_mod._diff_sec_filings({"ticker": "AAPL"}, "m") == {"error": "down"}
     from app.sec.models import Filing
+
     def _filing(acc: str, form: str) -> Filing:
-        return Filing(accession_no=acc, form=form, filer_cik=1, filer_name="F",
-                      filed_at="2026-01-01", accepted_at=None, known_at="2026-01-01T00:00:00Z",
-                      report_period=None, primary_document=None, is_amendment=False,
-                      amendment_of=None, source="u")
+        return Filing(
+            accession_no=acc,
+            form=form,
+            filer_cik=1,
+            filer_name="F",
+            filed_at="2026-01-01",
+            accepted_at=None,
+            known_at="2026-01-01T00:00:00Z",
+            report_period=None,
+            primary_document=None,
+            is_amendment=False,
+            amendment_of=None,
+            source="u",
+        )
+
     f1 = _filing("a1", "10-K")
     f2 = _filing("a2", "10-K")
     f3 = _filing("a3", "8-K")
+
     def _filings_trio(*a: object, **k: object) -> list[object]:
         return [f1, f3, f2]
+
     def _diff_ok(a: str, b: str, section: str | None = None) -> dict[str, object]:
         return {"diff": [a, b]}
+
     monkeypatch.setattr(tools_mod.sec, "list_sec_filings", _filings_trio)
     monkeypatch.setattr(tools_mod.sec, "diff_filings", _diff_ok)
     tagged = tools_mod._diff_sec_filings({"ticker": "aapl", "forms": "10-K"}, "m")
     assert tagged["resolved_via"] == "list_sec_filings-internal" and tagged["ticker"] == "AAPL"
+
     def _filings_one(*a: object, **k: object) -> list[object]:
         return [f1]
+
     monkeypatch.setattr(tools_mod.sec, "list_sec_filings", _filings_one)
     nopair = tools_mod._diff_sec_filings({"ticker": "A"}, "m")["error"]
     assert isinstance(nopair, str) and "No pair" in nopair
+
     def _filings_pair(*a: object, **k: object) -> list[object]:
         return [f1, f3]
+
     def _diff_err(a: str, b: str, section: str | None = None) -> dict[str, object]:
         return {"error": "x"}
+
     monkeypatch.setattr(tools_mod.sec, "list_sec_filings", _filings_pair)
     monkeypatch.setattr(tools_mod.sec, "diff_filings", _diff_err)
     assert tools_mod._diff_sec_filings({"ticker": "A"}, "m") == {"error": "x"}
@@ -3720,28 +4540,38 @@ def test_diff_filings_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_resolve_and_obligations(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.services.evidence_resolution as er
+
     def _wtk(n: str) -> str | None:
         if n == "Apple":
             return " aapl "
         raise RuntimeError("x")
+
     monkeypatch.setattr(er, "warehouse_name_to_ticker", _wtk)
     assert tools_mod._warehouse_ticker("Apple") == "AAPL"
     assert tools_mod._warehouse_ticker("Nope") is None
     import app.sec.client as cli
+
     def _find_msft(n: str, limit: int = 3) -> list[dict[str, object]]:
         return [{"tickers": [" msft "]}]
+
     monkeypatch.setattr(cli, "find_sec_company", _find_msft)
     assert tools_mod._edgar_ticker("Microsoft") == "MSFT"
+
     def _find_boom(n: str, limit: int = 3) -> list[dict[str, object]]:
         raise RuntimeError("x")
+
     monkeypatch.setattr(cli, "find_sec_company", _find_boom)
     assert tools_mod._edgar_ticker("X") is None
     assert tools_mod._resolve_company_to_ticker("Apple") == "AAPL"
+
     def _rct(n: str) -> str | None:
         return "AAPL" if n == "apple" else None
+
     monkeypatch.setattr(tools_mod, "_resolve_company_to_ticker", _rct)
+
     def _ob(t: str) -> dict[str, object]:
         return {"ticker": t}
+
     monkeypatch.setattr(tools_mod.obligations, "get_obligations", _ob)
     assert tools_mod._get_obligations({"ticker": "apple"}, "m") == {"ticker": "AAPL"}
     assert tools_mod._get_obligations({"company_name": "apple"}, "m") == {"ticker": "AAPL"}
@@ -3759,26 +4589,35 @@ def test_resolve_and_obligations(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # -- thesis handlers --
 
+
 def test_thesis_show_live_snapshot_and_future(tmp_path: Path) -> None:
-    r, t = _thesis(tmp_path)
+    _r, t = _thesis(tmp_path)
     ctx = _rctx(tmp_path)
     live = execute_tool("thesis_show", {"id": t.thesis_id}, "m", context=ctx)
     assert live["thesis_id"] == t.thesis_id and "claims" in live
     snap = execute_tool("thesis_show", {"id": t.thesis_id, "as_of": T0}, "m", context=ctx)
     assert snap["thesis_id"] == t.thesis_id
-    eq = execute_tool("thesis_show", {"id": t.thesis_id, "as_of": T0}, "m",
-                      context=_rctx(tmp_path, as_of=T0))
+    eq = execute_tool("thesis_show", {"id": t.thesis_id, "as_of": T0}, "m", context=_rctx(tmp_path, as_of=T0))
     assert eq["thesis_id"] == t.thesis_id
-    junk = execute_tool("thesis_show", {"id": t.thesis_id, "as_of": "junk"}, "m",
-                        context=_rctx(tmp_path, as_of="2026-06-01T00:00:00+00:00"))
+    junk = execute_tool(
+        "thesis_show",
+        {"id": t.thesis_id, "as_of": "junk"},
+        "m",
+        context=_rctx(tmp_path, as_of="2026-06-01T00:00:00+00:00"),
+    )
     assert junk["error"]
-    num = execute_tool("thesis_show", {"id": t.thesis_id, "as_of": 5}, "m",
-                       context=_rctx(tmp_path, as_of="2026-06-01T00:00:00+00:00"))
+    num = execute_tool(
+        "thesis_show", {"id": t.thesis_id, "as_of": 5}, "m", context=_rctx(tmp_path, as_of="2026-06-01T00:00:00+00:00")
+    )
     assert num["thesis_id"] == t.thesis_id
     assert tools_mod._as_snapshot_list("x") == []
     assert tools_mod._open_snapshot_questions({}) == []
-    fut = execute_tool("thesis_show", {"id": t.thesis_id, "as_of": "2999-01-01"}, "m",
-                       context=_rctx(tmp_path, as_of="2026-01-01T00:00:00+00:00"))
+    fut = execute_tool(
+        "thesis_show",
+        {"id": t.thesis_id, "as_of": "2999-01-01"},
+        "m",
+        context=_rctx(tmp_path, as_of="2026-01-01T00:00:00+00:00"),
+    )
     assert fut["error_type"] == "invalid_tool_arguments"
 
 
@@ -3791,9 +4630,13 @@ def test_thesis_watch_list_and_add(tmp_path: Path) -> None:
     assert hist["thesis_id"] == t.thesis_id
     assert execute_tool("thesis_watch", {"id": t.thesis_id, "rule_type": ""}, "m", context=ctx)["error"]
     assert execute_tool("thesis_watch", {"id": t.thesis_id, "rule_type": "nope"}, "m", context=ctx)["error"]
-    assert execute_tool("thesis_watch", {"id": t.thesis_id, "rule_type": "new_filing", "claim_ids": "x"}, "m", context=ctx)["error"]
+    assert execute_tool(
+        "thesis_watch", {"id": t.thesis_id, "rule_type": "new_filing", "claim_ids": "x"}, "m", context=ctx
+    )["error"]
     cid = r.load_thesis(t.thesis_id).claims[0].claim_id
-    added = execute_tool("thesis_watch", {"id": t.thesis_id, "rule_type": "new_filing", "claim_ids": [cid]}, "m", context=ctx)
+    added = execute_tool(
+        "thesis_watch", {"id": t.thesis_id, "rule_type": "new_filing", "claim_ids": [cid]}, "m", context=ctx
+    )
     assert isinstance(added, dict)
     inner = added.get("added", {})
     assert isinstance(inner, dict)
@@ -3810,28 +4653,61 @@ def test_thesis_journal_arms(tmp_path: Path) -> None:
     assert out["thesis_id"] == t.thesis_id
     assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": " "}, "m", context=ctx)["error"]
     assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "title": 5}, "m", context=ctx)["error"]
-    trig = r.create_trigger(t.thesis_id, claim_ids=[r.load_thesis(t.thesis_id).claims[0].claim_id],
-                            canonical_refs=["ev:1"], summary="s", summary_origin="deterministic")
-    linked = execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id}, "m", context=ctx)
+    trig = r.create_trigger(
+        t.thesis_id,
+        claim_ids=[r.load_thesis(t.thesis_id).claims[0].claim_id],
+        canonical_refs=["ev:1"],
+        summary="s",
+        summary_origin="deterministic",
+    )
+    linked = execute_tool(
+        "thesis_journal", {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id}, "m", context=ctx
+    )
     assert linked["thesis_id"] == t.thesis_id
-    assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "trigger_id": "nope"}, "m", context=ctx)["error"]
-    assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "run_id": "r1"}, "m", context=ctx)["thesis_id"]
-    ok_run = execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id, "run_id": "r1"}, "m", context=ctx)
+    assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "trigger_id": "nope"}, "m", context=ctx)[
+        "error"
+    ]
+    assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "run_id": "r1"}, "m", context=ctx)[
+        "thesis_id"
+    ]
+    ok_run = execute_tool(
+        "thesis_journal",
+        {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id, "run_id": "r1"},
+        "m",
+        context=ctx,
+    )
     assert ok_run["thesis_id"] == t.thesis_id
-    assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "known_at": "junk"}, "m", context=ctx)["error"]
+    assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "known_at": "junk"}, "m", context=ctx)[
+        "error"
+    ]
     dated = execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "known_at": T0}, "m", context=ctx)
     assert dated["thesis_id"] == t.thesis_id
     hist_ctx = _rctx(tmp_path, as_of=T0)
-    assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id, "known_at": "junk"}, "m", context=hist_ctx)["error"]
-    assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id, "known_at": "2999-01-01"}, "m", context=hist_ctx)["error"]
-    cut = execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id, "known_at": T0}, "m", context=hist_ctx)
+    assert execute_tool(
+        "thesis_journal",
+        {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id, "known_at": "junk"},
+        "m",
+        context=hist_ctx,
+    )["error"]
+    assert execute_tool(
+        "thesis_journal",
+        {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id, "known_at": "2999-01-01"},
+        "m",
+        context=hist_ctx,
+    )["error"]
+    cut = execute_tool(
+        "thesis_journal",
+        {"id": t.thesis_id, "body": "b", "trigger_id": trig.trigger_id, "known_at": T0},
+        "m",
+        context=hist_ctx,
+    )
     assert cut["thesis_id"] == t.thesis_id
     r.pause_thesis(t.thesis_id)
     assert execute_tool("thesis_journal", {"id": t.thesis_id, "body": "b"}, "m", context=ctx)["error"]
 
 
 def test_thesis_status_arms(tmp_path: Path) -> None:
-    r, t = _thesis(tmp_path)
+    _r, t = _thesis(tmp_path)
     ctx = _rctx(tmp_path)
     assert tools_mod._checked_status_id({"id": " x "}) == "x"
     with pytest.raises(ValueError):
@@ -3849,6 +4725,7 @@ def test_thesis_status_arms(tmp_path: Path) -> None:
 
 # -- research handlers --
 
+
 def test_research_not_found_routing() -> None:
     assert tools_mod._research_not_found_error(ValueError("job_id zzz"))["error_type"] == "unknown_job"
     assert tools_mod._research_not_found_error(ValueError("nope"))["error_type"] == "unknown_session"
@@ -3856,7 +4733,7 @@ def test_research_not_found_routing() -> None:
 
 
 def test_research_start_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    repo = _started_repo(tmp_path, monkeypatch)
+    _started_repo(tmp_path, monkeypatch)
     ctx = _rctx(tmp_path)
     assert execute_tool("research_start", {"question": " "}, "m", context=ctx)["error"]
     out = execute_tool("research_start", {"question": " Why NVDA? ", "objective": " ", "as_of": ""}, "m", context=ctx)
@@ -3875,11 +4752,17 @@ def test_research_read_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> 
     bad_kind = execute_tool("research_read", {"session_id": sid, "kind": "nope", "resource_id": "r"}, "m", context=ctx)
     assert bad_kind["error_type"] == "unknown_resource"
     assert tools_mod._checked_resource_kind({"kind": "job"}) == "job"
-    missing_session = execute_tool("research_read", {"session_id": "nope", "kind": "job", "resource_id": "r"}, "m", context=ctx)
+    missing_session = execute_tool(
+        "research_read", {"session_id": "nope", "kind": "job", "resource_id": "r"}, "m", context=ctx
+    )
     assert missing_session["error_type"] in ("unknown_session", "unknown_job")
-    unknown_job = execute_tool("research_read", {"session_id": sid, "kind": "job", "resource_id": "nope"}, "m", context=ctx)
+    unknown_job = execute_tool(
+        "research_read", {"session_id": sid, "kind": "job", "resource_id": "nope"}, "m", context=ctx
+    )
     assert unknown_job["error_type"] == "unknown_job"
-    unknown_ev = execute_tool("research_read", {"session_id": sid, "kind": "evidence", "resource_id": "nope"}, "m", context=ctx)
+    unknown_ev = execute_tool(
+        "research_read", {"session_id": sid, "kind": "evidence", "resource_id": "nope"}, "m", context=ctx
+    )
     assert unknown_ev["error_type"] == "unknown_resource"
     job_id = repo.list_jobs(sid)[0].job_id
     hit = execute_tool("research_read", {"session_id": sid, "kind": "job", "resource_id": job_id}, "m", context=ctx)
@@ -3944,11 +4827,31 @@ def test_research_submit_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     assert isinstance(sid_raw, str)
     sid = sid_raw
     job_id = repo.list_jobs(sid)[0].job_id
-    assert execute_tool("research_submit_source_result", {"session_id": sid, "job_id": job_id, "coverage": [], "evidence_ids": [], "unresolved_questions": []}, "m", context=ctx)["error"]
-    assert execute_tool("research_submit_source_result", {"session_id": sid, "job_id": job_id, "coverage": {}, "evidence_ids": "x", "unresolved_questions": []}, "m", context=ctx)["error"]
-    unknown_job = execute_tool("research_submit_source_result", {"session_id": sid, "job_id": "nope", "coverage": {}, "evidence_ids": [], "unresolved_questions": []}, "m", context=ctx)
+    assert execute_tool(
+        "research_submit_source_result",
+        {"session_id": sid, "job_id": job_id, "coverage": [], "evidence_ids": [], "unresolved_questions": []},
+        "m",
+        context=ctx,
+    )["error"]
+    assert execute_tool(
+        "research_submit_source_result",
+        {"session_id": sid, "job_id": job_id, "coverage": {}, "evidence_ids": "x", "unresolved_questions": []},
+        "m",
+        context=ctx,
+    )["error"]
+    unknown_job = execute_tool(
+        "research_submit_source_result",
+        {"session_id": sid, "job_id": "nope", "coverage": {}, "evidence_ids": [], "unresolved_questions": []},
+        "m",
+        context=ctx,
+    )
     assert unknown_job["error_type"] == "unknown_job"
-    unknown_session = execute_tool("research_submit_source_result", {"session_id": "nope", "job_id": job_id, "coverage": {}, "evidence_ids": [], "unresolved_questions": []}, "m", context=ctx)
+    unknown_session = execute_tool(
+        "research_submit_source_result",
+        {"session_id": "nope", "job_id": job_id, "coverage": {}, "evidence_ids": [], "unresolved_questions": []},
+        "m",
+        context=ctx,
+    )
     assert unknown_session["error_type"] in ("unknown_session", "unknown_job")
     assert tools_mod._submit_job_known({"jobs": "x"}, job_id) is False
 
@@ -3960,14 +4863,38 @@ def test_research_analysis_and_finalize_arms(tmp_path: Path, monkeypatch: pytest
     assert isinstance(sid_raw, str)
     sid = sid_raw
     job_id = repo.list_jobs(sid)[0].job_id
-    assert execute_tool("research_add_analysis", {"session_id": sid, "job_id": job_id, "role": "nope", "analysis": {}}, "m", context=ctx)["error"]
-    assert execute_tool("research_add_analysis", {"session_id": sid, "job_id": job_id, "role": "stockbot", "analysis": []}, "m", context=ctx)["error"]
+    assert execute_tool(
+        "research_add_analysis", {"session_id": sid, "job_id": job_id, "role": "nope", "analysis": {}}, "m", context=ctx
+    )["error"]
+    assert execute_tool(
+        "research_add_analysis",
+        {"session_id": sid, "job_id": job_id, "role": "stockbot", "analysis": []},
+        "m",
+        context=ctx,
+    )["error"]
     assert tools_mod._analysis_role({"role": "bearbot"}) == "bearbot"
     assert tools_mod._analysis_payload({"analysis": {"a": 1}}) == {"a": 1}
-    assert execute_tool("research_finalize", {"session_id": sid, "answer": " ", "claims": [{"text": "t", "evidence_ids": ["e"]}]}, "m", context=ctx)["error"]
-    assert execute_tool("research_finalize", {"session_id": sid, "answer": "a", "claims": []}, "m", context=ctx)["error"]
-    assert execute_tool("research_finalize", {"session_id": sid, "answer": "a", "claims": [{"text": "t", "evidence_ids": ["e"]}]}, "m", context=RequestContext("t", frozenset({Capability.RESEARCH})))["error"]
-    assert execute_tool("research_finalize", {"session_id": sid, "answer": "a", "claims": [{"text": "t", "evidence_ids": []}]}, "m", context=ctx)["error"]
+    assert execute_tool(
+        "research_finalize",
+        {"session_id": sid, "answer": " ", "claims": [{"text": "t", "evidence_ids": ["e"]}]},
+        "m",
+        context=ctx,
+    )["error"]
+    assert execute_tool("research_finalize", {"session_id": sid, "answer": "a", "claims": []}, "m", context=ctx)[
+        "error"
+    ]
+    assert execute_tool(
+        "research_finalize",
+        {"session_id": sid, "answer": "a", "claims": [{"text": "t", "evidence_ids": ["e"]}]},
+        "m",
+        context=RequestContext("t", frozenset({Capability.RESEARCH})),
+    )["error"]
+    assert execute_tool(
+        "research_finalize",
+        {"session_id": sid, "answer": "a", "claims": [{"text": "t", "evidence_ids": []}]},
+        "m",
+        context=ctx,
+    )["error"]
     assert tools_mod._finalize_answer({"answer": "a"}) == "a"
     assert tools_mod._finalize_claim_ids(["e"]) == ["e"]
     with pytest.raises(ValueError):
@@ -3977,6 +4904,7 @@ def test_research_analysis_and_finalize_arms(tmp_path: Path, monkeypatch: pytest
 
 
 # --- runner: live run/resume (from /tmp/rc_corerunner.py) ---
+
 
 def _noop_dispatch(n: str, a: dict[str, object]) -> dict[str, object]:
     return {}
@@ -3988,6 +4916,7 @@ def _noop_model(p: str) -> str:
 
 def _grounded(prompt: str) -> str:
     import re as _re
+
     seen: list[str] = []
     for line in prompt.splitlines():
         stripped = line.strip()
@@ -4002,22 +4931,53 @@ def _grounded(prompt: str) -> str:
             tok = str(m2.group(1)).strip()
             if (tok.startswith("EV-") or ":sec:" in tok) and tok not in seen:
                 seen.append(tok)
-    claims: list[dict[str, object]] = [] if not seen else [{"text": f"grounded finding {i}", "evidence_ids": [eid]} for i, eid in enumerate(seen[:6])]
+    claims: list[dict[str, object]] = (
+        [] if not seen else [{"text": f"grounded finding {i}", "evidence_ids": [eid]} for i, eid in enumerate(seen[:6])]
+    )
     if "Temporary assignment" in prompt:
         return json.dumps(claims)
-    return json.dumps({
-        "executive_view": "base case holds",
-        "claims": claims,
-        "impact_channels": [],
-        "materiality": {"overall": "medium", "reasoning": "grounded in the freeze"},
-        "uncertainties": [],
-        "what_would_change": ["a materially new filing"],
-        "follow_ups": [],
-    })
+    return json.dumps(
+        {
+            "executive_view": "base case holds",
+            "claims": claims,
+            "impact_channels": [],
+            "materiality": {"overall": "medium", "reasoning": "grounded in the freeze"},
+            "uncertainties": [],
+            "what_would_change": ["a materially new filing"],
+            "follow_ups": [],
+        }
+    )
+
+
+@pytest.fixture(autouse=True)
+def _evidence_handle_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evidence admission in this module reloads through the fake archive, never the network."""
+    seam.install(monkeypatch)
+
+
+def _doc_result(accession: str, document: str, window: str, **extra: object) -> dict[str, object]:
+    """One document-opening tool result carrying a canonical source_handle.
+
+    The fake archive serves the registered window, so the runner's ingest
+    materializes exactly the passage this result names.
+    """
+    base: dict[str, object] = {
+        "accession_no": accession,
+        "document_name": document,
+        "text": window,
+        "matching_passage": window,
+        "content": window,
+        "content_hash": "0" * 64,
+        "source_uri": f"source://sec/{accession}/{document}",
+        "source_handle": seam.handle_for(window, accession=accession, document=document),
+    }
+    base.update(extra)
+    return base
 
 
 def _fake_dispatch() -> DispatchFn:
     """SEC-shaped results: searches navigate (top_hits), documents carry raw passages."""
+
     def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
         if name in ("search_tools", "browse_tools"):
             return {"matches": ["sec-10q", "sec-10k"]}
@@ -4026,22 +4986,37 @@ def _fake_dispatch() -> DispatchFn:
             raw_args = args.get("arguments")
             call: dict[str, object] = raw_args if isinstance(raw_args, dict) else {}
             if inner in ("get_sec_document", "get_sec_filing"):
-                return {"accession_no": str(call.get("accession_no") or "0000320193-25-000079"),
-                        "document_name": str(call.get("document_name") or "nvda-20250331.htm"),
-                        "matching_passage": "Data center revenue grew 142% year over year.",
-                        "content": "Data center revenue grew 142% year over year.",
-                        "known_at": "2025-05-01"}
+                return _doc_result(
+                    str(call.get("accession_no") or "0000320193-25-000079"),
+                    str(call.get("document_name") or "nvda-20250331.htm"),
+                    "Data center revenue grew 142% year over year.",
+                    known_at="2025-05-01",
+                )
             if inner == "search_sec_filings":
-                return {"search_id": f"search:{call.get('query', '')}", "count": 1,
-                        "top_hits": [{"accession": "0000320193-25-000079",
-                                      "document": "nvda-20250331.htm", "form": "10-Q"}]}
-            return {"record": {"id": str(call.get("record_id", "r")), "known_at": "2025-05-01"}}
+                return {
+                    "search_id": f"search:{call.get('query', '')}",
+                    "count": 1,
+                    "top_hits": [
+                        {
+                            "accession": "0000320193-25-000079",
+                            "document": "nvda-20250331.htm",
+                            "form": "10-Q",
+                        }
+                    ],
+                }
+            return {
+                "record": {
+                    "id": str(call.get("record_id", "r")),
+                    "known_at": "2025-05-01",
+                }
+            }
         return {}
+
     return _dispatch
 
 
 def test_extract_known_at_datetime_and_invalid() -> None:
-    dt = datetime(2025, 5, 1, tzinfo=timezone.utc)
+    dt = datetime(2025, 5, 1, tzinfo=_dt.UTC)
     assert _extract_known_at({"known_at": dt}) == dt
     assert _extract_known_at({"known_at": "not-a-date", "record": {"known_at": "also-bad"}}) is None
     assert _extract_known_at({}) is None
@@ -4049,16 +5024,27 @@ def test_extract_known_at_datetime_and_invalid() -> None:
 
 def test_match_names_dict_and_scalar_arms() -> None:
     from app.research.runner import _LiveRun
+
     assert _LiveRun._match_names(None) == []
-    assert _LiveRun._match_names([{"name": "sec-10q"}, {"nope": 1}, "sec-10k", 42, ""]) == [{"name": "sec-10q"}, {"name": "sec-10k"}]
+    assert _LiveRun._match_names([{"name": "sec-10q"}, {"nope": 1}, "sec-10k", 42, ""]) == [
+        {"name": "sec-10q"},
+        {"name": "sec-10k"},
+    ]
     assert _LiveRun._match_names([{"name": ""}, {"name": 42}]) == []
 
 
 def test_coerce_reused_findings_arms() -> None:
     from app.research.runner import _LiveRun
+
     assert _LiveRun._coerce_reused_findings(None) == []
     assert _LiveRun._coerce_reused_findings("nope") == []
-    mixed: list[object] = ["str", {"text": "", "evidence_ids": ["E1"]}, {"text": "t", "evidence_ids": []}, {"text": "t", "evidence_ids": ["", 42]}, {"text": " good ", "evidence_ids": ["E1", "E2"]}]
+    mixed: list[object] = [
+        "str",
+        {"text": "", "evidence_ids": ["E1"]},
+        {"text": "t", "evidence_ids": []},
+        {"text": "t", "evidence_ids": ["", 42]},
+        {"text": " good ", "evidence_ids": ["E1", "E2"]},
+    ]
     out = _LiveRun._coerce_reused_findings(mixed)
     first = out[0]
     assert isinstance(first, GroundedClaim)
@@ -4067,19 +5053,37 @@ def test_coerce_reused_findings_arms() -> None:
 
 def test_coerce_reused_requests_arms() -> None:
     from app.research.runner import _LiveRun
+
     assert _LiveRun._coerce_reused_requests(None) == []
-    assert _LiveRun._coerce_reused_requests(["str", {"question": "Q?", "why_material": "m", "requested_source_domain": "SEC", "expected_gain": "high", "requesting_agents": ["a", 42]}]) != []
+    assert (
+        _LiveRun._coerce_reused_requests(
+            [
+                "str",
+                {
+                    "question": "Q?",
+                    "why_material": "m",
+                    "requested_source_domain": "SEC",
+                    "expected_gain": "high",
+                    "requesting_agents": ["a", 42],
+                },
+            ]
+        )
+        != []
+    )
     assert _LiveRun._coerce_reused_requests([{"question": 42}]) != [] or True  # coercion never raises on odd shapes
 
 
 def test_categorize_fetch_error_ladder() -> None:
     from app.research.models import FailureCategory
     from app.research.runner import _LiveRun
+
     tagged = RuntimeError("x")
-    setattr(tagged, "_failure_category", FailureCategory.POLICY_DENIED)
+    setattr(tagged, "_failure_category", FailureCategory.POLICY_DENIED)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     assert _LiveRun._categorize_fetch_error(tagged) == FailureCategory.POLICY_DENIED
     assert _LiveRun._categorize_fetch_error(TimeoutError("timed out")) == FailureCategory.TIMEOUT
-    assert _LiveRun._categorize_fetch_error(RuntimeError("tool budget exhausted")) == FailureCategory.TOOL_ERROR  # §3 bare budget no longer collapses
+    assert (
+        _LiveRun._categorize_fetch_error(RuntimeError("tool budget exhausted")) == FailureCategory.TOOL_ERROR
+    )  # §3 bare budget no longer collapses
     assert _LiveRun._categorize_fetch_error(RuntimeError("POLICY_DENIED nope")) == FailureCategory.POLICY_DENIED
     assert _LiveRun._categorize_fetch_error(RuntimeError("other")) == FailureCategory.TOOL_ERROR
 
@@ -4087,14 +5091,17 @@ def test_categorize_fetch_error_ladder() -> None:
 def test_categorize_committee_error_ladder() -> None:
     from app.research.models import FailureCategory
     from app.research.runner import _LiveRun
+
     tagged = RuntimeError("x")
-    setattr(tagged, "_failure_category", FailureCategory.TOOL_ERROR)
+    setattr(tagged, "_failure_category", FailureCategory.TOOL_ERROR)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     assert _LiveRun._categorize_committee_error(tagged) == FailureCategory.TOOL_ERROR
     # An unrecognized failure is never a fake timeout; a real timeout is typed or named.
     assert _LiveRun._categorize_committee_error(RuntimeError("budget gone")) == FailureCategory.MODEL_ERROR
     assert _LiveRun._categorize_committee_error(TimeoutError("pi call timed out")) == FailureCategory.TIMEOUT
     assert _LiveRun._categorize_committee_error(RuntimeError("denied by policy")) == FailureCategory.POLICY_DENIED
-    assert _LiveRun._categorize_committee_error(RuntimeError("uncited claim here")) == FailureCategory.MODEL_OUTPUT_FAILURE
+    assert (
+        _LiveRun._categorize_committee_error(RuntimeError("uncited claim here")) == FailureCategory.MODEL_OUTPUT_FAILURE
+    )
     assert _LiveRun._categorize_committee_error(RuntimeError("tool_error bad")) == FailureCategory.TOOL_ERROR
     assert _LiveRun._categorize_committee_error(RuntimeError("mystery")) == FailureCategory.MODEL_ERROR
 
@@ -4102,40 +5109,47 @@ def test_categorize_committee_error_ladder() -> None:
 def test_categorize_scout_error_ladder() -> None:
     from app.research.models import FailureCategory
     from app.research.runner import _LiveRun
+
     tagged = RuntimeError("x")
-    setattr(tagged, "_failure_category", FailureCategory.TIMEOUT)
+    setattr(tagged, "_failure_category", FailureCategory.TIMEOUT)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     assert _LiveRun._categorize_scout_error(tagged, "") == FailureCategory.TIMEOUT
     assert _LiveRun._categorize_scout_error(TimeoutError("expired"), "") == FailureCategory.TIMEOUT
-    assert _LiveRun._categorize_scout_error(RuntimeError("scout tool budget exhausted"), "") == FailureCategory.TOOL_ERROR  # §3 bare budget no longer collapses
+    assert (
+        _LiveRun._categorize_scout_error(RuntimeError("scout tool budget exhausted"), "") == FailureCategory.TOOL_ERROR
+    )  # §3 bare budget no longer collapses
     assert _LiveRun._categorize_scout_error(RuntimeError("policy denied"), "") == FailureCategory.POLICY_DENIED
     assert _LiveRun._categorize_scout_error(RuntimeError("boom"), "model") == FailureCategory.MODEL_ERROR
     assert _LiveRun._categorize_scout_error(RuntimeError("boom"), "tool") == FailureCategory.TOOL_ERROR
-
-
 
 
 def test_trace_record_closed_and_failure_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research.director import DirectorBudgets
     from app.research.runner import _LiveRun
+
     repo = ResearchRepository()
     run = _LiveRun(repo, "q?", "o", None, "", ["NVDA"], _noop_dispatch, _noop_model, DirectorBudgets())
     # closed trace: returns without raise (covers tr-is-None arm)
     run.trace = None
     run._trace_record("x", {"a": 1})
+
     # emit-failure arm: record raises -> swallowed
     class _BadTrace:
         def record(self, *a: object, **k: object) -> None:
             raise RuntimeError("boom")
+
         def finish(self, *a: object, **k: object) -> None:
             raise RuntimeError("boom")
-    setattr(run, "trace", _BadTrace())
+
+    setattr(run, "trace", _BadTrace())  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     run._trace_record("x", {"a": 1})
+
     # json-dumps failure arm: value whose str() raises
     class _Evil:
         def __str__(self) -> str:
             raise RuntimeError("evil str")
-    setattr(run, "trace", _BadTrace())
+
+    setattr(run, "trace", _BadTrace())  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     evil: object = _Evil()
     payload: Mapping[str, object] = {"evil": evil}
     run._trace_record("x", payload)
@@ -4145,8 +5159,19 @@ def test_create_session_interrupt_vs_plain(tmp_path: Path, monkeypatch: pytest.M
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research.director import DirectorBudgets
     from app.research.runner import _LiveRun
+
     repo = ResearchRepository()
-    run = _LiveRun(repo, "q?", "o", "2025-06-30T00:00:00+00:00", "2025-06-30T00:00:00+00:00", ["NVDA"], _noop_dispatch, _noop_model, DirectorBudgets())
+    run = _LiveRun(
+        repo,
+        "q?",
+        "o",
+        "2025-06-30T00:00:00+00:00",
+        "2025-06-30T00:00:00+00:00",
+        ["NVDA"],
+        _noop_dispatch,
+        _noop_model,
+        DirectorBudgets(),
+    )
     sid_plain = run._create_session("q?", "2025-06-30T00:00:00+00:00", None)
     assert repo.get_session(sid_plain).policy.get("interrupt_after") is None
     sid_int = run._create_session("q?", "2025-06-30T00:00:00+00:00", "source")
@@ -4157,6 +5182,7 @@ def test_persist_model_failure_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research.director import DirectorBudgets
     from app.research.runner import _LiveRun
+
     repo = ResearchRepository()
     run = _LiveRun(repo, "q?", "o", None, "", ["NVDA"], _noop_dispatch, _noop_model, DirectorBudgets())
     sid = run._create_session("q?", "", None)
@@ -4180,6 +5206,7 @@ def test_store_empty_terminal_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     from app.research.director import DirectorBudgets
     from app.research.models import SessionStatus
     from app.research.runner import _LiveRun
+
     repo = ResearchRepository()
     run = _LiveRun(repo, "q?", "o", None, "", ["NVDA"], _noop_dispatch, _noop_model, DirectorBudgets())
     # researching sessions cannot transition to completed: whole block is
@@ -4213,19 +5240,30 @@ def test_run_live_invalid_interrupt(tmp_path: Path, monkeypatch: pytest.MonkeyPa
 def test_run_live_empty_wave_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
+
     def _empty_dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
         if name in ("search_tools", "browse_tools"):
             return {"matches": []}
         if name == "call_tool":
             return {"content": "nothing", "evidence_ids": []}
         return {}
+
     def _empty_model(prompt: str) -> str:
         # scouts parse a bare JSON list; committee parses the rich envelope.
         if "Temporary assignment" in prompt:
             return json.dumps([])
-        return json.dumps({"executive_view": "", "claims": [], "impact_channels": [],
-                           "materiality": {"overall": "low", "reasoning": "no evidence"},
-                           "uncertainties": [], "what_would_change": [], "follow_ups": []})
+        return json.dumps(
+            {
+                "executive_view": "",
+                "claims": [],
+                "impact_channels": [],
+                "materiality": {"overall": "low", "reasoning": "no evidence"},
+                "uncertainties": [],
+                "what_would_change": [],
+                "follow_ups": [],
+            }
+        )
+
     out = run_live("empty?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _empty_dispatch, _empty_model, repo=repo)
     assert out["stop_reason"] == "complete:wave1"
     assert out["freeze_id"] and out["evidence_ids"] == []
@@ -4239,34 +5277,51 @@ def test_run_live_empty_wave_terminal(tmp_path: Path, monkeypatch: pytest.Monkey
 def test_run_live_one_committee_empty(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
+
     def _empty_dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
         if name in ("search_tools", "browse_tools"):
             return {"matches": []}
         return {"content": "nothing"}
+
     def _empty_model(prompt: str) -> str:
         if "Temporary assignment" in prompt:
             return json.dumps([])
         return json.dumps({"claims": [], "follow_ups": []})
-    out = run_live("empty?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _empty_dispatch, _empty_model, repo=repo, interrupt_after="one-committee")
+
+    out = run_live(
+        "empty?",
+        "o",
+        "2025-06-30T00:00:00+00:00",
+        ["NVDA"],
+        _empty_dispatch,
+        _empty_model,
+        repo=repo,
+        interrupt_after="one-committee",
+    )
     assert out["stop_reason"] == "complete:empty-with-limitations"
 
 
 def test_policy_denied_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research.runner import _LiveRun
+
     repo = ResearchRepository()
     seen_denied: list[str] = []
     real_emit = _LiveRun._emit
+
     def _spy_emit(self: object, sid: str, event_type: str, payload: Mapping[str, object]) -> None:
         if event_type == "policy.denied":
             tool = payload.get("tool")
             seen_denied.append(str(tool))
         assert isinstance(self, _LiveRun)
         return real_emit(self, sid, event_type, payload)
+
     monkeypatch.setattr(_LiveRun, "_emit", _spy_emit)
     import app.research.runner as _runner_mod
+
     def _not_sec(name: str) -> bool:
         return False
+
     monkeypatch.setattr(_runner_mod, "is_sec_tool", _not_sec)
     with pytest.raises(Exception, match="POLICY_DENIED"):
         run_live("q?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, repo=repo)
@@ -4276,12 +5331,16 @@ def test_policy_denied_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 def test_tool_budget_exhausted_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research.director import DirectorBudgets
+
     repo = ResearchRepository()
     budgets = DirectorBudgets(max_tool_calls=0)
     with pytest.raises(Exception, match="policy_rejection|POLICY_REJECTION"):  # §1 explicit tool limit reached
-        run_live("q?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, repo=repo, budgets=budgets)
+        run_live(
+            "q?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, repo=repo, budgets=budgets
+        )
     # also direct ledger consume check
     from app.research.runner import BudgetLedger
+
     led = BudgetLedger(0)
     assert led.consume_research_dispatch() is False
 
@@ -4291,9 +5350,12 @@ def test_resume_terminal_raise_writes_nothing(tmp_path: Path, monkeypatch: pytes
     import subprocess
 
     from app.research.runner import LiveModelError
+
     repo = ResearchRepository()
+
     def _timeout_model(_p: str) -> str:
         raise subprocess.TimeoutExpired(cmd="pi", timeout=1)
+
     with pytest.raises(LiveModelError) as ei:
         run_live("timeout probe?", "probe", None, ["NVDA"], _noop_dispatch, _timeout_model, repo=repo)
     sid = ei.value.session_id
@@ -4316,18 +5378,36 @@ def test_resume_terminal_raise_writes_nothing(tmp_path: Path, monkeypatch: pytes
 def test_resume_fetch_and_freeze_reuse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
-    out = run_live("NVDA demand?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, repo=repo, interrupt_after="source")
+    out = run_live(
+        "NVDA demand?",
+        "o",
+        "2025-06-30T00:00:00+00:00",
+        ["NVDA"],
+        _fake_dispatch(),
+        _grounded,
+        repo=repo,
+        interrupt_after="source",
+    )
     sid = out["session_id"]
     assert isinstance(sid, str)
     ev_before = len(repo.list_evidence(sid))
-    jobs_before = len(repo.list_jobs(sid))
+    len(repo.list_jobs(sid))
     out2 = resume_live(sid, _fake_dispatch(), _grounded, repo=repo)
     assert out2["stop_reason"] == "complete:wave1"
     assert len(repo.list_evidence(sid)) == ev_before
     assert out2["dossier_id"] == out["dossier_id"]
     assert len([j for j in repo.list_jobs(sid) if j.job_type == "source_agent"]) == 1
     # freeze reuse: interrupt at freeze then resume must reuse same freeze id
-    out3 = run_live("NVDA demand?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, repo=repo, interrupt_after="freeze")
+    out3 = run_live(
+        "NVDA demand?",
+        "o",
+        "2025-06-30T00:00:00+00:00",
+        ["NVDA"],
+        _fake_dispatch(),
+        _grounded,
+        repo=repo,
+        interrupt_after="freeze",
+    )
     sid3_raw = out3["session_id"]
     assert isinstance(sid3_raw, str)
     sid3 = sid3_raw
@@ -4342,8 +5422,19 @@ def test_committee_failure_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research.director import DirectorBudgets
     from app.research.runner import _LiveRun
+
     repo = ResearchRepository()
-    run = _LiveRun(repo, "q?", "o", "2025-06-30T00:00:00+00:00", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, DirectorBudgets())
+    run = _LiveRun(
+        repo,
+        "q?",
+        "o",
+        "2025-06-30T00:00:00+00:00",
+        "2025-06-30T00:00:00+00:00",
+        ["NVDA"],
+        _fake_dispatch(),
+        _grounded,
+        DirectorBudgets(),
+    )
     sid = run._create_session("q?", "2025-06-30T00:00:00+00:00", None)
     src = run._open_source_job(sid, 1, "q?")
     eids = run._fetch_wave(sid, 1, "q?", src, "")
@@ -4353,15 +5444,24 @@ def test_committee_failure_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     navigation = {str(r["evidence_id"]) for r in rows if r.get("record_kind") == "discovery"}
     assert set(eids) == citable and citable.isdisjoint(navigation)
     assert navigation, "non-document tool results must persist as discovery records"
-    tools = [str(r["metadata"].get("tool")) for r in rows if r.get("record_kind") == "discovery" and isinstance(r.get("metadata"), dict)]
+    tools = [
+        str(r["metadata"].get("tool"))
+        for r in rows
+        if r.get("record_kind") == "discovery" and isinstance(r.get("metadata"), dict)
+    ]
     assert tools and all(t not in ("get_sec_document", "get_sec_filing") for t in tools)
-    assert all(str(r["metadata"].get("tool")) in ("get_sec_document", "get_sec_filing")
-               for r in rows if r.get("record_kind") == "evidence" and isinstance(r.get("metadata"), dict))
+    assert all(
+        str(r["metadata"].get("tool")) in ("get_sec_document", "get_sec_filing")
+        for r in rows
+        if r.get("record_kind") == "evidence" and isinstance(r.get("metadata"), dict)
+    )
     kinds = [e.event_type for e in repo.list_events(sid)]
     assert "discovery.recorded" in kinds and "discovery.ingested" in kinds
     run._freeze_wave(sid, 1)
+
     def _boom(prompt: str) -> str:
         raise RuntimeError("committee boom")
+
     monkeypatch.setattr(run, "model", _boom)
     with pytest.raises(Exception, match="committee boom"):
         run._committee_wave(sid, 1, "")
@@ -4372,7 +5472,16 @@ def test_committee_failure_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 def test_resume_scoped_fallback_via_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
-    out = run_live("NVDA demand?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, repo=repo, interrupt_after="freeze")
+    out = run_live(
+        "NVDA demand?",
+        "o",
+        "2025-06-30T00:00:00+00:00",
+        ["NVDA"],
+        _fake_dispatch(),
+        _grounded,
+        repo=repo,
+        interrupt_after="freeze",
+    )
     sid_raw = out["session_id"]
     assert isinstance(sid_raw, str)
     sid = sid_raw
@@ -4380,6 +5489,7 @@ def test_resume_scoped_fallback_via_evidence(tmp_path: Path, monkeypatch: pytest
     for j in repo.list_jobs(sid):
         if j.job_type == "source_agent":
             import dataclasses
+
             repo.save_job(dataclasses.replace(j, diagnostics={}))
     out2 = resume_live(sid, _fake_dispatch(), _grounded, repo=repo)
     assert out2["stop_reason"] == "complete:wave1"
@@ -4388,13 +5498,16 @@ def test_resume_scoped_fallback_via_evidence(tmp_path: Path, monkeypatch: pytest
 def test_dispatch_error_and_deadline_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
+
     # dispatch raises -> tool.failed + propagate as LiveModelError via fetch
     def _boom_dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
         if name in ("search_tools", "browse_tools"):
             return {"matches": ["sec-10q"]}
         raise RuntimeError("downstream down")
-    with pytest.raises(Exception):
+
+    with pytest.raises(Exception):  # noqa: B017 - the pinned contract is that the run fails loudly, not which type
         run_live("q?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _boom_dispatch, _grounded, repo=repo)
+
     # error-in-raw arm, re-pinned (live-run defect: an untyped tool-reported
     # error - e.g. a missing argument - killed the whole session although the
     # model could repair the call). Tool-reported errors are results now; only
@@ -4405,6 +5518,7 @@ def test_dispatch_error_and_deadline_arms(tmp_path: Path, monkeypatch: pytest.Mo
         if name == "call_tool":
             return {"error": "upstream failed"}
         return {}
+
     out = run_live("q?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _err_dispatch, _grounded, repo=repo)
     assert out["evidence_ids"] == [] and out["stop_reason"] == "complete:wave1"
     err_sid = out["session_id"]
@@ -4417,6 +5531,7 @@ def test_dispatch_error_and_deadline_arms(tmp_path: Path, monkeypatch: pytest.Mo
         if name == "call_tool":
             return {"error": "provider exploded", "error_type": "provider_error"}
         return {}
+
     with pytest.raises(Exception, match="TOOL_ERROR"):
         run_live("q?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _fatal_dispatch, _grounded, repo=repo)
 
@@ -4426,27 +5541,48 @@ def test_scout_cancel_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
     from app.research.agents.scout import ScoutAssignment
     from app.research.director import DirectorBudgets
     from app.research.runner import _LiveRun
+
     repo = ResearchRepository()
     run = _LiveRun(repo, "q?", "o", None, "", ["NVDA"], _noop_dispatch, _noop_model, DirectorBudgets())
     sid = run._create_session("q?", "", None)
     src = run._open_source_job(sid, 1, "q?")
-    assignment = ScoutAssignment(assignment_id="scout-filings", session_id=sid, as_of="unbounded", role="filings", question="q?", tickers=["NVDA"])
+    assignment = ScoutAssignment(
+        assignment_id="scout-filings",
+        session_id=sid,
+        as_of="unbounded",
+        role="filings",
+        question="q?",
+        tickers=["NVDA"],
+    )
     existing = repo.list_jobs(sid)
     scout_job = run._open_or_reuse_scout_job(sid, 1, src, assignment, existing)
     assert repo.get_job(scout_job.job_id).status == "running"
+
     class _Cancelled(RuntimeError):
         pass
+
     def _cancel_dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
         raise _Cancelled("simulated scout cancelled")
+
     def _model(prompt: str) -> str:
         raise AssertionError("model must not run after cancel")
+
     import app.research.agents.scout as _scout_mod
-    def _fake_scout(a: ScoutAssignment, dispatch: DispatchFn, model: ModelFn, journal: Callable[[str, dict[str, object]], None] | None) -> ScoutResult:
+
+    def _fake_scout(
+        a: ScoutAssignment,
+        dispatch: DispatchFn,
+        model: ModelFn,
+        journal: Callable[[str, dict[str, object]], None] | None,
+    ) -> ScoutResult:
         dispatch("call_tool", {"name": "search_sec_filings", "arguments": {}})
         return _kern_res()
+
     monkeypatch.setattr(_scout_mod, "run_scout", _fake_scout)
+
     def _journal(t: str, p: dict[str, object]) -> None:
         return None
+
     with pytest.raises(_Cancelled):
         run._run_scout_assignment(sid, assignment, scout_job, _cancel_dispatch, _model, _journal)
     assert repo.get_job(scout_job.job_id).status == "cancelled"
@@ -4455,16 +5591,27 @@ def test_scout_cancel_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> No
 def test_fresh_fetch_question_arm(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research.runner import _fresh_fetch_question, _targeted_question
+
     repo = ResearchRepository()
     assert _fresh_fetch_question(repo, "nope", "q?") == "q?"
     assert _fresh_fetch_question(repo, "nope", "") == ""
-    out = run_live("NVDA demand?", "o", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, repo=repo, interrupt_after="source")
+    out = run_live(
+        "NVDA demand?",
+        "o",
+        "2025-06-30T00:00:00+00:00",
+        ["NVDA"],
+        _fake_dispatch(),
+        _grounded,
+        repo=repo,
+        interrupt_after="source",
+    )
     sid_raw = out["session_id"]
     assert isinstance(sid_raw, str)
     sid = sid_raw
     assert _targeted_question(repo, sid) is None  # wave 1 has no targeted question yet
     assert _fresh_fetch_question(repo, sid, "fallback?") == "fallback?"
     from app.research.journal import append_event, hydrate
+
     hydrate(sid, repo.list_events(sid))
     repo.save_event(append_event(sid, "wave.started", "test", "test", {"targeted_question": "wave2 q?"}))
     assert _targeted_question(repo, sid) == "wave2 q?"
@@ -4475,13 +5622,24 @@ def test_reuse_fetch_queued_and_running_arms(tmp_path: Path, monkeypatch: pytest
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research.director import DirectorBudgets
     from app.research.runner import _LiveRun, _reuse_fetch_job
+
     repo = ResearchRepository()
-    run = _LiveRun(repo, "q?", "o", "2025-06-30T00:00:00+00:00", "2025-06-30T00:00:00+00:00", ["NVDA"], _fake_dispatch(), _grounded, DirectorBudgets())
+    run = _LiveRun(
+        repo,
+        "q?",
+        "o",
+        "2025-06-30T00:00:00+00:00",
+        "2025-06-30T00:00:00+00:00",
+        ["NVDA"],
+        _fake_dispatch(),
+        _grounded,
+        DirectorBudgets(),
+    )
     sid = run._create_session("q?", "2025-06-30T00:00:00+00:00", None)
     # _create_session already opened a running source job: reuse returns it
     got0 = _reuse_fetch_job(run, repo, sid, 1, "q?")
     assert got0 is not None and got0[1] == "q?"
-    src = run._open_source_job(sid, 1, "my question?")
+    run._open_source_job(sid, 1, "my question?")
     # running job reuses its diagnostics question
     got = _reuse_fetch_job(run, repo, sid, 1, "fallback?")
     assert got is not None and got[1] in ("q?", "my question?")
@@ -4489,6 +5647,7 @@ def test_reuse_fetch_queued_and_running_arms(tmp_path: Path, monkeypatch: pytest
     for j in repo.list_jobs(sid):
         if j.job_type == "source_agent":
             import dataclasses
+
             repo.save_job(dataclasses.replace(j, status="queued"))
     got2 = _reuse_fetch_job(run, repo, sid, 1, "fallback?")
     assert got2 is not None
@@ -4500,31 +5659,43 @@ def test_handler_names_sorted_from_mapping() -> None:
     assert tools_mod._handler_names({"b": 1, "a": 2}) == ["a", "b"]
     assert tools_mod._handler_names({}) == []
     from app.thesis.monitor import SUPPORTED_HANDLERS
+
     names = tools_mod._handler_names(SUPPORTED_HANDLERS)
     assert names == sorted(SUPPORTED_HANDLERS) and "new_filing" in names
 
 
 def test_checked_rule_type_routing(tmp_path: Path) -> None:
     from app.thesis.monitor import SUPPORTED_HANDLERS
+
     assert tools_mod._checked_rule_type({"rule_type": "new_filing"}, SUPPORTED_HANDLERS) == "new_filing"
     with pytest.raises(ValueError, match="non-empty"):
         tools_mod._checked_rule_type({"rule_type": "  "}, SUPPORTED_HANDLERS)
     with pytest.raises(ValueError, match=r"unsupported rule_type 'nope'; supported: \["):
         tools_mod._checked_rule_type({"rule_type": "nope"}, SUPPORTED_HANDLERS)
 
+
 # -- CrapService: provenance / dossier / freeze / ladder / policy arms --
+
 
 def _neg_eid(sid: str, n: int) -> str:
     return f"{sid}:ev:neg:{n}"
 
 
 def _neg_item(eid: str, **kw: object) -> dict[str, object]:
-    d: dict[str, object] = {"evidence_id": eid, "wave_id": 1, "content": "c-" + eid,
-         "claim_text": "no 10-K filing found", "subject": "NVDA", "source_name": "SEC",
-         "source_uri": "https://sec.gov/x", "known_at": KNOWN,
-         "claim_kind": "absence_observation",
-         "search_id": "sr:1", "query": "NVDA 10-K",
-         "coverage": _cov()}
+    d: dict[str, object] = {
+        "evidence_id": eid,
+        "wave_id": 1,
+        "content": "c-" + eid,
+        "claim_text": "no 10-K filing found",
+        "subject": "NVDA",
+        "source_name": "SEC",
+        "source_uri": "https://sec.gov/x",
+        "known_at": KNOWN,
+        "claim_kind": "absence_observation",
+        "search_id": "sr:1",
+        "query": "NVDA 10-K",
+        "coverage": _cov(),
+    }
     d.update(kw)
     return d
 
@@ -4543,17 +5714,44 @@ def test_positive_search_hit_without_passage_rejects(tmp_path: Path, monkeypatch
         svc.record_evidence(sid, src, navigation, repo=repo)  # a search result is navigation, never evidence
 
 
-def test_positive_missing_accession_rejects(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_positive_declared_refs_must_agree_with_the_handle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The handle is authoritative for the filing; a declared ref must agree with it."""
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
-    item = _item(f"{sid}:ev:1", matching_passage="revenue grew")
-    item.pop("source_record_id", None)
+    # No declared accession/document at all: the handle still identifies the filing.
+    bare = _item(f"{sid}:ev:1", matching_passage="revenue grew")
+    bare.pop("source_record_id", None)
+    bare.pop("document_name", None)
+    out = svc.record_evidence(sid, src, bare, repo=repo)
+    prov = out["provenance"]
+    assert isinstance(prov, dict) and prov["accession_no"] == seam.DEFAULT_ACCESSION
+    assert prov["document_name"] == seam.DEFAULT_DOCUMENT
+    # A declared accession in the wrong shape keeps its own failure code.
     with pytest.raises(ValueError, match="ERR_ACCESSION_FORMAT"):
-        svc.record_evidence(sid, src, item, repo=repo)
-    no_doc = _item(f"{sid}:ev:1")
-    no_doc.pop("document_name", None)
+        svc.record_evidence(sid, src, _item(f"{sid}:ev:2", source_record_id="abc"), repo=repo)
+    # A search id declared as an accession is navigation, never evidence.
     with pytest.raises(ValueError, match="ERR_PROVENANCE_MISMATCH"):
-        svc.record_evidence(sid, src, no_doc, repo=repo)
+        svc.record_evidence(
+            sid,
+            src,
+            _item(
+                f"{sid}:ev:3",
+                source_record_id="sr:1",
+                search_id="sr:1",
+                query="OpenAI contracts",
+            ),
+            repo=repo,
+        )
+    # A declared filing that differs from the handle's fails closed.
+    mismatch = _item(f"{sid}:ev:4")
+    mismatch["source_record_id"] = "0000320193-25-000081"
+    with pytest.raises(ValueError, match="ERR_PROVENANCE_MISMATCH"):
+        svc.record_evidence(sid, src, mismatch, repo=repo)
+    # The declared document is checked the same way.
+    wrong_doc = _item(f"{sid}:ev:5")
+    wrong_doc["document_name"] = "nvda-8k.htm"
+    with pytest.raises(ValueError, match="ERR_PROVENANCE_MISMATCH"):
+        svc.record_evidence(sid, src, wrong_doc, repo=repo)
 
 
 def test_absence_observation_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4572,17 +5770,21 @@ def test_absence_observation_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         svc.record_evidence(sid, src, {**base, "accession": "0000320193-25-000080"}, repo=repo)
     # wording is never the signal: a negative-sounding claim with complete=false is a valid
     # scoped absence observation (no lexical negativity detection anywhere).
-    scoped = _neg_item(_neg_eid(sid, 2), query="NVDA 2024 10-K",
-                       claim_text="no 10-K in the 2024 window")
+    scoped = _neg_item(
+        _neg_eid(sid, 2),
+        query="NVDA 2024 10-K",
+        claim_text="no 10-K in the 2024 window",
+    )
     scoped["coverage"] = _cov(complete=False)
     scoped_out = svc.record_evidence(sid, src, scoped, repo=repo)
-    assert scoped_out["evidence_id"] == _neg_eid(sid, 2)
+    assert scoped_out["recorded_as"] == "coverage_artifact" and scoped_out["accepted"] is True
     assert scoped_out["claim_kind"] == "absence_observation"
     out = svc.record_evidence(sid, src, base, repo=repo)
-    assert out["evidence_id"] == _neg_eid(sid, 1)
+    assert out["recorded_as"] == "coverage_artifact" and out["accepted"] is True
     assert out["claim_kind"] == "absence_observation"
-    stored = repo.list_evidence(sid)
-    assert {r["evidence_id"] for r in stored} == {_neg_eid(sid, 1), _neg_eid(sid, 2)}
+    stored = repo.list_coverage_artifacts(sid)
+    assert {a["claim_kind"] for a in stored} == {"absence_observation"}
+    assert len(stored) == 2 and repo.list_evidence(sid) == []
 
 
 def test_absence_coverage_envelope_arms(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4610,15 +5812,17 @@ def test_claim_kind_aliases_and_unknown_kind_rejects(tmp_path: Path, monkeypatch
     legacy.pop("claim_kind", None)
     legacy["evidence_type"] = "filing_observation"
     assert svc.record_evidence(sid, src, legacy, repo=repo)["claim_kind"] == "observed_fact"
-    absence = _item(f"{sid}:ev:2", evidence_type="search_coverage", search_id="sr:1",
-                    query="NVDA 10-K", coverage=_cov())
+    absence = _item(
+        f"{sid}:ev:2", evidence_type="search_coverage", search_id="sr:1", query="NVDA 10-K", coverage=_cov()
+    )
     absence.pop("source_record_id", None)
     assert svc.record_evidence(sid, src, absence, repo=repo)["claim_kind"] == "absence_observation"
     with pytest.raises(ValueError, match="ERR_UNKNOWN_EVIDENCE_TYPE"):
         svc.record_evidence(sid, src, _item(f"{sid}:ev:3", claim_kind="guessing"), repo=repo)
     with pytest.raises(ValueError, match="ERR_UNKNOWN_EVIDENCE_TYPE"):
-        svc.record_evidence(sid, src, _item(f"{sid}:ev:4", claim_kind="observed_fact",
-                                            evidence_type="search_coverage"), repo=repo)
+        svc.record_evidence(
+            sid, src, _item(f"{sid}:ev:4", claim_kind="observed_fact", evidence_type="search_coverage"), repo=repo
+        )
 
 
 def test_submit_dossier_passthrough_lists_and_idempotent(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4626,8 +5830,12 @@ def test_submit_dossier_passthrough_lists_and_idempotent(tmp_path: Path, monkeyp
     sid, src = _sid(repo)
     eid = f"{sid}:ev:1"
     svc.record_evidence(sid, src, _item(eid), repo=repo)
-    out = svc.submit_source_result(src, coverage=_sufficient_coverage(resolved=["q1"], dates=["2024"],
-        gaps=42, docs=["d1"]), evidence_ids=[eid], repo=repo)
+    out = svc.submit_source_result(
+        src,
+        coverage=_sufficient_coverage(resolved=["q1"], dates=["2024"], gaps=42, docs=["d1"]),
+        evidence_ids=[eid],
+        repo=repo,
+    )
     assert out["dossier_id"] == f"{sid}:1:sec"
     stored = repo.list_dossiers(sid)[0]
     cov = stored["coverage"]
@@ -4656,6 +5864,7 @@ def test_freeze_skips_discovery_and_keeps_substantive(tmp_path: Path, monkeypatc
 def test_ladder_distinct_loop_and_policy_arms() -> None:
     from app.research.models import FailureCategory
     from app.research.runner import _LiveRun
+
     assert _LiveRun._ladder_category("research_loop_detected x") == FailureCategory.RESEARCH_LOOP_DETECTED
     assert _LiveRun._ladder_category("research_loop x") == FailureCategory.RESEARCH_LOOP_DETECTED
     assert _LiveRun._ladder_category("duplicate_research_action x") == FailureCategory.DUPLICATE_RESEARCH_ACTION
@@ -4665,6 +5874,7 @@ def test_ladder_distinct_loop_and_policy_arms() -> None:
 
 def test_denied_reason_mapping_mode_and_lists() -> None:
     from app.security.action_policy import source_denied_reason
+
     assert source_denied_reason("search_web", None) is None
     assert source_denied_reason("search_web", "nope") == "session source_policy must be a mapping"
     assert "unknown source_policy mode" in str(source_denied_reason("x", {"mode": "nope"}))
@@ -4677,6 +5887,7 @@ def test_denied_reason_mapping_mode_and_lists() -> None:
 
 def test_temporal_doc_stored_and_fallback_arms() -> None:
     from app.research.repository import _session_temporal_doc
+
     _con = sqlite3.connect(":memory:")
     _con.row_factory = sqlite3.Row
     fetched = _con.execute("SELECT 1 AS x").fetchone()
@@ -4735,16 +5946,21 @@ def _prompt_wave(prompt: str) -> int:
 
 def _scripted_claims(prompt: str) -> list[dict[str, object]]:
     """Grounded claims citing up to six ids the prompt actually acquired."""
-    return [{"text": f"finding {i}", "evidence_ids": [eid]}
-            for i, eid in enumerate(_prompt_evidence_ids(prompt)[:6])]
+    return [{"text": f"finding {i}", "evidence_ids": [eid]} for i, eid in enumerate(_prompt_evidence_ids(prompt)[:6])]
 
 
 def _scripted_envelope(prompt: str, follow_ups: list[dict[str, object]]) -> str:
-    return json.dumps({"executive_view": f"wave {_prompt_wave(prompt)} view",
-                       "claims": _scripted_claims(prompt), "impact_channels": [],
-                       "materiality": {"overall": "medium", "reasoning": "grounded in the freeze"},
-                       "uncertainties": [], "what_would_change": ["a materially new filing"],
-                       "follow_ups": follow_ups})
+    return json.dumps(
+        {
+            "executive_view": f"wave {_prompt_wave(prompt)} view",
+            "claims": _scripted_claims(prompt),
+            "impact_channels": [],
+            "materiality": {"overall": "medium", "reasoning": "grounded in the freeze"},
+            "uncertainties": [],
+            "what_would_change": ["a materially new filing"],
+            "follow_ups": follow_ups,
+        }
+    )
 
 
 def _unlimited_model(prompt: str) -> str:
@@ -4754,9 +5970,13 @@ def _unlimited_model(prompt: str) -> str:
     wave = _prompt_wave(prompt)
     follow_ups: list[dict[str, object]] = []
     if wave < _UNLIMITED_WAVES:
-        follow_ups = [{"question": f"What did {_WAVE_BRANCHES[wave]} supply contracts disclose about NVDA demand?",
-                       "why_it_matters": "counterparty concentration drives the demand case",
-                       "suggested_source": "SEC"}]
+        follow_ups = [
+            {
+                "question": f"What did {_WAVE_BRANCHES[wave]} supply contracts disclose about NVDA demand?",
+                "why_it_matters": "counterparty concentration drives the demand case",
+                "suggested_source": "SEC",
+            }
+        ]
     return _scripted_envelope(prompt, follow_ups)
 
 
@@ -4767,11 +5987,13 @@ def _branch_model(prompt: str) -> str:
     wave = _prompt_wave(prompt)
     follow_ups: list[dict[str, object]] = []
     if wave < _UNLIMITED_WAVES:
-        follow_ups = [{
-            "question": f"NVDA datacenter demand? :: {_WAVE_BRANCHES[wave]} obligations?",
-            "why_it_matters": "counterparty concentration drives the demand case",
-            "suggested_source": "SEC",
-        }]
+        follow_ups = [
+            {
+                "question": f"NVDA datacenter demand? :: {_WAVE_BRANCHES[wave]} obligations?",
+                "why_it_matters": "counterparty concentration drives the demand case",
+                "suggested_source": "SEC",
+            }
+        ]
     return _scripted_envelope(prompt, follow_ups)
 
 
@@ -4803,9 +6025,12 @@ class _SecToolFake:
             self.documents += 1
             accession = str(call.get("accession_no") or "")
             document = str(call.get("document_name") or "")
-            return {"accession_no": accession, "document_name": document,
-                    "matching_passage": f"passage {accession} {document}: demand grew 142%",
-                    "content": f"passage {accession} {document}", "known_at": "2025-05-01"}
+            return _doc_result(
+                accession,
+                document,
+                f"passage {accession} {document}: demand grew 142%",
+                known_at="2025-05-01",
+            )
         if inner == "search_sec_filings":
             self.searches += 1
             query = str(call.get("query") or "")
@@ -4815,11 +6040,19 @@ class _SecToolFake:
             if self.recycle_after is not None and len(self.hits) >= self.recycle_after:
                 page = list(self.hits[:2])
             else:
-                page = [(f"0000320193-26-{len(self.hits) + i + 1:06d}", f"hit-{len(self.hits) + i + 1}.htm")
-                        for i in range(self.page_size)]
+                page = [
+                    (
+                        f"0000320193-26-{len(self.hits) + i + 1:06d}",
+                        f"hit-{len(self.hits) + i + 1}.htm",
+                    )
+                    for i in range(self.page_size)
+                ]
                 self.hits.extend(page)
-            return {"search_id": f"sr:{self.searches}", "count": len(page),
-                    "top_hits": [{"accession": a, "document": d, "form": "10-Q"} for a, d in page]}
+            return {
+                "search_id": f"sr:{self.searches}",
+                "count": len(page),
+                "top_hits": [{"accession": a, "document": d, "form": "10-Q"} for a, d in page],
+            }
         return {"record": {"id": "r", "known_at": "2025-05-01"}}
 
     def events(self, repo: ResearchRepository, sid: str, event_type: str) -> list[Mapping[str, object]]:
@@ -4838,8 +6071,15 @@ def test_unlimited_run_keeps_going_five_waves(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     dispatch = _SecToolFake()
-    out = run_live("NVDA datacenter demand?", "objective: demand durability", _LIVE_ASOF,
-                   _LIVE_TICKERS, dispatch, _unlimited_model, repo=repo)
+    out = run_live(
+        "NVDA datacenter demand?",
+        "objective: demand durability",
+        _LIVE_ASOF,
+        _LIVE_TICKERS,
+        dispatch,
+        _unlimited_model,
+        repo=repo,
+    )
     sid = str(out["session_id"])
     assert out["stop_reason"] == "complete:wave5"
     assert out["wave_id"] == _UNLIMITED_WAVES
@@ -4861,8 +6101,7 @@ def test_unlimited_run_keeps_going_five_waves(tmp_path: Path, monkeypatch: pytes
     sess = repo.get_session(sid)
     assert sess.status == "completed" and sess.final_result is not None
     assert len(sess.freeze_ids) == _UNLIMITED_WAVES
-    src_questions = [str(j.diagnostics.get("question")) for j in repo.list_jobs(sid)
-                     if j.job_type == "source_agent"]
+    src_questions = [str(j.diagnostics.get("question")) for j in repo.list_jobs(sid) if j.job_type == "source_agent"]
     assert len(src_questions) == _UNLIMITED_WAVES and len(set(src_questions)) == _UNLIMITED_WAVES
 
 
@@ -4872,8 +6111,7 @@ def test_exact_repeat_blocked_while_new_queries_still_run(tmp_path: Path, monkey
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     dispatch = _SecToolFake()
-    out = run_live("NVDA datacenter demand?", "o", _LIVE_ASOF,
-                   _LIVE_TICKERS, dispatch, _branch_model, repo=repo)
+    out = run_live("NVDA datacenter demand?", "o", _LIVE_ASOF, _LIVE_TICKERS, dispatch, _branch_model, repo=repo)
     sid = str(out["session_id"])
     assert out["stop_reason"] == "complete:wave5"  # blocked repeats never stalled a productive run
     blocked = dispatch.events(repo, sid, "research_loop_detected")
@@ -4899,8 +6137,10 @@ def test_exact_repeat_blocked_while_new_queries_still_run(tmp_path: Path, monkey
 def test_loop_detector_exact_key_semantics() -> None:
     """Zero-progress repeats are blocked on the exact action key; any material difference runs."""
     from app.research.director import LoopDetector, normalize_research_action
-    key = normalize_research_action("sec", "search_sec_filings", "NVDA demand", "nvda",
-                                    "10-K", "2025-06-30", "", "objective-a")
+
+    key = normalize_research_action(
+        "sec", "search_sec_filings", "NVDA demand", "nvda", "10-K", "2025-06-30", "", "objective-a"
+    )
     det = LoopDetector()
     assert det.precheck(key)["duplicate"] is False  # first sight always runs
     assert det.check(key, "hash-a", 0)["duplicate"] is False
@@ -4910,14 +6150,37 @@ def test_loop_detector_exact_key_semantics() -> None:
     blocked_action = entry["action"]
     assert isinstance(blocked_action, list) and blocked_action == list(key)
     different = {
-        "query": normalize_research_action("sec", "search_sec_filings", "NVDA pricing", "NVDA", "10-K", "2025-06-30", "", "objective-a"),
-        "ticker": normalize_research_action("sec", "search_sec_filings", "NVDA demand", "AMD", "10-K", "2025-06-30", "", "objective-a"),
-        "forms": normalize_research_action("sec", "search_sec_filings", "NVDA demand", "NVDA", "10-Q", "2025-06-30", "", "objective-a"),
-        "as_of": normalize_research_action("sec", "search_sec_filings", "NVDA demand", "NVDA", "10-K", "2025-03-31", "", "objective-a"),
-        "accession": normalize_research_action("sec", "search_sec_filings", "NVDA demand", "NVDA", "10-K", "2025-06-30", "0000320193-25-000079", "objective-a"),
-        "objective": normalize_research_action("sec", "search_sec_filings", "NVDA demand", "NVDA", "10-K", "2025-06-30", "", "objective-b"),
-        "tool": normalize_research_action("sec", "list_sec_filings", "NVDA demand", "NVDA", "10-K", "2025-06-30", "", "objective-a"),
-        "source": normalize_research_action("web", "search_sec_filings", "NVDA demand", "NVDA", "10-K", "2025-06-30", "", "objective-a"),
+        "query": normalize_research_action(
+            "sec", "search_sec_filings", "NVDA pricing", "NVDA", "10-K", "2025-06-30", "", "objective-a"
+        ),
+        "ticker": normalize_research_action(
+            "sec", "search_sec_filings", "NVDA demand", "AMD", "10-K", "2025-06-30", "", "objective-a"
+        ),
+        "forms": normalize_research_action(
+            "sec", "search_sec_filings", "NVDA demand", "NVDA", "10-Q", "2025-06-30", "", "objective-a"
+        ),
+        "as_of": normalize_research_action(
+            "sec", "search_sec_filings", "NVDA demand", "NVDA", "10-K", "2025-03-31", "", "objective-a"
+        ),
+        "accession": normalize_research_action(
+            "sec",
+            "search_sec_filings",
+            "NVDA demand",
+            "NVDA",
+            "10-K",
+            "2025-06-30",
+            "0000320193-25-000079",
+            "objective-a",
+        ),
+        "objective": normalize_research_action(
+            "sec", "search_sec_filings", "NVDA demand", "NVDA", "10-K", "2025-06-30", "", "objective-b"
+        ),
+        "tool": normalize_research_action(
+            "sec", "list_sec_filings", "NVDA demand", "NVDA", "10-K", "2025-06-30", "", "objective-a"
+        ),
+        "source": normalize_research_action(
+            "web", "search_sec_filings", "NVDA demand", "NVDA", "10-K", "2025-06-30", "", "objective-a"
+        ),
     }
     assert all(other != key for other in different.values())
     assert all(det.precheck(other)["duplicate"] is False for other in different.values())
@@ -4928,29 +6191,46 @@ def test_loop_detector_exact_key_semantics() -> None:
 
 
 def test_next_wave_zero_novelty_streak_and_loop_veto() -> None:
-    """The gate retries one zero-novelty wave, stops the branch at ZERO_NOVELTY_LIMIT, prefers
+    """The gate retries one zero-novelty wave, stops the branch at the configured limit, prefers
     loop_detected for a blocked exact repeat, and never stops while the wave produced new material."""
-    from app.research.director import ZERO_NOVELTY_LIMIT
+    from app.research.director import DirectorBudgets
+
+    limit = DirectorBudgets(zero_novelty_limit=2)
     deps, seen = _deps()
     w1 = _w1_with([_req()])
     zero: dict[str, object] = dict.fromkeys(
-        ("new_raw_documents", "new_evidence_records", "new_entities", "new_relationships",
-         "new_material_claims", "resolved_questions", "new_questions"), 0)
-    zero.update({"zero_novelty_waves": 1, "duplicate_actions_blocked": 0, "zero_novelty_actions": 4})
-    assert ZERO_NOVELTY_LIMIT == 2
-    retry = decide_next_wave(w1, deps=deps, novelty=zero)
+        (
+            "new_raw_documents",
+            "new_evidence_records",
+            "new_entities",
+            "new_relationships",
+            "new_material_claims",
+            "resolved_questions",
+            "new_questions",
+        ),
+        0,
+    )
+    zero.update(
+        {
+            "zero_novelty_waves": 1,
+            "duplicate_actions_blocked": 0,
+            "zero_novelty_actions": 4,
+        }
+    )
+    retry = decide_next_wave(w1, deps=deps, novelty=zero, budgets=limit)
     assert retry.authorized and retry.stop_reason == "continue"
-    streak = decide_next_wave(w1, deps=deps, novelty={**zero, "zero_novelty_waves": ZERO_NOVELTY_LIMIT})
+    streak = decide_next_wave(w1, deps=deps, novelty={**zero, "zero_novelty_waves": 2}, budgets=limit)
     assert not streak.authorized and streak.stop_reason == "no_novelty"
     assert "consecutive zero-novelty" in streak.reason_detail
     assert seen[-1] == ("rs:x", f"no_novelty:{streak.reason_detail}")
-    loop = decide_next_wave(w1, deps=deps, novelty={**zero, "duplicate_actions_blocked": 3})
+    loop = decide_next_wave(w1, deps=deps, novelty={**zero, "duplicate_actions_blocked": 3}, budgets=limit)
     assert not loop.authorized and loop.stop_reason == "loop_detected"
-    fresh = decide_next_wave(w1, deps=deps, novelty={**zero, "new_evidence_records": 2})
+    fresh = decide_next_wave(w1, deps=deps, novelty={**zero, "new_evidence_records": 2}, budgets=limit)
     assert fresh.authorized and fresh.stop_reason == "continue"  # counts never stop research
     fallback = _w1_with([_req()])
-    fallback.novelty = {**zero, "zero_novelty_waves": ZERO_NOVELTY_LIMIT}
-    assert decide_next_wave(fallback, deps=deps).stop_reason == "no_novelty"
+    fallback.novelty = {**zero, "zero_novelty_waves": 1}
+    # No configured limit: a zero-novelty wave is a retry until the branch is exhausted.
+    assert decide_next_wave(fallback, deps=deps).stop_reason == "continue"
 
 
 def test_zero_novelty_wave_stops_the_run(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4959,8 +6239,7 @@ def test_zero_novelty_wave_stops_the_run(tmp_path: Path, monkeypatch: pytest.Mon
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     dispatch = _SecToolFake(recycle_after=8)
-    out = run_live("NVDA datacenter demand?", "o", _LIVE_ASOF,
-                   _LIVE_TICKERS, dispatch, _branch_model, repo=repo)
+    out = run_live("NVDA datacenter demand?", "o", _LIVE_ASOF, _LIVE_TICKERS, dispatch, _branch_model, repo=repo)
     sid = str(out["session_id"])
     novelties = dispatch.events(repo, sid, "wave.novelty")
     assert len(novelties) == 2

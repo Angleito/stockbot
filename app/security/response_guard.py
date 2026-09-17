@@ -28,18 +28,11 @@ FALLBACK_RESPONSE = "I couldn't generate a response that meets safety checks."
 
 
 def _find_spans(text: str, run_security: RunSecurityContext) -> list[tuple[str, str]]:
-    spans = [
-        (name, match.group(0))
-        for name, pattern in _ALWAYS_STRIP
-        for match in pattern.finditer(text)
-    ]
+    spans = [(name, match.group(0)) for name, pattern in _ALWAYS_STRIP for match in pattern.finditer(text)]
     if not run_security.authorization.portfolio_read:
         # Defense in depth: account identifiers are portfolio content, only
         # legitimate with an explicit session grant.
-        spans.extend(
-            ("account_id", match.group(0))
-            for match in _ACCOUNT_ID_RE.finditer(text)
-        )
+        spans.extend(("account_id", match.group(0)) for match in _ACCOUNT_ID_RE.finditer(text))
     return spans
 
 

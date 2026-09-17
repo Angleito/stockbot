@@ -101,9 +101,7 @@ def _check_proposal_head(proposal: IntakeProposal, where: str) -> None:
 def _claim_seen(c: Mapping[str, object], where: str, seen: set[object]) -> None:
     """One claim row: unvalidated status plus global ID uniqueness."""
     if c["status"] != "unvalidated":
-        raise ValueError(
-            f"{where}: claim {c['claim_id']!r} status must stay 'unvalidated', got {c['status']!r}"
-        )
+        raise ValueError(f"{where}: claim {c['claim_id']!r} status must stay 'unvalidated', got {c['status']!r}")
     if c["claim_id"] in seen:
         raise ValueError(f"{where}: duplicate ID {c['claim_id']!r}")
     seen.add(c["claim_id"])
@@ -134,10 +132,8 @@ def _check_requirement_rows(proposal: IntakeProposal, where: str, seen: set[obje
         seen.add(r["requirement_id"])
         if r["expression_id"] not in expr_ids:
             raise ValueError(
-                f"{where}: requirement {r['requirement_id']!r} references absent expression "
-                f"{r['expression_id']!r}"
+                f"{where}: requirement {r['requirement_id']!r} references absent expression {r['expression_id']!r}"
             )
-
 
 
 def _validate_claim(c: object, path: str) -> dict[str, JSONValue]:
@@ -204,13 +200,12 @@ def _validate_expression(e: object, path: str) -> dict[str, JSONValue]:
         "direction": direction,
         "structure": _expression_structure(e, where),
         "horizon": _unknown_str(e.get("horizon", UNKNOWN), "horizon", where),
-        "deterministic_support": _unknown_str(
-            e.get("deterministic_support", UNKNOWN), "deterministic_support", where
-        ),
+        "deterministic_support": _unknown_str(e.get("deterministic_support", UNKNOWN), "deterministic_support", where),
         "status": status,
     }
     _expression_mappings(e, where, out)
     return out
+
 
 def _requirement_id(r: Mapping[str, object], path: str) -> tuple[str, str]:
     """(requirement_id, where) for one requirement row."""
@@ -235,10 +230,7 @@ def _requirement_expression(r: Mapping[str, object], rid: str, where: str, expre
     if not isinstance(eid, str) or not eid.strip():
         raise ValueError(f"{where}: 'expression_id' must be a non-empty string")
     if eid not in expression_ids:
-        raise ValueError(
-            f"{where}: requirement {rid!r} references absent expression "
-            f"{eid!r}"
-        )
+        raise ValueError(f"{where}: requirement {rid!r} references absent expression {eid!r}")
     return eid
 
 
@@ -331,8 +323,9 @@ def _proposal_expressions(d: Mapping[str, object], where: str, path: str) -> lis
     return out
 
 
-def _proposal_requirements(d: Mapping[str, object], where: str, path: str,
-                           expressions: list[dict[str, JSONValue]]) -> tuple[dict[str, JSONValue], ...]:
+def _proposal_requirements(
+    d: Mapping[str, object], where: str, path: str, expressions: list[dict[str, JSONValue]]
+) -> tuple[dict[str, JSONValue], ...]:
     """Validated requirement rows linked to the expression IDs."""
     ids = {e["expression_id"] for e in expressions}
     return tuple(_validate_requirement(r, path, ids) for r in _as_list(d, "requirements", where))
@@ -351,7 +344,9 @@ def _research_only_context(request_context: RequestContext | None) -> RequestCon
     return request_context
 
 
-def _expr(*, intent: str, instrument: str, direction: str, structure: str, horizon: str = UNKNOWN) -> dict[str, JSONValue]:
+def _expr(
+    *, intent: str, instrument: str, direction: str, structure: str, horizon: str = UNKNOWN
+) -> dict[str, JSONValue]:
     return {
         "expression_id": new_expression_id(),
         "intent": intent,
@@ -370,8 +365,7 @@ def _expression_choice_question() -> IntakeQuestion:
     return IntakeQuestion(
         question_id="expression_choice",
         question=(
-            "How do you want to express this "
-            "(e.g. long puts, short equity, buy-and-hold equity, or still deciding)?"
+            "How do you want to express this (e.g. long puts, short equity, buy-and-hold equity, or still deciding)?"
         ),
         question_type="expression_choice",
     )
@@ -398,6 +392,7 @@ class _ProposalBase(TypedDict):
     unknowns: tuple[str, ...]
     requirements: tuple[dict[str, JSONValue], ...]
 
+
 def _interpret_blobs(text: str, answers: Mapping[str, object] | None) -> tuple[str, str]:
     """Lowercased (thesis, answers) blobs for phrase matching."""
     blob = " ".join(str(v) for v in (answers or {}).values() if isinstance(v, (str, int, float)))
@@ -422,8 +417,7 @@ def _showcase_pair() -> tuple[dict[str, JSONValue], dict[str, JSONValue]]:
     """AI-infra repricing showcase: hedge puts + post-selloff accumulation."""
     return (
         _expr(intent="bearish", instrument="option", direction="long", structure="long puts"),
-        _expr(intent="bullish", instrument="equity", direction="long",
-              structure="post-selloff equity accumulation"),
+        _expr(intent="bullish", instrument="equity", direction="long", structure="post-selloff equity accumulation"),
     )
 
 
@@ -441,8 +435,7 @@ def _is_showcase(t: str, blob: str, combined: str) -> bool:
 
 def _ten_year_expr() -> dict[str, JSONValue]:
     """Obvious long-equity intent for a ten-year hold."""
-    return _expr(intent="bullish", instrument="equity", direction="long",
-                 structure="equity", horizon="long-term")
+    return _expr(intent="bullish", instrument="equity", direction="long", structure="equity", horizon="long-term")
 
 
 def _local_interpret(text: str, answers: Mapping[str, object] | None) -> IntakeProposal:
@@ -479,12 +472,17 @@ def interpret_idea(
     # ponytail: deterministic local read (see module docstring).
     return _local_interpret(clean, given)
 
+
 _SCOPE_RE = re.compile(r"^[A-Za-z]{1,5}$")
 _SETUP_QUESTION_ID = "setup:scope"
 
 
 def build_initial_watch_rules(
-    scope: str, requirements: Sequence[Mapping[str, object] | ExpressionRequirement], *, claim_ids: Sequence[object] = (), expression_ids: Sequence[object] = ()
+    scope: str,
+    requirements: Sequence[Mapping[str, object] | ExpressionRequirement],
+    *,
+    claim_ids: Sequence[object] = (),
+    expression_ids: Sequence[object] = (),
 ) -> list[dict[str, JSONValue]]:
     """Supported semantic rules only: explicit ticker scope -> ``new_filing`` plus
     any requirement whose type already names a supported monitor. No thresholds."""
@@ -512,8 +510,7 @@ def _filing_rule_due(scope: str, cids: list[str], eids: list[str]) -> bool:
     """True when an explicit ticker scope names at least one target."""
     from app.thesis.monitor import SUPPORTED_HANDLERS  # local: monitor owns the table
 
-    return bool(_SCOPE_RE.fullmatch((scope or "").strip())
-                and "new_filing" in SUPPORTED_HANDLERS and (cids or eids))
+    return bool(_SCOPE_RE.fullmatch((scope or "").strip()) and "new_filing" in SUPPORTED_HANDLERS and (cids or eids))
 
 
 def _new_rule(rule_type: str, cids: list[str], eids: list[str]) -> dict[str, JSONValue]:
@@ -542,13 +539,15 @@ def _requirement_supported(rt: object, seen: set[JSONValue]) -> bool:
 
     return isinstance(rt, str) and rt in SUPPORTED_HANDLERS and rt not in seen
 
+
 def _requirement_eligible(rt: object, eid: object, eids: list[str], seen: set[JSONValue]) -> bool:
     """True when the requirement names a supported, unseen monitor with a live expression."""
     return _requirement_supported(rt, seen) and isinstance(eid, str) and eid in eids
 
 
-def _requirement_rule(r: Mapping[str, object] | ExpressionRequirement, eids: list[str],
-                      seen: set[JSONValue]) -> dict[str, JSONValue] | None:
+def _requirement_rule(
+    r: Mapping[str, object] | ExpressionRequirement, eids: list[str], seen: set[JSONValue]
+) -> dict[str, JSONValue] | None:
     """One requirement-backed rule; None when ineligible."""
     rt, eid = _requirement_link(r)
     if not _requirement_eligible(rt, eid, eids, seen) or not isinstance(eid, str):
@@ -564,20 +563,26 @@ def setup_needed_question() -> dict[str, JSONValue]:
     }
 
 
-def create_thesis_from_proposal(repository: ThesisRepository, proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, object]:
+def create_thesis_from_proposal(
+    repository: ThesisRepository, proposal: IntakeProposal, *, effective_at: str | None = None
+) -> dict[str, object]:
     """Shared CLI + tool creation path: thesis, explicit scope, supported rules.
 
     Unresolvable scope persists a setup question instead of a fake active
     monitor. Returns thesis_id/slug/scope/rules/setup_needed/missing_questions.
     """
     rules = build_initial_watch_rules(
-        proposal.scope, proposal.requirements,
+        proposal.scope,
+        proposal.requirements,
         claim_ids=[c["claim_id"] for c in proposal.claims],
-        expression_ids=[e["expression_id"] for e in proposal.expressions])
+        expression_ids=[e["expression_id"] for e in proposal.expressions],
+    )
     thesis = _create_thesis_rows(repository, proposal, rules, effective_at)
     missing, questions_add = _create_questions(proposal, rules)
     if questions_add:
-        repository.apply_research_result(thesis.thesis_id, {"questions_add": questions_add}, "", effective_at=effective_at)
+        repository.apply_research_result(
+            thesis.thesis_id, {"questions_add": questions_add}, "", effective_at=effective_at
+        )
     return {
         "thesis_id": thesis.thesis_id,
         "slug": thesis.slug,
@@ -588,8 +593,9 @@ def create_thesis_from_proposal(repository: ThesisRepository, proposal: IntakePr
     }
 
 
-def _create_thesis_rows(repository: ThesisRepository, proposal: IntakeProposal,
-                        rules: list[dict[str, JSONValue]], effective_at: str | None) -> Thesis:
+def _create_thesis_rows(
+    repository: ThesisRepository, proposal: IntakeProposal, rules: list[dict[str, JSONValue]], effective_at: str | None
+) -> Thesis:
     """Persist the thesis row with proposal payload plus initial watch rules."""
     return repository.create_thesis(
         user_thesis=proposal.user_thesis,
@@ -605,8 +611,9 @@ def _create_thesis_rows(repository: ThesisRepository, proposal: IntakeProposal,
     )
 
 
-def _create_questions(proposal: IntakeProposal,
-                      rules: list[dict[str, JSONValue]]) -> tuple[list[dict[str, JSONValue]], list[dict[str, JSONValue]]]:
+def _create_questions(
+    proposal: IntakeProposal, rules: list[dict[str, JSONValue]]
+) -> tuple[list[dict[str, JSONValue]], list[dict[str, JSONValue]]]:
     """Question rows: proposal questions plus the setup question when ruleless."""
     missing: list[dict[str, JSONValue]] = []
     questions_add = _proposal_question_rows(proposal)
@@ -648,8 +655,7 @@ def plan_refinement(thesis: Thesis, proposal: IntakeProposal) -> dict[str, objec
     claims, added_claims = _plan_claims(thesis, proposal)
     expressions, added_expr = _plan_expressions(thesis, proposal)
     requirements, added_reqs = _plan_requirements(thesis, proposal, added_expr)
-    merged = _plan_merged(thesis, proposal, claims, added_claims, expressions, added_expr,
-                          requirements, added_reqs)
+    merged = _plan_merged(thesis, proposal, claims, added_claims, expressions, added_expr, requirements, added_reqs)
     return {
         "merged": merged,
         "added_claims": added_claims,
@@ -658,34 +664,48 @@ def plan_refinement(thesis: Thesis, proposal: IntakeProposal) -> dict[str, objec
     }
 
 
-def _plan_claims(thesis: Thesis, proposal: IntakeProposal) -> tuple[list[dict[str, JSONValue]], list[dict[str, JSONValue]]]:
+def _plan_claims(
+    thesis: Thesis, proposal: IntakeProposal
+) -> tuple[list[dict[str, JSONValue]], list[dict[str, JSONValue]]]:
     """Kept claim dicts plus newly added claim dicts."""
     old = {c.statement for c in thesis.claims}
     kept = [c.to_dict() for c in thesis.claims]
     return kept, [dict(c) for c in proposal.claims if c["statement"] not in old]
 
 
-def _plan_expressions(thesis: Thesis, proposal: IntakeProposal) -> tuple[list[dict[str, JSONValue]], list[dict[str, JSONValue]]]:
+def _plan_expressions(
+    thesis: Thesis, proposal: IntakeProposal
+) -> tuple[list[dict[str, JSONValue]], list[dict[str, JSONValue]]]:
     """Kept expression dicts plus newly added expression dicts."""
     old = {(e.intent, e.instrument, e.direction, e.structure, e.horizon) for e in thesis.expressions}
     kept = [e.to_dict() for e in thesis.expressions]
-    added = [dict(e) for e in proposal.expressions
-             if (e["intent"], e["instrument"], e["direction"], e["structure"], e["horizon"]) not in old]
+    added = [
+        dict(e)
+        for e in proposal.expressions
+        if (e["intent"], e["instrument"], e["direction"], e["structure"], e["horizon"]) not in old
+    ]
     return kept, added
 
 
-def _plan_requirements(thesis: Thesis, proposal: IntakeProposal,
-                       added_expr: list[dict[str, JSONValue]]) -> tuple[list[dict[str, JSONValue]], list[dict[str, JSONValue]]]:
+def _plan_requirements(
+    thesis: Thesis, proposal: IntakeProposal, added_expr: list[dict[str, JSONValue]]
+) -> tuple[list[dict[str, JSONValue]], list[dict[str, JSONValue]]]:
     """Kept requirement dicts plus ones linked to newly added expressions."""
     new_ids = {e["expression_id"] for e in added_expr}
     kept = [r.to_dict() for r in thesis.requirements]
     return kept, [dict(r) for r in proposal.requirements if r["expression_id"] in new_ids]
 
 
-def _plan_merged(thesis: Thesis, proposal: IntakeProposal, claims: list[dict[str, JSONValue]],
-                 added_claims: list[dict[str, JSONValue]], expressions: list[dict[str, JSONValue]],
-                 added_expr: list[dict[str, JSONValue]], requirements: list[dict[str, JSONValue]],
-                 added_reqs: list[dict[str, JSONValue]]) -> dict[str, object]:
+def _plan_merged(
+    thesis: Thesis,
+    proposal: IntakeProposal,
+    claims: list[dict[str, JSONValue]],
+    added_claims: list[dict[str, JSONValue]],
+    expressions: list[dict[str, JSONValue]],
+    added_expr: list[dict[str, JSONValue]],
+    requirements: list[dict[str, JSONValue]],
+    added_reqs: list[dict[str, JSONValue]],
+) -> dict[str, object]:
     """Merged payload: fresh thesis text plus deduped union lists."""
     return {
         "user_thesis": proposal.user_thesis,
@@ -699,7 +719,14 @@ def _plan_merged(thesis: Thesis, proposal: IntakeProposal, claims: list[dict[str
     }
 
 
-def apply_refinement(repository: ThesisRepository, thesis_id: str, plan: Mapping[str, object], proposal: IntakeProposal, *, effective_at: str | None = None) -> dict[str, object]:
+def apply_refinement(
+    repository: ThesisRepository,
+    thesis_id: str,
+    plan: Mapping[str, object],
+    proposal: IntakeProposal,
+    *,
+    effective_at: str | None = None,
+) -> dict[str, object]:
     """Apply a refinement plan; watch changes are append-only, never touching user rules."""
     thesis = repository.load_thesis(thesis_id)
     tid = thesis.thesis_id
@@ -709,8 +736,7 @@ def apply_refinement(repository: ThesisRepository, thesis_id: str, plan: Mapping
     fresh_scope, fresh_claim_ids, fresh_expr_ids, covered = _refinement_coverage(repository, tid, effective_at)
     covered_claims, covered_exprs = covered
     added_claims, added_expressions, added_requirements = _refinement_added(plan, tid)
-    new_rules = _refinement_rules(fresh_scope, proposal, fresh_claim_ids, fresh_expr_ids,
-                                  covered_claims, covered_exprs)
+    new_rules = _refinement_rules(fresh_scope, proposal, fresh_claim_ids, fresh_expr_ids, covered_claims, covered_exprs)
     if new_rules:
         repository.apply_research_result(tid, {"watch_add": new_rules}, "", effective_at=effective_at)
     return {
@@ -742,7 +768,9 @@ def _refinement_merged(plan: Mapping[str, object], tid: str) -> dict[str, object
     return merged
 
 
-def _live_coverage(repository: ThesisRepository, tid: str) -> tuple[str, list[str], list[str], dict[str, set[str]], dict[str, set[str]]]:
+def _live_coverage(
+    repository: ThesisRepository, tid: str
+) -> tuple[str, list[str], list[str], dict[str, set[str]], dict[str, set[str]]]:
     """Live coverage: scope, IDs, and per-rule covered targets."""
 
     fresh = repository.load_thesis(tid)
@@ -750,8 +778,13 @@ def _live_coverage(repository: ThesisRepository, tid: str) -> tuple[str, list[st
     covered_exprs: dict[str, set[str]] = {}
     for r in repository.load_watch_rules(tid):
         _fold_live_rule(r, covered_claims, covered_exprs)
-    return (fresh.scope, [c.claim_id for c in fresh.claims],
-            [e.expression_id for e in fresh.expressions], covered_claims, covered_exprs)
+    return (
+        fresh.scope,
+        [c.claim_id for c in fresh.claims],
+        [e.expression_id for e in fresh.expressions],
+        covered_claims,
+        covered_exprs,
+    )
 
 
 def _fold_live_rule(r: object, covered_claims: dict[str, set[str]], covered_exprs: dict[str, set[str]]) -> None:
@@ -799,8 +832,9 @@ def _snapshot_targets(row: dict[str, object], key: str) -> list[str]:
     return [c for c in raw if isinstance(c, str)] if isinstance(raw, (list, tuple)) else []
 
 
-def _snapshot_coverage(repository: ThesisRepository, tid: str,
-                       effective_at: str) -> tuple[str, list[str], list[str], dict[str, set[str]], dict[str, set[str]]]:
+def _snapshot_coverage(
+    repository: ThesisRepository, tid: str, effective_at: str
+) -> tuple[str, list[str], list[str], dict[str, set[str]], dict[str, set[str]]]:
     """Snapshot coverage at effective_at: scope, IDs, per-rule covered targets."""
     snap = repository.load_state_as_of(tid, effective_at)
     _scope = snap.thesis.get("scope", UNKNOWN)
@@ -812,10 +846,13 @@ def _snapshot_coverage(repository: ThesisRepository, tid: str,
             continue
         covered_claims.setdefault(rt, set()).update(_snapshot_targets(r, "claim_ids"))
         covered_exprs.setdefault(rt, set()).update(_snapshot_targets(r, "expression_ids"))
-    return (_scope if isinstance(_scope, str) else UNKNOWN,
-            _snapshot_ids(snap.thesis.get("claims", []), "claim_id"),
-            _snapshot_ids(snap.thesis.get("expressions", []), "expression_id"),
-            covered_claims, covered_exprs)
+    return (
+        _scope if isinstance(_scope, str) else UNKNOWN,
+        _snapshot_ids(snap.thesis.get("claims", []), "claim_id"),
+        _snapshot_ids(snap.thesis.get("expressions", []), "expression_id"),
+        covered_claims,
+        covered_exprs,
+    )
 
 
 def _watch_section(snap: object) -> Mapping[str, object] | None:
@@ -831,8 +868,9 @@ def _snapshot_rule_rows(snap: object) -> list[object]:
     return list(rows) if isinstance(rows, list) else []
 
 
-def _refinement_coverage(repository: ThesisRepository, tid: str,
-                         effective_at: str | None) -> tuple[str, list[str], list[str], tuple[dict[str, set[str]], dict[str, set[str]]]]:
+def _refinement_coverage(
+    repository: ThesisRepository, tid: str, effective_at: str | None
+) -> tuple[str, list[str], list[str], tuple[dict[str, set[str]], dict[str, set[str]]]]:
     """Coverage triple for live or snapshot state."""
     if effective_at is None:
         scope, cids, eids, cc, ce = _live_coverage(repository, tid)
@@ -846,13 +884,18 @@ def _refinement_added(plan: Mapping[str, object], tid: str) -> tuple[list[object
     added_claims = plan["added_claims"]
     added_expressions = plan["added_expressions"]
     added_requirements = plan["added_requirements"]
-    if not isinstance(added_claims, list) or not isinstance(added_expressions, list) or not isinstance(added_requirements, list):
+    if (
+        not isinstance(added_claims, list)
+        or not isinstance(added_expressions, list)
+        or not isinstance(added_requirements, list)
+    ):
         raise ValueError(f"thesis {tid!r} refinement plan must list added claims/expressions/requirements")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return added_claims, added_expressions, added_requirements
 
 
-def _trim_rule_targets(cand: dict[str, JSONValue], covered_claims: dict[str, set[str]],
-                       covered_exprs: dict[str, set[str]]) -> dict[str, JSONValue] | None:
+def _trim_rule_targets(
+    cand: dict[str, JSONValue], covered_claims: dict[str, set[str]], covered_exprs: dict[str, set[str]]
+) -> dict[str, JSONValue] | None:
     """Candidate rule trimmed to uncovered targets; None when fully covered."""
     rt = cand.get("rule_type")
     if not isinstance(rt, str):
@@ -881,12 +924,17 @@ def _trim_ids(raw: object, known: set[str]) -> list[str]:
     return [c for c in raw if isinstance(c, str) and c not in known]
 
 
-def _refinement_rules(scope: str, proposal: IntakeProposal, claim_ids: list[str], expr_ids: list[str],
-                      covered_claims: dict[str, set[str]], covered_exprs: dict[str, set[str]]) -> list[dict[str, JSONValue]]:
+def _refinement_rules(
+    scope: str,
+    proposal: IntakeProposal,
+    claim_ids: list[str],
+    expr_ids: list[str],
+    covered_claims: dict[str, set[str]],
+    covered_exprs: dict[str, set[str]],
+) -> list[dict[str, JSONValue]]:
     """New watch rules for uncovered targets only (append-only)."""
     new_rules: list[dict[str, JSONValue]] = []
-    for cand in build_initial_watch_rules(scope, proposal.requirements,
-                                          claim_ids=claim_ids, expression_ids=expr_ids):
+    for cand in build_initial_watch_rules(scope, proposal.requirements, claim_ids=claim_ids, expression_ids=expr_ids):
         trimmed = _trim_rule_targets(cand, covered_claims, covered_exprs)
         if trimmed is not None:
             new_rules.append(trimmed)

@@ -1,5 +1,7 @@
 """Offline regression tests for XBRL concept matching (all-tokens + ambiguity)."""
 
+from typing import ClassVar
+
 import pandas as pd
 import pytest
 
@@ -15,7 +17,7 @@ class _FakeFacts:
 
 
 class _FakeCompany:
-    rows: list[dict[str, object]] = []
+    rows: ClassVar[list[dict[str, object]]] = []
 
     def __init__(self, ticker: str) -> None:
         self.ticker = ticker
@@ -50,11 +52,15 @@ def _row(concept: str, value: float = 1000) -> dict[str, object]:
 
 
 def test_total_revenue_requires_all_tokens(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_FakeCompany, "rows", [
-        _row("us-gaap:TotalAssets"),
-        _row("us-gaap:RevenueFromContractWithCustomer"),
-        _row("us-gaap:TotalRevenues"),
-    ])
+    monkeypatch.setattr(
+        _FakeCompany,
+        "rows",
+        [
+            _row("us-gaap:TotalAssets"),
+            _row("us-gaap:RevenueFromContractWithCustomer"),
+            _row("us-gaap:TotalRevenues"),
+        ],
+    )
     result = edgar_client.get_xbrl_facts("FAKE", "Revenue Total")
     assert "error" not in result
     matching = result["matching_concepts"]
@@ -64,10 +70,14 @@ def test_total_revenue_requires_all_tokens(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_ambiguous_concepts_return_no_data_without_mixing(monkeypatch: pytest.MonkeyPatch) -> None:
-    monkeypatch.setattr(_FakeCompany, "rows", [
-        _row("us-gaap:TotalRevenues"),
-        _row("us-gaap:TotalRevenuesNet"),
-    ])
+    monkeypatch.setattr(
+        _FakeCompany,
+        "rows",
+        [
+            _row("us-gaap:TotalRevenues"),
+            _row("us-gaap:TotalRevenuesNet"),
+        ],
+    )
     result = edgar_client.get_xbrl_facts("FAKE", "Revenue Total")
     assert "error" in result
     assert "ambiguous" in str(result["error"])

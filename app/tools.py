@@ -7,7 +7,7 @@ import json
 import logging
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, TypedDict
@@ -107,87 +107,124 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_fundamentals",
             "description": "Single reported fundamental for one ticker: a specific numeric fundamental (EPS, "
-                "dividends, balance sheet line item, shares outstanding) for a ticker. "
-                "Note: shares_outstanding is SEC-reported shares outstanding, "
-                "not public float. Call this for any request for a specific "
-                "numeric metric. Do NOT use for full financial statements (get_financial_statements), XBRL-tagged facts by concept name (get_xbrl_facts), cheap-vs-expensive multiples (get_valuation_metrics), or forward consensus expectations (get_analyst_estimates). When presenting EPS, show basic and diluted EPS side by side in a markdown table "
-                "with period, basic EPS, and diluted EPS columns, including TTM for both when available. Dividends responses include last paid and next "
-                "SEC-declared (upcoming) dividends with filing provenance; undeclared estimates are never included. Render past, present, and future-declared dividends under separate headings; anything undeclared is an estimate and must never appear under NEXT DECLARED. Dividend metrics are tool-computed; interpret, never recalculate.",
+            "dividends, balance sheet line item, shares outstanding) for a ticker. "
+            "Note: shares_outstanding is SEC-reported shares outstanding, "
+            "not public float. Call this for any request for a specific "
+            "numeric metric. Do NOT use for full financial statements (get_financial_statements), XBRL-tagged facts by concept name (get_xbrl_facts), cheap-vs-expensive multiples (get_valuation_metrics), or forward consensus expectations (get_analyst_estimates). When presenting EPS, show basic and diluted EPS side by side in a markdown table "
+            "with period, basic EPS, and diluted EPS columns, including TTM for both when available. Dividends responses include last paid and next "
+            "SEC-declared (upcoming) dividends with filing provenance; undeclared estimates are never included. Render past, present, and future-declared dividends under separate headings; anything undeclared is an estimate and must never appear under NEXT DECLARED. Dividend metrics are tool-computed; interpret, never recalculate.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
-                    "metric": {"type": "string", "enum": [
-                        "eps", "dividends", "balance_sheet", "shares_outstanding", "overview"
-                    ]},
-                    "as_of": {"type": "string", "description": "Point-in-time query date YYYY-MM-DD; store-backed for eps/shares_outstanding/dividends; live results are labeled data_source=live."}
+                    "metric": {
+                        "type": "string",
+                        "enum": [
+                            "eps",
+                            "dividends",
+                            "balance_sheet",
+                            "shares_outstanding",
+                            "overview",
+                        ],
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time query date YYYY-MM-DD; store-backed for eps/shares_outstanding/dividends; live results are labeled data_source=live.",
+                    },
                 },
-                "required": ["ticker", "metric"]
-            }
-        }
+                "required": ["ticker", "metric"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "find_sec_entities",
-            "description": "Resolves a company name, ticker, or CIK to verified SEC entity candidates (CIK, tickers, verification status), including no-ticker registrants and former names. Ties and fuzzy-only matches stay ambiguous; verify identity before list_sec_filings. Default is non-exhaustive (capped at limit).",
+            "description": "Resolves a company name, ticker, or CIK to verified SEC entity candidates (CIK, tickers, verification status), including no-ticker registrants and former names. Ties and fuzzy-only matches stay ambiguous; verify identity before list_sec_filings. Dispatched inside a deep research session, every entity route is searched by default and limit bounds only the returned packet (default 20); pass exhaustive=false for the quick bounded lookup.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "query": {"type": "string"},
-                    "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; former names apply only within their known/valid interval."},
-                    "exhaustive": {"type": "boolean", "description": "Fan out over all entity routes (default false; non-exhaustive)."},
-                    "limit": {"type": "integer", "description": "Max candidates to return (default 20); higher values probe deeper."}
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time date YYYY-MM-DD; former names apply only within their known/valid interval.",
+                    },
+                    "exhaustive": {
+                        "type": "boolean",
+                        "description": "true searches every entity route (the default when dispatched inside a research session); false requests the quick bounded lookup (default outside a research session).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Bounded lookups return at most this many candidates (default 20); exhaustive lookups return every candidate found across routes (local source cap 50) and limit only bounds the display packet.",
+                    },
                 },
-                "required": ["query"]
-            }
-        }
+                "required": ["query"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "search_sec_filings",
-            "description": "EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes (default non-exhaustive, capped at limit). Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Required: at least one of query, ticker, cik, company_name, person_name, domain, accession_no, security_identifier (a call with none is rejected). Optional: forms, start_date, end_date, as_of, exhaustive, limit. Example: {\"query\": \"risk factors\", \"ticker\": \"AAPL\", \"forms\": [\"10-K\"], \"limit\": 10}.",
+            "description": 'EDGAR discovery over entity, full-text (EFTS), filer-submissions, global filing, and local routes. Dispatched inside a deep research session, every applicable route is drained by default and limit bounds only the returned hit packet (default 20; page the rest with research_read_search); pass exhaustive=false for the quick bounded lookup, which is also the default outside a research session. Hits are text mentions: each names the filer (filer_name/filer_cik) and the exact matched document, never inferred subject identity. Returns coverage, attempts, counts, PIT basis, warnings/errors, auto-queued backfill jobs, and bounded evidence IDs. Required: at least one of query, ticker, cik, company_name, person_name, domain, accession_no, security_identifier (a call with none is rejected). Optional: forms, start_date, end_date, as_of, exhaustive, limit. Example: {"query": "risk factors", "ticker": "AAPL", "forms": ["10-K"], "limit": 10}.',
             "parameters": {
                 "type": "object",
                 "properties": {
-                "query": {"type": "string"},
-                "ticker": {"type": "string"},
-                "cik": {"type": "string"},
-                "company_name": {"type": "string"},
-                "person_name": {"type": "string"},
-                "domain": {"type": "string"},
-                "security_identifier": {"type": "string", "description": "Ticker, CUSIP, ISIN, or class title; never treated as issuer identity."},
-                "accession_no": {"type": "string"},
-                "forms": {"type": "array", "items": {"type": "string"}},
-                "start_date": {"type": "string"},
-                "end_date": {"type": "string"},
-                "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; records known after it are excluded."},
-                "exhaustive": {"type": "boolean", "description": "Fan out over all routes (default false; non-exhaustive)."},
-                "limit": {"type": "integer"}
+                    "query": {"type": "string"},
+                    "ticker": {"type": "string"},
+                    "cik": {"type": "string"},
+                    "company_name": {"type": "string"},
+                    "person_name": {"type": "string"},
+                    "domain": {"type": "string"},
+                    "security_identifier": {
+                        "type": "string",
+                        "description": "Ticker, CUSIP, ISIN, or class title; never treated as issuer identity.",
+                    },
+                    "accession_no": {"type": "string"},
+                    "forms": {"type": "array", "items": {"type": "string"}},
+                    "start_date": {"type": "string"},
+                    "end_date": {"type": "string"},
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time date YYYY-MM-DD; records known after it are excluded.",
+                    },
+                    "exhaustive": {
+                        "type": "boolean",
+                        "description": "true drains every applicable route (the default when dispatched inside a research session); false requests the quick bounded lookup (default outside a research session).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Max hits in the returned packet (default 20); under exhaustive retrieval it does not reduce retrieval.",
+                    },
                 },
-                "required": list[str]()
-            }
-        }
+                "required": list[str](),
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "list_sec_filings",
-            "description": "Lists SEC EDGAR filings for an exact ticker or CIK. Required: identifier (ticker or CIK, e.g. identifier=\"AAPL\"); missing identifier is rejected; does NOT search company names; resolve names via find_sec_entities first. Optional: forms, start_date, end_date, as_of, limit. Example: {\"identifier\": \"AAPL\", \"forms\": [\"10-K\"], \"limit\": 10}.",
+            "description": 'Lists SEC EDGAR filings for an exact ticker or CIK. Required: identifier (ticker or CIK, e.g. identifier="AAPL"); missing identifier is rejected; does NOT search company names; resolve names via find_sec_entities first. Optional: forms, start_date, end_date, as_of, limit. Example: {"identifier": "AAPL", "forms": ["10-K"], "limit": 10}.',
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "identifier": {"type": "string", "description": "Ticker or CIK, e.g. AAPL."},
+                    "identifier": {
+                        "type": "string",
+                        "description": "Ticker or CIK, e.g. AAPL.",
+                    },
                     "forms": {"type": "array", "items": {"type": "string"}},
                     "start_date": {"type": "string"},
                     "end_date": {"type": "string"},
-                    "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."},
-                    "limit": {"type": "integer"}
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded.",
+                    },
+                    "limit": {"type": "integer"},
                 },
-                "required": ["identifier"]
-            }
-        }
+                "required": ["identifier"],
+            },
+        },
     },
     {
         "type": "function",
@@ -197,10 +234,23 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "entity": {"type": "string", "description": "CIK, ticker, entity id, or candidate dict. If unknown, pass company_name instead; never call with neither."},
-                    "company_name": {"type": "string", "description": "Company name (e.g. Apple) when entity is unknown; the server maps it to a ticker."},
-                    "relationship_types": {"type": "array", "items": {"type": "string"}, "description": "Optional open-vocabulary type filter (e.g. beneficial_owner, holding_manager)."},
-                    "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD."},
+                    "entity": {
+                        "type": "string",
+                        "description": "CIK, ticker, entity id, or candidate dict. If unknown, pass company_name instead; never call with neither.",
+                    },
+                    "company_name": {
+                        "type": "string",
+                        "description": "Company name (e.g. Apple) when entity is unknown; the server maps it to a ticker.",
+                    },
+                    "relationship_types": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional open-vocabulary type filter (e.g. beneficial_owner, holding_manager).",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time date YYYY-MM-DD.",
+                    },
                     "limit": {"type": "integer"},
                     "exhaustive": {
                         "type": "boolean",
@@ -209,11 +259,11 @@ TOOLS: list[dict[str, object]] = [
                             "the returned model context remains bounded."
                         ),
                         "default": True,
-                    }
+                    },
                 },
-                "required": ["entity"]
-            }
-        }
+                "required": ["entity"],
+            },
+        },
     },
     {
         "type": "function",
@@ -226,11 +276,11 @@ TOOLS: list[dict[str, object]] = [
                     "source": {"type": "string"},
                     "form": {"type": "string"},
                     "search_id": {"type": "string"},
-                    "limit": {"type": "integer"}
+                    "limit": {"type": "integer"},
                 },
-                "required": list[str]()
-            }
-        }
+                "required": list[str](),
+            },
+        },
     },
     {
         "type": "function",
@@ -239,10 +289,19 @@ TOOLS: list[dict[str, object]] = [
             "description": "Returns one filing's record (filer, subject when known, form, filed/accepted/known dates, period, primary document, amendment link, source URL) by accession number. When the accession number is unknown, find it with list_sec_filings.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string", "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number."}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
-                "required": ["accession_no"]
-            }
-        }
+                "properties": {
+                    "accession_no": {
+                        "type": "string",
+                        "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number.",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded.",
+                    },
+                },
+                "required": ["accession_no"],
+            },
+        },
     },
     {
         "type": "function",
@@ -251,22 +310,72 @@ TOOLS: list[dict[str, object]] = [
             "description": "Lists the documents and exhibits attached to one filing by accession number. When the accession number is unknown, find it with list_sec_filings.",
             "parameters": {
                 "type": "object",
-                "properties": {"accession_no": {"type": "string", "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number."}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
-                "required": ["accession_no"]
-            }
-        }
+                "properties": {
+                    "accession_no": {
+                        "type": "string",
+                        "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number.",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded.",
+                    },
+                },
+                "required": ["accession_no"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_sec_document",
-            "description": "Returns a bounded window of one filing document's text (default: primary document) by accession number. Required: accession_no. Optional: document_name (exact file), section (within-document heading filter), query (within-document substring filter), cursor (alias for offset, default 0; overrides offset when both are given), limit (alias for max_chars, 1..32000, default 12000; overrides max_chars when both are given), offset/max_chars (legacy aliases), as_of, raw (default false; true returns raw source text, still bounded). Returns text plus metadata, section, source_refs [{accession, document, offset}], and cursor/next_cursor for pagination. Example: {\"accession_no\": \"0000320193-25-000079\", \"section\": \"Risk Factors\", \"cursor\": 0, \"limit\": 12000}; next page with {\"accession_no\": \"...\", \"cursor\": <next_cursor>}. Load only the document relevant to the question, never full history. When the accession is already known, pass it; use get_material_events only to discover what changed.",
+            "description": 'Returns a bounded window of one filing document\'s text (default: primary document) by accession number. Required: accession_no. Optional: document_name (exact file), section (within-document heading filter), query (within-document substring filter), cursor (alias for offset, default 0; overrides offset when both are given), limit (alias for max_chars, 1..32000, default 12000; overrides max_chars when both are given), offset/max_chars (legacy aliases), as_of, raw (default false; true returns raw source text, still bounded). Returns text plus metadata, section, source_refs [{accession, document, offset}], cursor/next_cursor for pagination, and a canonical source_handle for the returned window (pass it to research_add_evidence: the kernel reloads that window from the archive and materializes the cited passage itself). Example: {"accession_no": "0000320193-25-000079", "section": "Risk Factors", "cursor": 0, "limit": 12000}; next page with {"accession_no": "...", "cursor": <next_cursor>}. Load only the document relevant to the question, never full history. When the accession is already known, pass it; use get_material_events only to discover what changed.',
             "parameters": {
                 "type": "object",
-            "properties": {"accession_no": {"type": "string", "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number."}, "document_name": {"type": "string", "description": "Exact filing file name; omit for the primary document."}, "section": {"type": "string", "description": "Within-document heading filter, e.g. Risk Factors."}, "query": {"type": "string", "description": "Within-document substring filter."}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}, "offset": {"type": "integer", "description": "Character offset into the document text (default 0). Legacy alias; cursor overrides it when both are given."}, "max_chars": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000). Legacy alias; limit overrides it when both are given."}, "cursor": {"type": "integer", "description": "Character offset into the document text (default 0). Overrides offset when both are given."}, "limit": {"type": "integer", "description": "Characters to return, 1..32000 (default 12000). Overrides max_chars when both are given."}, "raw": {"type": "boolean", "description": "Return raw source text, still bounded (default false)."}},
-                "required": ["accession_no"]
-            }
-        }
+                "properties": {
+                    "accession_no": {
+                        "type": "string",
+                        "description": "SEC accession number, e.g. 0000320193-25-000079. Named accession_no, not accession_number.",
+                    },
+                    "document_name": {
+                        "type": "string",
+                        "description": "Exact filing file name; omit for the primary document.",
+                    },
+                    "section": {
+                        "type": "string",
+                        "description": "Within-document heading filter, e.g. Risk Factors.",
+                    },
+                    "query": {
+                        "type": "string",
+                        "description": "Within-document substring filter.",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "description": "Character offset into the document text (default 0). Legacy alias; cursor overrides it when both are given.",
+                    },
+                    "max_chars": {
+                        "type": "integer",
+                        "description": "Characters to return, 1..32000 (default 12000). Legacy alias; limit overrides it when both are given.",
+                    },
+                    "cursor": {
+                        "type": "integer",
+                        "description": "Character offset into the document text (default 0). Overrides offset when both are given.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "description": "Characters to return, 1..32000 (default 12000). Overrides max_chars when both are given.",
+                    },
+                    "raw": {
+                        "type": "boolean",
+                        "description": "Return raw source text, still bounded (default false).",
+                    },
+                },
+                "required": ["accession_no"],
+            },
+        },
     },
     {
         "type": "function",
@@ -275,10 +384,20 @@ TOOLS: list[dict[str, object]] = [
             "description": "Self-contained full-filing diff for one ticker: pass ticker (plus optional forms hint like S-3/A) and the two most recent matching filings resolve internally; or pass two accession numbers directly. Returns added/removed language. Do NOT call list_sec_filings first. Do NOT use for risk-factor-only year-over-year diffs for one ticker (diff_risk_factors).",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "forms": {"type": "array", "items": {"type": "string"}}, "current_accession": {"type": "string"}, "previous_accession": {"type": "string"}, "section": {"type": "string"}, "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded."}},
-                "required": []
-            }
-        }
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "forms": {"type": "array", "items": {"type": "string"}},
+                    "current_accession": {"type": "string"},
+                    "previous_accession": {"type": "string"},
+                    "section": {"type": "string"},
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time date YYYY-MM-DD; filings known after it are excluded.",
+                    },
+                },
+                "required": [],
+            },
+        },
     },
     {
         "type": "function",
@@ -287,10 +406,15 @@ TOOLS: list[dict[str, object]] = [
             "description": "What changed since a date: deterministic 8-K-derived events with accession citations. Call for 'what changed/what's new' questions. Takes a ticker and date; never load full history.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "since": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["ticker", "since"]
-            }
-        }
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "since": {"type": "string"},
+                    "as_of": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["ticker", "since"],
+            },
+        },
     },
     {
         "type": "function",
@@ -299,10 +423,21 @@ TOOLS: list[dict[str, object]] = [
             "description": "5%+ beneficial-ownership records (SC 13D/G): holder, shares, percent, voting/dispositive powers. Deterministic numbers, never web prose. Use for current 5%+ stakes; use get_ownership_changes for stake changes. Pass a ticker (e.g. AAPL) or a company_name (e.g. Apple); the server maps the name. Never call with neither.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string", "description": "Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither."}, "company_name": {"type": "string", "description": "Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker."}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["ticker"]
-            }
-        }
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither.",
+                    },
+                    "company_name": {
+                        "type": "string",
+                        "description": "Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker.",
+                    },
+                    "as_of": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -311,10 +446,14 @@ TOOLS: list[dict[str, object]] = [
             "description": "Deterministic diffs between a holder's consecutive 13D/G filings: share and percent changes plus voting/text changes. Use for stake changes; use get_beneficial_ownership for current 5%+ stakes. Takes a ticker.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["ticker"]
-            }
-        }
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "as_of": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -323,10 +462,21 @@ TOOLS: list[dict[str, object]] = [
             "description": "Executed insider buys/sells for one ticker: insider transactions (Forms 3/4/5) with SEC transaction codes mapped to purchase/sale/exercise/grant/gift/conversion/withholding/other. Disposals are never defaulted to bearish selling. Use for actual insider purchases and sales by executives and directors. Do NOT use for planned but unexecuted Form 144 sales (get_planned_insider_sales). Pass a ticker (e.g. AAPL) or a company_name (e.g. Apple); the server maps the name. Never call with neither.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string", "description": "Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither."}, "company_name": {"type": "string", "description": "Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker."}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["ticker"]
-            }
-        }
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither.",
+                    },
+                    "company_name": {
+                        "type": "string",
+                        "description": "Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker.",
+                    },
+                    "as_of": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -335,10 +485,14 @@ TOOLS: list[dict[str, object]] = [
             "description": "Planned Form 144 sale notices not yet executed for one ticker: proposed insider sales. Use for proposed or planned insider sales. Do NOT use for completed insider trades (get_insider_activity); compare with get_insider_activity for follow-through. Takes a ticker.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["ticker"]
-            }
-        }
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "as_of": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -347,10 +501,14 @@ TOOLS: list[dict[str, object]] = [
             "description": "Financing history (S-1/S-3/424B/EFFECT): offering terms with source-registration links. Unknown terms stay unknown, never estimated. Pair with get_dilution_profile for financing/dilution work. Takes a ticker.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["ticker"]
-            }
-        }
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "as_of": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -359,10 +517,13 @@ TOOLS: list[dict[str, object]] = [
             "description": "Deterministic dilution math: inputs, formula, and source accessions always shown. Unquantifiable terms return not_quantifiable. Pair with get_offering_history for financing/dilution work. Takes a ticker.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}},
-                "required": ["ticker"]
-            }
-        }
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "as_of": {"type": "string"},
+                },
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -371,10 +532,15 @@ TOOLS: list[dict[str, object]] = [
             "description": "Proxy/governance filing context (DEF 14A, contested forms, information statements) with retrieval pointers. Takes a ticker.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "since": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["ticker"]
-            }
-        }
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "since": {"type": "string"},
+                    "as_of": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -383,10 +549,14 @@ TOOLS: list[dict[str, object]] = [
             "description": "M&A filing context (tender offers, 14D-9, S-4, merger proxies). Deal status is unknown until structured parsers land; use get_sec_document for filing text. Takes a ticker.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string"}, "as_of": {"type": "string"}, "limit": {"type": "integer"}},
-                "required": ["ticker"]
-            }
-        }
+                "properties": {
+                    "ticker": {"type": "string"},
+                    "as_of": {"type": "string"},
+                    "limit": {"type": "integer"},
+                },
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -396,9 +566,9 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
-                "required": ["ticker"]
-            }
-        }
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -408,24 +578,23 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Non-empty capability description (not a company or ticker); never call with an empty query."},
+                    "query": {
+                        "type": "string",
+                        "description": "Non-empty capability description (not a company or ticker); never call with an empty query.",
+                    },
                     "domain": {"type": "string"},
                 },
-                "required": ["query"]
-            }
-        }
+                "required": ["query"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "list_tool_domains",
             "description": "List the tool-domain catalog: domain names with one-line descriptions.",
-            "parameters": {
-                "type": "object",
-                "properties": {},
-                "required": list[str]()
-            }
-        }
+            "parameters": {"type": "object", "properties": {}, "required": list[str]()},
+        },
     },
     {
         "type": "function",
@@ -436,11 +605,15 @@ TOOLS: list[dict[str, object]] = [
                 "type": "object",
                 "properties": {
                     "name": {"type": "string"},
-                    "names": {"type": "array", "items": {"type": "string"}, "description": "Describe several tools in one call, in order."},
+                    "names": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Describe several tools in one call, in order.",
+                    },
                 },
-                "required": list[str]()
-            }
-        }
+                "required": list[str](),
+            },
+        },
     },
     {
         "type": "function",
@@ -454,9 +627,9 @@ TOOLS: list[dict[str, object]] = [
                     "family": {"type": "string"},
                     "name": {"type": "string"},
                 },
-                "additionalProperties": False
-            }
-        }
+                "additionalProperties": False,
+            },
+        },
     },
     {
         "type": "function",
@@ -470,101 +643,104 @@ TOOLS: list[dict[str, object]] = [
                     "arguments": {"type": "object"},
                 },
                 "required": ["name"],
-                "additionalProperties": False
-            }
-        }
+                "additionalProperties": False,
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_recent_ownership_filings",
             "description": "Lists the most recent SC 13D/13G filings market-wide "
-                "(SEC current-filings feed, ~24h window): issuer, filer, stake "
-                "percent/shares, filed date, accession. Call for 'most recent' "
-                "or 'latest' big-investor filings when no ticker is given. Do not drill into get_beneficial_ownership unless asked. It lists filings, it "
-                "does not establish that a filing caused a price move.",
+            "(SEC current-filings feed, ~24h window): issuer, filer, stake "
+            "percent/shares, filed date, accession. Call for 'most recent' "
+            "or 'latest' big-investor filings when no ticker is given. Do not drill into get_beneficial_ownership unless asked. It lists filings, it "
+            "does not establish that a filing caused a price move.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "form_type": {"type": "string", "enum": ["SC 13D", "SC 13G", "both"]},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 25}
+                    "form_type": {
+                        "type": "string",
+                        "enum": ["SC 13D", "SC 13G", "both"],
+                    },
+                    "limit": {"type": "integer", "minimum": 1, "maximum": 25},
                 },
-                "required": list[str]()
-            }
-        }
+                "required": list[str](),
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "diff_risk_factors",
             "description": "Self-contained Risk Factors year-over-year diff for one ticker: what changed in Risk Factors language "
-                "vs. the prior filing. Takes a ticker alone; filings resolve internally so do NOT call list_sec_filings first. Call for risk-disclosure change framing (what is new/changed). Do NOT use for full-filing diffs between two accessions (diff_sec_filings). "
-                "Do not use for disclosure or mention questions without change framing; use search_sec_filings instead.",
+            "vs. the prior filing. Takes a ticker alone; filings resolve internally so do NOT call list_sec_filings first. Call for risk-disclosure change framing (what is new/changed). Do NOT use for full-filing diffs between two accessions (diff_sec_filings). "
+            "Do not use for disclosure or mention questions without change framing; use search_sec_filings instead.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
-                "required": ["ticker"]
-            }
-        }
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_financial_statements",
             "description": "Full parsed statements for one ticker: income statement, "
-                "balance sheet, and cash flow from 10-K or 10-Q filings. Do NOT use for a single metric like EPS (get_fundamentals) or a single XBRL-tagged fact (get_xbrl_facts). Takes a ticker.",
+            "balance sheet, and cash flow from 10-K or 10-Q filings. Do NOT use for a single metric like EPS (get_fundamentals) or a single XBRL-tagged fact (get_xbrl_facts). Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
-                    "statement_type": {"type": "string", "enum": [
-                        "income_statement", "balance_sheet", "cash_flow"
-                    ]}
+                    "statement_type": {
+                        "type": "string",
+                        "enum": ["income_statement", "balance_sheet", "cash_flow"],
+                    },
                 },
-                "required": ["ticker", "statement_type"]
-            }
-        }
+                "required": ["ticker", "statement_type"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_xbrl_facts",
             "description": "Single XBRL-tagged fact by concept name for one ticker: XBRL financial metrics (Revenue, Net Income, "
-                "Cash, Debt, Equity, etc.) for any company. Do not use this for EPS; for EPS use get_fundamentals(metric=\"eps\"). Use exact XBRL tag names (e.g. NetIncomeLoss for net income), never friendly labels. Do NOT use for full statements (get_financial_statements). Takes a ticker and concept.",
+            'Cash, Debt, Equity, etc.) for any company. Do not use this for EPS; for EPS use get_fundamentals(metric="eps"). Use exact XBRL tag names (e.g. NetIncomeLoss for net income), never friendly labels. Do NOT use for full statements (get_financial_statements). Takes a ticker and concept.',
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
-                    "concept": {"type": "string"}
+                    "concept": {"type": "string"},
                 },
-                "required": ["ticker", "concept"]
-            }
-        }
+                "required": ["ticker", "concept"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_short_interest",
             "description": "Biweekly short position for one ticker: FINRA consolidated short interest "
-                "(current/previous short position, days to cover, average daily "
-                "volume, percent change). Call for short interest, short float, "
-                "or days-to-cover questions. Do NOT use for daily short-sale volume by venue (get_reg_sho_volume), market-wide most-shorted screens (get_short_interest_leaderboard), or short-vs-shares-outstanding context (get_short_pressure_profile). For change-over-time or trend "
-                "questions, prefer query_finra. When the user asks to show "
-                "figures or values, or names exact fields, prefer "
-                "get_finra_datapoints. Takes a ticker.",
+            "(current/previous short position, days to cover, average daily "
+            "volume, percent change). Call for short interest, short float, "
+            "or days-to-cover questions. Do NOT use for daily short-sale volume by venue (get_reg_sho_volume), market-wide most-shorted screens (get_short_interest_leaderboard), or short-vs-shares-outstanding context (get_short_pressure_profile). For change-over-time or trend "
+            "questions, prefer query_finra. When the user asks to show "
+            "figures or values, or names exact fields, prefer "
+            "get_finra_datapoints. Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
                     "settlementDate": {
                         "type": "string",
-                        "description": "Optional settlement date YYYY-MM-DD. "
-                        "Omit to return recent cycles."
-                    }
+                        "description": "Optional settlement date YYYY-MM-DD. Omit to return recent cycles.",
+                    },
                 },
-                "required": ["ticker"]
-            }
-        }
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
@@ -574,170 +750,187 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "limit": {"type": "integer", "description": "Number of ranked stocks to return; default 10, maximum 25."},
-                    "settlement_date": {"type": "string", "description": "Optional FINRA settlement date (YYYY-MM-DD). Omit for the latest published FINRA cycle."},
-                    "as_of": {"type": "string", "description": "Optional knowledge horizon (YYYY-MM-DD). Only data knowable on or before this date is used. Defaults to today; pass an explicit date for a historical screen."}
+                    "limit": {
+                        "type": "integer",
+                        "description": "Number of ranked stocks to return; default 10, maximum 25.",
+                    },
+                    "settlement_date": {
+                        "type": "string",
+                        "description": "Optional FINRA settlement date (YYYY-MM-DD). Omit for the latest published FINRA cycle.",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Optional knowledge horizon (YYYY-MM-DD). Only data knowable on or before this date is used. Defaults to today; pass an explicit date for a historical screen.",
+                    },
                 },
-                "required": list[str]()
-            }
-        }
+                "required": list[str](),
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_reg_sho_volume",
             "description": "Self-contained daily short-sale volume by venue for one ticker: FINRA daily Reg SHO short-sale volume "
-                "ticker (short, short-exempt, and total share quantity by "
-                "reporting facility). Rolling 12 months. Takes a ticker alone; dataset and fields resolve internally so do NOT call describe_finra_dataset or get_finra_datapoints. Do NOT use for biweekly short interest positions (get_short_interest). Takes a ticker.",
+            "ticker (short, short-exempt, and total share quantity by "
+            "reporting facility). Rolling 12 months. Takes a ticker alone; dataset and fields resolve internally so do NOT call describe_finra_dataset or get_finra_datapoints. Do NOT use for biweekly short interest positions (get_short_interest). Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
                     "tradeDate": {
                         "type": "string",
-                        "description": "Optional trade date YYYY-MM-DD."
-                    }
+                        "description": "Optional trade date YYYY-MM-DD.",
+                    },
                 },
-                "required": ["ticker"]
-            }
-        }
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_threshold_securities",
             "description": "Returns FINRA OTC Regulation SHO / Rule 4320 "
-                "threshold securities. Optionally filter by ticker and date.",
+            "threshold securities. Optionally filter by ticker and date.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "ticker": {"type": "string"},
                     "tradeDate": {
                         "type": "string",
-                        "description": "Optional trade date YYYY-MM-DD."
-                    }
+                        "description": "Optional trade date YYYY-MM-DD.",
+                    },
                 },
-                "required": list[str]()
-            }
-        }
+                "required": list[str](),
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_analyst_estimates",
             "description": "Forward sell-side consensus expectations for one ticker: sell-side consensus estimates "
-                "from Yahoo Finance: latest quote, analyst 12-month price "
-                "targets (mean/median/high/low) and recommendation rating, "
-                "forward EPS and revenue estimates per period (current quarter, "
-                "next quarter, current fiscal year, next fiscal year) with "
-                "growth rates, plus EPS estimate-revision trend (7/30/60 days "
-                "ago). Call for analyst estimates, price targets, consensus "
-                "expectations, forward growth, or valuation-vs-consensus "
-                "questions. Do NOT use for reported historical EPS (get_fundamentals). Consensus moves daily; the response includes the "
-                "as-of timestamp. Always state the as-of date.",
+            "from Yahoo Finance: latest quote, analyst 12-month price "
+            "targets (mean/median/high/low) and recommendation rating, "
+            "forward EPS and revenue estimates per period (current quarter, "
+            "next quarter, current fiscal year, next fiscal year) with "
+            "growth rates, plus EPS estimate-revision trend (7/30/60 days "
+            "ago). Call for analyst estimates, price targets, consensus "
+            "expectations, forward growth, or valuation-vs-consensus "
+            "questions. Do NOT use for reported historical EPS (get_fundamentals). Consensus moves daily; the response includes the "
+            "as-of timestamp. Always state the as-of date.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
-                "required": ["ticker"]
-            }
-        }
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_sp500_weight",
             "description": "Returns a company's current weight in the S&P 500 "
-                "index (rank, weight as percent of index market cap) from the "
-                "Slickcharts constituent list. Call for 'what percent of the "
-                "S&P 500 is [ticker]' or index-weight questions. To estimate "
-                "total S&P 500 market cap, divide market_cap from "
-                "get_analyst_estimates by weight_pct/100.",
+            "index (rank, weight as percent of index market cap) from the "
+            "Slickcharts constituent list. Call for 'what percent of the "
+            "S&P 500 is [ticker]' or index-weight questions. To estimate "
+            "total S&P 500 market cap, divide market_cap from "
+            "get_analyst_estimates by weight_pct/100.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
-                "required": ["ticker"]
-            }
-        }
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_obligations",
             "description": "Future cash obligations from 10-K/10-Q notes for one ticker: quantified contractual obligations and "
-                "commitments disclosed in the latest 10-Q/10-K notes: "
-                "manufacturing/supply/capacity commitments, cloud service "
-                "agreements, vendor commitments, operating leases, and "
-                "facility lease guarantees, each with the amount, the "
-                "filing's own certainty language (contractual = "
-                "non-cancelable/firm; contingent = cancellable, reducible, "
-                "terminable, or default-triggered), payment horizon, and "
-                "source excerpt. Call for purchase obligations, supply "
-                "commitments, cloud commitments, lease obligations, "
-                "guarantees, or any 'what is the company obligated to pay "
-                "in the future' question. Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics). Contingent items are NOT counted "
-                "in adjusted EPS. Treat on-balance-sheet (already accrued) items as informational and never double-count them; never present contingent or off-balance-sheet obligations as certain. Pass a ticker (e.g. AAPL) or a company_name (e.g. Apple); the server maps the name to a ticker.",
+            "commitments disclosed in the latest 10-Q/10-K notes: "
+            "manufacturing/supply/capacity commitments, cloud service "
+            "agreements, vendor commitments, operating leases, and "
+            "facility lease guarantees, each with the amount, the "
+            "filing's own certainty language (contractual = "
+            "non-cancelable/firm; contingent = cancellable, reducible, "
+            "terminable, or default-triggered), payment horizon, and "
+            "source excerpt. Call for purchase obligations, supply "
+            "commitments, cloud commitments, lease obligations, "
+            "guarantees, or any 'what is the company obligated to pay "
+            "in the future' question. Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics). Contingent items are NOT counted "
+            "in adjusted EPS. Treat on-balance-sheet (already accrued) items as informational and never double-count them; never present contingent or off-balance-sheet obligations as certain. Pass a ticker (e.g. AAPL) or a company_name (e.g. Apple); the server maps the name to a ticker.",
             "parameters": {
                 "type": "object",
-                "properties": {"ticker": {"type": "string", "description": "Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither."}, "company_name": {"type": "string", "description": "Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker."}},
-                "required": ["ticker"]
-            }
-        }
+                "properties": {
+                    "ticker": {
+                        "type": "string",
+                        "description": "Ticker (e.g. AAPL). If unknown, pass company_name instead; never call with neither.",
+                    },
+                    "company_name": {
+                        "type": "string",
+                        "description": "Company name (e.g. Apple) when the ticker is unknown; the server maps it to a ticker.",
+                    },
+                },
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_valuation_metrics",
             "description": "Cheap-vs-expensive earnings multiples at live price for one ticker: valuation metrics anchored to the live "
-                "price as of the query: trailing P/E (SEC GAAP TTM EPS), "
-                "consensus forward P/E (Yahoo), plus three clearly separated "
-                "EPS figures: consensus forward EPS; adjusted forward EPS "
-                "(consensus minus only contractual obligations — "
-                "non-cancelable/firm per the 10-Q/10-K notes — annualized "
-                "per share); and a stress-scenario forward EPS (also "
-                "subtracting contingent obligations: cancellable, reducible, "
-                "terminable, or default-triggered). The per-share obligation "
-                "drag is shown explicitly. Use for 'is the stock cheap', "
-                "P/E, forward earnings, or obligation-adjusted valuation "
-                "questions. Do NOT use for reported EPS alone (get_fundamentals) or forward consensus alone (get_analyst_estimates). Never present the stress scenario as 'adjusted'. Always state which ledger tier you are citing plus the live price and its timestamp. Takes a ticker.",
+            "price as of the query: trailing P/E (SEC GAAP TTM EPS), "
+            "consensus forward P/E (Yahoo), plus three clearly separated "
+            "EPS figures: consensus forward EPS; adjusted forward EPS "
+            "(consensus minus only contractual obligations — "
+            "non-cancelable/firm per the 10-Q/10-K notes — annualized "
+            "per share); and a stress-scenario forward EPS (also "
+            "subtracting contingent obligations: cancellable, reducible, "
+            "terminable, or default-triggered). The per-share obligation "
+            "drag is shown explicitly. Use for 'is the stock cheap', "
+            "P/E, forward earnings, or obligation-adjusted valuation "
+            "questions. Do NOT use for reported EPS alone (get_fundamentals) or forward consensus alone (get_analyst_estimates). Never present the stress scenario as 'adjusted'. Always state which ledger tier you are citing plus the live price and its timestamp. Takes a ticker.",
             "parameters": {
                 "type": "object",
                 "properties": {"ticker": {"type": "string"}},
-                "required": ["ticker"]
-            }
-        }
+                "required": ["ticker"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "list_finra_datasets",
             "description": "Lists public FINRA Query API datasets (filing cabinet "
-                "catalog): concise entries with canonical id group/name, group, "
-                "description, and ticker/date support. Optional group or search "
-                "filters. Prefer calling the analysis tool directly with a known dataset ID; use this listing only to resolve an ID search did not surface.",
+            "catalog): concise entries with canonical id group/name, group, "
+            "description, and ticker/date support. Optional group or search "
+            "filters. Prefer calling the analysis tool directly with a known dataset ID; use this listing only to resolve an ID search did not surface.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "group": {
                         "type": "string",
-                        "description": "Optional dataset group filter "
-                        "(e.g. otcMarket, fixedIncomeMarket, finra)."
+                        "description": "Optional dataset group filter (e.g. otcMarket, fixedIncomeMarket, finra).",
                     },
                     "search": {
                         "type": "string",
-                        "description": "Optional substring match on name/description."
-                    }
+                        "description": "Optional substring match on name/description.",
+                    },
                 },
-                "required": list[str]()
-            }
-        }
+                "required": list[str](),
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "describe_finra_dataset",
             "description": "Describes one FINRA dataset: fields with types and "
-                "descriptions, ticker/date fields, documented filter values, and "
-                "supported methods. Takes the dataset ID directly.",
+            "descriptions, ticker/date fields, documented filter values, and "
+            "supported methods. Takes the dataset ID directly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -745,43 +938,43 @@ TOOLS: list[dict[str, object]] = [
                         "type": "string",
                         "description": "Canonical group/name "
                         "(e.g. otcMarket/consolidatedShortInterest). "
-                        "Legacy bare names are accepted when unambiguous."
+                        "Legacy bare names are accepted when unambiguous.",
                     }
                 },
-                "required": ["dataset_id"]
-            }
-        }
+                "required": ["dataset_id"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "get_finra_datapoints",
             "description": "Exact raw rows from any named FINRA dataset: returns exact source values "
-                "for explicit data requests ONLY (e.g. 'show the last five "
-                "settlement-date values' or 'show recent position figures'). "
-                "Requires a 'fields' list and at least one narrowing "
-                "condition (ticker, date/date range, or filters). IMPORTANT: "
-                "when the user requests named datapoints with friendly "
-                "labels (e.g. 'days to cover', 'average daily volume'), "
-                "call describe_finra_dataset FIRST and use the "
-                "metadata's exact field names (e.g. daysToCoverQuantity, "
-                "averageDailyVolumeQuantity) in the fields list — never "
-                "friendly labels. For 'latest five' / 'last five' / 'most "
-                "recent' requests, add sort_fields [\"-<dateField>\"] or "
-                "sort_order \"desc\" (or \"asc\" for oldest first); the "
-                "client resolves the sort against the dataset's partitions "
-                "automatically. Do NOT use for ordinary analysis — query_finra "
-                "and the specific helper tools return analyzed briefings "
-                "instead. Common short-interest fields: settlementDate, symbolCode, "
-                "currentShortPositionQuantity, previousShortPositionQuantity, "
-                "averageDailyVolumeQuantity, daysToCoverQuantity. For other datasets, "
-                "call describe_finra_dataset first for exact field names — ticker "
-                "plus dataset is enough to begin. Returns at "
-                "most 25 rows containing only the requested fields. Exact "
-                "source values are guaranteed for normal scalar data; "
-                "oversized text fields are rendered as a marked excerpt "
-                "(table cells are capped at 200 characters to keep the tool "
-                "message compact). Takes the dataset ID directly.",
+            "for explicit data requests ONLY (e.g. 'show the last five "
+            "settlement-date values' or 'show recent position figures'). "
+            "Requires a 'fields' list and at least one narrowing "
+            "condition (ticker, date/date range, or filters). IMPORTANT: "
+            "when the user requests named datapoints with friendly "
+            "labels (e.g. 'days to cover', 'average daily volume'), "
+            "call describe_finra_dataset FIRST and use the "
+            "metadata's exact field names (e.g. daysToCoverQuantity, "
+            "averageDailyVolumeQuantity) in the fields list — never "
+            "friendly labels. For 'latest five' / 'last five' / 'most "
+            'recent\' requests, add sort_fields ["-<dateField>"] or '
+            'sort_order "desc" (or "asc" for oldest first); the '
+            "client resolves the sort against the dataset's partitions "
+            "automatically. Do NOT use for ordinary analysis — query_finra "
+            "and the specific helper tools return analyzed briefings "
+            "instead. Common short-interest fields: settlementDate, symbolCode, "
+            "currentShortPositionQuantity, previousShortPositionQuantity, "
+            "averageDailyVolumeQuantity, daysToCoverQuantity. For other datasets, "
+            "call describe_finra_dataset first for exact field names — ticker "
+            "plus dataset is enough to begin. Returns at "
+            "most 25 rows containing only the requested fields. Exact "
+            "source values are guaranteed for normal scalar data; "
+            "oversized text fields are rendered as a marked excerpt "
+            "(table cells are capped at 200 characters to keep the tool "
+            "message compact). Takes the dataset ID directly.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -789,26 +982,23 @@ TOOLS: list[dict[str, object]] = [
                         "type": "string",
                         "description": "Canonical id group/name "
                         "(e.g. otcMarket/consolidatedShortInterest). "
-                        "Legacy bare names accepted when unambiguous."
+                        "Legacy bare names accepted when unambiguous.",
                     },
                     "fields": {
                         "type": "array",
                         "description": "Exact field names to return (e.g. settlementDate, symbolCode, currentShortPositionQuantity for short interest).",
                         "items": {"type": "string"},
-                        "minItems": 1
+                        "minItems": 1,
                     },
                     "ticker": {
                         "type": "string",
-                        "description": "Issue symbol when the dataset is symbol-level."
+                        "description": "Issue symbol when the dataset is symbol-level.",
                     },
                     "start_date": {
                         "type": "string",
-                        "description": "YYYY-MM-DD. Combined with end_date as a range."
+                        "description": "YYYY-MM-DD. Combined with end_date as a range.",
                     },
-                    "end_date": {
-                        "type": "string",
-                        "description": "YYYY-MM-DD."
-                    },
+                    "end_date": {"type": "string", "description": "YYYY-MM-DD."},
                     "filters": {
                         "type": "array",
                         "description": "Extra compare filters (field names must exist on the dataset — when unknown, call describe_finra_dataset first).",
@@ -819,28 +1009,32 @@ TOOLS: list[dict[str, object]] = [
                                 "op": {
                                     "type": "string",
                                     "enum": [
-                                        "EQUAL", "GREATER", "LESSER",
-                                        "GTE", "LTE", "NOT_EQUAL", "BEGINS_WITH"
-                                    ]
+                                        "EQUAL",
+                                        "GREATER",
+                                        "LESSER",
+                                        "GTE",
+                                        "LTE",
+                                        "NOT_EQUAL",
+                                        "BEGINS_WITH",
+                                    ],
                                 },
-                                "value": {"type": "string"}
+                                "value": {"type": "string"},
                             },
-                            "required": ["field", "value"]
-                        }
+                            "required": ["field", "value"],
+                        },
                     },
                     "limit": {
                         "type": "integer",
-                        "description": "Max rows to return (clamped to 1..25; "
-                        "default 10)."
+                        "description": "Max rows to return (clamped to 1..25; default 10).",
                     },
                     "sort_fields": {
                         "type": "array",
                         "description": "FINRA sortFields syntax: '+field' "
                         "ascending, '-field' descending, e.g. "
-                        "[\"-settlementDate\"] returns newest first. Use for "
+                        '["-settlementDate"] returns newest first. Use for '
                         "'latest five' / 'last five' / 'most recent' data "
                         "requests. Fields must exist on the dataset.",
-                        "items": {"type": "string"}
+                        "items": {"type": "string"},
                     },
                     "sort_order": {
                         "type": "string",
@@ -848,27 +1042,27 @@ TOOLS: list[dict[str, object]] = [
                         "description": "Convenience: sort by the dataset's "
                         "date field ('desc' = newest first, for 'latest "
                         "five' requests). Rejected when the dataset has no "
-                        "date field — use sort_fields instead."
-                    }
+                        "date field — use sort_fields instead.",
+                    },
                 },
-                "required": ["dataset", "fields"]
-            }
-        }
+                "required": ["dataset", "fields"],
+            },
+        },
     },
     {
         "type": "function",
         "function": {
             "name": "query_finra",
             "description": "Analyzed FINRA briefing with trends and metrics over any named dataset: queries a FINRA dataset by canonical group/name "
-                "(or legacy bare name) and returns an analyzed briefing: "
-                "query provenance, coverage dates, deterministic metrics "
-                "(min/max/mean/median/sum, latest-vs-prior change), derived "
-                "trends, data-quality warnings, and a concise prose briefing. "
-                "Raw source records are NOT returned. Prefer get_short_interest "
-                "/ get_reg_sho_volume / get_threshold_securities for those "
-                "specific questions. Takes the dataset ID directly with a bounded limit. "
-                "Use get_finra_datapoints only when the user explicitly asks "
-                "to see exact source values. For more records, paginate with offset using the returned next_offset/may_have_more indicators. If a result is flagged stale or historical (newest date older than 90 days), say so explicitly and never present it as current market data.",
+            "(or legacy bare name) and returns an analyzed briefing: "
+            "query provenance, coverage dates, deterministic metrics "
+            "(min/max/mean/median/sum, latest-vs-prior change), derived "
+            "trends, data-quality warnings, and a concise prose briefing. "
+            "Raw source records are NOT returned. Prefer get_short_interest "
+            "/ get_reg_sho_volume / get_threshold_securities for those "
+            "specific questions. Takes the dataset ID directly with a bounded limit. "
+            "Use get_finra_datapoints only when the user explicitly asks "
+            "to see exact source values. For more records, paginate with offset using the returned next_offset/may_have_more indicators. If a result is flagged stale or historical (newest date older than 90 days), say so explicitly and never present it as current market data.",
             "parameters": {
                 "type": "object",
                 "properties": {
@@ -876,29 +1070,26 @@ TOOLS: list[dict[str, object]] = [
                         "type": "string",
                         "description": "Canonical id group/name "
                         "(e.g. fixedIncomeMarket/treasuryDailyAggregates). "
-                        "Legacy bare names accepted when unambiguous."
+                        "Legacy bare names accepted when unambiguous.",
                     },
                     "ticker": {
                         "type": "string",
-                        "description": "Issue symbol when the dataset is symbol-level."
+                        "description": "Issue symbol when the dataset is symbol-level.",
                     },
                     "start_date": {
                         "type": "string",
-                        "description": "YYYY-MM-DD. Combined with end_date as a range."
+                        "description": "YYYY-MM-DD. Combined with end_date as a range.",
                     },
-                    "end_date": {
-                        "type": "string",
-                        "description": "YYYY-MM-DD."
-                    },
+                    "end_date": {"type": "string", "description": "YYYY-MM-DD."},
                     "limit": {
                         "type": "integer",
-                        "description": "Max records to return (clamped to 1..1000)."
+                        "description": "Max records to return (clamped to 1..1000).",
                     },
                     "offset": {
                         "type": "integer",
                         "description": "0-based record offset for pagination "
                         "(FINRA max 500000). Rejected for datasets whose "
-                        "catalog entry has supportsRecordOffset=false."
+                        "catalog entry has supportsRecordOffset=false.",
                     },
                     "filters": {
                         "type": "array",
@@ -910,25 +1101,30 @@ TOOLS: list[dict[str, object]] = [
                                 "op": {
                                     "type": "string",
                                     "enum": [
-                                        "EQUAL", "GREATER", "LESSER",
-                                        "GTE", "LTE", "NOT_EQUAL", "BEGINS_WITH"
-                                    ]
+                                        "EQUAL",
+                                        "GREATER",
+                                        "LESSER",
+                                        "GTE",
+                                        "LTE",
+                                        "NOT_EQUAL",
+                                        "BEGINS_WITH",
+                                    ],
                                 },
-                                "value": {"type": "string"}
+                                "value": {"type": "string"},
                             },
-                            "required": ["field", "value"]
-                        }
+                            "required": ["field", "value"],
+                        },
                     },
                     "analysis_goal": {
                         "type": "string",
                         "description": "Optional: what the user needs answered "
                         "(e.g. 'trend over the last 12 months'). Guides the "
-                        "briefing; deterministic metrics are always computed."
-                    }
+                        "briefing; deterministic metrics are always computed.",
+                    },
                 },
-                "required": ["dataset"]
-            }
-        }
+                "required": ["dataset"],
+            },
+        },
     },
     {
         "type": "function",
@@ -1009,9 +1205,12 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "refresh": {"type": "boolean", "description": "If true, refresh account and quote data from Robinhood before returning the snapshot."}
+                    "refresh": {
+                        "type": "boolean",
+                        "description": "If true, refresh account and quote data from Robinhood before returning the snapshot.",
+                    }
                 },
-                "required": list[str]()
+                "required": list[str](),
             },
         },
     },
@@ -1020,7 +1219,11 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_scanner_filter_specs",
             "description": "Lists every valid Robinhood scanner filter type and usage (read-only catalog).",
-            "parameters": {"type": "object", "properties": dict[str, object](), "required": list[str]()},
+            "parameters": {
+                "type": "object",
+                "properties": dict[str, object](),
+                "required": list[str](),
+            },
         },
     },
     {
@@ -1028,7 +1231,11 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "evaluate_mandate",
             "description": "Deterministic risk/mandate evaluation of the latest portfolio snapshot against data/mandate.json: sector exposure, single-position weight, minimum cash, prohibited assets. Breaches are computed by Stockbot; explain them, do not recalculate.",
-            "parameters": {"type": "object", "properties": dict[str, object](), "additionalProperties": False},
+            "parameters": {
+                "type": "object",
+                "properties": dict[str, object](),
+                "additionalProperties": False,
+            },
         },
     },
     {
@@ -1036,7 +1243,11 @@ TOOLS: list[dict[str, object]] = [
         "function": {
             "name": "get_scans",
             "description": "Lists the user's saved Robinhood scanners (screeners): id, title, active filters, configured columns, sort order, and whether the scan is Cortex-managed (read-only).",
-            "parameters": {"type": "object", "properties": dict[str, object](), "required": list[str]()},
+            "parameters": {
+                "type": "object",
+                "properties": dict[str, object](),
+                "required": list[str](),
+            },
         },
     },
     {
@@ -1047,8 +1258,16 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "scan_id": {"type": "string", "description": "The scan identifier to execute."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Maximum result rows to return (default 20)."},
+                    "scan_id": {
+                        "type": "string",
+                        "description": "The scan identifier to execute.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 25,
+                        "description": "Maximum result rows to return (default 20).",
+                    },
                 },
                 "required": ["scan_id"],
             },
@@ -1062,14 +1281,44 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Search query: ticker/company/industry plus the research question. Never include account, portfolio, or personal identifiers."},
-                    "category": {"type": "string", "enum": ["news", "company", "publication", "financial report"], "description": "Optional category to narrow the search."},
-                    "include_domains": {"type": "array", "items": {"type": "string"}, "description": "Optional domains to restrict results to."},
-                    "exclude_domains": {"type": "array", "items": {"type": "string"}, "description": "Optional domains to exclude from results."},
-                    "start_published_date": {"type": "string", "description": "Optional start publication date YYYY-MM-DD, inclusive."},
-                    "end_published_date": {"type": "string", "description": "Optional end publication date YYYY-MM-DD, inclusive."},
-                    "search_type": {"type": "string", "enum": ["auto", "fast", "deep-lite"], "description": "Optional search mode (default auto)."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Maximum results, 1-25 (default 5)."},
+                    "query": {
+                        "type": "string",
+                        "description": "Search query: ticker/company/industry plus the research question. Never include account, portfolio, or personal identifiers.",
+                    },
+                    "category": {
+                        "type": "string",
+                        "enum": ["news", "company", "publication", "financial report"],
+                        "description": "Optional category to narrow the search.",
+                    },
+                    "include_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional domains to restrict results to.",
+                    },
+                    "exclude_domains": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Optional domains to exclude from results.",
+                    },
+                    "start_published_date": {
+                        "type": "string",
+                        "description": "Optional start publication date YYYY-MM-DD, inclusive.",
+                    },
+                    "end_published_date": {
+                        "type": "string",
+                        "description": "Optional end publication date YYYY-MM-DD, inclusive.",
+                    },
+                    "search_type": {
+                        "type": "string",
+                        "enum": ["auto", "fast", "deep-lite"],
+                        "description": "Optional search mode (default auto).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 25,
+                        "description": "Maximum results, 1-25 (default 5).",
+                    },
                 },
                 "required": ["query"],
             },
@@ -1083,7 +1332,10 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "user_thesis": {"type": "string", "description": "The user's investment thesis in their own words."},
+                    "user_thesis": {
+                        "type": "string",
+                        "description": "The user's investment thesis in their own words.",
+                    },
                     **_THESIS_DELTA_PROPERTIES,
                 },
                 "required": ["user_thesis"],
@@ -1099,7 +1351,10 @@ TOOLS: list[dict[str, object]] = [
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "Thesis ID or slug."},
-                    "as_of": {"type": "string", "description": "Point-in-time cutoff (ISO-8601); omit for current state."},
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time cutoff (ISO-8601); omit for current state.",
+                    },
                 },
                 "required": ["id"],
             },
@@ -1114,7 +1369,10 @@ TOOLS: list[dict[str, object]] = [
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "Thesis ID or slug."},
-                    "clarification": {"type": "string", "description": "New information or correction in the user's own words."},
+                    "clarification": {
+                        "type": "string",
+                        "description": "New information or correction in the user's own words.",
+                    },
                     **_THESIS_DELTA_PROPERTIES,
                 },
                 "required": ["id", "clarification"],
@@ -1130,7 +1388,10 @@ TOOLS: list[dict[str, object]] = [
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "Thesis ID or slug."},
-                    "rule_type": {"type": "string", "description": "Semantic monitor name to add (omit to only list rules)."},
+                    "rule_type": {
+                        "type": "string",
+                        "description": "Semantic monitor name to add (omit to only list rules).",
+                    },
                     "claim_ids": {"type": "array", "items": {"type": "string"}},
                     "expression_ids": {"type": "array", "items": {"type": "string"}},
                 },
@@ -1149,9 +1410,18 @@ TOOLS: list[dict[str, object]] = [
                     "id": {"type": "string", "description": "Thesis ID or slug."},
                     "title": {"type": "string"},
                     "body": {"type": "string", "description": "Note body (Markdown)."},
-                    "trigger_id": {"type": "string", "description": "Trigger this entry completes (omit for ordinary notes)."},
-                    "run_id": {"type": "string", "description": "Live run this entry completes (trigger-linked only)."},
-                    "known_at": {"type": "string", "description": "PIT cutoff this entry is known at (ISO-8601)."},
+                    "trigger_id": {
+                        "type": "string",
+                        "description": "Trigger this entry completes (omit for ordinary notes).",
+                    },
+                    "run_id": {
+                        "type": "string",
+                        "description": "Live run this entry completes (trigger-linked only).",
+                    },
+                    "known_at": {
+                        "type": "string",
+                        "description": "PIT cutoff this entry is known at (ISO-8601).",
+                    },
                 },
                 "required": ["id", "body"],
             },
@@ -1166,7 +1436,11 @@ TOOLS: list[dict[str, object]] = [
                 "type": "object",
                 "properties": {
                     "id": {"type": "string", "description": "Thesis ID or slug."},
-                    "action": {"type": "string", "enum": ["pause", "resume", "close"], "description": "Status change to apply."},
+                    "action": {
+                        "type": "string",
+                        "enum": ["pause", "resume", "close"],
+                        "description": "Status change to apply.",
+                    },
                 },
                 "required": ["id", "action"],
             },
@@ -1181,8 +1455,14 @@ TOOLS: list[dict[str, object]] = [
                 "type": "object",
                 "properties": {
                     "question": {"type": "string", "description": "Research question."},
-                    "objective": {"type": "string", "description": "Objective (defaults to the question)."},
-                    "as_of": {"type": "string", "description": "Point-in-time cutoff (ISO-8601); omit for current state."},
+                    "objective": {
+                        "type": "string",
+                        "description": "Objective (defaults to the question).",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time cutoff (ISO-8601); omit for current state.",
+                    },
                 },
                 "required": ["question"],
             },
@@ -1196,7 +1476,10 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "Research session ID."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Research session ID.",
+                    },
                 },
                 "required": ["session_id"],
             },
@@ -1210,7 +1493,10 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "Research session ID."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Research session ID.",
+                    },
                 },
                 "required": ["session_id"],
             },
@@ -1224,7 +1510,10 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "Research session ID."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Research session ID.",
+                    },
                 },
                 "required": ["session_id"],
             },
@@ -1234,13 +1523,13 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "research_read",
-            "description": "Reads one persisted research resource (evidence, freeze, dossier, job, or session) by ID. Nonmutating.",
+            "description": "Reads one persisted research resource (evidence, freeze, dossier, coverage artifact, job, or session) by ID. Coverage artifacts are a search's scope records (absence observations): inspection only, never citable as raw evidence. Nonmutating.",
             "parameters": {
                 "type": "object",
                 "properties": {
                     "session_id": {"type": "string", "description": "Research session ID."},
-                    "kind": {"type": "string", "enum": ["evidence", "freeze", "dossier", "job", "research"], "description": "Resource store to read."},
-                    "resource_id": {"type": "string", "description": "Evidence, freeze, dossier, job, or session ID."},
+                    "kind": {"type": "string", "enum": ["evidence", "freeze", "dossier", "coverage", "job", "research"], "description": "Resource store to read."},
+                    "resource_id": {"type": "string", "description": "Evidence, freeze, dossier, coverage-artifact, job, or session ID."},
                     "freeze_id": {"type": "string", "description": "Optional freeze scope: an evidence read must be a member of that freeze's evidence set."},
                 },
                 "required": ["session_id", "kind", "resource_id"],
@@ -1255,11 +1544,30 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "Research session ID."},
-                    "search_id": {"type": "string", "description": "Search id returned by search_sec_filings."},
-                    "offset": {"type": "integer", "minimum": 0, "description": "Hits to skip, best score first (default 0)."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 500, "description": "Hits per page (default 50)."},
-                    "forms": {"type": "array", "items": {"type": "string"}, "description": "Optional form filter, e.g. [\"10-K\", \"8-K\"]."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Research session ID.",
+                    },
+                    "search_id": {
+                        "type": "string",
+                        "description": "Search id returned by search_sec_filings.",
+                    },
+                    "offset": {
+                        "type": "integer",
+                        "minimum": 0,
+                        "description": "Hits to skip, best score first (default 0).",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 500,
+                        "description": "Hits per page (default 50).",
+                    },
+                    "forms": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": 'Optional form filter, e.g. ["10-K", "8-K"].',
+                    },
                 },
                 "required": ["session_id", "search_id"],
             },
@@ -1269,33 +1577,84 @@ TOOLS: list[dict[str, object]] = [
         "type": "function",
         "function": {
             "name": "research_add_evidence",
-            "description": "Records one typed finding on a running research job. observed_fact requires raw-source provenance (source_record_id/accession_no, document_name, and a passage/matching_passage/section from the opened document): SEC search results are navigation artifacts, so a hit cited without a raw passage fails ERR_RAW_SOURCE_REQUIRED. absence_observation requires search_id + query + coverage of what was searched. Provenance, point-in-time, and IDs are kernel-validated.",
+            "description": "Records one typed finding on a running research job. observed_fact requires the canonical source_handle returned by get_sec_document plus the passage/matching_passage/section you are citing: the kernel reloads that document window from the SEC archive itself, slices the passage out of it, and stores those bytes, so a hallucinated passage fails ERR_PASSAGE_NOT_IN_SOURCE and a changed document fails ERR_SEC_HANDLE_STALE (a hit or a handle-less citation fails ERR_RAW_SOURCE_REQUIRED; SEC search results are navigation artifacts). absence_observation requires search_id + query + coverage of what was searched and is recorded as a session coverage artifact (search scope, never citable evidence), not as an evidence record. Provenance, point-in-time, and IDs are kernel-validated.",
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "Research session ID."},
-                    "job_id": {"type": "string", "description": "Running job ID the finding belongs to."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Research session ID.",
+                    },
+                    "job_id": {
+                        "type": "string",
+                        "description": "Running job ID the finding belongs to.",
+                    },
                     "item": {
                         "type": "object",
-                        "description": "Finding whose provenance must match its claim_kind: raw filing passage for observed_fact, search scope for absence_observation.",
+                        "description": "Finding whose provenance must match its claim_kind: the get_sec_document source_handle + cited passage for observed_fact, search scope for absence_observation.",
                         "properties": {
-                            "claim_kind": {"type": "string", "enum": ["observed_fact", "absence_observation"], "description": "Defaults to observed_fact; evidence_type/ev_type are legacy aliases (filing_observation/search_coverage)."},
-                            "claim_text": {"type": "string", "description": "The finding, stated over its provenance."},
-                            "content": {"type": "string", "description": "Recorded content (defaults to claim_text)."},
-                            "source_record_id": {"type": "string", "description": "SEC accession of the opened filing (also accession_no/accession; 18 bare digits normalize)."},
-                            "document_name": {"type": "string", "description": "Document the passage came from (also document)."},
-                            "passage": {"type": "string", "description": "Raw passage/section quoted from that document (also matching_passage/section/fact)."},
-                            "source_uri": {"type": "string", "description": "URL of the opened document, when known."},
-                            "known_at": {"type": "string", "description": "ISO-8601 public-knowledge timestamp (e.g. filing date); never a retrieval time."},
-                            "search_id": {"type": "string", "description": "Absence observations only: search-run id the scope covers."},
-                            "query": {"type": "string", "description": "Absence observations only: the exact query that was run."},
+                            "claim_kind": {
+                                "type": "string",
+                                "enum": ["observed_fact", "absence_observation"],
+                                "description": "Defaults to observed_fact (evidence). absence_observation records search-scope coverage instead of evidence; evidence_type/ev_type are legacy aliases (filing_observation/search_coverage).",
+                            },
+                            "claim_text": {
+                                "type": "string",
+                                "description": "The finding, stated over its provenance.",
+                            },
+                            "content": {
+                                "type": "string",
+                                "description": "Recorded content (defaults to claim_text).",
+                            },
+                            "source_record_id": {
+                                "type": "string",
+                                "description": "SEC accession of the opened filing (also accession_no/accession; 18 bare digits normalize).",
+                            },
+                            "document_name": {
+                                "type": "string",
+                                "description": "Document the passage came from (also document).",
+                            },
+                            "passage": {
+                                "type": "string",
+                                "description": "Passage/section you are citing from that document window (also matching_passage/section/fact); the kernel stores its own copy of the matched span.",
+                            },
+                            "source_handle": {
+                                "type": "object",
+                                "description": "The source_handle get_sec_document returned for the window you read (accession_no, document_name, basis, offset, max_chars, text_hash). The kernel reloads it and materializes the passage itself.",
+                            },
+                            "source_uri": {
+                                "type": "string",
+                                "description": "URL of the opened document, when known.",
+                            },
+                            "known_at": {
+                                "type": "string",
+                                "description": "ISO-8601 public-knowledge timestamp (e.g. filing date); never a retrieval time.",
+                            },
+                            "search_id": {
+                                "type": "string",
+                                "description": "Absence observations only: search-run id the scope covers.",
+                            },
+                            "query": {
+                                "type": "string",
+                                "description": "Absence observations only: the exact query that was run.",
+                            },
                             "coverage": {
                                 "type": "object",
                                 "description": "Absence observations only: what was searched and whether paging was exhausted.",
                                 "properties": {
-                                    "forms": {"type": "array", "items": {"type": "string"}, "description": "Forms searched (also dates/partitions/entities/docs/gaps)."},
-                                    "pagination_complete": {"type": "boolean", "description": "True only when every page of the search was retrieved."},
-                                    "complete": {"type": "boolean", "description": "True only when the searched scope is the whole intended scope."},
+                                    "forms": {
+                                        "type": "array",
+                                        "items": {"type": "string"},
+                                        "description": "Forms searched (also dates/partitions/entities/docs/gaps).",
+                                    },
+                                    "pagination_complete": {
+                                        "type": "boolean",
+                                        "description": "True only when every page of the search was retrieved.",
+                                    },
+                                    "complete": {
+                                        "type": "boolean",
+                                        "description": "True only when the searched scope is the whole intended scope.",
+                                    },
                                 },
                             },
                         },
@@ -1313,31 +1672,99 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "Research session ID."},
-                    "job_id": {"type": "string", "description": "Running source job ID to complete."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Research session ID.",
+                    },
+                    "job_id": {
+                        "type": "string",
+                        "description": "Running source job ID to complete.",
+                    },
                     "coverage": {
                         "type": "object",
                         "description": "Coverage envelope: what was searched and how far it got.",
                         "properties": {
-                            "useful_for_question": {"type": "string", "enum": ["sufficient", "insufficient"], "description": "Required. sufficient = SCC scope drained with no material open branch; insufficient = honest residual coverage."},
-                            "major_entities_investigated": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — entities actually investigated in filings."},
-                            "relationship_types_checked": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — relationship channels checked."},
-                            "forms_examined": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — forms opened."},
-                            "exhibits_examined": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — exhibits/documents opened."},
-                            "material_open_questions": {"type": "array", "items": {"type": "string"}, "description": "sufficient: present and empty."},
-                            "search_runs": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty search ids backing the coverage."},
-                            "covered_branches": {"type": "array", "items": {"type": "string"}, "description": "sufficient: non-empty — material branches the run covered."},
-                            "major_entities_missing": {"type": "array", "items": {"type": "string"}, "description": "sufficient: must be empty."},
-                            "remaining_branches": {"type": "array", "items": {"type": "string"}, "description": "sufficient: must be empty."},
-                            "routes_unsearched": {"type": "array", "items": {"type": "string"}, "description": "sufficient: must be empty."},
-                            "resolved": {"type": "array", "items": {"type": "string"}, "description": "Optional existing envelope: resolved questions (also partially_resolved/unresolved/source_limitations/dates/partitions/docs/gaps)."},
+                            "useful_for_question": {
+                                "type": "string",
+                                "enum": ["sufficient", "insufficient"],
+                                "description": "Required. sufficient = SCC scope drained with no material open branch; insufficient = honest residual coverage.",
+                            },
+                            "major_entities_investigated": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: non-empty — entities actually investigated in filings.",
+                            },
+                            "relationship_types_checked": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: non-empty — relationship channels checked.",
+                            },
+                            "forms_examined": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: non-empty — forms opened.",
+                            },
+                            "exhibits_examined": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: non-empty — exhibits/documents opened.",
+                            },
+                            "material_open_questions": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: present and empty.",
+                            },
+                            "search_runs": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: non-empty search ids backing the coverage.",
+                            },
+                            "covered_branches": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: non-empty — material branches the run covered.",
+                            },
+                            "major_entities_missing": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: must be empty.",
+                            },
+                            "remaining_branches": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: must be empty.",
+                            },
+                            "routes_unsearched": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "sufficient: must be empty.",
+                            },
+                            "resolved": {
+                                "type": "array",
+                                "items": {"type": "string"},
+                                "description": "Optional existing envelope: resolved questions (also partially_resolved/unresolved/source_limitations/dates/partitions/docs/gaps).",
+                            },
                         },
                         "required": ["useful_for_question"],
                     },
-                    "evidence_ids": {"type": "array", "items": {"type": "string"}, "description": "Evidence IDs grounding a sufficient result (empty only with insufficient)."},
-                    "unresolved_questions": {"type": "array", "items": {"type": "string"}, "description": "Open questions left by the source run; must be empty with sufficient."},
+                    "evidence_ids": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Evidence IDs grounding a sufficient result (empty only with insufficient).",
+                    },
+                    "unresolved_questions": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Open questions left by the source run; must be empty with sufficient.",
+                    },
                 },
-                "required": ["session_id", "job_id", "coverage", "evidence_ids", "unresolved_questions"],
+                "required": [
+                    "session_id",
+                    "job_id",
+                    "coverage",
+                    "evidence_ids",
+                    "unresolved_questions",
+                ],
             },
         },
     },
@@ -1349,10 +1776,23 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "Research session ID."},
-                    "job_id": {"type": "string", "description": "Running job ID the analysis belongs to."},
-                    "role": {"type": "string", "enum": ["stockbot", "bullbot", "bearbot"], "description": "Committee role authoring the analysis."},
-                    "analysis": {"type": "object", "description": "Committee output with claims grounded in frozen evidence IDs."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Research session ID.",
+                    },
+                    "job_id": {
+                        "type": "string",
+                        "description": "Running job ID the analysis belongs to.",
+                    },
+                    "role": {
+                        "type": "string",
+                        "enum": ["stockbot", "bullbot", "bearbot"],
+                        "description": "Committee role authoring the analysis.",
+                    },
+                    "analysis": {
+                        "type": "object",
+                        "description": "Committee output with claims grounded in frozen evidence IDs.",
+                    },
                 },
                 "required": ["session_id", "job_id", "role", "analysis"],
             },
@@ -1366,16 +1806,33 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "session_id": {"type": "string", "description": "Research session ID."},
-                    "answer": {"type": "string", "minLength": 1, "description": "Final synthesis prose."},
+                    "session_id": {
+                        "type": "string",
+                        "description": "Research session ID.",
+                    },
+                    "answer": {
+                        "type": "string",
+                        "minLength": 1,
+                        "description": "Final synthesis prose.",
+                    },
                     "claims": {
-                        "type": "array", "minItems": 1,
+                        "type": "array",
+                        "minItems": 1,
                         "description": "Grounded findings; each claim needs non-empty text and non-empty evidence IDs from the freeze.",
                         "items": {
                             "type": "object",
                             "properties": {
-                                "text": {"type": "string", "minLength": 1, "description": "Finding text."},
-                                "evidence_ids": {"type": "array", "minItems": 1, "items": {"type": "string", "minLength": 1}, "description": "Frozen evidence IDs grounding this claim."},
+                                "text": {
+                                    "type": "string",
+                                    "minLength": 1,
+                                    "description": "Finding text.",
+                                },
+                                "evidence_ids": {
+                                    "type": "array",
+                                    "minItems": 1,
+                                    "items": {"type": "string", "minLength": 1},
+                                    "description": "Frozen evidence IDs grounding this claim.",
+                                },
                             },
                             "required": ["text", "evidence_ids"],
                         },
@@ -1393,10 +1850,24 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "query": {"type": "string", "description": "Substring filter over candidate terms."},
-                    "geo": {"type": "string", "description": "Geography filter, e.g. US."},
-                    "as_of": {"type": "string", "description": "Point-in-time date YYYY-MM-DD; candidates known after it are excluded."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Max candidates (default 20)."},
+                    "query": {
+                        "type": "string",
+                        "description": "Substring filter over candidate terms.",
+                    },
+                    "geo": {
+                        "type": "string",
+                        "description": "Geography filter, e.g. US.",
+                    },
+                    "as_of": {
+                        "type": "string",
+                        "description": "Point-in-time date YYYY-MM-DD; candidates known after it are excluded.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Max candidates (default 20).",
+                    },
                 },
                 "required": [],
             },
@@ -1410,14 +1881,41 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD. Optional; both omitted defaults to trailing 7 days ending today UTC."},
-                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD. Optional; both omitted defaults to trailing 7 days ending today UTC."},
-                    "geos": {"type": "array", "items": {"type": "string"}, "description": "Geographies, e.g. [US]."},
-                    "geo": {"type": "string", "description": "Single geography shorthand for geos."},
-                    "term": {"type": "string", "description": "Optional substring filter over collected terms."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 1000, "description": "Max rows (default 100)."},
-                    "week_start": {"type": "string", "description": "Interest-week start YYYY-MM-DD; omitted defaults to the trailing 14-day week window ending at end_date."},
-                    "week_end": {"type": "string", "description": "Interest-week end YYYY-MM-DD; omitted defaults to the trailing 14-day week window ending at end_date."},
+                    "start_date": {
+                        "type": "string",
+                        "description": "Range start YYYY-MM-DD. Optional; both omitted defaults to trailing 7 days ending today UTC.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Range end YYYY-MM-DD. Optional; both omitted defaults to trailing 7 days ending today UTC.",
+                    },
+                    "geos": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Geographies, e.g. [US].",
+                    },
+                    "geo": {
+                        "type": "string",
+                        "description": "Single geography shorthand for geos.",
+                    },
+                    "term": {
+                        "type": "string",
+                        "description": "Optional substring filter over collected terms.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 1000,
+                        "description": "Max rows (default 100).",
+                    },
+                    "week_start": {
+                        "type": "string",
+                        "description": "Interest-week start YYYY-MM-DD; omitted defaults to the trailing 14-day week window ending at end_date.",
+                    },
+                    "week_end": {
+                        "type": "string",
+                        "description": "Interest-week end YYYY-MM-DD; omitted defaults to the trailing 14-day week window ending at end_date.",
+                    },
                 },
                 "required": [],
             },
@@ -1431,9 +1929,17 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "term": {"type": "string", "description": "Discovery term to investigate."},
+                    "term": {
+                        "type": "string",
+                        "description": "Discovery term to investigate.",
+                    },
                     "geo": {"type": "string", "description": "Geography, e.g. US."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 25, "description": "Max evidence rows per source (default 5; YouTube never above 5)."},
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 25,
+                        "description": "Max evidence rows per source (default 5; YouTube never above 5).",
+                    },
                 },
                 "required": ["term"],
             },
@@ -1447,11 +1953,30 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "geos": {"type": "array", "items": {"type": "string"}, "description": "Geography DCIDs, e.g. [geoId/06]."},
-                    "variables": {"type": "array", "items": {"type": "string"}, "description": "Statistical variable IDs, e.g. [Count_Person]."},
-                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD."},
-                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 100, "description": "Max observations (default 100)."},
+                    "geos": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Geography DCIDs, e.g. [geoId/06].",
+                    },
+                    "variables": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Statistical variable IDs, e.g. [Count_Person].",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Range start YYYY-MM-DD.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Range end YYYY-MM-DD.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 100,
+                        "description": "Max observations (default 100).",
+                    },
                 },
                 "required": ["geos", "variables"],
             },
@@ -1465,11 +1990,29 @@ TOOLS: list[dict[str, object]] = [
             "parameters": {
                 "type": "object",
                 "properties": {
-                    "company_id": {"type": "string", "description": "Documented assignee name from existing company evidence."},
-                    "assignees": {"type": "array", "items": {"type": "string"}, "description": "Documented assignee aliases (verified, never inferred from matching text)."},
-                    "start_date": {"type": "string", "description": "Range start YYYY-MM-DD."},
-                    "end_date": {"type": "string", "description": "Range end YYYY-MM-DD."},
-                    "limit": {"type": "integer", "minimum": 1, "maximum": 20, "description": "Max publications (default 20)."},
+                    "company_id": {
+                        "type": "string",
+                        "description": "Documented assignee name from existing company evidence.",
+                    },
+                    "assignees": {
+                        "type": "array",
+                        "items": {"type": "string"},
+                        "description": "Documented assignee aliases (verified, never inferred from matching text).",
+                    },
+                    "start_date": {
+                        "type": "string",
+                        "description": "Range start YYYY-MM-DD.",
+                    },
+                    "end_date": {
+                        "type": "string",
+                        "description": "Range end YYYY-MM-DD.",
+                    },
+                    "limit": {
+                        "type": "integer",
+                        "minimum": 1,
+                        "maximum": 20,
+                        "description": "Max publications (default 20).",
+                    },
                 },
                 "required": ["company_id", "assignees"],
             },
@@ -1480,7 +2023,8 @@ TOOLS: list[dict[str, object]] = [
 
 
 def _robinhood_client(
-    *, account_tools: frozenset[str] = frozenset(),
+    *,
+    account_tools: frozenset[str] = frozenset(),
 ) -> RobinhoodClient:
     """Construct a broker client with only the MCP reads this handler needs."""
     if not broker_enabled():
@@ -1515,11 +2059,12 @@ def _norm_row(row: dict[str, object]) -> dict[str, object]:
     """One provider row with string keys (provider JSON is untyped)."""
     return {str(k): v for k, v in row.items()}
 
+
 def _parse_text_block(text: str) -> object:
     try:
         parsed: object = json.loads(text)
         return parsed
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return {"text": text}
 
 
@@ -1581,6 +2126,7 @@ def _default_rows(unwrapped: dict[str, object], keys: tuple[str, ...]) -> list[d
             return hit
     return [_norm_row(unwrapped)]
 
+
 def _rows(payload: object, *keys: str) -> list[dict[str, object]]:
     unwrapped = _provider_payload(payload)
     direct = _direct_rows(unwrapped)
@@ -1631,6 +2177,7 @@ def get_market_snapshot(ticker: str) -> dict[str, object]:
 _PORTFOLIO_TOP_POSITIONS = 15
 _PORTFOLIO_TOP_LARGEST = 5
 
+
 def _breach_row(breach: RiskBreach) -> dict[str, object]:
     """One mandate breach with Decimal-safe string rendering."""
     return {
@@ -1668,6 +2215,7 @@ def _mandate_evaluation(evaluation: RiskEvaluation) -> dict[str, object]:
         "issues": [_mandate_issue_row(issue) for issue in evaluation.issues],
         "source": "mandate",
     }
+
 
 def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = None) -> dict[str, object]:
     """Deterministic mandate evaluation over the latest persisted snapshot."""
@@ -1719,6 +2267,7 @@ def _freshness_key(item: dict[str, object]) -> tuple[str, str, str]:
 def _bases_count_key(bases: list[object]) -> Callable[[str], int]:
     def _count(s: str) -> int:
         return bases.count(s)
+
     return _count
 
 
@@ -1770,11 +2319,17 @@ def _get_portfolio_snapshot(arguments: dict[str, object], model: str) -> dict[st
     """Bounded, deterministic portfolio snapshot (spec §23)."""
     del model
     refresh = bool(arguments.get("refresh", False))
-    provider = RobinhoodPortfolioProvider(_robinhood_client(
-        account_tools=frozenset({
-            "get_accounts", "get_portfolio", "get_equity_positions",
-        })
-    ))
+    provider = RobinhoodPortfolioProvider(
+        _robinhood_client(
+            account_tools=frozenset(
+                {
+                    "get_accounts",
+                    "get_portfolio",
+                    "get_equity_positions",
+                }
+            )
+        )
+    )
     if refresh:
         snapshot = sync_robinhood_portfolio(provider, data_root=None)
     else:
@@ -1788,10 +2343,7 @@ def _get_portfolio_snapshot(arguments: dict[str, object], model: str) -> dict[st
 
 def _snapshot_research(snapshot: PortfolioSnapshot) -> dict[str, PortfolioResearchPosition]:
     """Research items keyed by position id."""
-    return {
-        item.position.position_id: item
-        for item in enrich_portfolio_research(snapshot)
-    }
+    return {item.position.position_id: item for item in enrich_portfolio_research(snapshot)}
 
 
 def _snapshot_positions_by_id(snapshot: PortfolioSnapshot) -> dict[str, Position]:
@@ -1810,8 +2362,7 @@ def _snapshot_position_rows(
         limit=_PORTFOLIO_TOP_POSITIONS,
     )
     return [
-        _position_research_row(positions_by_id[position_id], research.get(position_id))
-        for position_id, _ in ranked
+        _position_research_row(positions_by_id[position_id], research.get(position_id)) for position_id, _ in ranked
     ]
 
 
@@ -1845,31 +2396,19 @@ def _snapshot_envelope(
         "cash": _str_or_none(snapshot.cash),
         "invested_value": _str_or_none(snapshot.invested_value),
         "position_count": len(snapshot.positions),
-        "priced_position_count": sum(
-            1 for position in snapshot.positions if position.market_value is not None
-        ),
-        "unresolved_position_count": sum(
-            1 for position in snapshot.positions if position.entity_id is None
-        ),
+        "priced_position_count": sum(1 for position in snapshot.positions if position.market_value is not None),
+        "unresolved_position_count": sum(1 for position in snapshot.positions if position.entity_id is None),
         "concentration": _str_or_none(
-            portfolio_concentration(
-                [position.portfolio_weight for position in snapshot.positions]
-            )
+            portfolio_concentration([position.portfolio_weight for position in snapshot.positions])
         ),
         "positions": position_rows,
         "omitted_count": omitted_count,
         "largest_positions": _snapshot_largest(snapshot),
-        "unresolved": [
-            position.ticker
-            for position in snapshot.positions
-            if position.entity_id is None
-        ],
+        "unresolved": [position.ticker for position in snapshot.positions if position.entity_id is None],
         "freshness": {
             "snapshot_created_at": snapshot.created_at.isoformat(),
             "snapshot_created_at_local": snapshot.created_at.astimezone().isoformat(),
-            **_research_freshness(
-                [item.research_data_freshness for item in research.values()]
-            ),
+            **_research_freshness([item.research_data_freshness for item in research.values()]),
         },
         "source": "robinhood_mcp",
     }
@@ -1907,9 +2446,7 @@ def _get_scanner_filter_specs(arguments: dict[str, object], model: str) -> dict[
 
 def _get_scans(arguments: dict[str, object], model: str) -> dict[str, object]:
     del arguments, model
-    rows = RobinhoodPortfolioProvider(_robinhood_client(
-        account_tools=frozenset({"get_scans"})
-    )).get_scans()
+    rows = RobinhoodPortfolioProvider(_robinhood_client(account_tools=frozenset({"get_scans"}))).get_scans()
     result: dict[str, object] = {
         "result_type": "scan_list",
         "count": len(rows),
@@ -1924,9 +2461,7 @@ def _run_scan(arguments: dict[str, object], model: str) -> dict[str, object]:
     del model
     scan_id = str(arguments["scan_id"])
     limit = max(1, min(int(str(arguments.get("limit") or _SCAN_RESULTS_ROWS)), 25))
-    data = RobinhoodPortfolioProvider(_robinhood_client(
-        account_tools=frozenset({"run_scan"})
-    )).run_scan(scan_id)
+    data = RobinhoodPortfolioProvider(_robinhood_client(account_tools=frozenset({"run_scan"}))).run_scan(scan_id)
     rows = _scan_rows(data)
     return {
         "result_type": "scan_results",
@@ -1949,9 +2484,7 @@ def _call_broker_tool(client: RobinhoodClient, name: str, arguments: dict[str, o
 
 def _chain_id_for(client: RobinhoodClient, ticker: str) -> object:
     """First chain id for the ticker, else None (provider JSON is untyped)."""
-    chain = _provider_payload(
-        _call_broker_tool(client, "get_option_chains", {"underlying_symbol": ticker})
-    )
+    chain = _provider_payload(_call_broker_tool(client, "get_option_chains", {"underlying_symbol": ticker}))
     chain_rows = _rows(chain, "chains", "option_chains")
     return _first(chain_rows[0], "chain_id", "chainId", "id") if chain_rows else None
 
@@ -1971,7 +2504,8 @@ def _instrument_args(ticker: str, option_type: str, chain_id: object, filters: d
 def _of_option_type(instruments: list[dict[str, object]], option_type: str) -> list[dict[str, object]]:
     """Keep only rows of the requested put/call type (provider echoes both)."""
     return [
-        row for row in instruments
+        row
+        for row in instruments
         if str(_first(row, "type", "option_type", "optionType") or option_type).lower() in {option_type, option_type[0]}
     ]
 
@@ -1990,7 +2524,7 @@ def _row_strike_value(row: dict[str, object]) -> Decimal | None:
     strike = _first(row, "strike", "strike_price", "strikePrice")
     try:
         return Decimal(str(strike))
-    except (ValueError, TypeError, ArithmeticError):
+    except ValueError, TypeError, ArithmeticError:
         return None
 
 
@@ -2000,9 +2534,7 @@ def _dte_in_range(dte: int | None, filters: dict[str, object]) -> bool:
     if min_dte is not None and (dte is None or dte < int(str(min_dte))):
         return False
     max_dte = filters.get("max_dte")
-    if max_dte is not None and (dte is None or dte > int(str(max_dte))):
-        return False
-    return True
+    return not (max_dte is not None and (dte is None or dte > int(str(max_dte))))
 
 
 def _strike_in_range(strike_value: Decimal | None, filters: dict[str, object]) -> bool:
@@ -2011,15 +2543,16 @@ def _strike_in_range(strike_value: Decimal | None, filters: dict[str, object]) -
     if strike_min is not None and (strike_value is None or strike_value < Decimal(str(strike_min))):
         return False
     strike_max = filters.get("strike_max")
-    if strike_max is not None and (strike_value is None or strike_value > Decimal(str(strike_max))):
-        return False
-    return True
+    return not (strike_max is not None and (strike_value is None or strike_value > Decimal(str(strike_max))))
 
 
-def _filter_instruments(instruments: list[dict[str, object]], filters: dict[str, object], today: date) -> list[dict[str, object]]:
+def _filter_instruments(
+    instruments: list[dict[str, object]], filters: dict[str, object], today: date
+) -> list[dict[str, object]]:
     """DTE/strike window over instrument rows."""
     return [
-        row for row in instruments
+        row
+        for row in instruments
         if _dte_in_range(_row_dte(row, today), filters) and _strike_in_range(_row_strike_value(row), filters)
     ]
 
@@ -2028,12 +2561,16 @@ def _quotes_by_id(client: RobinhoodClient, instruments: list[dict[str, object]])
     """Quote rows keyed by instrument id (empty when no instruments)."""
     ids = [_first(row, "id", "instrument_id", "contract_id") for row in instruments]
     ids = [str(value) for value in ids if value]
-    quotes = _rows(
-        _call_broker_tool(client, "get_option_quotes", {"instrument_ids": ids}),
-        "quotes",
-        "option_quotes",
-        "results",
-    ) if ids else []
+    quotes = (
+        _rows(
+            _call_broker_tool(client, "get_option_quotes", {"instrument_ids": ids}),
+            "quotes",
+            "option_quotes",
+            "results",
+        )
+        if ids
+        else []
+    )
     quotes_by_id: dict[str, object] = {}
     for row in quotes:
         quote = _quote_row(row)
@@ -2043,7 +2580,9 @@ def _quotes_by_id(client: RobinhoodClient, instruments: list[dict[str, object]])
     return quotes_by_id
 
 
-def _merge_quotes(instruments: list[dict[str, object]], quotes_by_id: dict[str, object], ticker: str) -> list[OptionQuote]:
+def _merge_quotes(
+    instruments: list[dict[str, object]], quotes_by_id: dict[str, object], ticker: str
+) -> list[OptionQuote]:
     """Instrument + quote merge normalized to OptionQuotes (un-normalizable rows dropped)."""
     normalized: list[OptionQuote] = []
     for instrument in instruments:
@@ -2060,6 +2599,7 @@ def _merge_quotes(instruments: list[dict[str, object]], quotes_by_id: dict[str, 
             continue
     return normalized
 
+
 def _load_option_quotes(ticker: str, option_type: str, **filters: object) -> list[OptionQuote]:
     client = _robinhood_client()
     chain_id = _chain_id_for(client, ticker)
@@ -2068,15 +2608,18 @@ def _load_option_quotes(ticker: str, option_type: str, **filters: object) -> lis
         "instruments",
         "option_instruments",
     )
-    instruments = _filter_instruments(_of_option_type(instruments, option_type), filters, date.today())
+    instruments = _filter_instruments(_of_option_type(instruments, option_type), filters, datetime.now(UTC).date())
     return _merge_quotes(instruments, _quotes_by_id(client, instruments), ticker)
 
 
-def _filter_quotes(quotes: list[OptionQuote], min_dte: object, max_dte: object, strike_min: object, strike_max: object) -> list[OptionQuote]:
+def _filter_quotes(
+    quotes: list[OptionQuote], min_dte: object, max_dte: object, strike_min: object, strike_max: object
+) -> list[OptionQuote]:
     """DTE/strike window over normalized quotes (loader already applied the same window pre-quote)."""
-    today = date.today()
+    today = datetime.now(UTC).date()
     return [
-        quote for quote in quotes
+        quote
+        for quote in quotes
         if (min_dte is None or (quote.expiration - today).days >= int(str(min_dte)))
         and (max_dte is None or (quote.expiration - today).days <= int(str(max_dte)))
         and (strike_min is None or quote.strike >= Decimal(str(strike_min)))
@@ -2091,7 +2634,16 @@ def _no_quotes_error(ticker: str, option_type: str) -> dict[str, object]:
         "source": "robinhood_mcp",
     }
 
-def get_option_chain(ticker: str, option_type: str, min_dte: object = None, max_dte: object = None, strike_min: object = None, strike_max: object = None, limit: object = 20) -> dict[str, object]:
+
+def get_option_chain(
+    ticker: str,
+    option_type: str,
+    min_dte: object = None,
+    max_dte: object = None,
+    strike_min: object = None,
+    strike_max: object = None,
+    limit: object = 20,
+) -> dict[str, object]:
     ticker = ticker.strip().upper()
     option_type = option_type.lower()
     quotes = _load_option_quotes(
@@ -2118,22 +2670,53 @@ def get_option_chain(ticker: str, option_type: str, min_dte: object = None, max_
     }
 
 
-def analyze_option_contract(ticker: str, expiration: str, strike: object, option_type: str, target_price: object = None) -> dict[str, object]:
+def analyze_option_contract(
+    ticker: str, expiration: str, strike: object, option_type: str, target_price: object = None
+) -> dict[str, object]:
     quotes = _load_option_quotes(ticker.strip().upper(), option_type.lower(), expiration_date=expiration)
-    matches = [quote for quote in quotes if quote.expiration.isoformat() == expiration and quote.strike == Decimal(str(strike))]
+    matches = [
+        quote for quote in quotes if quote.expiration.isoformat() == expiration and quote.strike == Decimal(str(strike))
+    ]
     if not matches:
         return {"error": "No matching Robinhood option contract found", "source": "robinhood_mcp"}
-    return {"result_type": "option_analysis", **analyze_option(matches[0], target_price=(str(target_price) if target_price is not None else None)), "source": "robinhood_mcp"}
+    return {
+        "result_type": "option_analysis",
+        **analyze_option(matches[0], target_price=(str(target_price) if target_price is not None else None)),
+        "source": "robinhood_mcp",
+    }
 
 
-def compare_robinhood_options(ticker: str, option_type: str, target_price: object, min_dte: object = None, max_dte: object = None, strike_min: object = None, strike_max: object = None, limit: object = 20) -> dict[str, object]:
+def compare_robinhood_options(
+    ticker: str,
+    option_type: str,
+    target_price: object,
+    min_dte: object = None,
+    max_dte: object = None,
+    strike_min: object = None,
+    strike_max: object = None,
+    limit: object = 20,
+) -> dict[str, object]:
     quotes = _load_option_quotes(
-        ticker.strip().upper(), option_type.lower(), min_dte=min_dte, max_dte=max_dte, strike_min=strike_min, strike_max=strike_max
+        ticker.strip().upper(),
+        option_type.lower(),
+        min_dte=min_dte,
+        max_dte=max_dte,
+        strike_min=strike_min,
+        strike_max=strike_max,
     )
     filtered = _filter_quotes(quotes, min_dte, max_dte, strike_min, strike_max)
     if not filtered:
         return _no_quotes_error(ticker.strip().upper(), option_type.lower())
-    return {"result_type": "option_comparison", "ticker": ticker.upper(), "source": "robinhood_mcp", **compare_options(filtered, target_price=(str(target_price) if target_price is not None else None), limit=int(str(limit or 20)))}
+    return {
+        "result_type": "option_comparison",
+        "ticker": ticker.upper(),
+        "source": "robinhood_mcp",
+        **compare_options(
+            filtered,
+            target_price=(str(target_price) if target_price is not None else None),
+            limit=int(str(limit or 20)),
+        ),
+    }
 
 
 def _search_web(args: dict[str, object], model: str) -> dict[str, object]:
@@ -2210,7 +2793,9 @@ def _other_end(rel: EntityRelationship, primary_entity_id: str) -> str | None:
     return None
 
 
-def _related_names(primary_entity_id: str, relationships: Sequence[EntityRelationship], names_by_entity: dict[str, str] | None) -> list[str]:
+def _related_names(
+    primary_entity_id: str, relationships: Sequence[EntityRelationship], names_by_entity: dict[str, str] | None
+) -> list[str]:
     """Names one hop from the primary via EntityRelationships."""
     if not isinstance(names_by_entity, dict):
         return []
@@ -2220,6 +2805,7 @@ def _related_names(primary_entity_id: str, relationships: Sequence[EntityRelatio
         if other:
             others.append(other)
     return [names_by_entity[other] for other in others if other in names_by_entity]
+
 
 def suggest_public_search_queries(
     primary_entity_id: str | None,
@@ -2242,8 +2828,13 @@ def _google_soft(result: dict[str, object]) -> dict[str, object]:
 
 
 def _google_import_error(source: str, exc: Exception) -> dict[str, object]:
-    return {"status": "unavailable", "source": source, "soft": True,
-            "error": f"Google data unavailable: {exc}", "error_type": "source_unavailable"}
+    return {
+        "status": "unavailable",
+        "source": source,
+        "soft": True,
+        "error": f"Google data unavailable: {exc}",
+        "error_type": "source_unavailable",
+    }
 
 
 def _arg_str(args: dict[str, object], key: str) -> str | None:
@@ -2269,7 +2860,7 @@ def _signals_capped(rows: object, limit: int) -> bool:
     count = len(rows) if isinstance(rows, list) else 0
     try:
         return count >= max(1, limit)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return False
 
 
@@ -2277,11 +2868,15 @@ def _query_signals_result(args: dict[str, object], rows: object, limit: int) -> 
     """Local-signal ok packet with continuation capped at the requested limit."""
     capped = _signals_capped(rows, limit)
     assert isinstance(rows, list)
-    return {"status": "ok", "source": "google", "signals": rows,
-            "count": len(rows),
-            "coverage": {"query": _arg_str(args, "query"), "geo": _arg_str(args, "geo"),
-                         "as_of": _arg_str(args, "as_of")},
-            "warnings": [], "continuation": capped}
+    return {
+        "status": "ok",
+        "source": "google",
+        "signals": rows,
+        "count": len(rows),
+        "coverage": {"query": _arg_str(args, "query"), "geo": _arg_str(args, "geo"), "as_of": _arg_str(args, "as_of")},
+        "warnings": [],
+        "continuation": capped,
+    }
 
 
 def _find_alternative_signals(args: dict[str, object], model: str) -> dict[str, object]:
@@ -2295,8 +2890,11 @@ def _find_alternative_signals(args: dict[str, object], model: str) -> dict[str, 
         return _query_signals_result(
             args,
             _signals.query_signals(
-                query=_arg_str(args, "query"), geo=_arg_str(args, "geo"), as_of=_arg_str(args, "as_of"),
-                limit=limit, data_root=get_data_root(),
+                query=_arg_str(args, "query"),
+                geo=_arg_str(args, "geo"),
+                as_of=_arg_str(args, "as_of"),
+                limit=limit,
+                data_root=get_data_root(),
             ),
             limit,
         )
@@ -2318,9 +2916,10 @@ def _trend_window(args: dict[str, object]) -> tuple[str | None, str | None]:
     start_date = _arg_str(args, "start_date")
     end_date = _arg_str(args, "end_date")
     if start_date is None and end_date is None:
-        _today = datetime.now(timezone.utc).date()
+        _today = datetime.now(UTC).date()
         return (_today - timedelta(days=6)).isoformat(), _today.isoformat()
     return start_date, end_date
+
 
 def _get_trend_evidence(args: dict[str, object], model: str) -> dict[str, object]:
     try:
@@ -2329,13 +2928,18 @@ def _get_trend_evidence(args: dict[str, object], model: str) -> dict[str, object
         return _google_import_error("trends", exc)
     try:
         start_date, end_date = _trend_window(args)
-        return _google_soft(_trends.collect_trends(
-            start_date=start_date, end_date=end_date,
-            geos=_trend_geos(args), limit=_arg_int(args, "limit", 100),
-            data_root=get_data_root(),
-            week_start=_arg_str(args, "week_start"), week_end=_arg_str(args, "week_end"),
-            term=_arg_str(args, "term"),
-        ))
+        return _google_soft(
+            _trends.collect_trends(
+                start_date=start_date,
+                end_date=end_date,
+                geos=_trend_geos(args),
+                limit=_arg_int(args, "limit", 100),
+                data_root=get_data_root(),
+                week_start=_arg_str(args, "week_start"),
+                week_end=_arg_str(args, "week_end"),
+                term=_arg_str(args, "term"),
+            )
+        )
     except Exception as exc:
         logger.exception("get_trend_evidence failed")
         return {"error": f"Tool 'get_trend_evidence' failed: {exc}", "soft": True, "source": "trends"}
@@ -2347,12 +2951,14 @@ def _investigate_term(args: dict[str, object]) -> str:
     return term_raw if isinstance(term_raw, str) else str(term_raw or "")
 
 
-def _collect_investigate_signals(term: str, geo: str, per_source: int, evidence: dict[str, object], gaps: list[str]) -> None:
+def _collect_investigate_signals(
+    term: str, geo: str, per_source: int, evidence: dict[str, object], gaps: list[str]
+) -> None:
     """Local signals evidence; failures become gaps, never raises."""
     try:
         from .google_data import signals as _signals
-        evidence["signals"] = _signals.query_signals(
-            query=term, geo=geo, limit=per_source, data_root=get_data_root())
+
+        evidence["signals"] = _signals.query_signals(query=term, geo=geo, limit=per_source, data_root=get_data_root())
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         gaps.append(f"signals unavailable: {exc}")
 
@@ -2360,9 +2966,11 @@ def _collect_investigate_signals(term: str, geo: str, per_source: int, evidence:
 def _classify_investigate_entity(ent: object, term: str, confirmed: list[object], unresolved: list[object]) -> None:
     """One SEC candidate -> confirmed (verified + CIK) or unresolved."""
     cik = getattr(ent, "cik", None)
-    entry = {"name": getattr(ent, "name", None) or term,
-             "cik": cik,
-             "verification_status": getattr(ent, "verification_status", None)}
+    entry = {
+        "name": getattr(ent, "name", None) or term,
+        "cik": cik,
+        "verification_status": getattr(ent, "verification_status", None),
+    }
     if getattr(ent, "verification_status", None) == "verified" and cik:
         confirmed.append(entry)
     else:
@@ -2371,32 +2979,40 @@ def _classify_investigate_entity(ent: object, term: str, confirmed: list[object]
 
 def _resolve_investigate_ticker(term: str, confirmed: list[object], unresolved: list[object]) -> None:
     """Ticker-alias corroboration; unresolved ticker only when nothing else confirmed anything."""
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from .domain.market.identity import resolve_ticker_aliases as _resolve_alias
     from .storage.duckdb import ticker_alias_candidates as _alias_cands
-    as_of = datetime.now(timezone.utc)
-    resolution = _resolve_alias(term.upper(),
-                                _alias_cands(term.upper(), as_of, get_data_root()),
-                                as_of=as_of)
+
+    as_of = datetime.now(UTC)
+    resolution = _resolve_alias(term.upper(), _alias_cands(term.upper(), as_of, get_data_root()), as_of=as_of)
     if resolution.resolved:
         confirmed.append(
-            {"ticker": term.upper(), "entity_id": resolution.entity_id,
-             "security_id": resolution.security_id, "via": "ticker_alias"})
+            {
+                "ticker": term.upper(),
+                "entity_id": resolution.entity_id,
+                "security_id": resolution.security_id,
+                "via": "ticker_alias",
+            }
+        )
     elif not confirmed and not unresolved:
         unresolved.append({"ticker": term.upper(), "reason": "unresolved"})
 
 
-def _collect_investigate_entities(term: str, confirmed: list[object], unresolved: list[object], gaps: list[str]) -> None:
+def _collect_investigate_entities(
+    term: str, confirmed: list[object], unresolved: list[object], gaps: list[str]
+) -> None:
     """SEC + ticker-alias corroboration; failures become gaps, never raises."""
     try:
         from .sec.discovery.service import find_sec_entities as _find_sec
+
         sec = _find_sec(query=term, max_results=5, data_root=get_data_root())
         for ent in list(getattr(sec, "entities", None) or []):
             _classify_investigate_entity(ent, term, confirmed, unresolved)
         _resolve_investigate_ticker(term, confirmed, unresolved)
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         gaps.append(f"entity resolution unavailable: {exc}")
+
 
 def _investigate_social_arbitrage_candidate(args: dict[str, object], model: str) -> dict[str, object]:
     """Evidence + gaps for one term; corroboration capped, causality never claimed."""
@@ -2407,13 +3023,21 @@ def _investigate_social_arbitrage_candidate(args: dict[str, object], model: str)
     confirmed: list[object] = []
     unresolved: list[object] = []
     gaps: list[str] = []
-    result: dict[str, object] = {"term": term, "geo": geo, "source": "google",
-                     "status": "ok", "evidence": evidence,
-                     "entities": {"confirmed": confirmed, "unresolved": unresolved}, "gaps": gaps}
+    result: dict[str, object] = {
+        "term": term,
+        "geo": geo,
+        "source": "google",
+        "status": "ok",
+        "evidence": evidence,
+        "entities": {"confirmed": confirmed, "unresolved": unresolved},
+        "gaps": gaps,
+    }
     _collect_investigate_signals(term, geo, per_source, evidence, gaps)
     _collect_investigate_entities(term, confirmed, unresolved, gaps)
     # ponytail: no YouTube imports/calls/data here — evidence table has no expiry, so API content must not enter tool results
-    gaps.append("youtube metrics excluded from saved evidence; run /youtube-analytics <thesis-id-or-slug> for the retention-safe view")
+    gaps.append(
+        "youtube metrics excluded from saved evidence; run /youtube-analytics <thesis-id-or-slug> for the retention-safe view"
+    )
     if len(gaps) >= 3 and not evidence:
         result.update({"status": "unavailable", "soft": True, "error": "; ".join(gaps)})
     return result
@@ -2425,11 +3049,15 @@ def _get_macro_context(args: dict[str, object], model: str) -> dict[str, object]
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return _google_import_error("datacommons", exc)
     try:
-        return _google_soft(_dc.get_macro_context(
-            _arg_str_list(args, "geos"), _arg_str_list(args, "variables"),
-            start_date=_arg_str(args, "start_date"), end_date=_arg_str(args, "end_date"),
-            limit=_arg_int(args, "limit", 100),
-        ))
+        return _google_soft(
+            _dc.get_macro_context(
+                _arg_str_list(args, "geos"),
+                _arg_str_list(args, "variables"),
+                start_date=_arg_str(args, "start_date"),
+                end_date=_arg_str(args, "end_date"),
+                limit=_arg_int(args, "limit", 100),
+            )
+        )
     except Exception as exc:
         logger.exception("get_macro_context failed")
         return {"error": f"Tool 'get_macro_context' failed: {exc}", "soft": True, "source": "datacommons"}
@@ -2448,16 +3076,22 @@ def _patent_assignees(args: dict[str, object]) -> list[str] | None:
     assignees_raw = args.get("assignees")
     return [a for a in assignees_raw if isinstance(a, str)] if isinstance(assignees_raw, list) else None
 
+
 def _search_company_patents(args: dict[str, object], model: str) -> dict[str, object]:
     try:
         from .google_data import patents as _patents
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return _google_import_error("patents", exc)
     try:
-        return _google_soft(_patents.search_company_patents(
-            _patent_company_id(args), start_date=_arg_str(args, "start_date"), end_date=_arg_str(args, "end_date"),
-            limit=_arg_int(args, "limit", 20), assignees=_patent_assignees(args),
-        ))
+        return _google_soft(
+            _patents.search_company_patents(
+                _patent_company_id(args),
+                start_date=_arg_str(args, "start_date"),
+                end_date=_arg_str(args, "end_date"),
+                limit=_arg_int(args, "limit", 20),
+                assignees=_patent_assignees(args),
+            )
+        )
     except Exception as exc:
         logger.exception("search_company_patents failed")
         return {"error": f"Tool 'search_company_patents' failed: {exc}", "soft": True, "source": "patents"}
@@ -2482,8 +3116,6 @@ def _wrap_list(identifier: object, records: object, key: str) -> dict[str, objec
     rec_list: list[object] = list(records) if isinstance(records, (list, tuple)) else []
     items = [_wrap_one(r) for r in rec_list]
     return {"subject": identifier, "count": len(items), key: items, "source": "SEC EDGAR"}
-
-
 
 
 # Typed discovery metadata for progressive tool discovery.
@@ -2542,13 +3174,21 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_dataset",
         time_mode="current",
         summary="One FINRA dataset's fields, types, filter values, and supported methods.",
-        choose_when=("Learning a named FINRA dataset's fields, types, filters, and coverage before querying.", "what is in.", "fields and coverage.",),
+        choose_when=(
+            "Learning a named FINRA dataset's fields, types, filters, and coverage before querying.",
+            "what is in.",
+            "fields and coverage.",
+        ),
         reject_when=(
             "Not for finding which dataset covers a question (list_finra_datasets).",
             "Not for analyzed briefings.",
         ),
         conflicts_with=("list_finra_datasets",),
-        related_tools=("list_finra_datasets", "query_finra", "get_finra_datapoints",),
+        related_tools=(
+            "list_finra_datasets",
+            "query_finra",
+            "get_finra_datapoints",
+        ),
         prerequisites=(),
     ),
     "diff_risk_factors": ToolDiscovery(
@@ -2566,8 +3206,14 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for disclosure search without change framing (search_sec_filings).",
             "Self-contained for one ticker; do NOT call list_sec_filings before or after.",
         ),
-        conflicts_with=("diff_sec_filings", "search_sec_filings",),
-        related_tools=("diff_sec_filings", "search_sec_filings",),
+        conflicts_with=(
+            "diff_sec_filings",
+            "search_sec_filings",
+        ),
+        related_tools=(
+            "diff_sec_filings",
+            "search_sec_filings",
+        ),
         prerequisites=(),
     ),
     "diff_sec_filings": ToolDiscovery(
@@ -2588,8 +3234,14 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT call list_sec_filings first; ticker resolution is internal.",
             "Do NOT use for disclosure search without change framing (search_sec_filings).",
         ),
-        conflicts_with=("diff_risk_factors", "search_sec_filings",),
-        related_tools=("diff_risk_factors", "get_sec_filing",),
+        conflicts_with=(
+            "diff_risk_factors",
+            "search_sec_filings",
+        ),
+        related_tools=(
+            "diff_risk_factors",
+            "get_sec_filing",
+        ),
         prerequisites=(),
     ),
     "find_alternative_signals": ToolDiscovery(
@@ -2607,7 +3259,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Not for a dated, geography-specific trend question.",
         ),
         conflicts_with=(),
-        related_tools=("get_trend_evidence", "investigate_social_arbitrage_candidate",),
+        related_tools=(
+            "get_trend_evidence",
+            "investigate_social_arbitrage_candidate",
+        ),
         prerequisites=(),
     ),
     "find_sec_entities": ToolDiscovery(
@@ -2622,7 +3277,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("Starting from a company name when the exact ticker or CIK is not known.",),
         reject_when=("Unneeded when the exact ticker or CIK is already known.",),
         conflicts_with=(),
-        related_tools=("list_sec_filings", "search_sec_filings",),
+        related_tools=(
+            "list_sec_filings",
+            "search_sec_filings",
+        ),
         prerequisites=(),
     ),
     "get_analyst_estimates": ToolDiscovery(
@@ -2639,8 +3297,14 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for reported historical EPS (get_fundamentals).",
             "Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics).",
         ),
-        conflicts_with=("get_fundamentals", "get_valuation_metrics",),
-        related_tools=("get_valuation_metrics", "get_fundamentals",),
+        conflicts_with=(
+            "get_fundamentals",
+            "get_valuation_metrics",
+        ),
+        related_tools=(
+            "get_valuation_metrics",
+            "get_fundamentals",
+        ),
         prerequisites=(),
     ),
     "get_beneficial_ownership": ToolDiscovery(
@@ -2658,8 +3322,14 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Not for relationship links in either direction (search_sec_relationships).",
             "Answer from these records; do not open filings or pull changes unless asked.",
         ),
-        conflicts_with=("get_ownership_changes", "search_sec_relationships",),
-        related_tools=("get_ownership_changes", "search_sec_relationships",),
+        conflicts_with=(
+            "get_ownership_changes",
+            "search_sec_relationships",
+        ),
+        related_tools=(
+            "get_ownership_changes",
+            "search_sec_relationships",
+        ),
         prerequisites=(),
     ),
     "get_dilution_profile": ToolDiscovery(
@@ -2691,8 +3361,14 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for a single metric like EPS (get_fundamentals).",
             "Do NOT use for a single XBRL fact (get_xbrl_facts).",
         ),
-        conflicts_with=("get_fundamentals", "get_xbrl_facts",),
-        related_tools=("get_fundamentals", "get_xbrl_facts",),
+        conflicts_with=(
+            "get_fundamentals",
+            "get_xbrl_facts",
+        ),
+        related_tools=(
+            "get_fundamentals",
+            "get_xbrl_facts",
+        ),
         prerequisites=(),
     ),
     "get_finra_datapoints": ToolDiscovery(
@@ -2709,8 +3385,15 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for analyzed briefings or trends (query_finra).",
             "Do NOT use for one ticker's current short position (get_short_interest).",
         ),
-        conflicts_with=("get_short_interest", "query_finra",),
-        related_tools=("describe_finra_dataset", "query_finra", "list_finra_datasets",),
+        conflicts_with=(
+            "get_short_interest",
+            "query_finra",
+        ),
+        related_tools=(
+            "describe_finra_dataset",
+            "query_finra",
+            "list_finra_datasets",
+        ),
         prerequisites=(),
     ),
     "get_fundamentals": ToolDiscovery(
@@ -2722,15 +3405,27 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_security",
         time_mode="latest_or_as_of",
         summary="Single reported fundamental for one ticker: EPS, dividends, balance-sheet item, or shares outstanding.",
-        choose_when=("One specific reported historical numeric fundamental for one ticker: basic/diluted/TTM EPS, dividends, or shares outstanding.",),
+        choose_when=(
+            "One specific reported historical numeric fundamental for one ticker: basic/diluted/TTM EPS, dividends, or shares outstanding.",
+        ),
         reject_when=(
             "Do NOT use for full statements (get_financial_statements).",
             "Do NOT use for XBRL facts by concept (get_xbrl_facts).",
             "Do NOT use for cheap-vs-expensive multiples (get_valuation_metrics).",
             "Do NOT use for forward consensus (get_analyst_estimates).",
         ),
-        conflicts_with=("get_analyst_estimates", "get_financial_statements", "get_valuation_metrics", "get_xbrl_facts",),
-        related_tools=("get_xbrl_facts", "get_financial_statements", "get_valuation_metrics", "get_analyst_estimates",),
+        conflicts_with=(
+            "get_analyst_estimates",
+            "get_financial_statements",
+            "get_valuation_metrics",
+            "get_xbrl_facts",
+        ),
+        related_tools=(
+            "get_xbrl_facts",
+            "get_financial_statements",
+            "get_valuation_metrics",
+            "get_analyst_estimates",
+        ),
         prerequisites=(),
     ),
     "get_governance_events": ToolDiscovery(
@@ -2760,7 +3455,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("One ticker's executed insider sales (buys/sells) by executives and directors (Forms 3/4/5).",),
         reject_when=("Do NOT use for planned but unexecuted Form 144 sales (get_planned_insider_sales).",),
         conflicts_with=("get_planned_insider_sales",),
-        related_tools=("get_planned_insider_sales", "get_beneficial_ownership",),
+        related_tools=(
+            "get_planned_insider_sales",
+            "get_beneficial_ownership",
+        ),
         prerequisites=(),
     ),
     "get_macro_context": ToolDiscovery(
@@ -2773,7 +3471,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="latest",
         summary="Macro statistics for a geography such as California: population (how many people live there), unemployment, inflation, GDP, rates.",
         choose_when=("Retrieving population, labor, inflation, GDP, or rate statistics for a geography.",),
-        reject_when=("Not for company-specific facts.", "Do NOT use for outside news, commentary, or why a stock moved (search_web).",),
+        reject_when=(
+            "Not for company-specific facts.",
+            "Do NOT use for outside news, commentary, or why a stock moved (search_web).",
+        ),
         conflicts_with=("search_web",),
         related_tools=("search_web",),
         prerequisites=(),
@@ -2794,7 +3495,12 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for a full filing list by ticker or form (list_sec_filings).",
         ),
         conflicts_with=("list_sec_filings",),
-        related_tools=("get_sec_document", "search_web", "get_recent_ownership_filings", "list_sec_filings",),
+        related_tools=(
+            "get_sec_document",
+            "search_web",
+            "get_recent_ownership_filings",
+            "list_sec_filings",
+        ),
         prerequisites=(),
     ),
     "get_obligations": ToolDiscovery(
@@ -2806,10 +3512,15 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_security",
         time_mode="latest",
         summary="Future cash obligations from 10-K/10-Q notes: amounts, horizons, certainty language.",
-        choose_when=("What a company is obligated to pay in the future for one ticker, including contracts and commitments.",),
+        choose_when=(
+            "What a company is obligated to pay in the future for one ticker, including contracts and commitments.",
+        ),
         reject_when=("Do NOT use for valuation multiples (get_valuation_metrics).",),
         conflicts_with=(),
-        related_tools=("get_valuation_metrics", "get_financial_statements",),
+        related_tools=(
+            "get_valuation_metrics",
+            "get_financial_statements",
+        ),
         prerequisites=(),
     ),
     "get_offering_history": ToolDiscovery(
@@ -2821,7 +3532,9 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_security",
         time_mode="latest_or_as_of",
         summary="Offering history from S-1/S-3/424B filings: offering terms with source-registration links.",
-        choose_when=("Reviewing past offerings, shelf registrations, or IPO terms for a ticker, including share-count impact context for converts or warrants.",),
+        choose_when=(
+            "Reviewing past offerings, shelf registrations, or IPO terms for a ticker, including share-count impact context for converts or warrants.",
+        ),
         reject_when=("Not for dilution math (get_dilution_profile).",),
         conflicts_with=("get_dilution_profile",),
         related_tools=("get_dilution_profile",),
@@ -2841,8 +3554,14 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Not for the current snapshot of holders (get_beneficial_ownership).",
             "Not for relationship links in either direction (search_sec_relationships).",
         ),
-        conflicts_with=("get_beneficial_ownership", "search_sec_relationships",),
-        related_tools=("get_beneficial_ownership", "search_sec_relationships",),
+        conflicts_with=(
+            "get_beneficial_ownership",
+            "search_sec_relationships",
+        ),
+        related_tools=(
+            "get_beneficial_ownership",
+            "search_sec_relationships",
+        ),
         prerequisites=(),
     ),
     "get_planned_insider_sales": ToolDiscovery(
@@ -2869,10 +3588,15 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="market_wide",
         time_mode="latest",
         summary="Market-wide feed of the most recent SC 13D/13G filings from roughly the last 24 hours.",
-        choose_when=("Finding the latest market-wide SC 13D/G filings when no ticker is given; what just came out, newly filed.",),
+        choose_when=(
+            "Finding the latest market-wide SC 13D/G filings when no ticker is given; what just came out, newly filed.",
+        ),
         reject_when=("Not for one company's current holders.",),
         conflicts_with=(),
-        related_tools=("get_beneficial_ownership", "get_material_events",),
+        related_tools=(
+            "get_beneficial_ownership",
+            "get_material_events",
+        ),
         prerequisites=(),
     ),
     "get_reg_sho_volume": ToolDiscovery(
@@ -2890,7 +3614,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT call describe_finra_dataset or get_finra_datapoints; dataset and fields resolve internally.",
         ),
         conflicts_with=("get_short_interest",),
-        related_tools=("get_short_interest", "query_finra",),
+        related_tools=(
+            "get_short_interest",
+            "query_finra",
+        ),
         prerequisites=(),
     ),
     "get_sec_document": ToolDiscovery(
@@ -2902,14 +3629,24 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_document",
         time_mode="as_of",
         summary="Bounded text window of one filing document by accession number (Required: accession_no); page with cursor/limit via next_cursor.",
-        choose_when=("Reading a specific section such as MD&A or risk factors from a known accession.", "What the main document in a filing says; main-document text for a known accession.", "Example: accession_no=\"0000320193-25-000079\", section=\"Risk Factors\", cursor=0, limit=12000; next page with cursor=next_cursor.",),
+        choose_when=(
+            "Reading a specific section such as MD&A or risk factors from a known accession.",
+            "What the main document in a filing says; main-document text for a known accession.",
+            'Example: accession_no="0000320193-25-000079", section="Risk Factors", cursor=0, limit=12000; next page with cursor=next_cursor.',
+        ),
         reject_when=(
             "Do NOT use for filing metadata by accession (get_sec_filing).",
             "Do NOT use to list a filing's documents or exhibits (list_sec_documents).",
             "Not for what-changed questions.",
         ),
-        conflicts_with=("get_sec_filing", "list_sec_documents",),
-        related_tools=("get_sec_filing", "get_material_events",),
+        conflicts_with=(
+            "get_sec_filing",
+            "list_sec_documents",
+        ),
+        related_tools=(
+            "get_sec_filing",
+            "get_material_events",
+        ),
         prerequisites=(),
     ),
     "get_sec_filing": ToolDiscovery(
@@ -2928,8 +3665,16 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use to list a filing's documents or exhibits (list_sec_documents).",
             "Does not search filing text; use full-text search when accession is unknown (search_sec_filings).",
         ),
-        conflicts_with=("get_sec_document", "list_sec_documents", "search_sec_filings",),
-        related_tools=("list_sec_filings", "list_sec_documents", "search_sec_filings",),
+        conflicts_with=(
+            "get_sec_document",
+            "list_sec_documents",
+            "search_sec_filings",
+        ),
+        related_tools=(
+            "list_sec_filings",
+            "list_sec_documents",
+            "search_sec_filings",
+        ),
         prerequisites=(),
     ),
     "get_sec_search_coverage": ToolDiscovery(
@@ -2964,8 +3709,20 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for exact source values (get_finra_datapoints).",
             "Do NOT use for analyzed briefings or trends over a dataset (query_finra).",
         ),
-        conflicts_with=("get_finra_datapoints", "get_reg_sho_volume", "get_short_pressure_profile", "query_finra", "get_short_interest_leaderboard",),
-        related_tools=("query_finra", "get_finra_datapoints", "get_reg_sho_volume", "get_short_pressure_profile", "get_short_interest_leaderboard",),
+        conflicts_with=(
+            "get_finra_datapoints",
+            "get_reg_sho_volume",
+            "get_short_pressure_profile",
+            "query_finra",
+            "get_short_interest_leaderboard",
+        ),
+        related_tools=(
+            "query_finra",
+            "get_finra_datapoints",
+            "get_reg_sho_volume",
+            "get_short_pressure_profile",
+            "get_short_interest_leaderboard",
+        ),
         prerequisites=(),
     ),
     "get_short_interest_leaderboard": ToolDiscovery(
@@ -2998,7 +3755,11 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for daily short-sale volume (get_reg_sho_volume).",
         ),
         conflicts_with=("get_short_interest",),
-        related_tools=("get_short_interest", "query_finra", "get_reg_sho_volume",),
+        related_tools=(
+            "get_short_interest",
+            "query_finra",
+            "get_reg_sho_volume",
+        ),
         prerequisites=(),
     ),
     "get_sp500_weight": ToolDiscovery(
@@ -3043,7 +3804,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("Checking merger, acquisition, or tender-offer filing context for a ticker.",),
         reject_when=("Not for governance or proxy votes.",),
         conflicts_with=(),
-        related_tools=("get_governance_events", "get_sec_document",),
+        related_tools=(
+            "get_governance_events",
+            "get_sec_document",
+        ),
         prerequisites=(),
     ),
     "get_trend_evidence": ToolDiscovery(
@@ -3075,8 +3839,15 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for reported EPS alone (get_fundamentals).",
             "Do NOT use for forward consensus alone (get_analyst_estimates).",
         ),
-        conflicts_with=("get_analyst_estimates", "get_fundamentals",),
-        related_tools=("get_analyst_estimates", "get_obligations", "get_fundamentals",),
+        conflicts_with=(
+            "get_analyst_estimates",
+            "get_fundamentals",
+        ),
+        related_tools=(
+            "get_analyst_estimates",
+            "get_obligations",
+            "get_fundamentals",
+        ),
         prerequisites=(),
     ),
     "get_xbrl_facts": ToolDiscovery(
@@ -3093,8 +3864,14 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for EPS (get_fundamentals).",
             "Do NOT use for full statements (get_financial_statements).",
         ),
-        conflicts_with=("get_financial_statements", "get_fundamentals",),
-        related_tools=("get_fundamentals", "get_financial_statements",),
+        conflicts_with=(
+            "get_financial_statements",
+            "get_fundamentals",
+        ),
+        related_tools=(
+            "get_fundamentals",
+            "get_financial_statements",
+        ),
         prerequisites=(),
     ),
     "investigate_social_arbitrage_candidate": ToolDiscovery(
@@ -3109,7 +3886,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("Testing whether online attention around one candidate corresponds to real demand.",),
         reject_when=("Not for broad signal discovery.",),
         conflicts_with=(),
-        related_tools=("find_alternative_signals", "get_trend_evidence",),
+        related_tools=(
+            "find_alternative_signals",
+            "get_trend_evidence",
+        ),
         prerequisites=(),
     ),
     "list_finra_datasets": ToolDiscovery(
@@ -3141,8 +3921,15 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for document text windows (get_sec_document).",
             "Do NOT use for filing metadata records (get_sec_filing).",
         ),
-        conflicts_with=("get_sec_document", "get_sec_filing",),
-        related_tools=("get_sec_filing", "get_sec_document", "list_sec_filings",),
+        conflicts_with=(
+            "get_sec_document",
+            "get_sec_filing",
+        ),
+        related_tools=(
+            "get_sec_filing",
+            "get_sec_document",
+            "list_sec_filings",
+        ),
         prerequisites=(),
     ),
     "list_sec_filings": ToolDiscovery(
@@ -3153,15 +3940,26 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         source="sec",
         entity_scope="single_entity",
         time_mode="date_range_or_as_of",
-        summary="List EDGAR filings for an exact ticker or CIK (Required: identifier, e.g. identifier=\"AAPL\"); filterable by form and date range.",
-        choose_when=("Listing what a company filed lately; recent filings for an exact ticker or CIK, optionally filtered by form or date.", "Required identifier (ticker or CIK, e.g. identifier=\"AAPL\"); optional forms, start_date, end_date, as_of, limit.",),
+        summary='List EDGAR filings for an exact ticker or CIK (Required: identifier, e.g. identifier="AAPL"); filterable by form and date range.',
+        choose_when=(
+            "Listing what a company filed lately; recent filings for an exact ticker or CIK, optionally filtered by form or date.",
+            'Required identifier (ticker or CIK, e.g. identifier="AAPL"); optional forms, start_date, end_date, as_of, limit.',
+        ),
         reject_when=(
             "Do not guess an identifier from a bare company name; use the exact ticker when known, otherwise resolve the company's exact identifier first.",
             "Do NOT use for disclosure search without known identifier (search_sec_filings).",
             "Do NOT use for 8-K-derived what-changed event feed since a date (get_material_events).",
         ),
-        conflicts_with=("search_sec_filings", "get_material_events",),
-        related_tools=("get_sec_filing", "search_sec_filings", "find_sec_entities", "get_material_events",),
+        conflicts_with=(
+            "search_sec_filings",
+            "get_material_events",
+        ),
+        related_tools=(
+            "get_sec_filing",
+            "search_sec_filings",
+            "find_sec_entities",
+            "get_material_events",
+        ),
         prerequisites=(),
     ),
     "query_finra": ToolDiscovery(
@@ -3178,8 +3976,16 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Do NOT use for exact source values (get_finra_datapoints).",
             "Do NOT use for one ticker's current short position (get_short_interest).",
         ),
-        conflicts_with=("get_finra_datapoints", "get_short_interest",),
-        related_tools=("describe_finra_dataset", "get_finra_datapoints", "get_short_interest", "list_finra_datasets",),
+        conflicts_with=(
+            "get_finra_datapoints",
+            "get_short_interest",
+        ),
+        related_tools=(
+            "describe_finra_dataset",
+            "get_finra_datapoints",
+            "get_short_interest",
+            "list_finra_datasets",
+        ),
         prerequisites=(),
     ),
     "search_company_patents": ToolDiscovery(
@@ -3191,7 +3997,9 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_company",
         time_mode="date_range_or_latest",
         summary="Company patent search: publications, assignees, counts, and classifications.",
-        choose_when=("Finding patents a company filed or patented lately, with publication counts and classifications.",),
+        choose_when=(
+            "Finding patents a company filed or patented lately, with publication counts and classifications.",
+        ),
         reject_when=(
             "Not for financial or filing questions.",
             "Answer from patent records.",
@@ -3209,15 +4017,29 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="multi_entity",
         time_mode="date_range_or_as_of",
         summary="General EDGAR full-text disclosure search across entity, EFTS, and 10-K/10-Q routes, with mentions.",
-        choose_when=("Searching disclosed filing text, risk-factor language, and mentions when the accession number is unknown.", "SEC filings or filing full-text search when accession is unknown.", "Required: at least one of query, ticker, cik, company_name, person_name, domain, accession_no, security_identifier; e.g. query=\"risk factors\", ticker=\"AAPL\".",),
+        choose_when=(
+            "Searching disclosed filing text, risk-factor language, and mentions when the accession number is unknown.",
+            "SEC filings or filing full-text search when accession is unknown.",
+            'Required: at least one of query, ticker, cik, company_name, person_name, domain, accession_no, security_identifier; e.g. query="risk factors", ticker="AAPL".',
+        ),
         reject_when=(
             "Not a filing lister for a known ticker (list_sec_filings).",
             "Do NOT use for year-over-year risk-factor changes (diff_risk_factors).",
             "Do NOT use for full-filing diffs between accessions (diff_sec_filings).",
             "Do NOT use for one filing metadata record by accession (get_sec_filing).",
         ),
-        conflicts_with=("diff_risk_factors", "diff_sec_filings", "list_sec_filings", "get_sec_filing",),
-        related_tools=("list_sec_filings", "get_sec_filing", "find_sec_entities", "diff_risk_factors",),
+        conflicts_with=(
+            "diff_risk_factors",
+            "diff_sec_filings",
+            "list_sec_filings",
+            "get_sec_filing",
+        ),
+        related_tools=(
+            "list_sec_filings",
+            "get_sec_filing",
+            "find_sec_entities",
+            "diff_risk_factors",
+        ),
         prerequisites=(),
     ),
     "search_sec_relationships": ToolDiscovery(
@@ -3234,8 +4056,14 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
             "Not for current 5%+ stake sizes (get_beneficial_ownership).",
             "Not for consecutive-filing stake diffs (get_ownership_changes).",
         ),
-        conflicts_with=("get_beneficial_ownership", "get_ownership_changes",),
-        related_tools=("get_beneficial_ownership", "get_ownership_changes",),
+        conflicts_with=(
+            "get_beneficial_ownership",
+            "get_ownership_changes",
+        ),
+        related_tools=(
+            "get_beneficial_ownership",
+            "get_ownership_changes",
+        ),
     ),
     "search_web": ToolDiscovery(
         domain="web",
@@ -3246,10 +4074,19 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="open_query",
         time_mode="latest",
         summary="External web news and commentary for price moves, headlines, and industry developments: what outside commentators and people are saying, business risks.",
-        choose_when=("Finding recent news, announcements, catalysts, market reaction, why a stock moved/rose/fell, or recent commentary outside structured sources.",),
-        reject_when=("Not for FINRA short data.", "Do NOT use for bounded geography statistics like population or rates (get_macro_context).",),
+        choose_when=(
+            "Finding recent news, announcements, catalysts, market reaction, why a stock moved/rose/fell, or recent commentary outside structured sources.",
+        ),
+        reject_when=(
+            "Not for FINRA short data.",
+            "Do NOT use for bounded geography statistics like population or rates (get_macro_context).",
+        ),
         conflicts_with=("get_macro_context",),
-        related_tools=("get_material_events", "query_finra", "get_macro_context",),
+        related_tools=(
+            "get_material_events",
+            "query_finra",
+            "get_macro_context",
+        ),
         prerequisites=(),
     ),
     "thesis_create": ToolDiscovery(
@@ -3264,7 +4101,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("Creating a new investment thesis to track and test.",),
         reject_when=("Not for reading an existing thesis.",),
         conflicts_with=(),
-        related_tools=("thesis_show", "thesis_refine",),
+        related_tools=(
+            "thesis_show",
+            "thesis_refine",
+        ),
         prerequisites=(),
         direct_activation=False,
     ),
@@ -3278,8 +4118,14 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="current",
         summary="Append an operator note or journal entry to a thesis log. Pass the thesis ID as thesis:<uuid>.",
         choose_when=("Appending an operator note about ongoing monitoring without creating or changing a watch rule.",),
-        reject_when=("Not for revising thesis claims or deltas (thesis_refine).", "Not for setting alerts (thesis_watch).",),
-        conflicts_with=("thesis_watch", "thesis_refine",),
+        reject_when=(
+            "Not for revising thesis claims or deltas (thesis_refine).",
+            "Not for setting alerts (thesis_watch).",
+        ),
+        conflicts_with=(
+            "thesis_watch",
+            "thesis_refine",
+        ),
         related_tools=("thesis_refine",),
         prerequisites=(),
         direct_activation=False,
@@ -3294,7 +4140,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="current",
         summary="Pause, resume, or close thesis monitoring. Pass the thesis ID as thesis:<uuid>.",
         choose_when=("Pausing monitoring without deleting rules, resuming a paused thesis, or closing a thesis.",),
-        reject_when=("Not for reading thesis state (thesis_show).", "Not for editing claims or rules (thesis_refine, thesis_watch).",),
+        reject_when=(
+            "Not for reading thesis state (thesis_show).",
+            "Not for editing claims or rules (thesis_refine, thesis_watch).",
+        ),
         conflicts_with=(),
         related_tools=("thesis_show",),
         prerequisites=(),
@@ -3312,7 +4161,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("Revising a thesis after new evidence or feedback.",),
         reject_when=("Not for routine operator notes without changing claims (thesis_journal).",),
         conflicts_with=("thesis_journal",),
-        related_tools=("thesis_show", "thesis_journal",),
+        related_tools=(
+            "thesis_show",
+            "thesis_journal",
+        ),
         prerequisites=(),
         direct_activation=False,
     ),
@@ -3326,9 +4178,17 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="latest_or_as_of",
         summary="Read a thesis: its status, assessment, and current state. Pass the thesis ID as thesis:<uuid>.",
         choose_when=("Checking a thesis and its current assessment.",),
-        reject_when=("Not for changing a thesis.", "Not for listing or adding monitoring rules and alerts (thesis_watch).",),
+        reject_when=(
+            "Not for changing a thesis.",
+            "Not for listing or adding monitoring rules and alerts (thesis_watch).",
+        ),
         conflicts_with=("thesis_watch",),
-        related_tools=("thesis_create", "thesis_refine", "thesis_journal", "thesis_watch",),
+        related_tools=(
+            "thesis_create",
+            "thesis_refine",
+            "thesis_journal",
+            "thesis_watch",
+        ),
         prerequisites=(),
     ),
     "thesis_watch": ToolDiscovery(
@@ -3340,9 +4200,17 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         entity_scope="single_thesis",
         time_mode="current",
         summary="List existing watch rules, or add a validated monitoring rule that alerts when a thesis condition triggers.",
-        choose_when=("Listing what is watched for a thesis, or setting an alert on an invalidator or trigger; what am I watching for, watch rules.",),
-        reject_when=("Not for logging notes (thesis_journal).", "Not for reading thesis status and assessment (thesis_show).",),
-        conflicts_with=("thesis_journal", "thesis_show",),
+        choose_when=(
+            "Listing what is watched for a thesis, or setting an alert on an invalidator or trigger; what am I watching for, watch rules.",
+        ),
+        reject_when=(
+            "Not for logging notes (thesis_journal).",
+            "Not for reading thesis status and assessment (thesis_show).",
+        ),
+        conflicts_with=(
+            "thesis_journal",
+            "thesis_show",
+        ),
         related_tools=("thesis_show",),
         prerequisites=(),
         direct_activation=False,
@@ -3357,9 +4225,19 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="current",
         summary="Start a research session for a question; returns the session ID with its first job and next action.",
         choose_when=("Starting research on a new question.",),
-        reject_when=("Not for checking session state (research_status).", "Not for cancelling a session (research_cancel).",),
-        conflicts_with=("research_status", "research_cancel",),
-        related_tools=("research_status", "research_cancel", "research_resume",),
+        reject_when=(
+            "Not for checking session state (research_status).",
+            "Not for cancelling a session (research_cancel).",
+        ),
+        conflicts_with=(
+            "research_status",
+            "research_cancel",
+        ),
+        related_tools=(
+            "research_status",
+            "research_cancel",
+            "research_resume",
+        ),
         prerequisites=(),
         direct_activation=False,
     ),
@@ -3375,7 +4253,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("Resuming or re-entering an existing research session.",),
         reject_when=("Not for checking jobs and next action without wave state (research_status).",),
         conflicts_with=("research_status",),
-        related_tools=("research_status", "research_start",),
+        related_tools=(
+            "research_status",
+            "research_start",
+        ),
         prerequisites=(),
         direct_activation=False,
     ),
@@ -3389,9 +4270,20 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         time_mode="latest_or_as_of",
         summary="Read a research session with its jobs and pending next action.",
         choose_when=("Checking a research session and its current state.",),
-        reject_when=("Not for starting a session (research_start).", "Not for resuming wave and budget state (research_resume).",),
-        conflicts_with=("research_start", "research_resume",),
-        related_tools=("research_start", "research_resume", "research_read", "research_cancel",),
+        reject_when=(
+            "Not for starting a session (research_start).",
+            "Not for resuming wave and budget state (research_resume).",
+        ),
+        conflicts_with=(
+            "research_start",
+            "research_resume",
+        ),
+        related_tools=(
+            "research_start",
+            "research_resume",
+            "research_read",
+            "research_cancel",
+        ),
         prerequisites=(),
         direct_activation=False,
     ),
@@ -3407,7 +4299,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         choose_when=("Stopping a research session that is no longer needed.",),
         reject_when=("Not for starting a session (research_start).",),
         conflicts_with=("research_start",),
-        related_tools=("research_start", "research_status",),
+        related_tools=(
+            "research_start",
+            "research_status",
+        ),
         prerequisites=(),
         direct_activation=False,
     ),
@@ -3442,7 +4337,10 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         ),
         reject_when=("Not for running a new SEC search (search_sec_filings).",),
         conflicts_with=(),
-        related_tools=("research_read", "research_add_evidence",),
+        related_tools=(
+            "research_read",
+            "research_add_evidence",
+        ),
         prerequisites=(),
         direct_activation=False,
     ),
@@ -3550,7 +4448,13 @@ def _check_discovery_texts(name: str, meta: ToolDiscovery) -> None:
         raise AssertionError(f"tool discovery {name!r} has empty/overlong summary")
     if not meta.choose_when or not meta.reject_when:
         raise AssertionError(f"tool discovery {name!r} needs >=1 choose_when and >=1 reject_when")
-    for bullet in (*meta.choose_when, *meta.reject_when, *meta.related_tools, *meta.prerequisites, *meta.conflicts_with):
+    for bullet in (
+        *meta.choose_when,
+        *meta.reject_when,
+        *meta.related_tools,
+        *meta.prerequisites,
+        *meta.conflicts_with,
+    ):
         if not bullet or len(bullet) > _DISCOVERY_TEXT_LIMIT:
             raise AssertionError(f"tool discovery {name!r} has empty/overlong bullet {bullet!r}")
 
@@ -3567,7 +4471,9 @@ def _check_discovery_peer(name: str, meta: ToolDiscovery, peer: str) -> None:
     if peer not in TOOL_DISCOVERY_REGISTRY:
         raise AssertionError(f"tool discovery {name!r} conflicts with unknown tool {peer!r}")
     if name not in TOOL_DISCOVERY_REGISTRY[peer].conflicts_with:
-        raise AssertionError(f"tool discovery {name!r} conflicts with {peer!r} but {peer!r} does not reciprocate {name!r}")
+        raise AssertionError(
+            f"tool discovery {name!r} conflicts with {peer!r} but {peer!r} does not reciprocate {name!r}"
+        )
     if peer not in " ".join(meta.reject_when):
         raise AssertionError(f"tool discovery {name!r} conflicts with {peer!r} but never names {peer!r} in reject_when")
 
@@ -3596,7 +4502,9 @@ def _uncovered_research_tools(raw_caps: dict[object, object]) -> list[str]:
     return sorted(
         str(tool)
         for tool, cap in raw_caps.items()
-        if cap is Capability.RESEARCH and str(tool) not in {"search_tools", "list_tool_domains", "describe_tool", "browse_tools", "call_tool"} and str(tool) not in TOOL_DISCOVERY_REGISTRY
+        if cap is Capability.RESEARCH
+        and str(tool) not in {"search_tools", "list_tool_domains", "describe_tool", "browse_tools", "call_tool"}
+        and str(tool) not in TOOL_DISCOVERY_REGISTRY
     )
 
 
@@ -3617,6 +4525,7 @@ def _check_discovery_capabilities() -> None:
         raise AssertionError(f"tool discovery registry missing RESEARCH tools: {uncovered}")
     _check_discovery_activation(raw_caps)
 
+
 def validate_tool_discovery_registry() -> dict[str, ToolDiscovery]:
     """Fail loudly on registry drift; returns the registry for verify scripts."""
     known_domains = set(DOMAIN_DESCRIPTIONS)
@@ -3630,17 +4539,28 @@ def validate_tool_discovery_registry() -> dict[str, ToolDiscovery]:
 _TOOL_DISCOVERY_FINGERPRINT = json.dumps(
     {
         name: [
-            meta.domain, meta.family, meta.intent, meta.output_kind, meta.source,
-            meta.entity_scope, meta.time_mode, meta.summary,
-            list(meta.choose_when), list(meta.reject_when),
-            sorted(meta.conflicts_with), sorted(meta.related_tools),
-            sorted(meta.prerequisites), meta.direct_activation,
+            meta.domain,
+            meta.family,
+            meta.intent,
+            meta.output_kind,
+            meta.source,
+            meta.entity_scope,
+            meta.time_mode,
+            meta.summary,
+            list(meta.choose_when),
+            list(meta.reject_when),
+            sorted(meta.conflicts_with),
+            sorted(meta.related_tools),
+            sorted(meta.prerequisites),
+            meta.direct_activation,
         ]
         for name, meta in sorted(TOOL_DISCOVERY_REGISTRY.items())
     },
     sort_keys=True,
 )
-TOOL_REGISTRY_VERSION = hashlib.sha256((json.dumps(TOOLS, sort_keys=True) + _TOOL_DISCOVERY_FINGERPRINT).encode()).hexdigest()[:12]
+TOOL_REGISTRY_VERSION = hashlib.sha256(
+    (json.dumps(TOOLS, sort_keys=True) + _TOOL_DISCOVERY_FINGERPRINT).encode()
+).hexdigest()[:12]
 
 
 validate_tool_discovery_registry()
@@ -3679,7 +4599,14 @@ def build_prerequisite_graph_from_tool_metadata() -> dict[str, frozenset[str]]:
 
 def _normalize_discovery_text(value: str) -> list[str]:
     """Lowercase, de-punctuate, and de-pluralize discovery text into tokens."""
-    lowered = value.lower().replace("p/e", "pe").replace("13-d", "13d").replace("contractual", "contract").replace("trended", "trend").replace("changed", "change")
+    lowered = (
+        value.lower()
+        .replace("p/e", "pe")
+        .replace("13-d", "13d")
+        .replace("contractual", "contract")
+        .replace("trended", "trend")
+        .replace("changed", "change")
+    )
     cleaned = "".join(c if c.isalnum() or c == " " else " " for c in lowered)
     collapsed = " ".join(cleaned.split()).replace("10 k", "10k")
     tokens: list[str] = []
@@ -3694,12 +4621,51 @@ def _normalize_discovery_text(value: str) -> list[str]:
 
 
 # Generic stopwords for catalog search (standard filler, never domain/intent terms).
-_DISCOVERY_STOPWORDS = frozenset({
-    "a", "an", "and", "are", "as", "at", "be", "been", "by", "did", "do", "does",
-    "for", "from", "had", "has", "have", "how", "in", "is", "it", "its", "me",
-    "my", "of", "on", "or", "that", "the", "this", "to", "was", "were", "what",
-    "when", "which", "who", "with", "show", "tell", "give",
-})
+_DISCOVERY_STOPWORDS = frozenset(
+    {
+        "a",
+        "an",
+        "and",
+        "are",
+        "as",
+        "at",
+        "be",
+        "been",
+        "by",
+        "did",
+        "do",
+        "does",
+        "for",
+        "from",
+        "had",
+        "has",
+        "have",
+        "how",
+        "in",
+        "is",
+        "it",
+        "its",
+        "me",
+        "my",
+        "of",
+        "on",
+        "or",
+        "that",
+        "the",
+        "this",
+        "to",
+        "was",
+        "were",
+        "what",
+        "when",
+        "which",
+        "who",
+        "with",
+        "show",
+        "tell",
+        "give",
+    }
+)
 
 
 def _discovery_keywords(value: str) -> set[str]:
@@ -3740,21 +4706,24 @@ def _is_ambiguity_group(component: list[str]) -> bool:
     """A real ambiguity group: 2+ names with at least one internal conflict edge."""
     if len(component) < 2:
         return False
-    return any(
-        any(peer in component for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with)
-        for name in component
-    )
+    return any(any(peer in component for peer in TOOL_DISCOVERY_REGISTRY[name].conflicts_with) for name in component)
 
 
 def _choose_bit(name: str) -> str:
     """One candidate's distinguishing bit: name plus its primary choose_when."""
-    return f"{name} \u2014 {TOOL_DISCOVERY_REGISTRY[name].choose_when[0]}" if TOOL_DISCOVERY_REGISTRY[name].choose_when else name
+    return (
+        f"{name} \u2014 {TOOL_DISCOVERY_REGISTRY[name].choose_when[0]}"
+        if TOOL_DISCOVERY_REGISTRY[name].choose_when
+        else name
+    )
 
 
 def _ambiguity_card(component: list[str], index: dict[str, int]) -> dict[str, object]:
     """Ranked-order candidates, domain/family paths, and the distinguishing question."""
+
     def _order_key(n: str) -> int:
         return index[n]
+
     ordered = sorted(component, key=_order_key)
     paths = sorted({f"{TOOL_DISCOVERY_REGISTRY[n].domain}/{TOOL_DISCOVERY_REGISTRY[n].family}" for n in ordered})
     bits = [_choose_bit(n) for n in ordered]
@@ -3784,6 +4753,7 @@ def _ambiguity_groups(ranked_names: list[str]) -> tuple[bool, list[dict[str, obj
 
 
 _SEARCH_EMPTY_HINT = "No matches. Retry with the full user question as the query (never a ticker or one word); omit domain unless certain of it."
+
 
 def _search_params(args: dict[str, object]) -> tuple[str, str | None]:
     """Normalized query plus validated domain filter (unknown domains ignored)."""
@@ -3825,11 +4795,17 @@ def _tool_domain_bonus(meta: ToolDiscovery, query_tokens: set[str]) -> int:
 def _tool_field_tokens(name: str, meta: ToolDiscovery) -> set[str]:
     """Scorable token set: name/domain/family/intent/output/summary/choose_when."""
     return _discovery_keywords(
-        " ".join((
-            name.replace("_", " "), meta.domain, meta.family.replace("-", " "),
-            meta.intent.replace("_", " "), meta.output_kind.replace("_", " "),
-            meta.summary, " ".join(meta.choose_when),
-        ))
+        " ".join(
+            (
+                name.replace("_", " "),
+                meta.domain,
+                meta.family.replace("-", " "),
+                meta.intent.replace("_", " "),
+                meta.output_kind.replace("_", " "),
+                meta.summary,
+                " ".join(meta.choose_when),
+            )
+        )
     )
 
 
@@ -3845,8 +4821,10 @@ def _rank_scored(scored: list[tuple[int, str]]) -> list[tuple[int, str]]:
     if scored:
         best = max(score for score, _ in scored)
         scored = [(score, name) for score, name in scored if score >= best - 4]
+
     def _rank_key(hit: tuple[int, str]) -> tuple[int, str]:
         return (-hit[0], hit[1])
+
     scored.sort(key=_rank_key)
     return scored
 
@@ -3875,6 +4853,7 @@ def _expand_conflicts(ranked_names: list[str], domain: str | None) -> list[str]:
                     continue
                 expanded.append(peer)
     return expanded[:5]
+
 
 def _search_tools(args: dict[str, object], model: str) -> dict[str, object]:
     """Generic lexical ranking over TOOL_DISCOVERY_REGISTRY fields only.
@@ -3906,10 +4885,7 @@ def _list_tool_domains(args: dict[str, object], model: str) -> dict[str, object]
     del args
     del model
     return {
-        "domains": [
-            {"name": name, "description": DOMAIN_DESCRIPTIONS[name]}
-            for name in sorted(DOMAIN_DESCRIPTIONS)
-        ],
+        "domains": [{"name": name, "description": DOMAIN_DESCRIPTIONS[name]} for name in sorted(DOMAIN_DESCRIPTIONS)],
     }
 
 
@@ -3918,6 +4894,7 @@ def _schema_arg_lists(name: str) -> tuple[list[str], list[str]]:
     params, required, optional = _canonical_tool_schema(name)
     del params
     return required, optional
+
 
 def _describe_one(name: str) -> dict[str, object]:
     """Full metadata for one named tool from the registry plus its canonical schema."""
@@ -3950,7 +4927,7 @@ def _parse_describe_names(name: str) -> list[object] | None:
     # ponytail: coerce instead of failing their describe-then-call flow.
     try:
         parsed = json.loads(name)
-    except (json.JSONDecodeError, TypeError):
+    except json.JSONDecodeError, TypeError:
         return None
     return parsed if isinstance(parsed, list) and parsed else None
 
@@ -4033,7 +5010,11 @@ def _browse_family(domain: str, family: str) -> dict[str, object]:
     """Family path: member cards plus the choose/reject contrast table."""
     names = _browse_family_names(domain, family)
     if not names:
-        return {"error": "unknown_family", "domain": domain, "families": sorted({m.family for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain})}
+        return {
+            "error": "unknown_family",
+            "domain": domain,
+            "families": sorted({m.family for n, m in TOOL_DISCOVERY_REGISTRY.items() if m.domain == domain}),
+        }
     tools = [_browse_family_card(n) for n in names]
     return {
         "path": f"/{domain}/{family}",
@@ -4060,6 +5041,7 @@ def _browse_root() -> dict[str, object]:
     domains = [{"name": d, "path": f"/{d}", "description": DOMAIN_DESCRIPTIONS[d]} for d in sorted(DOMAIN_DESCRIPTIONS)]
     return {"path": "/", "domains": domains}
 
+
 def _browse_tools(args: dict[str, object], model: str) -> dict[str, object]:
     """Hierarchical catalog: root domains, domain families, family tools + contrast, or one tool."""
     del model
@@ -4077,7 +5059,6 @@ def _browse_tools(args: dict[str, object], model: str) -> dict[str, object]:
     return _browse_root()
 
 
-
 def _envelope_dict(raw: object) -> dict[str, object]:
     """String-keyed dict from envelope JSON, else empty."""
     return {str(k): v for k, v in raw.items()} if isinstance(raw, dict) else {}
@@ -4085,7 +5066,11 @@ def _envelope_dict(raw: object) -> dict[str, object]:
 
 def _envelope_attempts(raw: object) -> list[dict[str, object]]:
     """Attempt dicts from envelope JSON, else empty."""
-    return [{str(k): v for k, v in a.items()} for a in raw if isinstance(a, dict)] if isinstance(raw, (list, tuple)) else []
+    return (
+        [{str(k): v for k, v in a.items()} for a in raw if isinstance(a, dict)]
+        if isinstance(raw, (list, tuple))
+        else []
+    )
 
 
 def _mention_hit(hit: dict[str, object]) -> dict[str, object]:
@@ -4112,10 +5097,9 @@ def _passage_row(hit: dict[str, object]) -> dict[str, object]:
 def _passage_term(hit: dict[str, object]) -> str | None:
     """First exposure term in the hit description, else the query topic."""
     import re as _re
+
     text = str(hit.get("file_description") or "")
-    match = _re.search(
-        r"contract|concentration|investments?|commitments?|counterpart\w*|openai",
-        text, _re.IGNORECASE)
+    match = _re.search(r"contract|concentration|investments?|commitments?|counterpart\w*|openai", text, _re.IGNORECASE)
     if match:
         return match.group(0).lower()
     query = str(hit.get("query") or "").strip()
@@ -4143,7 +5127,8 @@ def _hit_window(hit: dict[str, object]) -> dict[str, object]:
         "term": _passage_term(hit),
         "window": hit.get("snippet") or hit.get("file_description"),
         "relevance_reason": list(hit.get("relevance_reason") or [])
-        if isinstance(hit.get("relevance_reason"), (list, tuple)) else [],
+        if isinstance(hit.get("relevance_reason"), (list, tuple))
+        else [],
         "snippet": hit.get("snippet") or hit.get("file_description"),
         "resource_uri": hit.get("resource_uri"),
     }
@@ -4158,8 +5143,9 @@ _SEARCH_RETRIEVAL_NOTE = (
 )
 
 
-def _discovery_packet(hits: list[dict[str, object]], search_id: object,
-                      limit: int | None) -> tuple[list[dict[str, object]], dict[str, object]]:
+def _discovery_packet(
+    hits: list[dict[str, object]], search_id: object, limit: int | None
+) -> tuple[list[dict[str, object]], dict[str, object]]:
     """Compact discovery packet: bounded top_hits + paging pointer (display only)."""
     top = [_hit_window(hit) for hit in hits] if limit is None else [_hit_window(hit) for hit in hits[:limit]]
     rest = 0 if limit is None else max(len(hits) - len(top), 0)
@@ -4184,17 +5170,20 @@ def _search_runs(raw: object) -> list[dict[str, object]]:
         return []
     return [{str(k): v for k, v in run.items()} for run in raw if isinstance(run, dict)]
 
+
 def _envelope_pit_basis(attempts: list[dict[str, object]]) -> str | None:
     """Most common attempt pit_basis, else None."""
     bases: list[object] = [a.get("pit_basis") for a in attempts if a.get("pit_basis") is not None]
-    return max(set(str(b) for b in bases), key=_bases_count_key(bases)) if bases else None
+    return max({str(b) for b in bases}, key=_bases_count_key(bases)) if bases else None
 
 
 def _envelope_counts(data: dict[str, object], cov: dict[str, object]) -> dict[str, object]:
     """Reported/retrieved/pages plus entity/filing/document sizes."""
+
     def _len_of(key: str) -> int:
         value = data.get(key)
         return len(value) if isinstance(value, (list, tuple)) else 0
+
     return {
         "results_reported": cov.get("results_reported", 0),
         "results_retrieved": cov.get("results_retrieved", 0),
@@ -4267,34 +5256,57 @@ def _envelope_scope(request: dict[str, object]) -> dict[str, object]:
     return scope
 
 
-def _find_sec_entities(args: dict[str, object]) -> dict[str, object]:
+def _discovery_exhaustive(args: dict[str, object], context: RequestContext) -> bool:
+    """Exhaustive SEC discovery by default in a research session; explicit caller choice wins."""
+    explicit = args.get("exhaustive")
+    if explicit is not None:
+        return bool(explicit)
+    return context.research_session_id is not None
+
+
+def _discovery_bounds(args: dict[str, object], context: RequestContext) -> tuple[bool, int | None, int | None]:
+    """(exhaustive, backend max_results, packet limit): exhaustive retrieval is never limit-bounded."""
+    exhaustive = _discovery_exhaustive(args, context)
+    packet = _optional_int(args.get("limit")) if args.get("limit") is not None else 20
+    return exhaustive, (None if exhaustive else packet), packet
+
+
+def _find_sec_entities(args: dict[str, object], context: RequestContext) -> dict[str, object]:
     """Entity discovery -> envelope with candidate verification statuses."""
-    exhaustive = bool(args.get("exhaustive", False))
-    if args.get("limit") is not None:
-        max_results = _optional_int(args.get("limit"))
-    else:
-        max_results = None if exhaustive else 20
-    return _search_envelope(sec.find_sec_entities(
-        str(args["query"]), as_of=_str_or_none(args.get("as_of")),
-        exhaustive=exhaustive, max_results=max_results,
-        data_root=get_data_root(),
-    ))
+    exhaustive, max_results, packet = _discovery_bounds(args, context)
+    return _search_envelope(
+        sec.find_sec_entities(
+            str(args["query"]),
+            as_of=_str_or_none(args.get("as_of")),
+            exhaustive=exhaustive,
+            max_results=max_results,
+            data_root=get_data_root(),
+        ),
+        limit=packet,
+    )
 
 
-def _sec_search_result(args: dict[str, object]) -> dict[str, object]:
-    """Bounded discovery search -> envelope with jobs + evidence IDs."""
-    if not any(args.get(key) for key in (
-            "query", "ticker", "cik", "company_name", "person_name",
-            "domain", "accession_no", "security_identifier")):
+def _sec_search_result(args: dict[str, object], context: RequestContext) -> dict[str, object]:
+    """Discovery search -> envelope with jobs + evidence IDs; exhaustive in a research session."""
+    if not any(
+        args.get(key)
+        for key in (
+            "query",
+            "ticker",
+            "cik",
+            "company_name",
+            "person_name",
+            "domain",
+            "accession_no",
+            "security_identifier",
+        )
+    ):
         raise ValueError(
             "search_sec_filings needs one of: query, ticker, cik, "
             "company_name, person_name, domain, accession_no, "
-            "security_identifier")
-    exhaustive = bool(args.get("exhaustive", False))
-    if args.get("limit") is not None:
-        max_results = _optional_int(args.get("limit"))
-    else:
-        max_results = None if exhaustive else 20
+            "security_identifier"
+        )
+    exhaustive, max_results, packet = _discovery_bounds(args, context)
     raw_forms = args.get("forms")
     if isinstance(raw_forms, str):
         forms: tuple[str, ...] | None = (raw_forms,)
@@ -4303,24 +5315,27 @@ def _sec_search_result(args: dict[str, object]) -> dict[str, object]:
     else:
         forms = None
     request = sec.SECSearchRequest(
-        query=_str_or_none(args.get("query")), ticker=_str_or_none(args.get("ticker")), cik=_str_or_none(args.get("cik")),
+        query=_str_or_none(args.get("query")),
+        ticker=_str_or_none(args.get("ticker")),
+        cik=_str_or_none(args.get("cik")),
         company_name=_str_or_none(args.get("company_name")),
-        person_name=_str_or_none(args.get("person_name")), domain=_str_or_none(args.get("domain")),
+        person_name=_str_or_none(args.get("person_name")),
+        domain=_str_or_none(args.get("domain")),
         accession_no=_str_or_none(args.get("accession_no")),
         security_identifier=_str_or_none(args.get("security_identifier")),
         forms=forms,
-        start_date=_str_or_none(args.get("start_date")), end_date=_str_or_none(args.get("end_date")),
+        start_date=_str_or_none(args.get("start_date")),
+        end_date=_str_or_none(args.get("end_date")),
         as_of=_str_or_none(args.get("as_of")),
         exhaustive=exhaustive,
         max_results=max_results,
     )
-    return _search_envelope(
-        sec.SECDiscoveryService(data_root=get_data_root()).search(request),
-        limit=max_results if not exhaustive else 20)
+    return _search_envelope(sec.SECDiscoveryService(data_root=get_data_root()).search(request), limit=packet)
 
 
 class _DocView(TypedDict, total=False):
     """get_sec_document view kwargs (section/query/raw only when supplied)."""
+
     section: str
     query: str
     raw: bool
@@ -4351,6 +5366,7 @@ def _doc_max_chars(raw: object) -> int | None:
         return int(raw.strip()) if raw.strip() else 12_000
     return int(str(raw))
 
+
 def _doc_view_kwargs(args: dict[str, object]) -> _DocView:
     """section/query/raw only when the model supplied them (legacy fakes stay green)."""
     extra: _DocView = {}
@@ -4372,7 +5388,8 @@ def _get_sec_document(args: dict[str, object], model: str) -> dict[str, object]:
         cursor = args.get("cursor")
         limit = args.get("limit")
         return sec.get_sec_document(
-            str(args["accession_no"]), _str_or_none(args.get("document_name")),
+            str(args["accession_no"]),
+            _str_or_none(args.get("document_name")),
             as_of=_str_or_none(args.get("as_of")),
             offset=_doc_offset(cursor if cursor is not None else args.get("offset", 0)),
             max_chars=_doc_max_chars(limit if limit is not None else args.get("max_chars", 12_000)),
@@ -4407,7 +5424,11 @@ def _rel_attempts(result: dict[str, object]) -> tuple[list[object], list[dict[st
     """Errors plus attempt dicts from the relationships result."""
     errors = _as_result_list(result, "errors")
     raw_attempts = result.get("attempts")
-    attempts = [{str(k): v for k, v in a.items()} for a in raw_attempts if isinstance(a, dict)] if isinstance(raw_attempts, list) else []
+    attempts = (
+        [{str(k): v for k, v in a.items()} for a in raw_attempts if isinstance(a, dict)]
+        if isinstance(raw_attempts, list)
+        else []
+    )
     return errors, attempts
 
 
@@ -4417,7 +5438,9 @@ def _rel_attempt_flags(attempts: list[dict[str, object]]) -> tuple[bool, bool]:
     return has_partial, any(a.get("status") == "failed" for a in attempts)
 
 
-def _rel_coverage_status(result: dict[str, object], errors: list[object], attempts: list[dict[str, object]], found: int) -> str:
+def _rel_coverage_status(
+    result: dict[str, object], errors: list[object], attempts: list[dict[str, object]], found: int
+) -> str:
     """failed when errors/failures explain zero hits, partial on any caveat, else complete."""
     has_partial, has_failed = _rel_attempt_flags(attempts)
     if (errors and not found) or (has_failed and not found):
@@ -4434,14 +5457,19 @@ def _rel_ciks(result: dict[str, object]) -> list[object]:
 
 def _rel_request(args: dict[str, object]) -> dict[str, object]:
     """Echo of the relationship request coordinates."""
-    return {"entity": args.get("entity"),
-            "relationship_types": args.get("relationship_types"),
-            "as_of": args.get("as_of")}
+    return {
+        "entity": args.get("entity"),
+        "relationship_types": args.get("relationship_types"),
+        "as_of": args.get("as_of"),
+    }
+
 
 def _sec_relationships_result(args: dict[str, object]) -> dict[str, object]:
     result = sec.search_sec_relationships(
-        str(args["entity"]), relationship_types=_rel_types(args.get("relationship_types")),
-        as_of=_str_or_none(args.get("as_of")), limit=int(str(args.get("limit", 50) or 50)),
+        str(args["entity"]),
+        relationship_types=_rel_types(args.get("relationship_types")),
+        as_of=_str_or_none(args.get("as_of")),
+        limit=int(str(args.get("limit", 50) or 50)),
         exhaustive=bool(args.get("exhaustive", True)),
     )
     typed_list = _as_result_list(result, "typed")
@@ -4461,15 +5489,15 @@ def _sec_relationships_result(args: dict[str, object]) -> dict[str, object]:
         "mentions": result.get("mentions"),
         "coverage": {"status": _rel_coverage_status(result, errors, attempts, found)},
         "attempts": result.get("attempts"),
-        "counts": {"typed": len(typed_list),
-                   "workflow": len(rels_list),
-                   "mentions": len(ment_list)},
+        "counts": {"typed": len(typed_list), "workflow": len(rels_list), "mentions": len(ment_list)},
         "pit_basis": "known_at" if args.get("as_of") else None,
         "warnings": result.get("warnings"),
         "errors": errors,
         "backfill_jobs": [],
         "source": "SEC EDGAR",
     }
+
+
 def _list_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
     """List filings with lenient tool-JSON coercions (forms union narrowed here)."""
     del model
@@ -4494,6 +5522,8 @@ def _list_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
         ),
         "filings",
     )
+
+
 def _filing_forms(raw: object) -> str | list[str] | tuple[str, ...] | None:
     """forms union coercion shared by list/diff filings (string, tuple, else None)."""
     if raw is None:
@@ -4508,7 +5538,9 @@ def _filing_forms(raw: object) -> str | list[str] | tuple[str, ...] | None:
 def _recent_filings(ticker: str, args: dict[str, object]) -> object:
     """Up to 10 recent filings for ticker self-resolution; errors stay a dict."""
     try:
-        return sec.list_sec_filings(ticker, forms=_filing_forms(args.get("forms")), as_of=_str_or_none(args.get("as_of")), limit=10)
+        return sec.list_sec_filings(
+            ticker, forms=_filing_forms(args.get("forms")), as_of=_str_or_none(args.get("as_of")), limit=10
+        )
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return {"error": str(exc)}
 
@@ -4536,6 +5568,7 @@ def _diff_resolved_pair(ticker: str, filings: list[Filing], section: str | None)
         out = {**out, "ticker": ticker.strip().upper(), "resolved_via": "list_sec_filings-internal"}
     return out
 
+
 def _diff_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
     """Accession pair direct, or ticker self-resolution via sec.list_sec_filings."""
     del model
@@ -4546,7 +5579,9 @@ def _diff_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
         return sec.diff_filings(cur, prev, section=section)
     ticker = _str_or_none(args.get("ticker"))
     if not ticker:
-        return _invalid_args_error("diff_sec_filings", "Provide ticker or current_accession+previous_accession for tool 'diff_sec_filings'")
+        return _invalid_args_error(
+            "diff_sec_filings", "Provide ticker or current_accession+previous_accession for tool 'diff_sec_filings'"
+        )
     filings = _recent_filings(ticker, args)
     if isinstance(filings, dict):
         return filings
@@ -4560,6 +5595,7 @@ def _warehouse_ticker(name: str) -> str | None:
     """Exact warehouse name->ticker match, else None (never raises)."""
     try:
         from app.services.evidence_resolution import warehouse_name_to_ticker
+
         mapped = warehouse_name_to_ticker(name)
         if mapped and mapped.strip():
             return mapped.strip().upper()
@@ -4572,6 +5608,7 @@ def _edgar_ticker(name: str) -> str | None:
     """EDGAR company-index top hit tickers[0], else None (never raises)."""
     try:
         from app.sec.client import find_sec_company
+
         for cand in find_sec_company(name, limit=3):
             ticks = cand.get("tickers") if isinstance(cand, dict) else None
             if isinstance(ticks, list) and ticks and isinstance(ticks[0], str) and ticks[0].strip():
@@ -4579,6 +5616,7 @@ def _edgar_ticker(name: str) -> str | None:
     except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
         pass
     return None
+
 
 def _resolve_company_to_ticker(name: str) -> str | None:
     """Company name to ticker: exact warehouse match, then EDGAR company index top hit."""
@@ -4606,6 +5644,7 @@ def _company_arg(args: dict[str, object]) -> str | None:
     raw = args.get("company_name")
     return raw.strip() if isinstance(raw, str) and raw.strip() else None
 
+
 def _get_obligations(args: dict[str, object], model: str) -> dict[str, object]:
     """Ticker or company name; the server maps names to tickers for single dispatch."""
     del model
@@ -4615,20 +5654,30 @@ def _get_obligations(args: dict[str, object], model: str) -> dict[str, object]:
     if ticker is None:
         name = _company_arg(args)
         if name is None:
-            return _invalid_args_error("get_obligations", "Provide a ticker (e.g. AAPL) or company_name (e.g. Apple) for tool 'get_obligations'")
+            return _invalid_args_error(
+                "get_obligations",
+                "Provide a ticker (e.g. AAPL) or company_name (e.g. Apple) for tool 'get_obligations'",
+            )
         resolved = _resolve_company_to_ticker(name)
         if resolved is None:
             return _invalid_args_error("get_obligations", f"Unknown company name '{name}'; pass a ticker like AAPL")
         ticker = resolved
     return obligations.get_obligations(ticker)
-def _ticker_or_company_name(args: dict[str, object], tool: str, key: str = "ticker") -> tuple[str | None, dict[str, object] | None]:
+
+
+def _ticker_or_company_name(
+    args: dict[str, object], tool: str, key: str = "ticker"
+) -> tuple[str | None, dict[str, object] | None]:
     """Ticker/entity value or company_name; maps names to tickers for single dispatch."""
     value = _upper_arg(args, key)
     if value is not None:
         return _remap_mixed_case(args, key, value), None
     name = _company_arg(args)
     if name is None:
-        return None, _invalid_args_error(tool, f"Provide an entity/ticker (e.g. AAPL) or company_name (e.g. Apple) for tool '{tool}'; never call with neither")
+        return None, _invalid_args_error(
+            tool,
+            f"Provide an entity/ticker (e.g. AAPL) or company_name (e.g. Apple) for tool '{tool}'; never call with neither",
+        )
     resolved = _resolve_company_to_ticker(name)
     if resolved is None:
         return None, _invalid_args_error(tool, f"Unknown company name '{name}'; pass a {key} like AAPL")
@@ -4643,9 +5692,13 @@ def _get_beneficial_ownership(args: dict[str, object], model: str) -> dict[str, 
         return err
     assert ticker is not None
     return _wrap_list(
-        ticker, sec.get_beneficial_ownership(
-            ticker, as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
-        ), "records",
+        ticker,
+        sec.get_beneficial_ownership(
+            ticker,
+            as_of=_str_or_none(args.get("as_of")),
+            limit=_optional_int(args.get("limit", 20)),
+        ),
+        "records",
     )
 
 
@@ -4657,9 +5710,13 @@ def _get_insider_activity(args: dict[str, object], model: str) -> dict[str, obje
         return err
     assert ticker is not None
     return _wrap_list(
-        ticker, sec.get_insider_activity(
-            ticker, as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 50)),
-        ), "transactions",
+        ticker,
+        sec.get_insider_activity(
+            ticker,
+            as_of=_str_or_none(args.get("as_of")),
+            limit=_optional_int(args.get("limit", 50)),
+        ),
+        "transactions",
     )
 
 
@@ -4673,7 +5730,6 @@ def _search_sec_relationships(args: dict[str, object], model: str) -> dict[str, 
     return _sec_relationships_result({**args, "entity": entity})
 
 
-
 # Direct-dispatch tools (EDGAR/analyst/obligations/valuation) — same
 # registry pattern as the FINRA/Robinhood handler maps below.
 _MODEL_HANDLERS: dict[str, ModelHandler] = {
@@ -4681,58 +5737,85 @@ _MODEL_HANDLERS: dict[str, ModelHandler] = {
     "get_fundamentals": lambda args, model: sec_facts.get_fundamentals(
         str(args["ticker"]), str(args["metric"]), as_of=_str_or_none(args.get("as_of"))
     ),
-    "find_sec_entities": lambda args, model: _find_sec_entities(args),
     "search_sec_relationships": _search_sec_relationships,
     "get_sec_search_coverage": lambda args, model: sec.get_sec_search_coverage(
-        source=_str_or_none(args.get("source")), form=_str_or_none(args.get("form")),
-        search_id=_str_or_none(args.get("search_id")), limit=int(str(args.get("limit", 200))),
+        source=_str_or_none(args.get("source")),
+        form=_str_or_none(args.get("form")),
+        search_id=_str_or_none(args.get("search_id")),
+        limit=int(str(args.get("limit", 200))),
     ),
-    "search_sec_filings": lambda args, model: _sec_search_result(args),
     "list_sec_filings": _list_sec_filings,
     "get_sec_filing": lambda args, model: sec.get_sec_filing(
-        str(args["accession_no"]), as_of=_str_or_none(args.get("as_of"))).to_dict(),
+        str(args["accession_no"]), as_of=_str_or_none(args.get("as_of"))
+    ).to_dict(),
     "list_sec_documents": lambda args, model: _wrap_list(
-        args.get("accession_no"), sec.list_sec_documents(
-            str(args["accession_no"]), as_of=_str_or_none(args.get("as_of"))), "documents",
+        args.get("accession_no"),
+        sec.list_sec_documents(str(args["accession_no"]), as_of=_str_or_none(args.get("as_of"))),
+        "documents",
     ),
     "get_sec_document": _get_sec_document,
     "diff_sec_filings": _diff_sec_filings,
     "get_material_events": lambda args, model: _wrap_list(
-        args.get("ticker"), sec.get_material_events(
-            str(args["ticker"]), str(args["since"]), as_of=_str_or_none(args.get("as_of")),
+        args.get("ticker"),
+        sec.get_material_events(
+            str(args["ticker"]),
+            str(args["since"]),
+            as_of=_str_or_none(args.get("as_of")),
             limit=_optional_int(args.get("limit", 50)),
-        ), "events",
+        ),
+        "events",
     ),
     "get_beneficial_ownership": _get_beneficial_ownership,
     "get_ownership_changes": lambda args, model: _wrap_list(
-        args.get("ticker"), sec.get_ownership_changes(
-            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
-        ), "changes",
+        args.get("ticker"),
+        sec.get_ownership_changes(
+            str(args["ticker"]),
+            as_of=_str_or_none(args.get("as_of")),
+            limit=_optional_int(args.get("limit", 20)),
+        ),
+        "changes",
     ),
     "get_insider_activity": _get_insider_activity,
     "get_planned_insider_sales": lambda args, model: _wrap_list(
-        args.get("ticker"), sec.get_planned_insider_sales(
-            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 20)),
-        ), "proposed_sales",
+        args.get("ticker"),
+        sec.get_planned_insider_sales(
+            str(args["ticker"]),
+            as_of=_str_or_none(args.get("as_of")),
+            limit=_optional_int(args.get("limit", 20)),
+        ),
+        "proposed_sales",
     ),
     "get_offering_history": lambda args, model: _wrap_list(
-        args.get("ticker"), sec.get_offering_history(
-            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 50)),
-        ), "offerings",
+        args.get("ticker"),
+        sec.get_offering_history(
+            str(args["ticker"]),
+            as_of=_str_or_none(args.get("as_of")),
+            limit=_optional_int(args.get("limit", 50)),
+        ),
+        "offerings",
     ),
     "get_dilution_profile": lambda args, model: sec.get_dilution_profile(
-        str(args["ticker"]), as_of=_str_or_none(args.get("as_of")),
+        str(args["ticker"]),
+        as_of=_str_or_none(args.get("as_of")),
     ),
     "get_governance_events": lambda args, model: _wrap_list(
-        args.get("ticker"), sec.get_governance_events(
-            str(args["ticker"]), since=_str_or_none(args.get("since")), as_of=_str_or_none(args.get("as_of")),
+        args.get("ticker"),
+        sec.get_governance_events(
+            str(args["ticker"]),
+            since=_str_or_none(args.get("since")),
+            as_of=_str_or_none(args.get("as_of")),
             limit=_optional_int(args.get("limit", 10)),
-        ), "events",
+        ),
+        "events",
     ),
     "get_transaction_status": lambda args, model: _wrap_list(
-        args.get("ticker"), sec.get_transaction_status(
-            str(args["ticker"]), as_of=_str_or_none(args.get("as_of")), limit=_optional_int(args.get("limit", 10)),
-        ), "transactions",
+        args.get("ticker"),
+        sec.get_transaction_status(
+            str(args["ticker"]),
+            as_of=_str_or_none(args.get("as_of")),
+            limit=_optional_int(args.get("limit", 10)),
+        ),
+        "transactions",
     ),
     "get_short_pressure_profile": lambda args, model: sec.get_short_pressure_context(
         str(args["ticker"]),
@@ -4741,7 +5824,9 @@ _MODEL_HANDLERS: dict[str, ModelHandler] = {
     "list_tool_domains": _list_tool_domains,
     "describe_tool": _describe_tool,
     "browse_tools": _browse_tools,
-    "get_recent_ownership_filings": lambda args, model: edgar_client.get_recent_ownership_filings(str(args.get("form_type", "both")), int(str(args.get("limit", 10)))),
+    "get_recent_ownership_filings": lambda args, model: edgar_client.get_recent_ownership_filings(
+        str(args.get("form_type", "both")), int(str(args.get("limit", 10)))
+    ),
     "diff_risk_factors": lambda args, model: edgar_client.diff_risk_factors(str(args["ticker"])),
     "get_xbrl_facts": lambda args, model: sec_facts.get_xbrl_facts(str(args["ticker"]), str(args["concept"])),
     "get_financial_statements": lambda args, model: edgar_client.get_financial_statements(
@@ -4763,7 +5848,9 @@ _MODEL_HANDLERS: dict[str, ModelHandler] = {
 # parity test can prove every FINRA schema has an executable dispatcher.
 _FINRA_HANDLERS: dict[str, ModelHandler] = {
     "get_short_interest_leaderboard": lambda args, model: screens.get_short_interest_leaderboard(
-        limit=_optional_int(args.get("limit")), settlement_date=_str_or_none(args.get("settlement_date")), as_of=_str_or_none(args.get("as_of"))
+        limit=_optional_int(args.get("limit")),
+        settlement_date=_str_or_none(args.get("settlement_date")),
+        as_of=_str_or_none(args.get("as_of")),
     ),
     "get_short_interest": lambda args, model: finra_client.get_short_interest(
         str(args["ticker"]), _str_or_none(args.get("settlementDate"))
@@ -4806,15 +5893,26 @@ _FINRA_HANDLERS: dict[str, ModelHandler] = {
 _ROBINHOOD_HANDLERS: dict[str, ModelHandler] = {
     "get_market_snapshot": lambda args, model: get_market_snapshot(str(args["ticker"])),
     "get_option_chain": lambda args, model: get_option_chain(
-        str(args["ticker"]), str(args["option_type"]), args.get("min_dte"), args.get("max_dte"),
-        args.get("strike_min"), args.get("strike_max"), args.get("limit", 20)
+        str(args["ticker"]),
+        str(args["option_type"]),
+        args.get("min_dte"),
+        args.get("max_dte"),
+        args.get("strike_min"),
+        args.get("strike_max"),
+        args.get("limit", 20),
     ),
     "analyze_option_contract": lambda args, model: analyze_option_contract(
         str(args["ticker"]), str(args["expiration"]), args["strike"], str(args["option_type"]), args.get("target_price")
     ),
     "compare_options": lambda args, model: compare_robinhood_options(
-        str(args["ticker"]), str(args["option_type"]), args["target_price"], args.get("min_dte"), args.get("max_dte"),
-        args.get("strike_min"), args.get("strike_max"), args.get("limit", 20)
+        str(args["ticker"]),
+        str(args["option_type"]),
+        args["target_price"],
+        args.get("min_dte"),
+        args.get("max_dte"),
+        args.get("strike_min"),
+        args.get("strike_max"),
+        args.get("limit", 20),
     ),
     "get_portfolio_snapshot": _get_portfolio_snapshot,
     "get_scanner_filter_specs": _get_scanner_filter_specs,
@@ -4901,8 +5999,7 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "run_scan": Capability.PORTFOLIO_READ,
 }
 PORTFOLIO_AUTHORIZED_TOOLS: frozenset[str] = frozenset(
-    name for name, capability in TOOL_CAPABILITIES.items()
-    if capability is Capability.PORTFOLIO_READ
+    name for name, capability in TOOL_CAPABILITIES.items() if capability is Capability.PORTFOLIO_READ
 )
 
 
@@ -4942,6 +6039,7 @@ def _tool_properties(name: str) -> dict[str, object]:
     """Property dict for one tool's parameters, else empty."""
     return _schema_dict(_tool_schema(name).get("parameters"))
 
+
 def _validate_tool_arguments(name: str, arguments: object) -> str | None:
     """Schema-level argument check: object-ness plus required keys. Returns
     an error message, or None when the arguments are acceptable. Type
@@ -4967,12 +6065,24 @@ def _canonical_tool_schema(name: str) -> tuple[dict[str, object], list[str], lis
 def _invalid_args_error(name: str, message: str) -> dict[str, object]:
     """Repairable validation shape reusing the canonical schema."""
     params, required, optional = _canonical_tool_schema(name)
-    return {"error": message, "error_type": "invalid_tool_arguments", "tool": name, "parameters": params, "required": required, "optional": optional}
+    return {
+        "error": message,
+        "error_type": "invalid_tool_arguments",
+        "tool": name,
+        "parameters": params,
+        "required": required,
+        "optional": optional,
+    }
 
 
 def _unknown_tool_error(name: str) -> dict[str, object]:
     """Unknown-tool shape for call_tool dispatch (executes nothing)."""
-    return {"error": f"unknown_tool '{name}'", "error_type": "unknown_tool", "tool": name, "hint": "call browse_tools with no arguments, then call_tool with an exact catalog name"}
+    return {
+        "error": f"unknown_tool '{name}'",
+        "error_type": "unknown_tool",
+        "tool": name,
+        "hint": "call browse_tools with no arguments, then call_tool with an exact catalog name",
+    }
 
 
 def _thesis_repo_for(context: RequestContext) -> ThesisRepository:
@@ -4981,6 +6091,7 @@ def _thesis_repo_for(context: RequestContext) -> ThesisRepository:
 
     base = getattr(context, "data_root", None) or get_data_root()
     return ThesisRepository(Path(str(base)) / "thesis")
+
 
 def _effective_at(context: RequestContext) -> str | None:
     as_of = getattr(context, "as_of", None)
@@ -5009,18 +6120,32 @@ def _thesis_for_context(repo: ThesisRepository, id_or_slug: str, context: Reques
 
 
 _PIT_INSTANT_TOOLS = frozenset({"thesis_show", "research_status", "research_resume", "research_read"})
-_PIT_GOVERNED_MUTATORS = frozenset({"thesis_create", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status", "research_start", "research_cancel", "research_add_evidence", "research_submit_source_result", "research_add_analysis", "research_finalize"})
+_PIT_GOVERNED_MUTATORS = frozenset(
+    {
+        "thesis_create",
+        "thesis_refine",
+        "thesis_watch",
+        "thesis_journal",
+        "thesis_status",
+        "research_start",
+        "research_cancel",
+        "research_add_evidence",
+        "research_submit_source_result",
+        "research_add_analysis",
+        "research_finalize",
+    }
+)
 
 
 def _pit_day(cutoff: str) -> str | None:
-    from datetime import timezone  # local: keep module import surface minimal
 
     from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
     dt = _as_dt(cutoff)
     if dt is None:
         return None
-    return dt.astimezone(timezone.utc).date().isoformat()
+    return dt.astimezone(UTC).date().isoformat()
+
 
 def _tool_has_as_of(name: str) -> bool:
     """Whether the tool's canonical schema accepts an as_of coordinate."""
@@ -5028,7 +6153,9 @@ def _tool_has_as_of(name: str) -> bool:
     return isinstance(props, dict) and "as_of" in _schema_dict(props)
 
 
-def _default_pit_value(name: str, args: dict[str, object], cutoff: str) -> tuple[dict[str, object], dict[str, object] | None]:
+def _default_pit_value(
+    name: str, args: dict[str, object], cutoff: str
+) -> tuple[dict[str, object], dict[str, object] | None]:
     """Blank as_of defaults: instant tools take the cutoff, others the cutoff day."""
     if name in _PIT_INSTANT_TOOLS:
         return {**args, "as_of": cutoff}, None
@@ -5038,20 +6165,31 @@ def _default_pit_value(name: str, args: dict[str, object], cutoff: str) -> tuple
     return {**args, "as_of": day}, None
 
 
-def _reject_future_as_of(name: str, args: dict[str, object], supplied: str, cutoff: str) -> tuple[dict[str, object], dict[str, object] | None]:
+def _reject_future_as_of(
+    name: str, args: dict[str, object], supplied: str, cutoff: str
+) -> tuple[dict[str, object], dict[str, object] | None]:
     """Reject a model as_of beyond the run cutoff (parseable ISO comparison)."""
     from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
     supplied_dt, cutoff_dt = _as_dt(supplied), _as_dt(cutoff)
     if supplied_dt is not None and cutoff_dt is not None and supplied_dt > cutoff_dt:
-        return args, {"error": f"tool '{name}': as_of {supplied!r} is beyond the run cutoff {cutoff!r}", "error_type": "invalid_tool_arguments"}
+        return args, {
+            "error": f"tool '{name}': as_of {supplied!r} is beyond the run cutoff {cutoff!r}",
+            "error_type": "invalid_tool_arguments",
+        }
     return args, None
 
-def _apply_pit_cutoff(name: str, arguments: object, context: RequestContext) -> tuple[dict[str, object], dict[str, object] | None]:
+
+def _apply_pit_cutoff(
+    name: str, arguments: object, context: RequestContext
+) -> tuple[dict[str, object], dict[str, object] | None]:
     """Default `as_of` to the run cutoff; reject a model value beyond it."""
     cutoff = _effective_at(context)
     if not isinstance(arguments, dict):
-        return {}, {"error": f"Tool arguments must be a JSON object for tool '{name}'", "error_type": "invalid_tool_arguments"}
+        return {}, {
+            "error": f"Tool arguments must be a JSON object for tool '{name}'",
+            "error_type": "invalid_tool_arguments",
+        }
     args: dict[str, object] = arguments
     if not cutoff or not _tool_has_as_of(name):
         return args, None
@@ -5082,7 +6220,9 @@ def _thesis_create(arguments: dict[str, object], context: RequestContext) -> dic
         raise ValueError("thesis_create: 'user_thesis' must be a non-empty string")
     proposal = _thesis_proposal(arguments, user_thesis, "<thesis_create>")
     return thesis_intake.create_thesis_from_proposal(
-        _thesis_repo_for(context), proposal, effective_at=_effective_at(context))
+        _thesis_repo_for(context), proposal, effective_at=_effective_at(context)
+    )
+
 
 def _reject_future_show_as_of(model_as_of: str, cutoff: str) -> None:
     """Reject a model as_of beyond the run cutoff (parseable ISO comparison)."""
@@ -5213,6 +6353,7 @@ def _show_live(repo: ThesisRepository, thesis: Thesis, tid: str) -> dict[str, ob
         "open_questions": _open_question_dicts(repo.load_questions(tid)),
     }
 
+
 def _thesis_show(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     repo = _thesis_repo_for(context)
     thesis = _thesis_for_context(repo, str(arguments["id"]), context)
@@ -5233,26 +6374,27 @@ def _refine_inputs(repo: ThesisRepository, arguments: dict[str, object], context
         raise ValueError("thesis_refine: 'clarification' must be a non-empty string")
     return thesis, clarification.strip()
 
+
 def _refine_noop_result(thesis: Thesis) -> dict[str, object]:
     return {"thesis_id": thesis.thesis_id, "slug": thesis.slug, "applied": False}
+
+
 def _refine_is_noop(plan: dict[str, object], thesis: Thesis) -> bool:
     merged = plan["merged"]
     merged_thesis = merged.get("user_thesis") if isinstance(merged, dict) else None
-    return (not plan["added_claims"] and not plan["added_expressions"]
-            and merged_thesis == thesis.user_thesis)
+    return not plan["added_claims"] and not plan["added_expressions"] and merged_thesis == thesis.user_thesis
+
 
 def _thesis_refine(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.thesis import intake as thesis_intake
 
     repo = _thesis_repo_for(context)
     thesis, clarification = _refine_inputs(repo, arguments, context)
-    proposal = _thesis_proposal(
-        arguments, f"{thesis.user_thesis}\n{clarification}", "<thesis_refine>")
+    proposal = _thesis_proposal(arguments, f"{thesis.user_thesis}\n{clarification}", "<thesis_refine>")
     plan = thesis_intake.plan_refinement(thesis, proposal)
     if _refine_is_noop(plan, thesis):
         return _refine_noop_result(thesis)
-    out = thesis_intake.apply_refinement(
-        repo, thesis.thesis_id, plan, proposal, effective_at=_effective_at(context))
+    out = thesis_intake.apply_refinement(repo, thesis.thesis_id, plan, proposal, effective_at=_effective_at(context))
     return {"applied": True, **out}
 
 
@@ -5297,7 +6439,13 @@ def _apply_watch_rule(repo: ThesisRepository, tid: str, rule: dict[str, object],
     repo.apply_research_result(tid, {"watch_add": [rule]}, "", effective_at=_effective_at(context))
 
 
-def _watch_add(repo: ThesisRepository, thesis: Thesis, arguments: dict[str, object], context: RequestContext, handlers: Mapping[str, object]) -> dict[str, object]:
+def _watch_add(
+    repo: ThesisRepository,
+    thesis: Thesis,
+    arguments: dict[str, object],
+    context: RequestContext,
+    handlers: Mapping[str, object],
+) -> dict[str, object]:
     """Validate and append one watch rule to an active thesis."""
     from app.thesis.models import new_rule_id
 
@@ -5316,6 +6464,7 @@ def _watch_add(repo: ThesisRepository, thesis: Thesis, arguments: dict[str, obje
     }
     _apply_watch_rule(repo, tid, rule, context)
     return {"thesis_id": tid, "added": rule}
+
 
 def _thesis_watch(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.thesis.monitor import SUPPORTED_HANDLERS
@@ -5380,14 +6529,18 @@ def _trigger_known_at(known_at: object, cutoff: str, entry: dict[str, object]) -
     from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
     if not isinstance(known_at, str) or not known_at or _as_dt(known_at) is None:
-        raise ValueError("thesis_journal: 'known_at' is required for trigger-linked entries and must be a parseable ISO-8601 string")
+        raise ValueError(
+            "thesis_journal: 'known_at' is required for trigger-linked entries and must be a parseable ISO-8601 string"
+        )
     known_dt, cutoff_dt = _as_dt(known_at), _as_dt(cutoff)
     if (known_dt is not None or cutoff_dt is not None) and known_dt != cutoff_dt:
         raise ValueError(f"thesis_journal: 'known_at' {known_at!r} must equal the run cutoff {cutoff!r}")
     entry["known_at"] = known_at
 
 
-def _attach_journal_trigger(repo: ThesisRepository, thesis_id: str, arguments: dict[str, object], entry: dict[str, object]) -> str | None:
+def _attach_journal_trigger(
+    repo: ThesisRepository, thesis_id: str, arguments: dict[str, object], entry: dict[str, object]
+) -> str | None:
     """Trigger/run linkage: trigger_id validated, run_id attached when present."""
     trigger_id = arguments.get("trigger_id")
     if trigger_id is None:
@@ -5404,7 +6557,9 @@ def _attach_journal_trigger(repo: ThesisRepository, thesis_id: str, arguments: d
     raise TypeError(f"trigger_id must be a string, got {type(trigger).__name__}")
 
 
-def _attach_journal_known_at(trigger_id: str | None, arguments: dict[str, object], context: RequestContext, entry: dict[str, object]) -> None:
+def _attach_journal_known_at(
+    trigger_id: str | None, arguments: dict[str, object], context: RequestContext, entry: dict[str, object]
+) -> None:
     """known_at: cutoff-equal for trigger-linked entries under PIT, else plain parseable."""
     known_at = arguments.get("known_at")
     if trigger_id is not None:
@@ -5415,6 +6570,7 @@ def _attach_journal_known_at(trigger_id: str | None, arguments: dict[str, object
             entry["known_at"] = _checked_known_at(known_at)
     elif known_at is not None:
         entry["known_at"] = _checked_known_at(known_at)
+
 
 def _thesis_journal(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     repo = _thesis_repo_for(context)
@@ -5430,6 +6586,7 @@ def _thesis_journal(arguments: dict[str, object], context: RequestContext) -> di
     dest = repo.append_journal_entry(thesis.thesis_id, entry)
     return {"thesis_id": thesis.thesis_id, "journal_path": str(dest)}
 
+
 def _checked_status_id(arguments: dict[str, object]) -> str:
     """Validated thesis id for status transitions (non-empty, stripped)."""
     thesis_id = arguments.get("id")
@@ -5444,6 +6601,7 @@ def _checked_status_action(arguments: dict[str, object]) -> str:
     if not isinstance(action, str) or action not in ("pause", "resume", "close"):
         raise ValueError("thesis_status: 'action' must be one of pause, resume, close")
     return action
+
 
 def _thesis_status(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     repo = _thesis_repo_for(context)
@@ -5516,6 +6674,7 @@ def _started_packet(research_service: object, repo: object, session_id: str) -> 
         "pending_next_action": snapshot.get("pending_next_action"),
     }
 
+
 def _research_start(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.research import service as research_service
 
@@ -5562,14 +6721,14 @@ def _research_cancel(arguments: dict[str, object], context: RequestContext) -> d
         return _research_not_found_error(e)
 
 
-_RESEARCH_KINDS = ("evidence", "freeze", "dossier", "job", "research")
+_RESEARCH_KINDS = ("evidence", "freeze", "dossier", "coverage", "job", "research")
 
 
 def _checked_resource_kind(arguments: dict[str, object]) -> str:
     """Validated research resource kind, else an unknown_resource error is raised by the caller."""
     kind = arguments.get("kind")
     if not isinstance(kind, str) or kind not in _RESEARCH_KINDS:
-        raise ValueError(f"unknown resource kind: {kind!r} (expected evidence|freeze|dossier|job|research)")
+        raise ValueError(f"unknown resource kind: {kind!r} (expected evidence|freeze|dossier|coverage|job|research)")
     return kind
 
 
@@ -5660,8 +6819,7 @@ def _read_search_forms(arguments: dict[str, object]) -> tuple[str, ...] | None:
 def _read_search_page(arguments: dict[str, object]) -> tuple[int, int, tuple[str, ...] | None]:
     """Validated (offset, limit, forms) page window for research_read_search."""
     offset = _read_search_count(arguments, "offset", 0, 0)
-    limit = min(_read_search_count(arguments, "limit", _READ_SEARCH_DEFAULT_LIMIT, 1),
-                _READ_SEARCH_MAX_LIMIT)
+    limit = min(_read_search_count(arguments, "limit", _READ_SEARCH_DEFAULT_LIMIT, 1), _READ_SEARCH_MAX_LIMIT)
     return offset, limit, _read_search_forms(arguments)
 
 
@@ -5740,8 +6898,7 @@ def _research_read_search(arguments: dict[str, object], context: RequestContext)
     if row is None:
         return {"error": f"unknown search_id: {search_id!r}", "error_type": "unknown_search"}
     total = sec_store.query_hits_count(search_id, forms=forms, root=root)
-    hits = sec_store.query_hits(
-        search_id, offset=offset, limit=limit, forms=forms, root=root)
+    hits = sec_store.query_hits(search_id, offset=offset, limit=limit, forms=forms, root=root)
     request = _ledger_search_request(row)
     return {
         "session_id": session_id,
@@ -5794,6 +6951,7 @@ def _submit_job_known(state: dict[str, object], job_id: str) -> bool:
     jobs: list[object] = list(raw_jobs) if isinstance(raw_jobs, list) else []
     return any(isinstance(j, dict) and j.get("job_id") == job_id for j in jobs)
 
+
 def _research_submit_source_result(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.research import service as research_service
     from app.research.service import ResearchNotFound
@@ -5810,7 +6968,11 @@ def _research_submit_source_result(arguments: dict[str, object], context: Reques
     if not _submit_job_known(state, job_id):
         return {"error": f"unknown job_id: {job_id!r} in session {session_id!r}", "error_type": "unknown_job"}
     try:
-        return dict(research_service.submit_source_result(job_id, dict(coverage), list(evidence_ids), list(unresolved), repo=_research_repo_for(context)))
+        return dict(
+            research_service.submit_source_result(
+                job_id, dict(coverage), list(evidence_ids), list(unresolved), repo=_research_repo_for(context)
+            )
+        )
     except (ResearchNotFound, KeyError) as e:
         return _research_not_found_error(e)
 
@@ -5830,6 +6992,7 @@ def _analysis_payload(arguments: dict[str, object]) -> dict[str, object]:
         raise ValueError(f"research_add_analysis: 'analysis' must be an object, got {type(analysis).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return analysis
 
+
 def _research_add_analysis(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.research import service as research_service
     from app.research.service import ResearchNotFound
@@ -5839,7 +7002,11 @@ def _research_add_analysis(arguments: dict[str, object], context: RequestContext
     role = _analysis_role(arguments)
     analysis = _analysis_payload(arguments)
     try:
-        return dict(research_service.record_committee_analysis(session_id, job_id, role, analysis, repo=_research_repo_for(context)))
+        return dict(
+            research_service.record_committee_analysis(
+                session_id, job_id, role, analysis, repo=_research_repo_for(context)
+            )
+        )
     except (ResearchNotFound, KeyError) as e:
         return _research_not_found_error(e)
 
@@ -5858,7 +7025,9 @@ def _finalize_claim_ids(evidence_ids: object) -> list[str]:
         raise ValueError("research_finalize: each claim 'evidence_ids' must be a non-empty list of non-empty strings")
     for item in evidence_ids:
         if not isinstance(item, str) or not item.strip():
-            raise ValueError("research_finalize: each claim 'evidence_ids' must be a non-empty list of non-empty strings")
+            raise ValueError(
+                "research_finalize: each claim 'evidence_ids' must be a non-empty list of non-empty strings"
+            )
     return evidence_ids
 
 
@@ -5879,13 +7048,18 @@ def _finalize_claims(arguments: dict[str, object]) -> list[object]:
         _finalize_claim_ids(claim.get("evidence_ids", []) if isinstance(claim, dict) else [])
     return claims
 
+
 def _research_finalize(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.research import service as research_service
     from app.research.service import ResearchNotFound
 
     session_id = str(arguments["session_id"])
     try:
-        return dict(research_service.finalize_session(session_id, _finalize_answer(arguments), _finalize_claims(arguments), repo=_research_repo_for(context)))
+        return dict(
+            research_service.finalize_session(
+                session_id, _finalize_answer(arguments), _finalize_claims(arguments), repo=_research_repo_for(context)
+            )
+        )
     except ValueError as e:
         return {"error": str(e)}
     except (ResearchNotFound, KeyError) as e:
@@ -5914,11 +7088,27 @@ _RESEARCH_HANDLERS: dict[str, ContextHandler] = {
     "research_finalize": _research_finalize,
 }
 
+_SEC_DISCOVERY_HANDLERS: dict[str, ContextHandler] = {
+    "find_sec_entities": _find_sec_entities,
+    "search_sec_filings": _sec_search_result,
+}
+
 # Thesis/research tools are direct local dispatch (no broker) but take
 # (arguments, context) instead of (arguments, model) for data-root scoping.
+# SEC discovery takes (arguments, context) for the research-session default
+# (exhaustive retrieval); its handlers stay out of _RESEARCH_HANDLERS because
+# they hit provider seams, not local-only state.
 # Merged view for backward compat (tests/scripts import _DIRECT_HANDLERS).
-_DIRECT_HANDLERS: dict[str, object] = {**_MODEL_HANDLERS, **_THESIS_HANDLERS, **_RESEARCH_HANDLERS}
-_CONTEXT_CALL_HANDLERS = frozenset(_THESIS_HANDLERS) | frozenset(_RESEARCH_HANDLERS)
+_DIRECT_HANDLERS: dict[str, object] = {
+    **_MODEL_HANDLERS,
+    **_THESIS_HANDLERS,
+    **_RESEARCH_HANDLERS,
+    **_SEC_DISCOVERY_HANDLERS,
+}
+_CONTEXT_CALL_HANDLERS = (
+    frozenset(_THESIS_HANDLERS) | frozenset(_RESEARCH_HANDLERS) | frozenset(_SEC_DISCOVERY_HANDLERS)
+)
+
 
 def _permission_error(name: str, context: RequestContext) -> dict[str, object] | None:
     """Not-permitted envelope, else None."""
@@ -5930,29 +7120,33 @@ def _permission_error(name: str, context: RequestContext) -> dict[str, object] |
 def _pit_unsafe_error(name: str, context: RequestContext) -> dict[str, object] | None:
     """Historical runs reject tools without an as_of coordinate (governed mutators exempt)."""
     if _effective_at(context) and name not in _PIT_GOVERNED_MUTATORS and not _tool_has_as_of(name):
-        return {"error": f"Tool '{name}' is not point-in-time safe under this historical run.", "error_type": "pit_unsafe_tool", "soft": True}
+        return {
+            "error": f"Tool '{name}' is not point-in-time safe under this historical run.",
+            "error_type": "pit_unsafe_tool",
+            "soft": True,
+        }
     return None
 
 
 def _lookup_context_handler(name: str) -> ContextHandler | None:
-    """Thesis/research handler for context-dispatched tools, else None."""
-    return _THESIS_HANDLERS.get(name) or _RESEARCH_HANDLERS.get(name)
+    """Thesis/research/SEC-discovery handler for context-dispatched tools, else None."""
+    return _THESIS_HANDLERS.get(name) or _RESEARCH_HANDLERS.get(name) or _SEC_DISCOVERY_HANDLERS.get(name)
 
 
 def _lookup_model_handler(name: str) -> ModelHandler | None:
     """Model handler across the model/FINRA/Robinhood maps, else None."""
-    return (
-        _MODEL_HANDLERS.get(name)
-        or _FINRA_HANDLERS.get(name)
-        or _ROBINHOOD_HANDLERS.get(name)
-    )
+    return _MODEL_HANDLERS.get(name) or _FINRA_HANDLERS.get(name) or _ROBINHOOD_HANDLERS.get(name)
 
 
 def _with_pit_flag(name: str, result: dict[str, object], context: RequestContext) -> dict[str, object]:
     """Mark non-as_of results pit_safe=False under a historical run (governed mutators exempt)."""
-    if _effective_at(context) and isinstance(result, dict):
-        if not _tool_has_as_of(name) and name not in _PIT_GOVERNED_MUTATORS:
-            result.setdefault("pit_safe", False)
+    if (
+        _effective_at(context)
+        and isinstance(result, dict)
+        and not _tool_has_as_of(name)
+        and name not in _PIT_GOVERNED_MUTATORS
+    ):
+        result.setdefault("pit_safe", False)
     return result
 
 
@@ -5986,6 +7180,7 @@ def _auth_required() -> dict[str, object]:
         "soft": True,
         "source": "robinhood_mcp",
     }
+
 
 def execute_tool(
     name: str,

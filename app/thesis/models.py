@@ -13,7 +13,7 @@ import re
 import uuid
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from enum import StrEnum
 
 JSONScalar = str | int | float | bool | None
@@ -44,6 +44,7 @@ def validate_json_mapping(value: object, where: str = "<dict>") -> dict[str, JSO
     if not isinstance(validated, dict):
         raise ValueError(f"{where}: must be a mapping, got {type(value).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return validated
+
 
 SCHEMA_VERSION = 1
 
@@ -127,7 +128,7 @@ KNOWN_WATCH_TYPES = frozenset(
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _req_str(d: Mapping[str, object], key: str, where: str) -> str:
@@ -491,6 +492,7 @@ class Thesis:
     unknowns: tuple[str, ...] = ()
     expressions: tuple[TradeExpression, ...] = ()
     requirements: tuple[ExpressionRequirement, ...] = ()
+
     def to_dict(self) -> dict[str, JSONValue]:
         d = asdict(self)
         d["schema_version"] = SCHEMA_VERSION
@@ -560,12 +562,18 @@ def _thesis_claim_rows(d: Mapping[str, object], _path: str, where: str) -> list[
 
 def _thesis_expression_rows(d: Mapping[str, object], _path: str, where: str) -> list[TradeExpression]:
     """Validated expression rows."""
-    return [TradeExpression.from_dict(_row_mapping(e, _path, "expression"), _path) for e in _thesis_row_list(d, "expressions", where)]
+    return [
+        TradeExpression.from_dict(_row_mapping(e, _path, "expression"), _path)
+        for e in _thesis_row_list(d, "expressions", where)
+    ]
 
 
 def _thesis_requirement_rows(d: Mapping[str, object], _path: str, where: str) -> list[ExpressionRequirement]:
     """Validated requirement rows."""
-    return [ExpressionRequirement.from_dict(_row_mapping(r, _path, "requirement"), _path) for r in _thesis_row_list(d, "requirements", where)]
+    return [
+        ExpressionRequirement.from_dict(_row_mapping(r, _path, "requirement"), _path)
+        for r in _thesis_row_list(d, "requirements", where)
+    ]
 
 
 def _thesis_claim_ids(thesis: Thesis, where: str) -> set[str]:
@@ -594,7 +602,9 @@ def _thesis_requirement_links(thesis: Thesis, where: str, seen: set[str], expr_i
             raise ValueError(f"{where}: duplicate ID {r.requirement_id!r}")
         seen.add(r.requirement_id)
         if r.expression_id not in expr_ids:
-            raise ValueError(f"{where}: requirement {r.requirement_id!r} references absent expression {r.expression_id!r}")
+            raise ValueError(
+                f"{where}: requirement {r.requirement_id!r} references absent expression {r.expression_id!r}"
+            )
 
 
 # --- Nested current-state records (only what the six files need) ---
@@ -606,8 +616,10 @@ class ThesisState:
     assessment: str = "unresolved"
     claim_assessments: dict[str, JSONValue] = field(default_factory=dict)
     expression_assessments: dict[str, JSONValue] = field(default_factory=dict)
+
     def to_dict(self) -> dict[str, JSONValue]:
         return {"schema_version": SCHEMA_VERSION, **asdict(self)}
+
     @classmethod
     def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ThesisState:
         if not isinstance(d, dict):
@@ -636,6 +648,7 @@ class ThesisQuestion:
 
     def to_dict(self) -> dict[str, JSONValue]:
         return asdict(self)
+
     @classmethod
     def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ThesisQuestion:
         if not isinstance(d, dict):
@@ -660,6 +673,7 @@ class ThesisMemory:
 
     def to_dict(self) -> dict[str, JSONValue]:
         return asdict(self)
+
     @classmethod
     def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ThesisMemory:
         if not isinstance(d, dict):
@@ -682,6 +696,7 @@ class EvidenceRef:
 
     def to_dict(self) -> dict[str, JSONValue]:
         return asdict(self)
+
     @classmethod
     def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> EvidenceRef:
         if not isinstance(d, dict):
@@ -716,8 +731,11 @@ class Checkpoint:
         hashes = d.get("recent_hashes", [])
         if not isinstance(hashes, list) or not all(isinstance(h, str) for h in hashes):
             raise ValueError(f"{where}: 'recent_hashes' must be a list of strings")
-        return cls(thesis_id=_req_str(d, "thesis_id", where), sources=validate_json_mapping(sources, f"{where}: 'sources'"),
-                   recent_hashes=list(hashes))
+        return cls(
+            thesis_id=_req_str(d, "thesis_id", where),
+            sources=validate_json_mapping(sources, f"{where}: 'sources'"),
+            recent_hashes=list(hashes),
+        )
 
 
 def _snapshot_version(d: Mapping[str, object], where: str) -> int:
@@ -758,9 +776,13 @@ def _snapshot_head(d: Mapping[str, object], where: str) -> tuple[int, str, str, 
     """Scalar snapshot head: version, thesis_id, effective/recorded_at, reason."""
     if not isinstance(d, dict):
         raise ValueError(f"{where}: snapshot must be a mapping, got {type(d).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
-    return (_snapshot_version(d, where), _snapshot_thesis_id(d, where),
-            _snapshot_moment(d, "effective_at", where), _snapshot_moment(d, "recorded_at", where),
-            _snapshot_reason(d, where))
+    return (
+        _snapshot_version(d, where),
+        _snapshot_thesis_id(d, where),
+        _snapshot_moment(d, "effective_at", where),
+        _snapshot_moment(d, "recorded_at", where),
+        _snapshot_reason(d, where),
+    )
 
 
 def _snapshot_section(d: Mapping[str, object], key: str, where: str, thesis_id: str) -> dict[str, JSONValue]:
@@ -776,8 +798,9 @@ def _snapshot_section(d: Mapping[str, object], key: str, where: str, thesis_id: 
 
 def _snapshot_sections(d: Mapping[str, object], where: str, thesis_id: str) -> dict[str, dict[str, JSONValue]]:
     """All five snapshot sections validated as thesis-bound mappings."""
-    return {key: _snapshot_section(d, key, where, thesis_id)
-            for key in ("thesis", "state", "questions", "watch", "memory")}
+    return {
+        key: _snapshot_section(d, key, where, thesis_id) for key in ("thesis", "state", "questions", "watch", "memory")
+    }
 
 
 def _snapshot_row_list(section: dict[str, JSONValue], key: str, where: str) -> list[Mapping[str, object]]:

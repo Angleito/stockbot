@@ -10,42 +10,62 @@ class RobinhoodCapability(Enum):
     ACCOUNT_READ = "account_read"
 
 
-MARKET_READ_TOOLS: frozenset[str] = frozenset({
-    "get_equity_quotes", "get_equity_fundamentals", "get_option_chains",
-    "get_option_instruments", "get_option_quotes", "get_option_historicals",
-    "get_scanner_filter_specs",
-})
+MARKET_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_equity_quotes",
+        "get_equity_fundamentals",
+        "get_option_chains",
+        "get_option_instruments",
+        "get_option_quotes",
+        "get_option_historicals",
+        "get_scanner_filter_specs",
+    }
+)
 
-ACCOUNT_READ_TOOLS: frozenset[str] = frozenset({
-    "get_accounts", "get_portfolio", "get_equity_positions",
-    "get_scans", "run_scan",
-})
+ACCOUNT_READ_TOOLS: frozenset[str] = frozenset(
+    {
+        "get_accounts",
+        "get_portfolio",
+        "get_equity_positions",
+        "get_scans",
+        "run_scan",
+    }
+)
 
 # Deny layer applied before the allowlist. It covers trading and money movement
 # even if a caller accidentally attempts to configure one of those tools.
 BLOCKED_KEYWORDS: tuple[str, ...] = (
-    "order", "trade", "place", "submit", "cancel", "replace", "modify",
-    "exercise", "withdraw", "deposit", "transfer",
-)
-
-BLOCKED_TOOLS: frozenset[str] = frozenset({
-    "review_equity_order",
-    "place_equity_order",
-    "cancel_equity_order",
-    "replace_equity_order",
-    "place_option_order",
+    "order",
+    "trade",
+    "place",
+    "submit",
+    "cancel",
+    "replace",
+    "modify",
+    "exercise",
     "withdraw",
     "deposit",
     "transfer",
-})
+)
+
+BLOCKED_TOOLS: frozenset[str] = frozenset(
+    {
+        "review_equity_order",
+        "place_equity_order",
+        "cancel_equity_order",
+        "replace_equity_order",
+        "place_option_order",
+        "withdraw",
+        "deposit",
+        "transfer",
+    }
+)
 
 
 def is_blocked(name: str) -> bool:
     """Return True when the tool name matches either deny layer."""
     lowered = name.lower()
-    return lowered in BLOCKED_TOOLS or any(
-        keyword in lowered for keyword in BLOCKED_KEYWORDS
-    )
+    return lowered in BLOCKED_TOOLS or any(keyword in lowered for keyword in BLOCKED_KEYWORDS)
 
 
 def tool_capability(name: str) -> RobinhoodCapability | None:
@@ -78,7 +98,8 @@ def _configured_subset(
 
 
 def allowed_read_tools(
-    *, market: frozenset[str] | None = None,
+    *,
+    market: frozenset[str] | None = None,
     account: frozenset[str] | None = None,
 ) -> frozenset[str]:
     """Union of configured subsets of the canonical read-only registry.

@@ -6,7 +6,7 @@ import json
 import os
 import re
 from collections.abc import Collection, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import NamedTuple, NoReturn
 
@@ -56,17 +56,34 @@ STATE_FILES = ("thesis.yaml", "state.yaml", "watch.yaml", "questions.yaml", "mem
 
 # Evidence refs carry canonical refs + summaries only. Anything else smuggles
 # bodies or model-invented provenance (URLs, publication/retrieval metadata).
-_FORBIDDEN_EVIDENCE_KEYS = frozenset({
-    "body", "content", "filing_body", "full_text", "document_text",
-    "url", "urls", "link", "links", "source_url",
-    "provenance", "publication", "published_at", "retrieved_at", "retrieval", "origin",
-})
+_FORBIDDEN_EVIDENCE_KEYS = frozenset(
+    {
+        "body",
+        "content",
+        "filing_body",
+        "full_text",
+        "document_text",
+        "url",
+        "urls",
+        "link",
+        "links",
+        "source_url",
+        "provenance",
+        "publication",
+        "published_at",
+        "retrieved_at",
+        "retrieval",
+        "origin",
+    }
+)
+
 
 def _reject_hostile_summary(summary: object, where: str) -> None:
     """Scan-on-write gate for Pi-authored prompt-bound text (evidence/journals)."""
     from app.security.prompt_injection import (
         assess,  # local: keep thesis import graph acyclic
     )
+
     text = summary if isinstance(summary, str) else ("" if summary is None else str(summary))
     found = assess(text)
     if found.verdict in ("BLOCK", "QUARANTINE"):
@@ -79,7 +96,8 @@ def _reject_hostile_journal(title: object, body: object, where: str) -> None:
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return datetime.now(UTC).isoformat(timespec="seconds")
+
 
 def _safe_name(trigger_or_entry_id: str) -> str:
     return re.sub(r"[^A-Za-z0-9_.-]+", "_", trigger_or_entry_id)
@@ -140,8 +158,10 @@ def _snapshot_order_key(snap: ThesisStateSnapshot) -> tuple[datetime, int]:
     assert stamp is not None
     return (stamp, snap.version)
 
+
 class _ApplyInputs(NamedTuple):
     """Coerced research-result payload (lists validated as lists, journal as mapping)."""
+
     claim_updates: list[object]
     expression_updates: list[object]
     trigger_id: str
@@ -171,6 +191,7 @@ def _coerce_trigger_id(result: Mapping[str, object], thesis_dir: Path) -> str:
         raise ValueError(f"{thesis_dir}: bad trigger_id {trigger_raw!r}")
     return trigger_raw if isinstance(trigger_raw, str) else ""
 
+
 def _coerce_journal_entry(result: Mapping[str, object], thesis_dir: Path) -> Mapping[str, object] | None:
     """Journal mapping gate (None when absent)."""
     journal_raw = result.get("journal_entry")
@@ -178,8 +199,10 @@ def _coerce_journal_entry(result: Mapping[str, object], thesis_dir: Path) -> Map
         raise ValueError(f"{thesis_dir}: bad journal_entry {journal_raw!r}")
     return journal_raw if isinstance(journal_raw, dict) else None
 
+
 def _coerce_apply_inputs(
-    result: Mapping[str, object], thesis_dir: Path,
+    result: Mapping[str, object],
+    thesis_dir: Path,
 ) -> _ApplyInputs:
     """Validate-then-extract the 10 payload phases (no lock, no writes)."""
     return _ApplyInputs(
@@ -195,6 +218,7 @@ def _coerce_apply_inputs(
         journal_entry=_coerce_journal_entry(result, thesis_dir),
     )
 
+
 def _patch_entry_id(entry: object, key: str, thesis_dir: Path, noun: str) -> str:
     """Validated patch entry id (mapping + text id gates)."""
     if not isinstance(entry, dict) or not entry.get(key):
@@ -204,14 +228,18 @@ def _patch_entry_id(entry: object, key: str, thesis_dir: Path, noun: str) -> str
         raise ValueError(f"{thesis_dir}/thesis.yaml: bad {noun} update {entry!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
     return eid
 
+
 def _patch_member_gate(eid: str, member_ids: set[str], thesis_dir: Path, thesis_id: str, noun: str) -> None:
     """Id-membership gate for one patch entry."""
     if eid not in member_ids:
-        raise ValueError(
-            f"{thesis_dir}/thesis.yaml: {noun} {eid!r} does not belong to thesis {thesis_id!r}")
+        raise ValueError(f"{thesis_dir}/thesis.yaml: {noun} {eid!r} does not belong to thesis {thesis_id!r}")
+
 
 def _apply_claim_patch(
-    updates: list[object], member_ids: set[str], thesis_dir: Path, thesis_id: str,
+    updates: list[object],
+    member_ids: set[str],
+    thesis_dir: Path,
+    thesis_id: str,
 ) -> dict[str, dict[str, object]]:
     """Claim status patch: id membership + known statuses (raises on foreign ids)."""
     patch: dict[str, dict[str, object]] = {}
@@ -227,7 +255,10 @@ def _apply_claim_patch(
 
 
 def _apply_expression_patch(
-    updates: list[object], member_ids: set[str], thesis_dir: Path, thesis_id: str,
+    updates: list[object],
+    member_ids: set[str],
+    thesis_dir: Path,
+    thesis_id: str,
 ) -> dict[str, dict[str, object]]:
     """Expression status patch: id membership + known statuses."""
     patch: dict[str, dict[str, object]] = {}
@@ -262,6 +293,7 @@ def _pit_file_owned_ref(raw: object, thesis_id: str) -> str | None:
     ref = raw.get("canonical_ref")
     return ref if isinstance(ref, str) and ref else None
 
+
 def _pit_file_fresh_ref(raw: object, dt_cut: datetime) -> str | None:
     """Owned ref only when its known_at is at or before the cut."""
     from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
@@ -272,6 +304,7 @@ def _pit_file_fresh_ref(raw: object, dt_cut: datetime) -> str | None:
     known_str = _pit_known_at(raw)
     dt_known = _as_dt(known_str) if known_str else None
     return ref if dt_known is not None and dt_known <= dt_cut else None
+
 
 def _pit_file_ref(path: Path, thesis_id: str, dt_cut: datetime) -> str | None:
     """Canonical ref of one evidence file when known at or before the cut."""
@@ -285,7 +318,9 @@ def _pit_file_ref(path: Path, thesis_id: str, dt_cut: datetime) -> str | None:
 
 
 def _pit_allowed_refs(
-    thesis_dir: Path, thesis_id: str, dt_cut: datetime | None,
+    thesis_dir: Path,
+    thesis_id: str,
+    dt_cut: datetime | None,
 ) -> set[str]:
     """Stored canonical refs known at or before the payload cut (PIT pool)."""
 
@@ -309,18 +344,23 @@ def _trigger_allowed_refs(raw_trigger: dict[str, JSONValue]) -> set[str]:
 
 
 def _payload_cut(
-    journal_entry: Mapping[str, object] | None, raw_trigger: dict[str, JSONValue],
+    journal_entry: Mapping[str, object] | None,
+    raw_trigger: dict[str, JSONValue],
 ) -> str | None:
     """Payload time: journal known_at, else the trigger's creation time."""
     payload_known = journal_entry.get("known_at") if isinstance(journal_entry, dict) else None
     if not payload_known:
         payload_known = raw_trigger.get("created_at")
-    return payload_known if isinstance(payload_known, str) else (
-        str(payload_known) if payload_known is not None else None)
+    return (
+        payload_known if isinstance(payload_known, str) else (str(payload_known) if payload_known is not None else None)
+    )
 
 
 def _check_evidence_provenance(
-    evidence_refs: list[object], allowed: set[str] | None, thesis_dir: Path, trigger_id: str,
+    evidence_refs: list[object],
+    allowed: set[str] | None,
+    thesis_dir: Path,
+    trigger_id: str,
 ) -> None:
     """Forbidden-keys + allowed-set gate (runs before any write)."""
     for ref in evidence_refs:
@@ -328,16 +368,17 @@ def _check_evidence_provenance(
             raise ValueError(f"{thesis_dir}/evidence: evidence ref must be a mapping, got {type(ref).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         smuggled = [k for k in _FORBIDDEN_EVIDENCE_KEYS if ref.get(k)]
         if smuggled:
-            raise ValueError(
-                f"{thesis_dir}/evidence: evidence refs must not carry bodies/provenance (got {smuggled})")
+            raise ValueError(f"{thesis_dir}/evidence: evidence refs must not carry bodies/provenance (got {smuggled})")
         if allowed is not None and ref.get("canonical_ref") not in allowed:
             raise ValueError(
                 f"{thesis_dir}/evidence: foreign canonical_ref {ref.get('canonical_ref')!r}"
-                f" (trigger {trigger_id!r}); refusing writeback")
+                f" (trigger {trigger_id!r}); refusing writeback"
+            )
 
 
 class _ApplyFold(NamedTuple):
     """Fold flags for one research commit (snapshot vs live decided by caller)."""
+
     claim_or_expr: bool
     state_changed: bool
     questions_added: bool
@@ -348,12 +389,20 @@ class _ApplyFold(NamedTuple):
     def dirty(self, patched: bool = False) -> bool:
         """Any mutable section changed (patch flag supplied by caller)."""
         return bool(
-            patched or self.claim_or_expr or self.state_changed or self.questions_added
-            or self.memories_added or self.watch_added or self.questions_answered_updated)
+            patched
+            or self.claim_or_expr
+            or self.state_changed
+            or self.questions_added
+            or self.memories_added
+            or self.watch_added
+            or self.questions_answered_updated
+        )
 
 
 def _merge_patched_entry(
-    entry: object, key: str, patch: dict[str, dict[str, object]],
+    entry: object,
+    key: str,
+    patch: dict[str, dict[str, object]],
 ) -> object:
     """One claim/expression dict merged with its patch (identity when unpatched)."""
     if not isinstance(entry, dict):
@@ -366,20 +415,22 @@ def _merge_patched_entry(
 
 
 def _fold_claim_expression(
-    thesis_dict: Mapping[str, object], claim_patch: dict[str, dict[str, object]],
-    expr_patch: dict[str, dict[str, object]], thesis_id: str, eff: str, where: str,
+    thesis_dict: Mapping[str, object],
+    claim_patch: dict[str, dict[str, object]],
+    expr_patch: dict[str, dict[str, object]],
+    thesis_id: str,
+    eff: str,
+    where: str,
 ) -> dict[str, JSONValue]:
     """Status patch fold shared by snapshot dicts and live Thesis objects."""
     patched: dict[str, object] = dict(thesis_dict)
     claims = patched.get("claims", [])
     patched["claims"] = [
-        _merge_patched_entry(c, "claim_id", claim_patch)
-        for c in (claims if isinstance(claims, list) else [])
+        _merge_patched_entry(c, "claim_id", claim_patch) for c in (claims if isinstance(claims, list) else [])
     ]
     exprs = patched.get("expressions", [])
     patched["expressions"] = [
-        _merge_patched_entry(e, "expression_id", expr_patch)
-        for e in (exprs if isinstance(exprs, list) else [])
+        _merge_patched_entry(e, "expression_id", expr_patch) for e in (exprs if isinstance(exprs, list) else [])
     ]
     patched["thesis_id"] = thesis_id
     patched["updated_at"] = eff
@@ -387,7 +438,9 @@ def _fold_claim_expression(
 
 
 def _fold_state_candidate(
-    state_raw: object, thesis_id: str, thesis_dir: Path,
+    state_raw: object,
+    thesis_id: str,
+    thesis_dir: Path,
 ) -> dict[str, JSONValue]:
     """Validated state dict from a payload state (mapping or ThesisState)."""
     if isinstance(state_raw, dict):
@@ -414,18 +467,24 @@ def _section_rows(section: Mapping[str, object], key: str) -> list[JSONValue]:
     return [dict(x) if isinstance(x, dict) else x for x in raw]
 
 
-def _copy_section_list(section: Mapping[str, object], key: str, thesis_id: str, schema_default: int) -> tuple[dict[str, JSONValue], list[JSONValue]]:
+def _copy_section_list(
+    section: Mapping[str, object], key: str, thesis_id: str, schema_default: int
+) -> tuple[dict[str, JSONValue], list[JSONValue]]:
     """Owned copy of a questions/memory/watch section + its live list."""
-    raw: dict[str, JSONValue] = {"schema_version": _section_version(section, schema_default),
-                                 "thesis_id": thesis_id,
-                                 key: _section_rows(section, key)}
+    raw: dict[str, JSONValue] = {
+        "schema_version": _section_version(section, schema_default),
+        "thesis_id": thesis_id,
+        key: _section_rows(section, key),
+    }
     entries = raw.get(key, [])
     assert isinstance(entries, list)
     return raw, entries
 
 
 def _append_questions(
-    questions_raw: dict[str, JSONValue], additions: list[object], thesis_dir: Path,
+    questions_raw: dict[str, JSONValue],
+    additions: list[object],
+    thesis_dir: Path,
 ) -> bool:
     """Append questions by id (skip known); True when anything landed."""
     entries = questions_raw.get("questions", [])
@@ -447,7 +506,10 @@ def _append_questions(
 
 
 def _append_memories(
-    memory_raw: dict[str, JSONValue], additions: list[object], thesis_dir: Path, eff: str,
+    memory_raw: dict[str, JSONValue],
+    additions: list[object],
+    thesis_dir: Path,
+    eff: str,
 ) -> bool:
     """Append memories by id (skip known); True when anything landed."""
     entries = memory_raw.get("memories", [])
@@ -478,9 +540,14 @@ def _watch_rule_refs_gate(robj: WatchRule, claim_ids: set[str], expr_ids: set[st
         if eid not in expr_ids:
             raise ValueError(f"{thesis_dir}/watch.yaml: rule references absent expression {eid!r}")
 
+
 def _fold_single_watch_rule(
-    entries: list[JSONValue], known: set[JSONValue | None], rule: object,
-    claim_ids: set[str], expr_ids: set[str], thesis_dir: Path,
+    entries: list[JSONValue],
+    known: set[JSONValue | None],
+    rule: object,
+    claim_ids: set[str],
+    expr_ids: set[str],
+    thesis_dir: Path,
 ) -> bool:
     """One watch rule: cross-ref gates + append by id (False when already known)."""
     if not isinstance(rule, dict):
@@ -498,7 +565,9 @@ def _fold_single_watch_rule(
 
 
 def _append_watch_rules(
-    watch_raw: dict[str, JSONValue], additions: list[object], thesis_d: Mapping[str, object],
+    watch_raw: dict[str, JSONValue],
+    additions: list[object],
+    thesis_d: Mapping[str, object],
     thesis_dir: Path,
 ) -> bool:
     """Append watch rules by id with claim/expression cross-ref checks."""
@@ -514,14 +583,17 @@ def _append_watch_rules(
     return added
 
 
-def _answer_target(by_id: dict[object, dict[str, JSONValue]], answer: dict[object, object], qpath: Path) -> dict[str, JSONValue]:
+def _answer_target(
+    by_id: dict[object, dict[str, JSONValue]], answer: dict[object, object], qpath: Path
+) -> dict[str, JSONValue]:
     """Target question for one answer (membership gate)."""
-    if (not isinstance(answer.get("question_id"), str) or answer.get("question_id") not in by_id):
+    if not isinstance(answer.get("question_id"), str) or answer.get("question_id") not in by_id:
         raise ValueError(f"{qpath}: answer names absent question {answer!r}")
     target = by_id.get(answer.get("question_id"))
     if target is None:
         raise ValueError(f"{qpath}: answer names absent question {answer!r}")
     return target
+
 
 def _answer_text(answer: dict[object, object], qpath: Path) -> str:
     """Non-empty answer text gate."""
@@ -530,8 +602,11 @@ def _answer_text(answer: dict[object, object], qpath: Path) -> str:
         raise ValueError(f"{qpath}: answer for {answer.get('question_id')!r} must be a non-empty string")
     return text
 
+
 def _fold_single_answer(
-    by_id: dict[object, dict[str, JSONValue]], answer: object, qpath: Path,
+    by_id: dict[object, dict[str, JSONValue]],
+    answer: object,
+    qpath: Path,
 ) -> None:
     """One answer -> target question (membership + non-empty text gates)."""
     if not isinstance(answer, dict):
@@ -551,7 +626,9 @@ def _validate_section_questions(entries: object, qpath: Path) -> None:
 
 
 def _mark_questions_answered(
-    questions_raw: dict[str, JSONValue], answers: list[object], thesis_dir: Path,
+    questions_raw: dict[str, JSONValue],
+    answers: list[object],
+    thesis_dir: Path,
 ) -> None:
     """Fold answers into a questions section in place (validated inline)."""
     qpath = thesis_dir / "questions.yaml"
@@ -565,7 +642,10 @@ def _mark_questions_answered(
 
 
 def _append_evidence_refs(
-    root: Path, thesis_dir: Path, thesis_id: str, evidence_refs: list[object],
+    root: Path,
+    thesis_dir: Path,
+    thesis_id: str,
+    evidence_refs: list[object],
 ) -> int:
     """Evidence side effect shared by both paths: one file per ref, skip existing ids."""
     for ref in evidence_refs:
@@ -589,13 +669,17 @@ def _find_journal_file(thesis_dir: Path, entry_id: str) -> Path | None:
         try:
             if f"entry_id: {entry_id}" in f.read_text(encoding="utf-8").split("---")[1]:
                 return f
-        except (OSError, IndexError):
+        except OSError, IndexError:
             continue
     return None
 
 
 def _persist_journal_file(
-    root: Path, thesis_dir: Path, thesis_id: str, entry_id: str, jd: dict[str, object],
+    root: Path,
+    thesis_dir: Path,
+    thesis_id: str,
+    entry_id: str,
+    jd: dict[str, object],
 ) -> str:
     """Hostile-gated journal persist (title/body defaults preserved)."""
     title = jd.get("title", "Research run")
@@ -613,8 +697,12 @@ def _persist_journal_file(
 
 
 def _write_journal_entry(
-    root: Path, thesis_dir: Path, thesis_id: str,
-    journal_raw: Mapping[str, object] | None, run_id: str, trigger_id: str,
+    root: Path,
+    thesis_dir: Path,
+    thesis_id: str,
+    journal_raw: Mapping[str, object] | None,
+    run_id: str,
+    trigger_id: str,
 ) -> str | None:
     """Journal side effect shared by both paths: idempotent by entry id."""
     if journal_raw is None:
@@ -632,7 +720,10 @@ def _write_journal_entry(
 
 
 def _persist_trigger_processed(
-    repo: ThesisRepository, tpath: Path, thesis_id: str, run_id: str,
+    repo: ThesisRepository,
+    tpath: Path,
+    thesis_id: str,
+    run_id: str,
 ) -> str:
     """Reload + status/run fold + persist for one trigger file."""
     raw_trigger = load_raw_yaml(tpath)
@@ -647,9 +738,13 @@ def _persist_trigger_processed(
 
 
 def _mark_trigger_processed(
-    repo: ThesisRepository, thesis_dir: Path, thesis_id: str,
-    trigger_id: str, run_id: str,
-    tpath: Path | None, raw_trigger: dict[str, JSONValue] | None,
+    repo: ThesisRepository,
+    thesis_dir: Path,
+    thesis_id: str,
+    trigger_id: str,
+    run_id: str,
+    tpath: Path | None,
+    raw_trigger: dict[str, JSONValue] | None,
 ) -> str | None:
     """Trigger processed side effect shared by both paths (never deletes)."""
     if not trigger_id:
@@ -659,8 +754,11 @@ def _mark_trigger_processed(
     if not tpath.is_file():
         return None
     return _persist_trigger_processed(repo, tpath, thesis_id, run_id)
+
+
 def _resolve_gate_allowed(
-    thesis_dir: Path, thesis_id: str,
+    thesis_dir: Path,
+    thesis_id: str,
     journal_entry: Mapping[str, object] | None,
     raw_trigger: dict[str, JSONValue],
     allowed_refs: set[str] | None,
@@ -696,19 +794,25 @@ class ThesisRepository:
             return "load-failure", str(exc)
 
     def _register_loaded(
-        self, seen: dict[str, Path], loaded: list[tuple[Path, Thesis]], child: Path, thesis: Thesis,
+        self,
+        seen: dict[str, Path],
+        loaded: list[tuple[Path, Thesis]],
+        child: Path,
+        thesis: Thesis,
     ) -> None:
         """Duplicate ids stay loud (single decision point)."""
         if thesis.thesis_id in seen:
-            raise ValueError(
-                f"duplicate thesis ID {thesis.thesis_id!r} in {seen[thesis.thesis_id]} and {child}"
-            )
+            raise ValueError(f"duplicate thesis ID {thesis.thesis_id!r} in {seen[thesis.thesis_id]} and {child}")
         seen[thesis.thesis_id] = child
         loaded.append((child, thesis))
 
     def _fold_slug_match(
-        self, found: dict[str, Path], bad_dirs: dict[str, str], bad_ids: dict[str, str],
-        child: Path, thesis: Thesis,
+        self,
+        found: dict[str, Path],
+        bad_dirs: dict[str, str],
+        bad_ids: dict[str, str],
+        child: Path,
+        thesis: Thesis,
     ) -> None:
         """Slug match -> healthy entry, else quarantine by dir + id."""
         if child.name != thesis.slug:
@@ -907,7 +1011,6 @@ class ThesisRepository:
             return None
         return self._latest_pair(self._history_pairs(hdir))
 
-
     @staticmethod
     def _next_history_version(hdir: Path) -> int:
         """Next version int over numeric history stems."""
@@ -919,9 +1022,19 @@ class ThesisRepository:
         return (max(existing) if existing else 0) + 1
 
     def _write_snapshot_from_dicts_locked(
-        self, thesis_dir: Path, thesis_id: str, *, effective_at: str, reason: str,
-        run_id: str = "", trigger_id: str = "",
-        thesis: dict[str, JSONValue], state: dict[str, JSONValue], questions: dict[str, JSONValue], watch: dict[str, JSONValue], memory: dict[str, JSONValue],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        *,
+        effective_at: str,
+        reason: str,
+        run_id: str = "",
+        trigger_id: str = "",
+        thesis: dict[str, JSONValue],
+        state: dict[str, JSONValue],
+        questions: dict[str, JSONValue],
+        watch: dict[str, JSONValue],
+        memory: dict[str, JSONValue],
     ) -> ThesisStateSnapshot:
         """Write one versioned snapshot from caller-supplied dicts; caller must hold thesis_lock."""
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
@@ -932,10 +1045,18 @@ class ThesisRepository:
         hdir.mkdir(parents=True, exist_ok=True)
         version = self._next_history_version(hdir)
         snap = ThesisStateSnapshot(
-            thesis_id=thesis_id, version=version, effective_at=effective_at, recorded_at=_utcnow(),
-            reason=reason, run_id=run_id or "", trigger_id=trigger_id or "",
-            thesis=thesis, state=state,
-            questions=questions, watch=watch, memory=memory,
+            thesis_id=thesis_id,
+            version=version,
+            effective_at=effective_at,
+            recorded_at=_utcnow(),
+            reason=reason,
+            run_id=run_id or "",
+            trigger_id=trigger_id or "",
+            thesis=thesis,
+            state=state,
+            questions=questions,
+            watch=watch,
+            memory=memory,
         )
         dest = hdir / f"{version:08d}.yaml"
         validated = ThesisStateSnapshot.from_dict(snap.to_dict(), str(dest))
@@ -943,16 +1064,22 @@ class ThesisRepository:
         return validated
 
     def _load_snapshot_sections_locked(
-        self, thesis_dir: Path, thesis_id: str,
-    ) -> tuple[dict[str, JSONValue], dict[str, JSONValue], dict[str, JSONValue], dict[str, JSONValue], dict[str, JSONValue]]:
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+    ) -> tuple[
+        dict[str, JSONValue], dict[str, JSONValue], dict[str, JSONValue], dict[str, JSONValue], dict[str, JSONValue]
+    ]:
         """Live thesis/state/questions/watch/memory dicts; validates owners."""
         thesis = load_yaml(thesis_dir / "thesis.yaml", Thesis)
         if thesis.thesis_id != thesis_id:
-            raise ValueError(
-                f"{thesis_dir}: thesis_id mismatch: file has {thesis.thesis_id!r}, expected {thesis_id!r}")
+            raise ValueError(f"{thesis_dir}: thesis_id mismatch: file has {thesis.thesis_id!r}, expected {thesis_id!r}")
         state = load_yaml(thesis_dir / "state.yaml", ThesisState)
-        qpath, wpath, mpath = (str(thesis_dir / "questions.yaml"), str(thesis_dir / "watch.yaml"),
-                                str(thesis_dir / "memory.yaml"))
+        qpath, wpath, mpath = (
+            str(thesis_dir / "questions.yaml"),
+            str(thesis_dir / "watch.yaml"),
+            str(thesis_dir / "memory.yaml"),
+        )
         questions = load_raw_yaml(thesis_dir / "questions.yaml")
         self._check_file_owner(questions, qpath, thesis_id)
         watch = load_raw_yaml(thesis_dir / "watch.yaml")
@@ -962,7 +1089,11 @@ class ThesisRepository:
         return (thesis.to_dict(), state.to_dict(), dict(questions), dict(watch), dict(memory))
 
     def _migration_basis(
-        self, thesis_dir: Path, reason: str, effective_at: str, updated_at: str,
+        self,
+        thesis_dir: Path,
+        reason: str,
+        effective_at: str,
+        updated_at: str,
     ) -> tuple[str, str]:
         """First-snapshot rewrite: migration reason + thesis clock basis."""
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
@@ -977,29 +1108,41 @@ class ThesisRepository:
         return reason, effective_at
 
     def _snapshot_state_locked(
-        self, thesis_dir: Path, thesis_id: str, *, effective_at: str, reason: str,
-        run_id: str = "", trigger_id: str = "",
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        *,
+        effective_at: str,
+        reason: str,
+        run_id: str = "",
+        trigger_id: str = "",
     ) -> ThesisStateSnapshot:
         """Write one versioned history snapshot; caller must hold thesis_lock."""
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
 
         if _as_dt(effective_at) is None:
             raise ValueError(f"{thesis_dir}/history: bad effective_at {effective_at!r}")
-        thesis_d, state_d, questions, watch, memory = self._load_snapshot_sections_locked(
-            thesis_dir, thesis_id)
+        thesis_d, state_d, questions, watch, memory = self._load_snapshot_sections_locked(thesis_dir, thesis_id)
         raw_thesis = load_yaml(thesis_dir / "thesis.yaml", Thesis)
-        reason, effective_at = self._migration_basis(
-            thesis_dir, reason, effective_at, raw_thesis.updated_at)
+        reason, effective_at = self._migration_basis(thesis_dir, reason, effective_at, raw_thesis.updated_at)
         return self._write_snapshot_from_dicts_locked(
-            thesis_dir, thesis_id, effective_at=effective_at, reason=reason,
-            run_id=run_id, trigger_id=trigger_id,
-            thesis=thesis_d, state=state_d,
-            questions=dict(questions), watch=dict(watch), memory=dict(memory),
+            thesis_dir,
+            thesis_id,
+            effective_at=effective_at,
+            reason=reason,
+            run_id=run_id,
+            trigger_id=trigger_id,
+            thesis=thesis_d,
+            state=state_d,
+            questions=dict(questions),
+            watch=dict(watch),
+            memory=dict(memory),
         )
 
     @staticmethod
     def _eligible_snapshot(
-        snaps: list[ThesisStateSnapshot], cutoff: datetime,
+        snaps: list[ThesisStateSnapshot],
+        cutoff: datetime,
     ) -> ThesisStateSnapshot | None:
         """Latest snapshot at or before the cutoff; None when all are later."""
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
@@ -1014,8 +1157,7 @@ class ThesisRepository:
         """Parsed history snapshots; raises when the directory holds no files."""
         files: list[Path] = sorted(hdir.glob("*.yaml")) if hdir.is_dir() else []
         if not files:
-            raise HistoricalStateUnavailable(
-                f"{hdir}: no state for {thesis_id!r} (no history)")
+            raise HistoricalStateUnavailable(f"{hdir}: no state for {thesis_id!r} (no history)")
         return [ThesisStateSnapshot.from_dict(load_raw_yaml(f), str(f)) for f in files]
 
     def load_state_as_of(self, thesis_id: str, known_at: str) -> ThesisStateSnapshot:
@@ -1031,12 +1173,14 @@ class ThesisRepository:
             snaps = self._history_snaps(thesis_id, hdir)
         except HistoricalStateUnavailable:
             raise HistoricalStateUnavailable(
-                f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (no history)") from None
+                f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (no history)"
+            ) from None
         found = self._eligible_snapshot(snaps, cutoff)
         if found is None:
             earliest = min(s.effective_at for s in snaps)
             raise HistoricalStateUnavailable(
-                f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (earliest {earliest!r})")
+                f"{hdir}: no state for {thesis_id!r} as of {known_at!r} (earliest {earliest!r})"
+            )
         return found
 
     @staticmethod
@@ -1094,7 +1238,9 @@ class ThesisRepository:
 
     @staticmethod
     def _mark_answers(
-        entries: object, answered: list[dict[str, JSONValue]], path: str,
+        entries: object,
+        answered: list[dict[str, JSONValue]],
+        path: str,
     ) -> dict[object, dict[str, JSONValue]]:
         """Fold answers into question dicts in place; returns id index."""
         if not isinstance(entries, list):
@@ -1106,7 +1252,11 @@ class ThesisRepository:
         return by_id
 
     def _answer_backdated_locked(
-        self, thesis_dir: Path, thesis_id: str, answered: list[dict[str, JSONValue]], eff: str,
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        answered: list[dict[str, JSONValue]],
+        eff: str,
     ) -> None:
         """As-of copy path: patch snapshot questions, persist snapshot only."""
         path = str(thesis_dir / "questions.yaml")
@@ -1116,12 +1266,23 @@ class ThesisRepository:
         entries = raw.get("questions", [])
         self._mark_answers(entries, answered, path)
         self._write_snapshot_from_dicts_locked(
-            thesis_dir, thesis_id, effective_at=eff, reason="questions_answered",
-            thesis=dict(base.thesis), state=dict(base.state),
-            questions=raw, watch=dict(base.watch), memory=dict(base.memory))
+            thesis_dir,
+            thesis_id,
+            effective_at=eff,
+            reason="questions_answered",
+            thesis=dict(base.thesis),
+            state=dict(base.state),
+            questions=raw,
+            watch=dict(base.watch),
+            memory=dict(base.memory),
+        )
 
     def _answer_live_locked(
-        self, thesis_dir: Path, thesis_id: str, answered: list[dict[str, JSONValue]], eff: str,
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        answered: list[dict[str, JSONValue]],
+        eff: str,
     ) -> None:
         """Live path: patch questions.yaml, then snapshot."""
         path = str(thesis_dir / "questions.yaml")
@@ -1131,7 +1292,9 @@ class ThesisRepository:
         atomic_write_yaml(thesis_dir / "questions.yaml", raw, self.root)
         self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=eff, reason="questions_answered")
 
-    def answer_questions(self, thesis_id: str, answered: list[dict[str, JSONValue]], *, effective_at: str | None = None) -> None:
+    def answer_questions(
+        self, thesis_id: str, answered: list[dict[str, JSONValue]], *, effective_at: str | None = None
+    ) -> None:
         """Mark questions answered (validate-then-replace questions.yaml, lock-held)."""
         if not answered:
             return
@@ -1157,8 +1320,7 @@ class ThesisRepository:
         if rule.get("rule_type") == "new_external_evidence":
             rule["support_reason"] = "no production source for 'new_external_evidence'; never queried"
         else:
-            rule["support_reason"] = (
-                f"no deterministic monitor backing for {rule.get('rule_type')!r}; never queried")
+            rule["support_reason"] = f"no deterministic monitor backing for {rule.get('rule_type')!r}; never queried"
 
     @staticmethod
     def _heal_watch_rule(rule: object, path: object, supported: Collection[str]) -> bool:
@@ -1190,7 +1352,11 @@ class ThesisRepository:
         return ThesisRepository._copy_entry_list(source, path, "rules")
 
     def _normalize_backdated_locked(
-        self, thesis_dir: Path, thesis_id: str, eff: str, supported: Collection[str],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        eff: str,
+        supported: Collection[str],
     ) -> None:
         """As-of copy path: heal snapshot rules, persist snapshot only when changed."""
         path = thesis_dir / "watch.yaml"
@@ -1199,12 +1365,23 @@ class ThesisRepository:
         raw["rules"] = self._copy_rule_list(base.watch.get("rules", []), path)
         if self._heal_watch_rules(raw.get("rules", []), path, supported):
             self._write_snapshot_from_dicts_locked(
-                thesis_dir, thesis_id, effective_at=eff, reason="watch_normalized",
-                thesis=dict(base.thesis), state=dict(base.state),
-                questions=dict(base.questions), watch=raw, memory=dict(base.memory))
+                thesis_dir,
+                thesis_id,
+                effective_at=eff,
+                reason="watch_normalized",
+                thesis=dict(base.thesis),
+                state=dict(base.state),
+                questions=dict(base.questions),
+                watch=raw,
+                memory=dict(base.memory),
+            )
 
     def _normalize_live_locked(
-        self, thesis_dir: Path, thesis_id: str, eff: str, supported: Collection[str],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        eff: str,
+        supported: Collection[str],
     ) -> None:
         """Live path: heal watch.yaml, then snapshot when changed."""
         path = thesis_dir / "watch.yaml"
@@ -1233,7 +1410,6 @@ class ThesisRepository:
                 self._normalize_backdated_locked(thesis_dir, thesis_id, eff, SUPPORTED_HANDLERS)
                 return
             self._normalize_live_locked(thesis_dir, thesis_id, eff, SUPPORTED_HANDLERS)
-
 
     def load_watch_rules(self, thesis_id: str) -> list[WatchRule]:
         """Read validated watch rules (ID-or-slug lookup)."""
@@ -1287,7 +1463,8 @@ class ThesisRepository:
     @staticmethod
     def _coerce_create_watch_rules(
         watch_rules: Sequence[Mapping[str, object]],
-        claim_ids: set[str], expr_ids: set[str],
+        claim_ids: set[str],
+        expr_ids: set[str],
     ) -> list[WatchRule]:
         """Watch rule dicts -> validated objects with claim/expression cross-refs."""
         rule_objs = []
@@ -1322,27 +1499,30 @@ class ThesisRepository:
             atomic_write_yaml(thesis_dir / "thesis.yaml", thesis.to_dict(), self.root)
             atomic_write_yaml(
                 thesis_dir / "state.yaml",
-                ThesisState(thesis_id=thesis_id, assessment="unresolved").to_dict(), self.root,
+                ThesisState(thesis_id=thesis_id, assessment="unresolved").to_dict(),
+                self.root,
             )
             atomic_write_yaml(
                 thesis_dir / "watch.yaml",
-                {"schema_version": SCHEMA_VERSION, "thesis_id": thesis_id,
-                 "rules": [r.to_dict() for r in rule_objs]}, self.root,
+                {"schema_version": SCHEMA_VERSION, "thesis_id": thesis_id, "rules": [r.to_dict() for r in rule_objs]},
+                self.root,
             )
             atomic_write_yaml(
                 thesis_dir / "questions.yaml",
-                {"schema_version": SCHEMA_VERSION, "thesis_id": thesis_id, "questions": []}, self.root,
+                {"schema_version": SCHEMA_VERSION, "thesis_id": thesis_id, "questions": []},
+                self.root,
             )
             atomic_write_yaml(
                 thesis_dir / "memory.yaml",
-                {"schema_version": SCHEMA_VERSION, "thesis_id": thesis_id, "memories": []}, self.root,
+                {"schema_version": SCHEMA_VERSION, "thesis_id": thesis_id, "memories": []},
+                self.root,
             )
             atomic_write_yaml(
                 thesis_dir / "checkpoint.yaml",
-                Checkpoint(thesis_id=thesis_id).to_dict(), self.root,
+                Checkpoint(thesis_id=thesis_id).to_dict(),
+                self.root,
             )
-            self._snapshot_state_locked(
-                thesis_dir, thesis_id, effective_at=thesis.created_at, reason="thesis_created")
+            self._snapshot_state_locked(thesis_dir, thesis_id, effective_at=thesis.created_at, reason="thesis_created")
 
     @staticmethod
     def _create_claims(claims: Sequence[str | Mapping[str, object] | ThesisClaim]) -> tuple[ThesisClaim, ...]:
@@ -1357,9 +1537,14 @@ class ThesisRepository:
         return tuple(_coerce_expression(e) for e in (expressions or []))
 
     def _build_create_candidate(
-        self, thesis_id: str, user_thesis: str, scope: str,
+        self,
+        thesis_id: str,
+        user_thesis: str,
+        scope: str,
         claims: Sequence[str | Mapping[str, object] | ThesisClaim],
-        assumptions: Sequence[str], invalidators: Sequence[str], unknowns: Sequence[str],
+        assumptions: Sequence[str],
+        invalidators: Sequence[str],
+        unknowns: Sequence[str],
         expressions: Sequence[Mapping[str, object] | TradeExpression],
         requirements: Sequence[Mapping[str, object] | ExpressionRequirement],
         eff: str,
@@ -1387,10 +1572,19 @@ class ThesisRepository:
         """Candidate with its shortest free slug filled in."""
         slug = self._reserve_thesis_slug(user_thesis)
         return Thesis(
-            thesis_id=thesis.thesis_id, slug=slug, status=thesis.status, created_at=thesis.created_at,
-            updated_at=thesis.updated_at, user_thesis=thesis.user_thesis, scope=thesis.scope,
-            claims=thesis.claims, assumptions=thesis.assumptions, invalidators=thesis.invalidators,
-            unknowns=thesis.unknowns, expressions=thesis.expressions, requirements=thesis.requirements,
+            thesis_id=thesis.thesis_id,
+            slug=slug,
+            status=thesis.status,
+            created_at=thesis.created_at,
+            updated_at=thesis.updated_at,
+            user_thesis=thesis.user_thesis,
+            scope=thesis.scope,
+            claims=thesis.claims,
+            assumptions=thesis.assumptions,
+            invalidators=thesis.invalidators,
+            unknowns=thesis.unknowns,
+            expressions=thesis.expressions,
+            requirements=thesis.requirements,
         )
 
     @staticmethod
@@ -1411,12 +1605,14 @@ class ThesisRepository:
         return user_thesis.strip()
 
     def _create_rule_objs(
-        self, watch_rules: Sequence[Mapping[str, object]], thesis: Thesis,
+        self,
+        watch_rules: Sequence[Mapping[str, object]],
+        thesis: Thesis,
     ) -> list[WatchRule]:
         """Watch rules validated against the candidate's claim/expression ids."""
         return self._coerce_create_watch_rules(
-            watch_rules, {c.claim_id for c in thesis.claims},
-            {e.expression_id for e in thesis.expressions})
+            watch_rules, {c.claim_id for c in thesis.claims}, {e.expression_id for e in thesis.expressions}
+        )
 
     def create_thesis(
         self,
@@ -1436,8 +1632,8 @@ class ThesisRepository:
         eff = self._create_clock(effective_at)
         thesis_id = new_thesis_id()
         thesis = self._build_create_candidate(
-            thesis_id, text, scope, claims, assumptions, invalidators,
-            unknowns, expressions, requirements, eff)
+            thesis_id, text, scope, claims, assumptions, invalidators, unknowns, expressions, requirements, eff
+        )
         rule_objs = self._create_rule_objs(watch_rules, thesis)
         thesis = self._with_reserved_slug(thesis, text)
         self._persist_new_thesis_locked(self.root / thesis.slug, thesis, rule_objs)
@@ -1459,20 +1655,29 @@ class ThesisRepository:
 
     @staticmethod
     def _require_no_dropped_ids(
-        thesis_dir: Path, thesis_id: str, patch: Mapping[str, object],
-        base: ThesisStateSnapshot, key: str, noun: str,
+        thesis_dir: Path,
+        thesis_id: str,
+        patch: Mapping[str, object],
+        base: ThesisStateSnapshot,
+        key: str,
+        noun: str,
     ) -> None:
         """Backdated patch must retain every as-of id (single missing-id gate)."""
         if not isinstance(patch.get(key), list):
             return
-        missing = ThesisRepository._asof_ids(base, key, noun) - ThesisRepository._retained_ids(patch.get(key), f"{noun}_id")
+        missing = ThesisRepository._asof_ids(base, key, noun) - ThesisRepository._retained_ids(
+            patch.get(key), f"{noun}_id"
+        )
         if missing:
             first = min(missing, key=str)
-            raise ValueError(
-                f"{thesis_dir}/thesis.yaml: {noun} {first!r} does not belong to thesis {thesis_id!r}")
+            raise ValueError(f"{thesis_dir}/thesis.yaml: {noun} {first!r} does not belong to thesis {thesis_id!r}")
 
     def _update_backdated_locked(
-        self, thesis_dir: Path, thesis_id: str, patch: Mapping[str, object], eff: str,
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        patch: Mapping[str, object],
+        eff: str,
     ) -> Thesis:
         """As-of copy path: validate patch against snapshot, persist snapshot only."""
         base = self.load_state_as_of(thesis_id, eff)
@@ -1484,13 +1689,25 @@ class ThesisRepository:
         data["updated_at"] = eff
         candidate = Thesis.from_dict(data, str(thesis_dir / "thesis.yaml"))
         self._write_snapshot_from_dicts_locked(
-            thesis_dir, thesis_id, effective_at=eff, reason="thesis_updated",
-            thesis=candidate.to_dict(), state=dict(base.state),
-            questions=dict(base.questions), watch=dict(base.watch), memory=dict(base.memory))
+            thesis_dir,
+            thesis_id,
+            effective_at=eff,
+            reason="thesis_updated",
+            thesis=candidate.to_dict(),
+            state=dict(base.state),
+            questions=dict(base.questions),
+            watch=dict(base.watch),
+            memory=dict(base.memory),
+        )
         return candidate
 
     def _update_live_locked(
-        self, thesis_dir: Path, thesis: Thesis, thesis_id: str, patch: Mapping[str, object], eff: str,
+        self,
+        thesis_dir: Path,
+        thesis: Thesis,
+        thesis_id: str,
+        patch: Mapping[str, object],
+        eff: str,
     ) -> Thesis:
         """Live path: patch thesis.yaml, then snapshot."""
         live_data: dict[str, object] = dict(thesis.to_dict())
@@ -1531,9 +1748,16 @@ class ThesisRepository:
         data["thesis_id"] = thesis_id
         candidate = Thesis.from_dict(data, str(thesis_dir / "thesis.yaml"))
         self._write_snapshot_from_dicts_locked(
-            thesis_dir, thesis_id, effective_at=eff, reason="status_changed",
-            thesis=candidate.to_dict(), state=dict(base.state),
-            questions=dict(base.questions), watch=dict(base.watch), memory=dict(base.memory))
+            thesis_dir,
+            thesis_id,
+            effective_at=eff,
+            reason="status_changed",
+            thesis=candidate.to_dict(),
+            state=dict(base.state),
+            questions=dict(base.questions),
+            watch=dict(base.watch),
+            memory=dict(base.memory),
+        )
         return candidate
 
     def _set_status(self, thesis_id: str, status: str, *, effective_at: str | None = None) -> Thesis:
@@ -1584,9 +1808,16 @@ class ThesisRepository:
                 data["thesis_id"] = thesis_id
                 candidate = Thesis.from_dict(data, str(thesis_dir / "thesis.yaml"))
                 self._write_snapshot_from_dicts_locked(
-                    thesis_dir, thesis_id, effective_at=eff, reason="status_changed",
-                    thesis=candidate.to_dict(), state=dict(base.state),
-                    questions=dict(base.questions), watch=dict(base.watch), memory=dict(base.memory))
+                    thesis_dir,
+                    thesis_id,
+                    effective_at=eff,
+                    reason="status_changed",
+                    thesis=candidate.to_dict(),
+                    state=dict(base.state),
+                    questions=dict(base.questions),
+                    watch=dict(base.watch),
+                    memory=dict(base.memory),
+                )
                 return candidate
             data = thesis.to_dict()
             data["status"] = models.ThesisStatus.CLOSED.value
@@ -1661,8 +1892,7 @@ class ThesisRepository:
             fm = head[1] if len(head) >= 3 else ""
         except OSError:
             return None
-        return {ln.split(":", 1)[0].strip(): ln.split(":", 1)[1].strip()
-                for ln in fm.splitlines() if ":" in ln}
+        return {ln.split(":", 1)[0].strip(): ln.split(":", 1)[1].strip() for ln in fm.splitlines() if ":" in ln}
 
     @staticmethod
     def _journal_known_ok(fields: dict[str, str], known_at: str | None, want: datetime | None) -> bool:
@@ -1678,8 +1908,12 @@ class ThesisRepository:
 
     @staticmethod
     def _journal_matches(
-        fields: dict[str, str], thesis_id: str, trigger_id: str,
-        known_at: str | None, want: datetime | None, run_id: str | None,
+        fields: dict[str, str],
+        thesis_id: str,
+        trigger_id: str,
+        known_at: str | None,
+        want: datetime | None,
+        run_id: str | None,
     ) -> bool:
         """Thesis/trigger/run/known_at predicate for one journal's fields."""
         if fields.get("thesis_id") != thesis_id or fields.get("trigger_id") != trigger_id:
@@ -1689,8 +1923,13 @@ class ThesisRepository:
         return run_id is None or fields.get("run_id", "") == run_id
 
     def _journal_dir_matches(
-        self, journal_dir: Path, thesis_id: str, trigger_id: str,
-        known_at: str | None, want: datetime | None, run_id: str | None,
+        self,
+        journal_dir: Path,
+        thesis_id: str,
+        trigger_id: str,
+        known_at: str | None,
+        want: datetime | None,
+        run_id: str | None,
     ) -> bool:
         """True when any journal file in the dir matches the predicate."""
         for f in journal_dir.glob("*.md"):
@@ -1704,6 +1943,7 @@ class ThesisRepository:
     ) -> bool:
         """True when a durable journal entry names this thesis and trigger."""
         from app.thesis.monitor import _as_dt  # local: monitor owns the clock helpers
+
         want = _as_dt(known_at) if known_at is not None else None
         journal_dir = self._dir_for(thesis_id) / "journal"
         if not journal_dir.is_dir():
@@ -1712,7 +1952,10 @@ class ThesisRepository:
 
     @staticmethod
     def _require_trigger_membership(
-        thesis_dir: Path, known: set[str], ids: Sequence[str], noun: str,
+        thesis_dir: Path,
+        known: set[str],
+        ids: Sequence[str],
+        noun: str,
     ) -> None:
         """Claim/expression membership for one trigger id list."""
         for given in ids or []:
@@ -1721,24 +1964,36 @@ class ThesisRepository:
 
     @staticmethod
     def _validate_trigger_refs(
-        thesis_dir: Path, thesis: Thesis,
-        claim_ids: Sequence[str], expression_ids: Sequence[str], summary_origin: str,
+        thesis_dir: Path,
+        thesis: Thesis,
+        claim_ids: Sequence[str],
+        expression_ids: Sequence[str],
+        summary_origin: str,
     ) -> None:
         """Closed-thesis + claim/expression membership + summary origin gates."""
         if thesis.status == models.ThesisStatus.CLOSED.value:
             raise ValueError(f"{thesis_dir}: thesis {thesis.thesis_id!r} is closed; cannot create triggers")
         ThesisRepository._require_trigger_membership(
-            thesis_dir, {c.claim_id for c in thesis.claims}, claim_ids, "claim")
+            thesis_dir, {c.claim_id for c in thesis.claims}, claim_ids, "claim"
+        )
         ThesisRepository._require_trigger_membership(
-            thesis_dir, {e.expression_id for e in thesis.expressions}, expression_ids, "expression")
+            thesis_dir, {e.expression_id for e in thesis.expressions}, expression_ids, "expression"
+        )
         if summary_origin not in ("deterministic", "recycled"):
             raise ValueError(f"{thesis_dir}: bad summary_origin {summary_origin!r}")
 
     @staticmethod
-    def _new_trigger(thesis_id: str, trigger_type: str, importance: str,
-                     claim_ids: Sequence[str], expression_ids: Sequence[str],
-                     canonical_refs: Sequence[str], summary: str,
-                     metadata: dict[str, JSONValue] | None, summary_origin: str) -> Trigger:
+    def _new_trigger(
+        thesis_id: str,
+        trigger_type: str,
+        importance: str,
+        claim_ids: Sequence[str],
+        expression_ids: Sequence[str],
+        canonical_refs: Sequence[str],
+        summary: str,
+        metadata: dict[str, JSONValue] | None,
+        summary_origin: str,
+    ) -> Trigger:
         """Validated trigger object (metadata carries the origin)."""
         meta = dict(metadata or {})
         meta["summary_origin"] = summary_origin
@@ -1757,15 +2012,30 @@ class ThesisRepository:
         )
 
     def _persist_trigger_locked(
-        self, thesis_dir: Path, thesis_id: str,
-        trigger_type: str, importance: str,
-        claim_ids: Sequence[str], expression_ids: Sequence[str], canonical_refs: Sequence[str],
-        summary: str, metadata: dict[str, JSONValue] | None, summary_origin: str,
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        trigger_type: str,
+        importance: str,
+        claim_ids: Sequence[str],
+        expression_ids: Sequence[str],
+        canonical_refs: Sequence[str],
+        summary: str,
+        metadata: dict[str, JSONValue] | None,
+        summary_origin: str,
     ) -> Trigger:
         """Validated trigger -> inbox file (lock held)."""
         trigger = self._new_trigger(
-            thesis_id, trigger_type, importance, claim_ids, expression_ids,
-            canonical_refs, summary, metadata, summary_origin)
+            thesis_id,
+            trigger_type,
+            importance,
+            claim_ids,
+            expression_ids,
+            canonical_refs,
+            summary,
+            metadata,
+            summary_origin,
+        )
         Trigger.from_dict(trigger.to_dict(), str(thesis_dir / "inbox"))
         dest = thesis_dir / "inbox" / f"{_safe_name(trigger.trigger_id)}.yaml"
         atomic_write_yaml(dest, {"schema_version": SCHEMA_VERSION, **trigger.to_dict()}, self.root)
@@ -1789,8 +2059,17 @@ class ThesisRepository:
             thesis = self._check_owner(thesis_dir, thesis_id)
             self._validate_trigger_refs(thesis_dir, thesis, claim_ids, expression_ids, summary_origin)
             return self._persist_trigger_locked(
-                thesis_dir, thesis_id, trigger_type, importance,
-                claim_ids, expression_ids, canonical_refs, summary, metadata, summary_origin)
+                thesis_dir,
+                thesis_id,
+                trigger_type,
+                importance,
+                claim_ids,
+                expression_ids,
+                canonical_refs,
+                summary,
+                metadata,
+                summary_origin,
+            )
 
     def _resolve_trigger_path(self, thesis_dir: Path, trigger_id: str) -> Path:
         """Direct inbox name, else scan for older filenames (never deletes)."""
@@ -1805,7 +2084,9 @@ class ThesisRepository:
 
     @staticmethod
     def _fold_trigger_processed(
-        raw: dict[str, JSONValue], run_id: str, metadata: dict[str, JSONValue] | None,
+        raw: dict[str, JSONValue],
+        run_id: str,
+        metadata: dict[str, JSONValue] | None,
     ) -> None:
         """Status/processed_at/run/metadata fold for the processed transition."""
         raw["status"] = TriggerStatus.PROCESSED.value
@@ -1817,7 +2098,9 @@ class ThesisRepository:
             merged.update(metadata)
             raw["metadata"] = merged
 
-    def mark_trigger_processed(self, thesis_id: str, trigger_id: str, run_id: str = "", metadata: dict[str, JSONValue] | None = None) -> Trigger:
+    def mark_trigger_processed(
+        self, thesis_id: str, trigger_id: str, run_id: str = "", metadata: dict[str, JSONValue] | None = None
+    ) -> Trigger:
         thesis_dir = self._dir_for(thesis_id)
         with thesis_lock(thesis_dir):
             self._check_owner(thesis_dir, thesis_id)
@@ -1829,7 +2112,9 @@ class ThesisRepository:
             atomic_write_yaml(target, {"schema_version": SCHEMA_VERSION, **updated.to_dict()}, self.root)
             return updated
 
-    def _direct_trigger_raw(self, thesis_dir: Path, thesis_id: str, trigger_id: str) -> tuple[Path, dict[str, JSONValue]] | None:
+    def _direct_trigger_raw(
+        self, thesis_dir: Path, thesis_id: str, trigger_id: str
+    ) -> tuple[Path, dict[str, JSONValue]] | None:
         """Direct inbox name hit; None when the file is absent."""
         direct = thesis_dir / "inbox" / f"{_safe_name(trigger_id)}.yaml"
         if not direct.is_file():
@@ -1838,7 +2123,9 @@ class ThesisRepository:
         self._check_file_owner(raw, str(direct), thesis_id)
         return direct, raw
 
-    def _scan_trigger_raw(self, thesis_dir: Path, thesis_id: str, trigger_id: str) -> tuple[Path, dict[str, JSONValue]] | None:
+    def _scan_trigger_raw(
+        self, thesis_dir: Path, thesis_id: str, trigger_id: str
+    ) -> tuple[Path, dict[str, JSONValue]] | None:
         """Old-filename inbox scan hit; None when nothing names the trigger."""
         for f in sorted((thesis_dir / "inbox").glob("*.yaml")):
             candidate = self._trigger_scan_hit(f, thesis_id, trigger_id)
@@ -1856,7 +2143,9 @@ class ThesisRepository:
             return scanned
         raise KeyError(f"unknown trigger: {trigger_id!r}")
 
-    def _trigger_scan_hit(self, path: Path, thesis_id: str, trigger_id: str) -> tuple[Path, dict[str, JSONValue]] | None:
+    def _trigger_scan_hit(
+        self, path: Path, thesis_id: str, trigger_id: str
+    ) -> tuple[Path, dict[str, JSONValue]] | None:
         """Inbox scan hit: raw names the trigger and passes the owner check."""
         try:
             raw = load_raw_yaml(path)
@@ -1914,17 +2203,21 @@ class ThesisRepository:
     @staticmethod
     def _pending_shape_ok(raw: dict[object, object]) -> bool:
         """Run/payload shape gate: dict payload plus non-empty run id."""
-        return (isinstance(raw.get("payload"), dict)
-                and isinstance(raw.get("run_id"), str) and bool(raw["run_id"]))
+        return isinstance(raw.get("payload"), dict) and isinstance(raw.get("run_id"), str) and bool(raw["run_id"])
 
     @staticmethod
     def _validate_pending_intent(
-        path: Path, raw: object, thesis_id: str, trigger_id: str,
+        path: Path,
+        raw: object,
+        thesis_id: str,
+        trigger_id: str,
     ) -> dict[str, JSONValue]:
         """Owner/run/payload shape gate (foreign or corrupt stays loud)."""
-        if (not isinstance(raw, dict)
-                or not ThesisRepository._pending_owner_ok(raw, thesis_id, trigger_id)
-                or not ThesisRepository._pending_shape_ok(raw)):
+        if (
+            not isinstance(raw, dict)
+            or not ThesisRepository._pending_owner_ok(raw, thesis_id, trigger_id)
+            or not ThesisRepository._pending_shape_ok(raw)
+        ):
             raise ValueError(f"{path}: foreign or corrupt pending result intent; operator review required")
         return dict(raw)
 
@@ -1941,7 +2234,6 @@ class ThesisRepository:
             except OSError as exc:
                 raise ValueError(f"{p}: unreadable pending result intent: {exc}") from exc
             return self._validate_pending_intent(p, self._coerce_pending_raw(p, text), thesis_id, trigger_id)
-
 
     def write_pending_result(self, thesis_id: str, trigger_id: str, intent: Mapping[str, JSONValue]) -> Path:
         """Persist the validated result before mutating (replay skips the model call)."""
@@ -1961,7 +2253,6 @@ class ThesisRepository:
                 self._pending_path(thesis_dir, trigger_id).unlink()
             except FileNotFoundError:
                 pass
-
 
     def load_checkpoint(self, id_or_slug: str) -> Checkpoint:
         """Read validated checkpoint.yaml (lock-held; KeyError on unknown thesis)."""
@@ -1983,19 +2274,21 @@ class ThesisRepository:
             atomic_write_yaml(thesis_dir / "checkpoint.yaml", candidate.to_dict(), self.root)
             return candidate
 
-
-
     def _fold_live_claim_expression(
-        self, thesis_dir: Path, thesis_id: str, thesis: Thesis,
-        claim_patch: dict[str, dict[str, object]], expr_patch: dict[str, dict[str, object]],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        thesis: Thesis,
+        claim_patch: dict[str, dict[str, object]],
+        expr_patch: dict[str, dict[str, object]],
         eff: str,
     ) -> Thesis:
         """Live thesis.yaml fold: patch statuses, persist, return new Thesis."""
         if not (claim_patch or expr_patch):
             return thesis
         folded = _fold_claim_expression(
-            thesis.to_dict(), claim_patch, expr_patch, thesis_id, _utcnow(),
-            str(thesis_dir / "thesis.yaml"))
+            thesis.to_dict(), claim_patch, expr_patch, thesis_id, _utcnow(), str(thesis_dir / "thesis.yaml")
+        )
         # backdated clock uses eff; live clock stamps now (behavior preserved)
         thesis = Thesis.from_dict({**folded, "updated_at": folded.get("updated_at")}, str(thesis_dir / "thesis.yaml"))
         atomic_write_yaml(thesis_dir / "thesis.yaml", thesis.to_dict(), self.root)
@@ -2008,7 +2301,10 @@ class ThesisRepository:
         atomic_write_yaml(thesis_dir / "state.yaml", candidate.to_dict(), self.root)
 
     def _fold_live_questions(
-        self, thesis_dir: Path, thesis_id: str, additions: list[object],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        additions: list[object],
     ) -> bool:
         """Live questions.yaml fold: append by id, persist, report change."""
         raw = load_raw_yaml(thesis_dir / "questions.yaml")
@@ -2016,14 +2312,21 @@ class ThesisRepository:
         entries = raw.get("questions", [])
         if not isinstance(entries, list):
             raise ValueError(f"{thesis_dir}/questions.yaml: 'questions' must be a list")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
-        questions_raw: dict[str, JSONValue] = {"schema_version": raw.get("schema_version", SCHEMA_VERSION),
-                                               "thesis_id": thesis_id, "questions": entries}
+        questions_raw: dict[str, JSONValue] = {
+            "schema_version": raw.get("schema_version", SCHEMA_VERSION),
+            "thesis_id": thesis_id,
+            "questions": entries,
+        }
         added = _append_questions(questions_raw, additions, thesis_dir)
         atomic_write_yaml(thesis_dir / "questions.yaml", raw, self.root)
         return added
 
     def _fold_live_memories(
-        self, thesis_dir: Path, thesis_id: str, additions: list[object], eff: str,
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        additions: list[object],
+        eff: str,
     ) -> bool:
         """Live memory.yaml fold: append by id, persist, report change."""
         raw = load_raw_yaml(thesis_dir / "memory.yaml")
@@ -2031,14 +2334,21 @@ class ThesisRepository:
         entries = raw.get("memories", [])
         if not isinstance(entries, list):
             raise ValueError(f"{thesis_dir}/memory.yaml: 'memories' must be a list")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
-        memory_raw: dict[str, JSONValue] = {"schema_version": raw.get("schema_version", SCHEMA_VERSION),
-                                            "thesis_id": thesis_id, "memories": entries}
+        memory_raw: dict[str, JSONValue] = {
+            "schema_version": raw.get("schema_version", SCHEMA_VERSION),
+            "thesis_id": thesis_id,
+            "memories": entries,
+        }
         added = _append_memories(memory_raw, additions, thesis_dir, eff)
         atomic_write_yaml(thesis_dir / "memory.yaml", raw, self.root)
         return added
 
     def _fold_live_watch(
-        self, thesis_dir: Path, thesis_id: str, thesis: Thesis, additions: list[object],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        thesis: Thesis,
+        additions: list[object],
     ) -> bool:
         """Live watch.yaml fold: cross-ref against live Thesis, persist, report change."""
         raw = load_raw_yaml(thesis_dir / "watch.yaml")
@@ -2046,14 +2356,20 @@ class ThesisRepository:
         entries = raw.get("rules", [])
         if not isinstance(entries, list):
             raise ValueError(f"{thesis_dir}/watch.yaml: 'rules' must be a list")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
-        watch_raw: dict[str, JSONValue] = {"schema_version": raw.get("schema_version", SCHEMA_VERSION),
-                                           "thesis_id": thesis_id, "rules": entries}
+        watch_raw: dict[str, JSONValue] = {
+            "schema_version": raw.get("schema_version", SCHEMA_VERSION),
+            "thesis_id": thesis_id,
+            "rules": entries,
+        }
         added = _append_watch_rules(watch_raw, additions, thesis.to_dict(), thesis_dir)
         atomic_write_yaml(thesis_dir / "watch.yaml", raw, self.root)
         return added
 
     def _fold_live_answers(
-        self, thesis_dir: Path, thesis_id: str, answers: list[object],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        answers: list[object],
     ) -> bool:
         """Live questions-answered fold: patch file, persist, report change."""
         qpath = thesis_dir / "questions.yaml"
@@ -2062,69 +2378,97 @@ class ThesisRepository:
         entries = qraw.get("questions", [])
         if not isinstance(entries, list):
             raise ValueError(f"{qpath}: 'questions' must be a list")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
-        questions_raw: dict[str, JSONValue] = {"schema_version": qraw.get("schema_version", SCHEMA_VERSION),
-                                               "thesis_id": thesis_id, "questions": entries}
+        questions_raw: dict[str, JSONValue] = {
+            "schema_version": qraw.get("schema_version", SCHEMA_VERSION),
+            "thesis_id": thesis_id,
+            "questions": entries,
+        }
         _mark_questions_answered(questions_raw, answers, thesis_dir)
         atomic_write_yaml(qpath, qraw, self.root)
         return True
 
     def _resolve_apply_gate(
-        self, thesis_dir: Path, thesis_id: str, trigger_id: str,
-        journal_entry: Mapping[str, object] | None, allowed_refs: set[str] | None,
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        trigger_id: str,
+        journal_entry: Mapping[str, object] | None,
+        allowed_refs: set[str] | None,
     ) -> tuple[Path | None, dict[str, JSONValue] | None, set[str] | None]:
         """Trigger load + allowed-set for one commit (no writes)."""
         if not trigger_id:
             return None, None, None
         tpath, raw_trigger = self._load_trigger_raw(thesis_dir, thesis_id, trigger_id)
-        return tpath, raw_trigger, _resolve_gate_allowed(
-            thesis_dir, thesis_id, journal_entry, raw_trigger, allowed_refs)
-
+        return (
+            tpath,
+            raw_trigger,
+            _resolve_gate_allowed(thesis_dir, thesis_id, journal_entry, raw_trigger, allowed_refs),
+        )
 
     def _backdated_patches(
-        self, base: ThesisStateSnapshot, thesis_dir: Path, thesis_id: str, inputs: _ApplyInputs,
+        self,
+        base: ThesisStateSnapshot,
+        thesis_dir: Path,
+        thesis_id: str,
+        inputs: _ApplyInputs,
     ) -> tuple[dict[str, dict[str, object]], dict[str, dict[str, object]]]:
         """As-of claim/expression patches (membership against the snapshot)."""
         claim_patch = _apply_claim_patch(
-            inputs.claim_updates,
-            _snapshot_member_ids(base.thesis.get("claims", []), "claim_id"),
-            thesis_dir, thesis_id)
+            inputs.claim_updates, _snapshot_member_ids(base.thesis.get("claims", []), "claim_id"), thesis_dir, thesis_id
+        )
         expr_patch = _apply_expression_patch(
             inputs.expression_updates,
             _snapshot_member_ids(base.thesis.get("expressions", []), "expression_id"),
-            thesis_dir, thesis_id)
+            thesis_dir,
+            thesis_id,
+        )
         return claim_patch, expr_patch
 
     def _backdated_section_folds(
-        self, thesis_dir: Path, eff: str, inputs: _ApplyInputs,
+        self,
+        thesis_dir: Path,
+        eff: str,
+        inputs: _ApplyInputs,
         thesis_d: Mapping[str, object],
-        questions_raw: dict[str, JSONValue], memory_raw: dict[str, JSONValue],
+        questions_raw: dict[str, JSONValue],
+        memory_raw: dict[str, JSONValue],
         watch_raw: dict[str, JSONValue],
     ) -> _ApplyFold:
         """Append phases against as-of copies; returns change flags."""
-        questions_added = _append_questions(
-            questions_raw, inputs.questions_add, thesis_dir) if inputs.questions_add else False
-        memories_added = _append_memories(
-            memory_raw, inputs.memories_add, thesis_dir, eff) if inputs.memories_add else False
-        watch_added = _append_watch_rules(
-            watch_raw, inputs.watch_add, thesis_d, thesis_dir) if inputs.watch_add else False
+        questions_added = (
+            _append_questions(questions_raw, inputs.questions_add, thesis_dir) if inputs.questions_add else False
+        )
+        memories_added = (
+            _append_memories(memory_raw, inputs.memories_add, thesis_dir, eff) if inputs.memories_add else False
+        )
+        watch_added = (
+            _append_watch_rules(watch_raw, inputs.watch_add, thesis_d, thesis_dir) if inputs.watch_add else False
+        )
         answered_updated = bool(inputs.questions_answered)
         if inputs.questions_answered:
             _mark_questions_answered(questions_raw, inputs.questions_answered, thesis_dir)
-        return _ApplyFold(False, inputs.state is not None,
-                           questions_added, memories_added, watch_added, answered_updated)
+        return _ApplyFold(
+            False, inputs.state is not None, questions_added, memories_added, watch_added, answered_updated
+        )
 
     def _apply_backdated_locked(
-        self, thesis_dir: Path, thesis_id: str, eff: str, inputs: _ApplyInputs,
-        run_id: str, allowed_refs: set[str] | None, outcome: dict[str, JSONValue],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        eff: str,
+        inputs: _ApplyInputs,
+        run_id: str,
+        allowed_refs: set[str] | None,
+        outcome: dict[str, JSONValue],
     ) -> None:
         """Backdated commit: patch as-of snapshot copies, snapshot-only persist."""
         base = self.load_state_as_of(thesis_id, eff)
         if base.thesis.get("status") == models.ThesisStatus.CLOSED.value:
-            raise ValueError(
-                f"{thesis_dir}: thesis {thesis_id!r} is closed; refusing research writeback")
+            raise ValueError(f"{thesis_dir}: thesis {thesis_id!r} is closed; refusing research writeback")
         claim_patch, expr_patch = self._backdated_patches(base, thesis_dir, thesis_id, inputs)
         tpath, raw_trigger, allowed = self._resolve_apply_gate(
-            thesis_dir, thesis_id, inputs.trigger_id, inputs.journal_entry, allowed_refs)
+            thesis_dir, thesis_id, inputs.trigger_id, inputs.journal_entry, allowed_refs
+        )
         _check_evidence_provenance(inputs.evidence_refs, allowed, thesis_dir, inputs.trigger_id)
         thesis_d = dict(base.thesis)
         state_d = dict(base.state)
@@ -2133,106 +2477,167 @@ class ThesisRepository:
         watch_raw, _ = _copy_section_list(base.watch, "rules", thesis_id, SCHEMA_VERSION)
         if claim_patch or expr_patch:
             thesis_d = _fold_claim_expression(
-                base.thesis, claim_patch, expr_patch, thesis_id, eff,
-                str(thesis_dir / "thesis.yaml"))
+                base.thesis, claim_patch, expr_patch, thesis_id, eff, str(thesis_dir / "thesis.yaml")
+            )
         if inputs.state is not None:
             state_d = _fold_state_candidate(inputs.state, thesis_id, thesis_dir)
-        flags = self._backdated_section_folds(
-            thesis_dir, eff, inputs, thesis_d, questions_raw, memory_raw, watch_raw)
+        flags = self._backdated_section_folds(thesis_dir, eff, inputs, thesis_d, questions_raw, memory_raw, watch_raw)
         self._backdated_side_effects(
-            thesis_dir, thesis_id, eff, inputs, run_id, tpath, raw_trigger,
-            claim_patch, expr_patch, outcome,
-            thesis_d, state_d, questions_raw, watch_raw, memory_raw, flags)
+            thesis_dir,
+            thesis_id,
+            eff,
+            inputs,
+            run_id,
+            tpath,
+            raw_trigger,
+            claim_patch,
+            expr_patch,
+            outcome,
+            thesis_d,
+            state_d,
+            questions_raw,
+            watch_raw,
+            memory_raw,
+            flags,
+        )
 
     def _backdated_side_effects(
-        self, thesis_dir: Path, thesis_id: str, eff: str, inputs: _ApplyInputs,
-        run_id: str, tpath: Path | None, raw_trigger: dict[str, JSONValue] | None,
-        claim_patch: dict[str, dict[str, object]], expr_patch: dict[str, dict[str, object]],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        eff: str,
+        inputs: _ApplyInputs,
+        run_id: str,
+        tpath: Path | None,
+        raw_trigger: dict[str, JSONValue] | None,
+        claim_patch: dict[str, dict[str, object]],
+        expr_patch: dict[str, dict[str, object]],
         outcome: dict[str, JSONValue],
-        thesis_d: dict[str, JSONValue], state_d: dict[str, JSONValue],
-        questions_raw: dict[str, JSONValue], watch_raw: dict[str, JSONValue],
-        memory_raw: dict[str, JSONValue], flags: _ApplyFold,
+        thesis_d: dict[str, JSONValue],
+        state_d: dict[str, JSONValue],
+        questions_raw: dict[str, JSONValue],
+        watch_raw: dict[str, JSONValue],
+        memory_raw: dict[str, JSONValue],
+        flags: _ApplyFold,
     ) -> None:
         """Backdated evidence/journal/trigger writes plus snapshot persist."""
-        outcome["evidence"] = _append_evidence_refs(
-            self.root, thesis_dir, thesis_id, inputs.evidence_refs)
+        outcome["evidence"] = _append_evidence_refs(self.root, thesis_dir, thesis_id, inputs.evidence_refs)
         journaled = _write_journal_entry(
-            self.root, thesis_dir, thesis_id, inputs.journal_entry, run_id, inputs.trigger_id)
+            self.root, thesis_dir, thesis_id, inputs.journal_entry, run_id, inputs.trigger_id
+        )
         if journaled is not None:
             outcome["journal"] = journaled
-        marked = _mark_trigger_processed(
-            self, thesis_dir, thesis_id, inputs.trigger_id, run_id, tpath, raw_trigger)
+        marked = _mark_trigger_processed(self, thesis_dir, thesis_id, inputs.trigger_id, run_id, tpath, raw_trigger)
         if marked is not None:
             outcome["trigger"] = marked
         if flags.dirty(bool(claim_patch or expr_patch)):
             self._write_snapshot_from_dicts_locked(
-                thesis_dir, thesis_id, effective_at=eff, reason="research_result",
-                run_id=run_id, trigger_id=inputs.trigger_id,
-                thesis=thesis_d, state=state_d, questions=questions_raw,
-                watch=watch_raw, memory=memory_raw)
+                thesis_dir,
+                thesis_id,
+                effective_at=eff,
+                reason="research_result",
+                run_id=run_id,
+                trigger_id=inputs.trigger_id,
+                thesis=thesis_d,
+                state=state_d,
+                questions=questions_raw,
+                watch=watch_raw,
+                memory=memory_raw,
+            )
 
     def _apply_live_locked(
-        self, thesis_dir: Path, thesis_id: str, thesis: Thesis, eff: str, inputs: _ApplyInputs,
-        run_id: str, allowed_refs: set[str] | None, outcome: dict[str, JSONValue],
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        thesis: Thesis,
+        eff: str,
+        inputs: _ApplyInputs,
+        run_id: str,
+        allowed_refs: set[str] | None,
+        outcome: dict[str, JSONValue],
     ) -> Thesis:
         """Live commit: patch live files in fixed phase order, then snapshot."""
         if thesis.status == models.ThesisStatus.CLOSED.value:
             raise ValueError(f"{thesis_dir}: thesis {thesis_id!r} is closed; refusing research writeback")
         claim_patch = _apply_claim_patch(
-            inputs.claim_updates, {x.claim_id for x in thesis.claims}, thesis_dir, thesis_id)
+            inputs.claim_updates, {x.claim_id for x in thesis.claims}, thesis_dir, thesis_id
+        )
         expr_patch = _apply_expression_patch(
-            inputs.expression_updates, {x.expression_id for x in thesis.expressions},
-            thesis_dir, thesis_id)
+            inputs.expression_updates, {x.expression_id for x in thesis.expressions}, thesis_dir, thesis_id
+        )
         tpath, raw_trigger, allowed = self._resolve_apply_gate(
-            thesis_dir, thesis_id, inputs.trigger_id, inputs.journal_entry, allowed_refs)
+            thesis_dir, thesis_id, inputs.trigger_id, inputs.journal_entry, allowed_refs
+        )
         _check_evidence_provenance(inputs.evidence_refs, allowed, thesis_dir, inputs.trigger_id)
-        thesis = self._fold_live_claim_expression(
-            thesis_dir, thesis_id, thesis, claim_patch, expr_patch, eff)
-        outcome["evidence"] = _append_evidence_refs(
-            self.root, thesis_dir, thesis_id, inputs.evidence_refs)
+        thesis = self._fold_live_claim_expression(thesis_dir, thesis_id, thesis, claim_patch, expr_patch, eff)
+        outcome["evidence"] = _append_evidence_refs(self.root, thesis_dir, thesis_id, inputs.evidence_refs)
         flags = self._live_section_folds(thesis_dir, thesis_id, thesis, eff, inputs)
         journaled = _write_journal_entry(
-            self.root, thesis_dir, thesis_id, inputs.journal_entry, run_id, inputs.trigger_id)
+            self.root, thesis_dir, thesis_id, inputs.journal_entry, run_id, inputs.trigger_id
+        )
         if journaled is not None:
             outcome["journal"] = journaled
-        marked = _mark_trigger_processed(
-            self, thesis_dir, thesis_id, inputs.trigger_id, run_id, tpath, raw_trigger)
+        marked = _mark_trigger_processed(self, thesis_dir, thesis_id, inputs.trigger_id, run_id, tpath, raw_trigger)
         if marked is not None:
             outcome["trigger"] = marked
         if flags.dirty(bool(claim_patch or expr_patch)):
             self._snapshot_state_locked(
-                thesis_dir, thesis_id, effective_at=eff, reason="research_result",
-                run_id=run_id, trigger_id=inputs.trigger_id)
+                thesis_dir,
+                thesis_id,
+                effective_at=eff,
+                reason="research_result",
+                run_id=run_id,
+                trigger_id=inputs.trigger_id,
+            )
         return thesis
 
     def _live_qmw_folds(
-        self, thesis_dir: Path, thesis_id: str, thesis: Thesis, eff: str, inputs: _ApplyInputs,
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        thesis: Thesis,
+        eff: str,
+        inputs: _ApplyInputs,
     ) -> tuple[bool, bool, bool]:
         """Live questions/memory/watch folds (each gated on its additions)."""
-        questions_added = self._fold_live_questions(
-            thesis_dir, thesis_id, inputs.questions_add) if inputs.questions_add else False
-        memories_added = self._fold_live_memories(
-            thesis_dir, thesis_id, inputs.memories_add, eff) if inputs.memories_add else False
-        watch_added = self._fold_live_watch(
-            thesis_dir, thesis_id, thesis, inputs.watch_add) if inputs.watch_add else False
+        questions_added = (
+            self._fold_live_questions(thesis_dir, thesis_id, inputs.questions_add) if inputs.questions_add else False
+        )
+        memories_added = (
+            self._fold_live_memories(thesis_dir, thesis_id, inputs.memories_add, eff) if inputs.memories_add else False
+        )
+        watch_added = (
+            self._fold_live_watch(thesis_dir, thesis_id, thesis, inputs.watch_add) if inputs.watch_add else False
+        )
         return questions_added, memories_added, watch_added
 
     def _live_section_folds(
-        self, thesis_dir: Path, thesis_id: str, thesis: Thesis, eff: str, inputs: _ApplyInputs,
+        self,
+        thesis_dir: Path,
+        thesis_id: str,
+        thesis: Thesis,
+        eff: str,
+        inputs: _ApplyInputs,
     ) -> _ApplyFold:
         """Live questions/memory/watch/answers/state folds; returns change flags."""
         state_changed = inputs.state is not None
         if state_changed:
             self._fold_live_state(thesis_dir, thesis_id, inputs.state)
-        questions_added, memories_added, watch_added = self._live_qmw_folds(
-            thesis_dir, thesis_id, thesis, eff, inputs)
-        answered_updated = self._fold_live_answers(
-            thesis_dir, thesis_id, inputs.questions_answered) if inputs.questions_answered else False
+        questions_added, memories_added, watch_added = self._live_qmw_folds(thesis_dir, thesis_id, thesis, eff, inputs)
+        answered_updated = (
+            self._fold_live_answers(thesis_dir, thesis_id, inputs.questions_answered)
+            if inputs.questions_answered
+            else False
+        )
         return _ApplyFold(False, state_changed, questions_added, memories_added, watch_added, answered_updated)
 
-
     def apply_research_result(
-        self, thesis_id: str, result: Mapping[str, object], run_id: str = "", *, allowed_refs: set[str] | None = None,
+        self,
+        thesis_id: str,
+        result: Mapping[str, object],
+        run_id: str = "",
+        *,
+        allowed_refs: set[str] | None = None,
         effective_at: str | None = None,
     ) -> dict[str, JSONValue]:
         """Single replayable research commit; de-dup additions by ID (crash-retry safe).
@@ -2262,9 +2667,7 @@ class ThesisRepository:
             latest = self._latest_effective_locked(thesis_dir)
             inputs = _coerce_apply_inputs(result, thesis_dir)
             if latest is not None and eff_dt < latest[0]:
-                self._apply_backdated_locked(
-                    thesis_dir, thesis_id, eff, inputs, run_id, allowed_refs, outcome)
+                self._apply_backdated_locked(thesis_dir, thesis_id, eff, inputs, run_id, allowed_refs, outcome)
                 return outcome
-            self._apply_live_locked(
-                thesis_dir, thesis_id, thesis, eff, inputs, run_id, allowed_refs, outcome)
+            self._apply_live_locked(thesis_dir, thesis_id, thesis, eff, inputs, run_id, allowed_refs, outcome)
         return outcome

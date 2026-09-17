@@ -29,11 +29,21 @@ def _seed_all(durable: Path) -> None:
         if name in v.FINRA_SEED_DATASETS:
             parquet.write_rows(name, rows, root=durable / "parquet")
     facts = normalize_sec_company_facts(
-        {"cik": 1, "entityName": "CIK1", "facts": {"dei": {
-            "EntityCommonStockSharesOutstanding": {"units": {"shares": [
-                {"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"},
-            ]}},
-        }}},
+        {
+            "cik": 1,
+            "entityName": "CIK1",
+            "facts": {
+                "dei": {
+                    "EntityCommonStockSharesOutstanding": {
+                        "units": {
+                            "shares": [
+                                {"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"},
+                            ]
+                        }
+                    },
+                }
+            },
+        },
         retrieved_at="2026-08-10T12:00:00Z",
         content_hash="facts-1",
         source_url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000000001.json",
@@ -43,8 +53,7 @@ def _seed_all(durable: Path) -> None:
         if name in v.FINRA_SEED_DATASETS:
             parquet.write_rows(name, rows, root=durable / "parquet")
     snap = normalize_finra_short_interest(
-        [{"symbolCode": "AAA", "issueName": "Alpha",
-          "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20}],
+        [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20}],
         settlement_date=SETTLEMENT,
         known_at="2026-08-20T12:00:00Z",
         retrieved_at="2026-08-30T12:00:00Z",
@@ -57,23 +66,28 @@ def _seed_all(durable: Path) -> None:
 
 
 def _main_mocks(
-    monkeypatch: pytest.MonkeyPatch, durable: Path, tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    durable: Path,
+    tmp_path: Path,
 ) -> list[list[tuple[str, int]]]:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "argv", ["verify", "--tool", "get_short_interest_leaderboard"])
     monkeypatch.setenv("PI_VERIFY_REPETITIONS", "1")
     monkeypatch.setattr(v, "get_data_root", lambda: durable)
     monkeypatch.setattr(
-        v, "discover",
+        v,
+        "discover",
         lambda: (
             {"tools": [{"function": {"name": "get_short_interest_leaderboard"}}]},
-            {"bridge_ok": True, "tool_count": 1,
-             "tool_names": ["get_short_interest_leaderboard"]},
+            {"bridge_ok": True, "tool_count": 1, "tool_names": ["get_short_interest_leaderboard"]},
         ),
     )
     matrix_calls: list[list[tuple[str, int]]] = []
+
     def _matrix(
-        jobs: list[tuple[str, int]], _worker: object, _concurrency: int,
+        jobs: list[tuple[str, int]],
+        _worker: object,
+        _concurrency: int,
     ) -> list[object]:
         matrix_calls.append(jobs)
         return []
@@ -119,7 +133,9 @@ def test_missing_fetch_called_once_then_copy(tmp_path: Path, monkeypatch: pytest
 
 
 def test_missing_env_unset_main_fails_without_matrix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     durable = tmp_path / "durable"
     _seed_all(durable)
@@ -132,7 +148,9 @@ def test_missing_env_unset_main_fails_without_matrix(
 
 
 def test_fetch_failure_main_fails_without_matrix(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str],
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+    capsys: pytest.CaptureFixture[str],
 ) -> None:
     durable = tmp_path / "durable"
     _seed_all(durable)
@@ -150,11 +168,12 @@ def test_fetch_failure_main_fails_without_matrix(
 
 
 def test_fetch_orchestrates_refresh_confirm_and_tolerates_one_cik(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    import app.analytics.screens as screens
     import app.services.research_data as rd
     import app.storage.duckdb as dd
+    from app.analytics import screens
 
     durable = tmp_path / "durable"
     seen: list[int] = []
@@ -172,7 +191,9 @@ def test_fetch_orchestrates_refresh_confirm_and_tolerates_one_cik(
         return {"cik": cik}
 
     def _rows(
-        sql: str, params: object = (), data_root: Path | None = None,
+        sql: str,
+        params: object = (),
+        data_root: Path | None = None,
     ) -> list[dict[str, object]]:
         return [
             {"symbol_code": "AAA", "pos": 100},

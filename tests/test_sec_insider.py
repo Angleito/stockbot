@@ -2,19 +2,25 @@
 
 from pathlib import Path
 from types import SimpleNamespace
-from typing import override
+from typing import ClassVar, override
 
 import pytest
 
-import app.sec.insider as insider
+from app.sec import insider
 from app.sec.models import InsiderTransaction, ProposedInsiderSale
 
 
 class _Activity:
-    def __init__(self, code: str | None = None, shares: str | int | None = None,
-                 price: str | float | None = None, date: str | None = None,
-                 title: str | None = None, ad: str | None = None,
-                 holdings: str | int | None = None) -> None:
+    def __init__(
+        self,
+        code: str | None = None,
+        shares: str | int | None = None,
+        price: str | float | None = None,
+        date: str | None = None,
+        title: str | None = None,
+        ad: str | None = None,
+        holdings: str | int | None = None,
+    ) -> None:
         self.transaction_code = code
         self.shares = shares
         self.price = price
@@ -36,22 +42,22 @@ class _Obj:
 
 def test_code_kinds_and_missing_fields():
     rows = [
-        _Activity(code="P", shares="1,000", price="10.5", date="2024-01-10",
-                  title="Common", ad="A", holdings="5000"),
-        _Activity(code="S", shares=200, price=11.0, date="2024-02-10",
-                  title="Common", ad="D", holdings=4800),
-        _Activity(code="M", shares=50, price="0", date="2024-03-10",
-                  title="Option", ad="A", holdings=4850),
-        _Activity(code="Z", shares=7, price=1.0, date="2024-04-10",
-                  title="Common", ad="A", holdings=4857),
+        _Activity(code="P", shares="1,000", price="10.5", date="2024-01-10", title="Common", ad="A", holdings="5000"),
+        _Activity(code="S", shares=200, price=11.0, date="2024-02-10", title="Common", ad="D", holdings=4800),
+        _Activity(code="M", shares=50, price="0", date="2024-03-10", title="Option", ad="A", holdings=4850),
+        _Activity(code="Z", shares=7, price=1.0, date="2024-04-10", title="Common", ad="A", holdings=4857),
         _Activity(),  # everything missing
     ]
     txns = insider.normalize_ownership_filing(
-        _Obj(rows), issuer="ACME", form="4", filed_at="2024-05-01",
-        accession_no="x1")
+        _Obj(rows), issuer="ACME", form="4", filed_at="2024-05-01", accession_no="x1"
+    )
     assert [t.transaction_kind for t in txns] == [
-        "open_market_purchase", "open_market_sale", "exercise", "other",
-        "other"]
+        "open_market_purchase",
+        "open_market_sale",
+        "exercise",
+        "other",
+        "other",
+    ]
     # never default unknown disposals to bearish selling
     assert txns[3].transaction_kind == "other"
     assert txns[3].transaction_kind != "open_market_sale"
@@ -63,7 +69,7 @@ def test_code_kinds_and_missing_fields():
 
 
 class _FakeDF:
-    columns = ["Shares to be sold"]
+    columns: ClassVar[object] = ["Shares to be sold"]
 
     def __getitem__(self, key: str) -> list[str | None]:
         assert key == "Shares to be sold"
@@ -71,32 +77,27 @@ class _FakeDF:
 
 
 def test_normalize_144_sums_shares_column():
-    form144 = SimpleNamespace(person_selling="John Smith",
-                              seller_cik="123",
-                              securities_to_be_sold=_FakeDF())
-    sale = insider.normalize_144(form144, issuer="ACME",
-                                 filed_at="2024-05-01", accession_no="t1")
+    form144 = SimpleNamespace(person_selling="John Smith", seller_cik="123", securities_to_be_sold=_FakeDF())
+    sale = insider.normalize_144(form144, issuer="ACME", filed_at="2024-05-01", accession_no="t1")
     assert sale.seller_name == "John Smith"
     assert sale.shares_proposed == 1500
 
 
 def test_normalize_144_never_raises():
-    sale = insider.normalize_144(object(), issuer="ACME", filed_at=None,
-                                 accession_no="t9")
+    sale = insider.normalize_144(object(), issuer="ACME", filed_at=None, accession_no="t9")
     assert sale.shares_proposed is None
 
 
 def test_compare_144_to_form4_date_filter():
-    proposed = ProposedInsiderSale("John Smith", "123", "ACME", "2024-05-01",
-                                   "t1", shares_proposed=1500)
+    proposed = ProposedInsiderSale("John Smith", "123", "ACME", "2024-05-01", "t1", shares_proposed=1500)
 
     def txn(name: str, date: str, shares: int, kind: str = "open_market_sale") -> InsiderTransaction:
-        return InsiderTransaction(name, "123", "ACME", "4", "2024-06-01",
-                                  "f1", date, "Common", "S", kind, shares,
-                                  10.0, "D", 1000)
+        return InsiderTransaction(
+            name, "123", "ACME", "4", "2024-06-01", "f1", date, "Common", "S", kind, shares, 10.0, "D", 1000
+        )
 
     txns = [
-        txn("john smith", "2024-06-01", 400),   # later sale, case-insensitive
+        txn("john smith", "2024-06-01", 400),  # later sale, case-insensitive
         txn("John Smith", "2024-04-01", 9999),  # earlier sale: ignored
         txn("John Smith", "2024-06-02", 100, kind="open_market_purchase"),
         txn("Someone Else", "2024-06-03", 500),
@@ -109,8 +110,7 @@ def test_compare_144_to_form4_date_filter():
 
 
 def test_compare_144_unmatched():
-    proposed = ProposedInsiderSale("Jane Doe", None, "ACME", "2024-05-01",
-                                   "t2", shares_proposed=100)
+    proposed = ProposedInsiderSale("Jane Doe", None, "ACME", "2024-05-01", "t2", shares_proposed=100)
     result = insider.compare_144_to_form4(proposed, [])
     assert result["matched"] is False
     assert result["executed_sale_shares"] == 0
@@ -118,10 +118,8 @@ def test_compare_144_unmatched():
 
 def test_get_insider_activity_skips_failed_loads(monkeypatch: pytest.MonkeyPatch) -> None:
     filings = [
-        SimpleNamespace(accession_no="g1", form="4", filed_at="2024-01-15",
-                        company="ACME"),
-        SimpleNamespace(accession_no="bad", form="4", filed_at="2024-02-15",
-                        company="ACME"),
+        SimpleNamespace(accession_no="g1", form="4", filed_at="2024-01-15", company="ACME"),
+        SimpleNamespace(accession_no="bad", form="4", filed_at="2024-02-15", company="ACME"),
     ]
 
     def fake_list(*args: object, **kwargs: object) -> list[SimpleNamespace]:
@@ -143,13 +141,24 @@ def test_get_insider_activity_skips_failed_loads(monkeypatch: pytest.MonkeyPatch
 def test_store_queries_insider_both_directions(tmp_path: Path) -> None:
     from app.sec.store import query_insider_transactions, store_insider_transaction
 
-    assert store_insider_transaction({
-        "accession": "0000000000-25-000015", "form": "4",
-        "issuer_cik": 320193, "issuer_name": "Issuer Inc",
-        "owner_cik": 1206472, "owner_name": "Jane Doe",
-        "is_director": True, "transaction_code": "P",
-        "shares": 100, "known_at": "2024-04-01",
-    }, root=tmp_path) == 1
+    assert (
+        store_insider_transaction(
+            {
+                "accession": "0000000000-25-000015",
+                "form": "4",
+                "issuer_cik": 320193,
+                "issuer_name": "Issuer Inc",
+                "owner_cik": 1206472,
+                "owner_name": "Jane Doe",
+                "is_director": True,
+                "transaction_code": "P",
+                "shares": 100,
+                "known_at": "2024-04-01",
+            },
+            root=tmp_path,
+        )
+        == 1
+    )
     by_issuer = query_insider_transactions(issuer_cik=320193, root=tmp_path)
     assert by_issuer[0]["owner_name"] == "Jane Doe"
     assert by_issuer[0]["is_director"] is True
@@ -163,58 +172,106 @@ def test_13f_provisional_security_id_and_governed_mapping(tmp_path: Path) -> Non
     from app.sec import insider as _ins
     from app.sec.store import query_13f_holdings_for_issuer, store_13f_holding
     from app.storage import parquet as _pq
+
     now = "2024-05-20T00:00:00Z"
-    _pq.write_rows("entities", [{"entity_id": "sec:cik:0000320193", "name": "Apple Inc.",
-                                 "entity_type": "company", "sic": None, "source": "sec-submissions",
-                                 "known_at": "2024-01-01T00:00:00Z", "retrieved_at": now,
-                                 "content_hash": None, "parser_version": "1"}], root=tmp_path / "parquet")
-    rec = _ins._holding_row_to_record({"Cusip": "037833100", "Issuer": "Apple Inc.",
-                                       "ReportPeriod": "2024-03-31", "Class": "Common Stock"},
-                                      manager_name="Berkshire", manager_cik="1067983",
-                                      accession_no="ACC-13F-1", report_period="2024-03-31",
-                                      filed_at="2024-05-15", document_name="infotable.xml",
-                                      known_at="2024-05-15T00:00:00Z", source_url=None,
-                                      source_row=1)
+    _pq.write_rows(
+        "entities",
+        [
+            {
+                "entity_id": "sec:cik:0000320193",
+                "name": "Apple Inc.",
+                "entity_type": "company",
+                "sic": None,
+                "source": "sec-submissions",
+                "known_at": "2024-01-01T00:00:00Z",
+                "retrieved_at": now,
+                "content_hash": None,
+                "parser_version": "1",
+            }
+        ],
+        root=tmp_path / "parquet",
+    )
+    rec = _ins._holding_row_to_record(
+        {"Cusip": "037833100", "Issuer": "Apple Inc.", "ReportPeriod": "2024-03-31", "Class": "Common Stock"},
+        manager_name="Berkshire",
+        manager_cik="1067983",
+        accession_no="ACC-13F-1",
+        report_period="2024-03-31",
+        filed_at="2024-05-15",
+        document_name="infotable.xml",
+        known_at="2024-05-15T00:00:00Z",
+        source_url=None,
+        source_row=1,
+    )
     assert rec.security_id == "cusip:037833100" and rec.entity_id is None
-    assert _ins.observe_13f_security(rec, raw_archive_path="/tmp/p", content_hash="h1",
-                                     retrieved_at=now, root=tmp_path) >= 2
+    assert (
+        _ins.observe_13f_security(rec, raw_archive_path="/tmp/p", content_hash="h1", retrieved_at=now, root=tmp_path)
+        >= 2
+    )
     store_13f_holding(rec.to_dict(), root=tmp_path)
     inv = query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path)
     assert len(inv) == 1 and inv[0]["entity_id"] == "sec:cik:0000320193"
-    rec2 = _ins._holding_row_to_record({"Cusip": "594918104", "Issuer": "Apple Inc.",
-                                        "ReportPeriod": "bad", "Class": "Common"},
-                                       manager_name="M", manager_cik="1", accession_no="ACC-BAD",
-                                       report_period="bad", filed_at="2024-05-15",
-                                       document_name="d", known_at="2024-05-15T00:00:00Z",
-                                       source_url=None, source_row=1)
-    assert _ins.observe_13f_security(rec2, raw_archive_path="/tmp/p", content_hash="h2",
-                                     retrieved_at=now, root=tmp_path) == 1
+    rec2 = _ins._holding_row_to_record(
+        {"Cusip": "594918104", "Issuer": "Apple Inc.", "ReportPeriod": "bad", "Class": "Common"},
+        manager_name="M",
+        manager_cik="1",
+        accession_no="ACC-BAD",
+        report_period="bad",
+        filed_at="2024-05-15",
+        document_name="d",
+        known_at="2024-05-15T00:00:00Z",
+        source_url=None,
+        source_row=1,
+    )
+    assert (
+        _ins.observe_13f_security(rec2, raw_archive_path="/tmp/p", content_hash="h2", retrieved_at=now, root=tmp_path)
+        == 1
+    )
     # Ambiguous candidates exclude mapping.
-    _pq.write_rows("entities", [{"entity_id": "sec:cik:0000000002", "name": "Apple Inc.",
-                                 "entity_type": "company", "sic": None, "source": "sec-submissions",
-                                 "known_at": "2024-02-01T00:00:00Z", "retrieved_at": now,
-                                 "content_hash": None, "parser_version": "1"}], root=tmp_path / "parquet")
-    rec3 = _ins._holding_row_to_record({"Cusip": "037833100", "Issuer": "Apple Inc.",
-                                        "ReportPeriod": "2024-03-31"},
-                                       manager_name="M2", manager_cik="2", accession_no="ACC-AMB",
-                                       report_period="2024-03-31", filed_at="2024-05-15",
-                                       document_name="d", known_at="2024-05-15T00:00:00Z",
-                                       source_url=None, source_row=1)
-    _ins.observe_13f_security(rec3, raw_archive_path="/tmp/p2", content_hash="h3",
-                              retrieved_at=now, root=tmp_path)
+    _pq.write_rows(
+        "entities",
+        [
+            {
+                "entity_id": "sec:cik:0000000002",
+                "name": "Apple Inc.",
+                "entity_type": "company",
+                "sic": None,
+                "source": "sec-submissions",
+                "known_at": "2024-02-01T00:00:00Z",
+                "retrieved_at": now,
+                "content_hash": None,
+                "parser_version": "1",
+            }
+        ],
+        root=tmp_path / "parquet",
+    )
+    rec3 = _ins._holding_row_to_record(
+        {"Cusip": "037833100", "Issuer": "Apple Inc.", "ReportPeriod": "2024-03-31"},
+        manager_name="M2",
+        manager_cik="2",
+        accession_no="ACC-AMB",
+        report_period="2024-03-31",
+        filed_at="2024-05-15",
+        document_name="d",
+        known_at="2024-05-15T00:00:00Z",
+        source_url=None,
+        source_row=1,
+    )
+    _ins.observe_13f_security(rec3, raw_archive_path="/tmp/p2", content_hash="h3", retrieved_at=now, root=tmp_path)
     store_13f_holding(rec3.to_dict(), root=tmp_path)
     assert query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path) == []
 
 
 def test_values_by_column_getitem_fast_path() -> None:
     class _Frame:
-        columns = ["shares"]
+        columns: ClassVar[object] = ["shares"]
 
         def __getitem__(self, key: object) -> object:
             assert key == "shares"
             return [100, 200]
 
     assert insider._values_by_column(_Frame(), "shares") == [100, 200]
+
 
 def test_values_by_column_row_scan_fallbacks() -> None:
     dict_rows: list[object] = [{"shares": "1,000"}, {"shares": None}, {"price": 5}]
@@ -224,6 +281,7 @@ def test_values_by_column_row_scan_fallbacks() -> None:
     assert insider._values_by_column([{"shares": 1}], True) is None
     assert insider._values_by_column([{"shares": 1}], None) is None
     assert insider._values_by_column(42, "shares") is None
+
 
 def test_values_by_column_row_errors_skip() -> None:
     class _BadDict(dict[str, object]):
@@ -237,7 +295,7 @@ def test_values_by_column_row_errors_skip() -> None:
 
 def test_values_by_column_row_coercion_failure_returns_none() -> None:
     class _BadIter:
-        columns = ["shares"]
+        columns: ClassVar[object] = ["shares"]
 
         def __getitem__(self, key: object) -> object:
             raise RuntimeError("boom")

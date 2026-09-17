@@ -65,9 +65,12 @@ def _request_frame(method: str, params: dict[str, object] | None) -> bytes:
 def _subscribe_entry(pane_id: str, match: str) -> dict[str, object]:
     """Per-pane subscription: substring output match, or agent-status watch."""
     if match:
-        return {"type": "pane.output_matched", "pane_id": pane_id,
-                "source": "recent",
-                "match": {"type": "substring", "value": match}}
+        return {
+            "type": "pane.output_matched",
+            "pane_id": pane_id,
+            "source": "recent",
+            "match": {"type": "substring", "value": match},
+        }
     return {"type": "pane.agent_status_changed", "pane_id": pane_id}
 
 
@@ -76,17 +79,19 @@ def _subscribe_frame(pane_ids: list[str] | None, match: str) -> bytes:
     subscriptions: list[dict[str, object]] = [{"type": "pane.created"}, {"type": "pane.closed"}]
     for pane_id in pane_ids or []:
         subscriptions.append(_subscribe_entry(pane_id, match))
-    payload: dict[str, object] = {"id": "sub_operator", "method": "events.subscribe",
-                "params": {"subscriptions": subscriptions}}
+    payload: dict[str, object] = {
+        "id": "sub_operator",
+        "method": "events.subscribe",
+        "params": {"subscriptions": subscriptions},
+    }
     return (json.dumps(payload) + "\n").encode()
+
 
 class HerdrClient:
     """Thin newline-JSON client over ``HERDR_SOCKET_PATH`` (0600, operator-held)."""
 
     def __init__(self, socket_path: str | None = None) -> None:
-        self.socket_path = (
-            socket_path or os.environ.get("HERDR_SOCKET_PATH") or DEFAULT_SOCKET
-        )
+        self.socket_path = socket_path or os.environ.get("HERDR_SOCKET_PATH") or DEFAULT_SOCKET
 
     def _connect(self) -> socket.socket:
         sock = socket.socket(socket.AF_UNIX, socket.SOCK_STREAM)
@@ -111,23 +116,18 @@ class HerdrClient:
                 return message
         raise ConnectionError("empty response from Herdr socket")
 
-    def pane_read(
-        self, pane_id: str, source: str = "recent", lines: int = 200
-    ) -> str:
+    def pane_read(self, pane_id: str, source: str = "recent", lines: int = 200) -> str:
         """RAW LOGS tail for one pane (text, ANSI stripped)."""
         result = self.request(
             "pane.read",
-            {"pane_id": pane_id, "source": source, "lines": lines,
-             "format": "text", "strip_ansi": True},
+            {"pane_id": pane_id, "source": source, "lines": lines, "format": "text", "strip_ansi": True},
         )["result"]
         assert isinstance(result, dict)
         payload = result.get("read", result)
         assert isinstance(payload, dict)
         return str(payload.get("text", ""))
 
-    def subscribe(
-        self, pane_ids: list[str] | None = None, match: str = ""
-    ) -> Iterator[dict[str, object]]:
+    def subscribe(self, pane_ids: list[str] | None = None, match: str = "") -> Iterator[dict[str, object]]:
         """Yield narrow operator events; caller maps pane_id via WorkerMap."""
         sock = self._connect()
         sock.sendall(_subscribe_frame(pane_ids, match))

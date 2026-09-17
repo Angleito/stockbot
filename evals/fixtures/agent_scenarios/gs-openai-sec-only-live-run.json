@@ -1,7 +1,7 @@
 {
   "answer_excerpt": "SEC evidence indicates Goldman Sachs has no disclosed direct OpenAI exposure: full-text search returns zero OpenAI hits. Its 10-K frames any such counterparty failure under general third-party credit and concentration risk, explicitly warning concentration increases potential for significant losses across market-making, underwriting, investing and financing, plus derivatives credit risk. Critically, the 10-K discloses no numeric single-name concentration limit and no OpenAI-specific bound, so an OpenAI bankruptcy cannot be shown as capped by SEC disclosure; impact would depend on undisclosed actual concentration and correlated exposures, likely manageable if diversified but potentially significant if concentrated.",
   "as_of": null,
-  "budget_cap": 60,
+  "budget_cap": null,
   "budget_used": 14,
   "evidence_ids": [
     "rs:4d6534bd-46bc-4b50-b9a6-a999bfa180c0:ev:103c0d89",

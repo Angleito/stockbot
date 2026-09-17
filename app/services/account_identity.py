@@ -13,7 +13,5 @@ def local_account_id(account_id: str) -> str:
     round-trip identity in the analytical tables without exposing the
     account to anyone who reads data/.
     """
-    digest = hashlib.sha256(
-        f"stockbot:local-account:v1:{account_id}".encode("utf-8")
-    ).hexdigest()
+    digest = hashlib.sha256(f"stockbot:local-account:v1:{account_id}".encode()).hexdigest()
     return f"local:{digest[:16]}"

@@ -8,7 +8,7 @@ the versioned Parquet datasets.  Never exposes provider internals.
 from __future__ import annotations
 
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -56,12 +56,12 @@ def resolve_security(
     """
     del provider_instrument_id
     if as_of is None:
-        as_of = datetime.now(timezone.utc)
+        as_of = datetime.now(UTC)
     elif not isinstance(as_of, datetime):
         raise TypeError(f"as_of must be a timezone-aware datetime, got {type(as_of).__name__}")
     elif as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
-    as_of = as_of.astimezone(timezone.utc)
+    as_of = as_of.astimezone(UTC)
     aliases = duckdb.ticker_alias_candidates(ticker, as_of, data_root=data_root)
     return resolve_ticker_aliases(ticker, aliases, as_of=as_of)
 
@@ -82,9 +82,7 @@ def _ratio_value(value: Decimal | None) -> Decimal | None:
     return value.quantize(Decimal("1e-28"))
 
 
-def persist_snapshot(
-    snapshot: PortfolioSnapshot, *, data_root: Path | None = None
-) -> None:
+def persist_snapshot(snapshot: PortfolioSnapshot, *, data_root: Path | None = None) -> None:
     """Persist an immutable snapshot (idempotent: a rerun writes 0 rows).
 
     Never writes OAuth/token or raw provider payload data or raw broker account identifiers.
@@ -92,82 +90,80 @@ def persist_snapshot(
     parquet_root = Path(data_root) / "parquet" if data_root else None
     parquet.write_rows(
         "portfolio_snapshots",
-        [{
-            "snapshot_id": snapshot.snapshot_id,
-            "broker": snapshot.broker,
-            "created_at": snapshot.created_at.isoformat(),
-            "cash": snapshot.cash,
-            "invested_value": snapshot.invested_value,
-            "total_value": snapshot.total_value,
-            "account_count": len(snapshot.account_ids),
-            "position_count": len(snapshot.positions),
-            "priced_position_count": sum(
-                1 for position in snapshot.positions if position.market_value is not None
-            ),
-            "unresolved_position_count": sum(
-                1 for position in snapshot.positions if position.entity_id is None
-            ),
-            "source": SNAPSHOT_SOURCE,
-            "parser_version": PARSER_VERSION,
-            "calculation_version": CALCULATION_VERSION,
-        }],
+        [
+            {
+                "snapshot_id": snapshot.snapshot_id,
+                "broker": snapshot.broker,
+                "created_at": snapshot.created_at.isoformat(),
+                "cash": snapshot.cash,
+                "invested_value": snapshot.invested_value,
+                "total_value": snapshot.total_value,
+                "account_count": len(snapshot.account_ids),
+                "position_count": len(snapshot.positions),
+                "priced_position_count": sum(1 for position in snapshot.positions if position.market_value is not None),
+                "unresolved_position_count": sum(1 for position in snapshot.positions if position.entity_id is None),
+                "source": SNAPSHOT_SOURCE,
+                "parser_version": PARSER_VERSION,
+                "calculation_version": CALCULATION_VERSION,
+            }
+        ],
         root=parquet_root,
     )
     parquet.write_rows(
         "portfolio_positions",
-        [{
-            "snapshot_id": snapshot.snapshot_id,
-            "position_id": position.position_id,
-            "account_id": position.account_id,
-            "security_id": position.security_id,
-            "entity_id": position.entity_id,
-            "ticker": position.ticker,
-            "quantity": position.quantity,
-            "average_cost": position.average_cost,
-            "market_price": position.market_price,
-            "price_type": position.price_type,
-            "market_value": position.market_value,
-            "unrealized_gain": position.unrealized_gain,
-            "unrealized_gain_pct": _ratio_value(position.unrealized_gain_pct),
-            "portfolio_weight": _ratio_value(position.portfolio_weight),
-            "source": position.source,
-            "quote_retrieved_at": (
-                position.quote_retrieved_at.isoformat() if position.quote_retrieved_at else None
-            ),
-            "asset_type": position.asset_type,
-        } for position in snapshot.positions],
+        [
+            {
+                "snapshot_id": snapshot.snapshot_id,
+                "position_id": position.position_id,
+                "account_id": position.account_id,
+                "security_id": position.security_id,
+                "entity_id": position.entity_id,
+                "ticker": position.ticker,
+                "quantity": position.quantity,
+                "average_cost": position.average_cost,
+                "market_price": position.market_price,
+                "price_type": position.price_type,
+                "market_value": position.market_value,
+                "unrealized_gain": position.unrealized_gain,
+                "unrealized_gain_pct": _ratio_value(position.unrealized_gain_pct),
+                "portfolio_weight": _ratio_value(position.portfolio_weight),
+                "source": position.source,
+                "quote_retrieved_at": (
+                    position.quote_retrieved_at.isoformat() if position.quote_retrieved_at else None
+                ),
+                "asset_type": position.asset_type,
+            }
+            for position in snapshot.positions
+        ],
         root=parquet_root,
     )
     parquet.write_rows(
         "portfolio_accounts",
-        [{"snapshot_id": snapshot.snapshot_id, "account_id": account_id}
-         for account_id in snapshot.account_ids],
+        [{"snapshot_id": snapshot.snapshot_id, "account_id": account_id} for account_id in snapshot.account_ids],
         root=parquet_root,
     )
 
 
 def _snapshot_header(row: Mapping[str, object]) -> tuple[str, datetime, str]:
     """(snapshot id, created_at, broker) from the newest snapshot row."""
-    created_at = datetime.fromisoformat(str(row["created_at"]).replace("Z", "+00:00"))
+    created_at = datetime.fromisoformat(str(row["created_at"]))
     return str(row["snapshot_id"]), created_at, str(row["broker"])
 
 
 def _snapshot_decimals(row: Mapping[str, object]) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
     """(cash, invested, total) as canonical decimals (None stays None)."""
     return (
-        mappers.canonical_decimal(
-            Decimal(str(row["cash"])) if row.get("cash") is not None else None
-        ),
+        mappers.canonical_decimal(Decimal(str(row["cash"])) if row.get("cash") is not None else None),
         mappers.canonical_decimal(
             Decimal(str(row["invested_value"])) if row.get("invested_value") is not None else None
         ),
-        mappers.canonical_decimal(
-            Decimal(str(row["total_value"])) if row.get("total_value") is not None else None
-        ),
+        mappers.canonical_decimal(Decimal(str(row["total_value"])) if row.get("total_value") is not None else None),
     )
 
 
-def _snapshot_account_ids(snapshot_id: str, positions: tuple[object, ...], *, data_root: Path | None) -> tuple[str, ...]:
+def _snapshot_account_ids(
+    snapshot_id: str, positions: tuple[object, ...], *, data_root: Path | None
+) -> tuple[str, ...]:
     """Write-order account ids, or position-derived for legacy snapshots."""
     account_rows = duckdb.query(
         "SELECT account_id FROM portfolio_accounts WHERE snapshot_id = ?",
@@ -186,6 +182,7 @@ def _snapshot_account_ids(snapshot_id: str, positions: tuple[object, ...], *, da
         if account_id not in legacy:
             legacy.append(account_id)
     return tuple(legacy)
+
 
 def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot | None:
     """Return the newest persisted snapshot, or None when none exists.
@@ -235,7 +232,7 @@ def sync_robinhood_portfolio(
 ) -> PortfolioSnapshot:
     """Full read-only portfolio sync: accounts, positions, cash, one batched
     quote call, identity resolution, valuation, persistence."""
-    created_at = now or datetime.now(timezone.utc)
+    created_at = now or datetime.now(UTC)
     accounts = provider.get_accounts()
     raw_positions: list[BrokeragePosition] = []
     cash_balances: list[CashBalance] = []

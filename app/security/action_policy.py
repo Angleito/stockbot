@@ -113,9 +113,7 @@ _POSSESSIVE_OWN_RE = re.compile(
     r"\b(?:my|i|you|user|we)\s+(?:own\w*|have\w*|hold\w*|held)\b",
     re.IGNORECASE,
 )
-_PORTFOLIO_NOUN_RE = re.compile(
-    r"\b(?:portfolio|position|holdings|balance|account)\b", re.IGNORECASE
-)
+_PORTFOLIO_NOUN_RE = re.compile(r"\b(?:portfolio|position|holdings|balance|account)\b", re.IGNORECASE)
 # Digit-runs (4+) or "$" amounts — the numeric side of portfolio context.
 _AMOUNT_TOKEN_RE = re.compile(r"\$\s?\d[\d,]*(?:\.\d+)?|\b\d{4,}\b")
 
@@ -126,6 +124,7 @@ _EGRESS_TOKEN_WINDOW = 12
 class EgressDecision:
     allowed: bool
     reason: str | None
+
 
 def _source_policy_mode(source_policy: dict[str, object]) -> str | None:
     """Allowlist/all mode; None when the mode is unknown (caller reports it)."""
@@ -214,9 +213,7 @@ def _call_tool_inner(arguments: object) -> str | None:
     return inner.strip() if isinstance(inner, str) and inner.strip() else None
 
 
-def authorize_tool_call(
-    name: str, arguments: dict[str, object], run_security: RunSecurityContext
-) -> tuple[bool, str]:
+def authorize_tool_call(name: str, arguments: dict[str, object], run_security: RunSecurityContext) -> tuple[bool, str]:
     """Gate one tool call against intent plus the explicit session grant."""
     denied = source_denied_reason(name, getattr(run_security, "source_policy", None))
     if denied is not None:
@@ -251,9 +248,7 @@ def _portfolio_context(query: str) -> bool:
     nouns = [i for i, token in enumerate(tokens) if _PORTFOLIO_NOUN_RE.search(token)]
     amounts = [i for i, token in enumerate(tokens) if _AMOUNT_TOKEN_RE.search(token)]
     return any(
-        abs(noun_index - amount_index) <= _EGRESS_TOKEN_WINDOW
-        for noun_index in nouns
-        for amount_index in amounts
+        abs(noun_index - amount_index) <= _EGRESS_TOKEN_WINDOW for noun_index in nouns for amount_index in amounts
     )
 
 
@@ -268,9 +263,7 @@ def private_pattern_hit(text: str) -> str | None:
     return None
 
 
-def authorize_egress(
-    destination: str, payload: object, run_security: RunSecurityContext
-) -> EgressDecision:
+def authorize_egress(destination: str, payload: object, run_security: RunSecurityContext) -> EgressDecision:
     """Block private data from leaving Stockbot to external destinations.
 
     Ordering invariant: once ANY private tool result has been ALLOWED into

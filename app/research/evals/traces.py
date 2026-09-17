@@ -14,7 +14,7 @@ import sqlite3
 import time
 import uuid
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.config import get_data_root
@@ -78,6 +78,7 @@ class TraceHeader:
     def __post_init__(self) -> None:
         object.__setattr__(self, "wave_id", _coerce_wave(self.wave_id))
 
+
 @dataclass(frozen=True)
 class TraceEvent:
     event_id: str
@@ -91,7 +92,7 @@ class TraceEvent:
 
 
 def _now() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _db_path(data_root: Path | None) -> Path:
@@ -203,9 +204,9 @@ class TraceRecorder:
     _start_perf: float = 0.0
     _start_iso: str = ""
     _closed: bool = False
+
     def __post_init__(self) -> None:
         self.wave_id = _coerce_wave(self.wave_id)
-
 
     def record(
         self,
@@ -396,9 +397,7 @@ def get_trace(trace_id: str, data_root: Path | None = None) -> TraceHeader | Non
     return _header_from_row(tuple(row))
 
 
-def list_traces(
-    session_id: str | None = None, data_root: Path | None = None, limit: int = 50
-) -> list[TraceHeader]:
+def list_traces(session_id: str | None = None, data_root: Path | None = None, limit: int = 50) -> list[TraceHeader]:
     """Newest-first trace headers, optionally filtered to one session."""
     with _connect(_db_path(data_root)) as conn:
         if session_id is None:

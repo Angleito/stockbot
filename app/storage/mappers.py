@@ -61,9 +61,7 @@ def position_from_row(row: Mapping[str, object], retrieved_at: datetime) -> Posi
     retrieved during the sync that created the snapshot).
     """
     numeric = {
-        key: canonical_decimal(
-            Decimal(str(row[key])) if row[key] is not None else None
-        )
+        key: canonical_decimal(Decimal(str(row[key])) if row[key] is not None else None)
         for key in (
             "quantity",
             "average_cost",
@@ -94,8 +92,9 @@ def position_from_row(row: Mapping[str, object], retrieved_at: datetime) -> Posi
         retrieved_at=retrieved_at,
         price_type=str(row["price_type"]) if row.get("price_type") else None,
         quote_retrieved_at=(
-            datetime.fromisoformat(quote_retrieved_at.replace("Z", "+00:00"))
-            if isinstance(quote_retrieved_at, str) and quote_retrieved_at else None
+            datetime.fromisoformat(quote_retrieved_at)
+            if isinstance(quote_retrieved_at, str) and quote_retrieved_at
+            else None
         ),
         asset_type=asset_type,
     )

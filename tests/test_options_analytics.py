@@ -1,4 +1,4 @@
-from datetime import date, datetime, timezone
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from app.analytics.options import analyze_option, compare_options
@@ -23,7 +23,7 @@ def _quote(
     rho: Decimal | None = None,
     volume: int | None = 10,
     open_interest: int | None = 100,
-    retrieved_at: datetime = datetime(2026, 8, 25, tzinfo=timezone.utc),
+    retrieved_at: datetime = datetime(2026, 8, 25, tzinfo=UTC),
 ) -> OptionQuote:
     return OptionQuote(
         contract_id=contract_id,

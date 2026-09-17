@@ -9,7 +9,7 @@ import tempfile
 from collections.abc import Mapping
 from pathlib import Path
 from types import ModuleType
-from typing import Protocol, Self, TextIO, TypeVar
+from typing import Protocol, Self, TextIO
 
 import yaml
 
@@ -20,15 +20,12 @@ except ImportError:  # pragma: no cover
 
 from app.thesis.models import SCHEMA_VERSION, JSONValue
 
-_M = TypeVar("_M", bound="YamlModel")
-
 
 class YamlModel(Protocol):
     """Structural thesis-model surface consumed by load_yaml (all models share from_dict)."""
 
     @classmethod
-    def from_dict(cls, data: Mapping[str, object], path: str = ..., /) -> Self:
-        ...
+    def from_dict(cls, data: Mapping[str, object], path: str = ..., /) -> Self: ...
 
 
 def _root_resolved(root: Path | str) -> Path:
@@ -52,7 +49,7 @@ def _resolve_inside(root: Path | str, path: Path | str) -> Path:
     return dest_r
 
 
-def load_yaml(path: Path | str, model_type: type[_M]) -> _M:
+def load_yaml[M: YamlModel](path: Path | str, model_type: type[M]) -> M:
     """Safe-load a mapping YAML file, require schema v1, validate and return."""
     p = Path(path)
     try:

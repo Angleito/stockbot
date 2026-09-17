@@ -31,6 +31,7 @@ MOUNT_CHECK_FILES = ("docker-compose.yml", "sandbox/stockbot/spec.yaml")
 def ok(name: str) -> None:
     print(f"\u2713 {name}")
 
+
 def fail(name: str, detail: str) -> NoReturn:
     print(f"\u2717 {name}: {detail}", file=sys.stderr)
     sys.exit(1)
@@ -38,7 +39,7 @@ def fail(name: str, detail: str) -> NoReturn:
 
 def run(cmd: list[str]) -> subprocess.CompletedProcess[str]:
     try:
-        return subprocess.run(cmd, capture_output=True, text=True, timeout=60)
+        return subprocess.run(cmd, capture_output=True, text=True, timeout=60, check=False)
     except FileNotFoundError:
         fail(" ".join(cmd[1:]), f"'{cmd[0]}' not found on PATH")
     except subprocess.TimeoutExpired:
@@ -95,7 +96,10 @@ def check_ssh_forwarding() -> None:
     name = "ssh.agentForwardingEnabled false"
     proc = run(["sbx", "settings", "get", "ssh.agentForwardingEnabled"])
     if proc.returncode != 0:
-        fail(name, f"'sbx settings get ssh.agentForwardingEnabled' failed (exit {proc.returncode}): {proc.stderr.strip()}")
+        fail(
+            name,
+            f"'sbx settings get ssh.agentForwardingEnabled' failed (exit {proc.returncode}): {proc.stderr.strip()}",
+        )
     if not _ssh_value_ok(proc.stdout):
         fail(name, "ssh.agentForwardingEnabled is not false; run 'sbx settings set ssh.agentForwardingEnabled false'")
     ok(name)
@@ -186,8 +190,9 @@ CHECKS: dict[str, Callable[[], None]] = {
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
-    parser.add_argument("--check", action="append", choices=sorted(CHECKS),
-                        help="run only this check (repeatable; default: all)")
+    parser.add_argument(
+        "--check", action="append", choices=sorted(CHECKS), help="run only this check (repeatable; default: all)"
+    )
     return parser.parse_args(argv)
 
 

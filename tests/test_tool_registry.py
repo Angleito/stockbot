@@ -22,13 +22,20 @@ def _schema_functions() -> dict[str, Mapping[str, object]]:
 
 def test_tool_registry_five_way_parity():
     schemas = set(_schema_functions())
-    handlers = set(tools._DIRECT_HANDLERS) | set(tools._FINRA_HANDLERS) | set(tools._ROBINHOOD_HANDLERS) | {"call_tool"}  # gateway dispatch is call_tool's canonical handler; it has no _MODEL_HANDLERS entry by design
+    handlers = (
+        set(tools._DIRECT_HANDLERS) | set(tools._FINRA_HANDLERS) | set(tools._ROBINHOOD_HANDLERS) | {"call_tool"}
+    )  # gateway dispatch is call_tool's canonical handler; it has no _MODEL_HANDLERS entry by design
     assert schemas == handlers, f"Schemas without handlers: {sorted(schemas - handlers)}"
-    assert schemas == set(tools.TOOL_CAPABILITIES), f"Missing capability: {sorted(schemas - set(tools.TOOL_CAPABILITIES))}"
+    assert schemas == set(tools.TOOL_CAPABILITIES), (
+        f"Missing capability: {sorted(schemas - set(tools.TOOL_CAPABILITIES))}"
+    )
     assert schemas == set(TOOL_DOMAINS), f"Missing security domain: {sorted(schemas - set(TOOL_DOMAINS))}"
     assert schemas == set(TOOL_ENVELOPES), f"Missing context envelope: {sorted(schemas - set(TOOL_ENVELOPES))}"
 
-THESIS_TOOLS = frozenset({"thesis_create", "thesis_show", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status"})
+
+THESIS_TOOLS = frozenset(
+    {"thesis_create", "thesis_show", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status"}
+)
 
 
 def test_thesis_domains_and_structured_schemas():
@@ -51,7 +58,21 @@ def test_thesis_domains_and_structured_schemas():
 def test_routing_cards_have_exact_shape():
     for name in tools.TOOL_DISCOVERY_REGISTRY:
         card = tools._routing_card(name)
-        assert set(card) == {"name", "domain", "family", "summary", "intent", "output_kind", "source", "entity_scope", "time_mode", "choose_when", "reject_when", "required", "optional"}, name
+        assert set(card) == {
+            "name",
+            "domain",
+            "family",
+            "summary",
+            "intent",
+            "output_kind",
+            "source",
+            "entity_scope",
+            "time_mode",
+            "choose_when",
+            "reject_when",
+            "required",
+            "optional",
+        }, name
         assert card["name"] == name
         assert "parameters" not in card
 
@@ -66,6 +87,7 @@ def test_routing_card_required_optional_derive_from_schema():
 
 def test_discovery_coordinates_complete():
     import re
+
     kebab = re.compile(r"^[a-z0-9]+(?:[-_][a-z0-9]+)*$")
     snake = re.compile(r"^[a-z0-9]+(?:_[a-z0-9]+)*$")
     assert len(tools.TOOL_DISCOVERY_REGISTRY) == 58
@@ -100,6 +122,7 @@ def test_conflicts_reciprocal_and_named(monkeypatch: pytest.MonkeyPatch) -> None
     import copy
 
     import app.tools as mod
+
     probe: dict[str, tools.ToolDiscovery] = {k: copy.deepcopy(v) for k, v in reg.items()}
     victim = probe["get_fundamentals"]
     object.__setattr__(victim, "conflicts_with", tuple(c for c in victim.conflicts_with if c != "get_xbrl_facts"))
@@ -112,7 +135,9 @@ def test_conflicts_reciprocal_and_named(monkeypatch: pytest.MonkeyPatch) -> None
         raise AssertionError("one-way conflict should fail")
     # unknown peer must fail with both names
     probe2: dict[str, tools.ToolDiscovery] = {k: copy.deepcopy(v) for k, v in reg.items()}
-    object.__setattr__(probe2["get_fundamentals"], "conflicts_with", (*probe2["get_fundamentals"].conflicts_with, "no_such_tool"))
+    object.__setattr__(
+        probe2["get_fundamentals"], "conflicts_with", (*probe2["get_fundamentals"].conflicts_with, "no_such_tool")
+    )
     monkeypatch.setattr(mod, "TOOL_DISCOVERY_REGISTRY", probe2)
     try:
         mod.validate_tool_discovery_registry()
@@ -122,7 +147,9 @@ def test_conflicts_reciprocal_and_named(monkeypatch: pytest.MonkeyPatch) -> None
         raise AssertionError("unknown conflict should fail")
     # self conflict must fail
     probe3: dict[str, tools.ToolDiscovery] = {k: copy.deepcopy(v) for k, v in reg.items()}
-    object.__setattr__(probe3["get_fundamentals"], "conflicts_with", (*probe3["get_fundamentals"].conflicts_with, "get_fundamentals"))
+    object.__setattr__(
+        probe3["get_fundamentals"], "conflicts_with", (*probe3["get_fundamentals"].conflicts_with, "get_fundamentals")
+    )
     monkeypatch.setattr(mod, "TOOL_DISCOVERY_REGISTRY", probe3)
     try:
         mod.validate_tool_discovery_registry()
@@ -135,14 +162,15 @@ def test_conflicts_reciprocal_and_named(monkeypatch: pytest.MonkeyPatch) -> None
 def test_registry_version_covers_routing_metadata():
     import hashlib
     import json
+
     v1 = tools.TOOL_REGISTRY_VERSION
     assert isinstance(v1, str) and len(v1) == 12
     # changing routing metadata must change the version (schemas alone are not enough)
     import copy
 
     import app.tools as mod
+
     probe = {k: copy.deepcopy(v) for k, v in mod.TOOL_DISCOVERY_REGISTRY.items()}
     object.__setattr__(probe["get_short_interest"], "intent", "mutated_intent")
     fp = json.dumps({n: [m.domain, m.family, m.intent] for n, m in sorted(probe.items())}, sort_keys=True)
     assert hashlib.sha256((json.dumps(mod.TOOLS, sort_keys=True) + fp).encode()).hexdigest()[:12] != v1
-

@@ -1,17 +1,20 @@
 """Permanent §44/§45 gates: transitions, budgets, journal, PIT, append-only,
 freeze immutability + cumulative E2, dossier refs, same-freeze parallel
 committee, resume at source/freeze/one-member. All fakes, no network."""
+
 import dataclasses
 import itertools
 import time
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
+from hashlib import sha256
 from pathlib import Path
 
 import pytest
 from hypothesis import given, settings
 from hypothesis import strategies as st
 
+import tests.research_source_seam as seam
 from app.research import jobs as _jobs
 from app.research import session as _session
 from app.research.agents.bearbot import BearAnalysis
@@ -35,13 +38,14 @@ from app.research.models import Job, JSONValue, SessionStatus
 from app.research.repository import ResearchRepository
 from app.research.runner import run_live
 
-ASOF = datetime(2025, 6, 30, tzinfo=timezone.utc)
+ASOF = datetime(2025, 6, 30, tzinfo=UTC)
 
 
 def _committee_output(claims: list[dict[str, object]], follow_ups: Sequence[object] = ()) -> str:
     """Rich committee envelope (executive_view, claims, channels, materiality, uncertainties,
     what_would_change, follow_ups): the role contract every trio prompt now demands."""
     import json as _json
+
     ids: list[str] = []
     for claim in claims:
         raw_ids = claim.get("evidence_ids")
@@ -50,21 +54,24 @@ def _committee_output(claims: list[dict[str, object]], follow_ups: Sequence[obje
     channels: list[dict[str, object]] = (
         [{"text": "frozen-evidence channel", "direction": "pressure", "evidence_ids": [ids[0]]}] if ids else []
     )
-    return _json.dumps({
-        "executive_view": "Balanced read of the frozen evidence.",
-        "claims": claims,
-        "impact_channels": channels,
-        "materiality": {"overall": "medium", "reasoning": "effect size read off the frozen evidence"},
-        "uncertainties": ["the freeze does not settle timing"],
-        "what_would_change": ["a new filing disclosing the terms"],
-        "follow_ups": list(follow_ups),
-    })
+    return _json.dumps(
+        {
+            "executive_view": "Balanced read of the frozen evidence.",
+            "claims": claims,
+            "impact_channels": channels,
+            "materiality": {"overall": "medium", "reasoning": "effect size read off the frozen evidence"},
+            "uncertainties": ["the freeze does not settle timing"],
+            "what_would_change": ["a new filing disclosing the terms"],
+            "follow_ups": list(follow_ups),
+        }
+    )
 
 
 def _grounded(prompt: str, follow_ups: Sequence[object] = ()) -> str:
     """Fake grounded model: cite only freeze/acquired ids listed in the prompt."""
     import json as _json
     import re as _re
+
     seen: list[str] = []
     for line in prompt.splitlines():
         stripped = line.strip()
@@ -87,14 +94,24 @@ def _grounded(prompt: str, follow_ups: Sequence[object] = ()) -> str:
         return _json.dumps(claims)
     return _committee_output(claims, follow_ups)
 
+
 def _ev(eid: str, sid: str, wave: int, known: datetime) -> Evidence:
     return Evidence(
-        evidence_id=eid, session_id=sid, wave_id=wave, source_type="sec",
-        source_name="SEC", source_uri="https://sec.gov/x", source_record_id="r",
-        subject="NVDA", claim_text="c", content="c-" + eid,
+        evidence_id=eid,
+        session_id=sid,
+        wave_id=wave,
+        source_type="sec",
+        source_name="SEC",
+        source_uri="https://sec.gov/x",
+        source_record_id="r",
+        subject="NVDA",
+        claim_text="c",
+        content="c-" + eid,
         content_hash=evidence_content_hash("c-" + eid),
-        known_at=known, retrieved_at=datetime(2025, 6, 1, tzinfo=timezone.utc),
-        job_id="J-1", agent_id="s-A",
+        known_at=known,
+        retrieved_at=datetime(2025, 6, 1, tzinfo=UTC),
+        job_id="J-1",
+        agent_id="s-A",
     )
 
 
@@ -148,8 +165,7 @@ def test_scout_cannot_have_children() -> None:
     s = _session.create_session("q?", "o", as_of=ASOF)
     _, parent = _jobs.create_job(s, [], job_type="scout", owner="t")
     with pytest.raises(ValueError):
-        _jobs.create_job(s, [parent], job_type="scout", owner="t",
-                         parent_job_id=parent.job_id)
+        _jobs.create_job(s, [parent], job_type="scout", owner="t", parent_job_id=parent.job_id)
 
 
 def test_journal_sequences_and_pit_rejection_logged() -> None:
@@ -160,9 +176,12 @@ def test_journal_sequences_and_pit_rejection_logged() -> None:
     led = EvidenceLedger()
     seen: list[tuple[str, dict[str, object]]] = []
     with pytest.raises(EvidenceRejectedError):
-        ingest_evidence(led, _ev("EV-X", s.session_id, 1,
-                                 datetime(2025, 7, 1, tzinfo=timezone.utc)),
-                        as_of=ASOF, on_reject=lambda t, p: seen.append((t, p)))
+        ingest_evidence(
+            led,
+            _ev("EV-X", s.session_id, 1, datetime(2025, 7, 1, tzinfo=UTC)),
+            as_of=ASOF,
+            on_reject=lambda t, p: seen.append((t, p)),
+        )
     assert seen and seen[0][0] == "evidence.rejected"
     assert seen[0][1]["reason"] == "PIT_VIOLATION"
 
@@ -170,12 +189,9 @@ def test_journal_sequences_and_pit_rejection_logged() -> None:
 def test_ledger_append_only_and_supersede() -> None:
     s = _session.create_session("q?", "o", as_of=ASOF)
     led = EvidenceLedger()
-    ingest_evidence(led, _ev("EV-1", s.session_id, 1,
-                             datetime(2025, 5, 1, tzinfo=timezone.utc)),
-                    as_of=ASOF, on_reject=None)
+    ingest_evidence(led, _ev("EV-1", s.session_id, 1, datetime(2025, 5, 1, tzinfo=UTC)), as_of=ASOF, on_reject=None)
     with pytest.raises(ValueError):
-        led.append(_ev("EV-1", s.session_id, 1,
-                       datetime(2025, 5, 1, tzinfo=timezone.utc)))
+        led.append(_ev("EV-1", s.session_id, 1, datetime(2025, 5, 1, tzinfo=UTC)))
     fix = led.get("EV-1")
     led.supersede(dataclasses.replace(fix, evidence_id="EV-2", superseded_by="EV-1"))
     assert led.get("EV-1").evidence_id == "EV-1"
@@ -185,9 +201,7 @@ def test_freeze_immutable_and_cumulative_e2() -> None:
     s = _session.create_session("q?", "o", as_of=ASOF)
     led = EvidenceLedger()
     for eid, wave in (("EV-1", 1), ("EV-2", 1), ("EV-3", 2)):
-        ingest_evidence(led, _ev(eid, s.session_id, wave,
-                                 datetime(2025, 5, 1, tzinfo=timezone.utc)),
-                        as_of=ASOF, on_reject=None)
+        ingest_evidence(led, _ev(eid, s.session_id, wave, datetime(2025, 5, 1, tzinfo=UTC)), as_of=ASOF, on_reject=None)
     e1 = [e for e in led.list_session(s.session_id) if e.wave_id <= 1]
     e2 = [e for e in led.list_session(s.session_id) if e.wave_id <= 2]
     f1 = create_freeze(freeze_id="E1", session_id=s.session_id, wave_id=1, records=e1, as_of=ASOF)
@@ -202,13 +216,25 @@ def test_freeze_immutable_and_cumulative_e2() -> None:
 
 def test_dossier_rejects_dangling_refs() -> None:
     s = _session.create_session("q?", "o", as_of=ASOF)
-    cov: dict[str, object] = {"entities": ["NVDA"], "forms": ["10-Q"],
-                              "time_range": {"start": "2025-01-01", "end": "2025-06-30"},
-                              "sources_examined": ["e"], "complete": True, "exclusions": []}
-    bad = create_dossier(dossier_id="SEC-D1", session_id=s.session_id, wave_id=1,
-                         subject="NVDA", coverage=cov,
-                         findings=[{"text": "dangling", "evidence_ids": ["EV-NOPE"]}],
-                         unknowns=[], limitations=[], open_questions=[])
+    cov: dict[str, object] = {
+        "entities": ["NVDA"],
+        "forms": ["10-Q"],
+        "time_range": {"start": "2025-01-01", "end": "2025-06-30"},
+        "sources_examined": ["e"],
+        "complete": True,
+        "exclusions": [],
+    }
+    bad = create_dossier(
+        dossier_id="SEC-D1",
+        session_id=s.session_id,
+        wave_id=1,
+        subject="NVDA",
+        coverage=cov,
+        findings=[{"text": "dangling", "evidence_ids": ["EV-NOPE"]}],
+        unknowns=[],
+        limitations=[],
+        open_questions=[],
+    )
     with pytest.raises(DossierIntegrityError):
         validate_dossier(bad, set())
 
@@ -220,16 +246,23 @@ ModelFn = Callable[[str], str]
 def _fake_document(index: int, args: Mapping[str, object]) -> dict[str, object]:
     """One raw filing document result (accession + document_name + passage): the only evidence shape."""
     raw_accession = args.get("accession_no")
-    accession = (raw_accession.strip() if isinstance(raw_accession, str) and raw_accession.strip()
-                 else f"0000320193-25-{index:06d}")
+    accession = (
+        raw_accession.strip()
+        if isinstance(raw_accession, str) and raw_accession.strip()
+        else f"0000320193-25-{index:06d}"
+    )
     raw_document = args.get("document_name")
-    document = (raw_document.strip() if isinstance(raw_document, str) and raw_document.strip()
-                else f"nvda-20250331-{index}.htm")
+    document = (
+        raw_document.strip() if isinstance(raw_document, str) and raw_document.strip() else f"nvda-20250331-{index}.htm"
+    )
+    passage = "Data Center revenue grew year over year on accelerated computing demand."
     return {
-        "content": f"NVDA {document}: accelerated computing demand grew in the reporting period.",
+        "content": passage,
+        "text": passage,
         "accession_no": accession,
         "document_name": document,
-        "matching_passage": "Data Center revenue grew year over year on accelerated computing demand.",
+        "matching_passage": passage,
+        "source_handle": seam.handle_for(passage, accession=accession, document=document),
         "known_at": "2025-05-01",
         "uri": f"https://www.sec.gov/Archives/edgar/data/1045810/{accession.replace('-', '')}/{document}",
     }
@@ -253,18 +286,30 @@ def _fake_dispatch() -> DispatchFn:
             requested: dict[str, object] = inner_args if isinstance(inner_args, dict) else {}
             if inner in ("get_sec_document", "get_sec_filing"):
                 return _fake_document(n, requested)
-            return {"search_id": f"s{n}", "query": str(requested.get("query") or ""), "count": 1,
-                    "top_hits": [{"accession": f"0000320193-25-{n:06d}",
-                                  "document": f"nvda-20250331-{n}.htm", "form": "10-Q"}]}
+            return {
+                "search_id": f"s{n}",
+                "query": str(requested.get("query") or ""),
+                "count": 1,
+                "top_hits": [
+                    {"accession": f"0000320193-25-{n:06d}", "document": f"nvda-20250331-{n}.htm", "form": "10-Q"}
+                ],
+            }
         return {}
+
     return _dispatch
 
 
 def _run_wave(repo: ResearchRepository, model: ModelFn) -> dict[str, object]:
-    return run_live(question="NVDA demand?", objective="o",
-                    as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"],
-                    dispatch=_fake_dispatch(), model=model,
-                    repo=repo, budgets=None)
+    return run_live(
+        question="NVDA demand?",
+        objective="o",
+        as_of="2025-06-30T00:00:00+00:00",
+        tickers=["NVDA"],
+        dispatch=_fake_dispatch(),
+        model=model,
+        repo=repo,
+        budgets=None,
+    )
 
 
 def test_same_freeze_parallel_committee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -318,12 +363,22 @@ def test_resume_at_source_freeze_one_member(tmp_path: Path, monkeypatch: pytest.
         assert prompt
         return _grounded(prompt)
 
-    for hook, reason in (("source", "interrupted:source"), ("freeze", "interrupted:freeze"),
-                         ("one-committee", "interrupted:one-committee")):
-        out = run_live(question="NVDA demand?", objective="o",
-                       as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"],
-                       dispatch=_fake_dispatch(), model=_ok,
-                       repo=repo, budgets=None, interrupt_after=hook)
+    for hook, reason in (
+        ("source", "interrupted:source"),
+        ("freeze", "interrupted:freeze"),
+        ("one-committee", "interrupted:one-committee"),
+    ):
+        out = run_live(
+            question="NVDA demand?",
+            objective="o",
+            as_of="2025-06-30T00:00:00+00:00",
+            tickers=["NVDA"],
+            dispatch=_fake_dispatch(),
+            model=_ok,
+            repo=repo,
+            budgets=None,
+            interrupt_after=hook,
+        )
         assert out["stop_reason"] == reason
         resume_sid = out["session_id"]
         assert isinstance(resume_sid, str)
@@ -342,20 +397,43 @@ def test_committee_prompts_carry_identical_freeze_payload() -> None:
 
     s = _session.create_session("NVDA demand?", "o", as_of=ASOF)
     led = EvidenceLedger()
-    ingest_evidence(led, _ev("EV-1", s.session_id, 1,
-                             datetime(2025, 5, 1, tzinfo=timezone.utc)),
-                    as_of=ASOF, on_reject=None)
+    ingest_evidence(led, _ev("EV-1", s.session_id, 1, datetime(2025, 5, 1, tzinfo=UTC)), as_of=ASOF, on_reject=None)
     rec = led.get("EV-1")
     payload = f"[{rec.evidence_id}] {rec.subject} | claim: {rec.claim_text}\ncontent: {rec.content}"
     from app.research.agents.bearbot import run_bearbot
     from app.research.agents.bullbot import run_bullbot
     from app.research.agents.stockbot import run_stockbot
-    run_stockbot("Q?", session_id=s.session_id, wave_id=1, freeze_id="E1",
-                 evidence_ids=["EV-1"], as_of="x", model=_cap, evidence_text=payload)
-    run_bullbot("Q?", session_id=s.session_id, wave_id=1, freeze_id="E1",
-                evidence_ids=["EV-1"], as_of="x", model=_cap, evidence_text=payload)
-    run_bearbot("Q?", session_id=s.session_id, wave_id=1, freeze_id="E1",
-                evidence_ids=["EV-1"], as_of="x", model=_cap, evidence_text=payload)
+
+    run_stockbot(
+        "Q?",
+        session_id=s.session_id,
+        wave_id=1,
+        freeze_id="E1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        model=_cap,
+        evidence_text=payload,
+    )
+    run_bullbot(
+        "Q?",
+        session_id=s.session_id,
+        wave_id=1,
+        freeze_id="E1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        model=_cap,
+        evidence_text=payload,
+    )
+    run_bearbot(
+        "Q?",
+        session_id=s.session_id,
+        wave_id=1,
+        freeze_id="E1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        model=_cap,
+        evidence_text=payload,
+    )
     assert len(prompts) == 3
     bodies = [p.split("Evidence (cite ids; do not invent):\n", 1)[1] for p in prompts]
     assert bodies[0] == bodies[1] == bodies[2]
@@ -364,30 +442,44 @@ def test_committee_prompts_carry_identical_freeze_payload() -> None:
 
 def test_source_timestamp_never_invented_and_post_cutoff_rejected() -> None:
     from app.research.runner import _extract_known_at, _extract_source_ref
+
     assert _extract_known_at({}) is None
     assert _extract_known_at({"record": {}}) is None
     assert _extract_source_ref({}) == (None, None)
     assert _extract_source_ref({"source": "SEC EDGAR"}) == (None, None)
-    known = _extract_known_at({"meta": {"source_refs": {
-        "record_id": "0001045810-25-000023", "uri": "https://sec.gov/x",
-        "known_at": "2025-05-28"}}})
+    known = _extract_known_at(
+        {
+            "meta": {
+                "source_refs": {
+                    "record_id": "0001045810-25-000023",
+                    "uri": "https://sec.gov/x",
+                    "known_at": "2025-05-28",
+                }
+            }
+        }
+    )
     assert known is not None and (known.year, known.month, known.day) == (2025, 5, 28)
-    uri, ref = _extract_source_ref({"meta": {"source_refs": {
-        "record_id": "0001045810-25-000023", "uri": "https://sec.gov/x"}}})
+    uri, ref = _extract_source_ref(
+        {"meta": {"source_refs": {"record_id": "0001045810-25-000023", "uri": "https://sec.gov/x"}}}
+    )
     assert (uri, ref) == ("https://sec.gov/x", "0001045810-25-000023")
     s = _session.create_session("q?", "o", as_of=ASOF)
     led = EvidenceLedger()
     seen: list[tuple[str, dict[str, object]]] = []
     with pytest.raises(EvidenceRejectedError):
-        ingest_evidence(led, _ev("EV-FUT", s.session_id, 1,
-                                 datetime(2026, 1, 1, tzinfo=timezone.utc)),
-                        as_of=ASOF, on_reject=lambda t, p: seen.append((t, p)))
+        ingest_evidence(
+            led,
+            _ev("EV-FUT", s.session_id, 1, datetime(2026, 1, 1, tzinfo=UTC)),
+            as_of=ASOF,
+            on_reject=lambda t, p: seen.append((t, p)),
+        )
     assert seen[0][1]["reason"] == "PIT_VIOLATION"
     assert led.ids() == ()
 
 
 def test_resume_after_source_completes_reusing_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.runner import resume_live
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
 
@@ -395,10 +487,17 @@ def test_resume_after_source_completes_reusing_evidence(tmp_path: Path, monkeypa
         assert prompt
         return _grounded(prompt)
 
-    out = run_live(question="NVDA demand?", objective="o",
-                   as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"],
-                   dispatch=_fake_dispatch(), model=_ok,
-                   repo=repo, budgets=None, interrupt_after="source")
+    out = run_live(
+        question="NVDA demand?",
+        objective="o",
+        as_of="2025-06-30T00:00:00+00:00",
+        tickers=["NVDA"],
+        dispatch=_fake_dispatch(),
+        model=_ok,
+        repo=repo,
+        budgets=None,
+        interrupt_after="source",
+    )
     assert out["stop_reason"] == "interrupted:source"
     sid = out["session_id"]
     assert isinstance(sid, str)
@@ -408,7 +507,11 @@ def test_resume_after_source_completes_reusing_evidence(tmp_path: Path, monkeypa
     did_before = out["dossier_id"]
     ev_before = len(repo.list_evidence(sid))
     jobs_before = repo.list_jobs(sid)
-    assert len(jobs_before) == 4 and sum(1 for j in jobs_before if j.job_type == "source_agent") == 1 and sum(1 for j in jobs_before if j.job_type == "scout") == 3
+    assert (
+        len(jobs_before) == 4
+        and sum(1 for j in jobs_before if j.job_type == "source_agent") == 1
+        and sum(1 for j in jobs_before if j.job_type == "scout") == 3
+    )
     out2 = resume_live(sid, _fake_dispatch(), _ok, repo=repo)
     assert out2["stop_reason"] == "complete:wave1"
     eids_after = out2["evidence_ids"]
@@ -432,6 +535,7 @@ def test_resume_after_source_completes_reusing_evidence(tmp_path: Path, monkeypa
 
 def test_resume_after_freeze_skips_fetch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.runner import resume_live
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
 
@@ -439,10 +543,17 @@ def test_resume_after_freeze_skips_fetch(tmp_path: Path, monkeypatch: pytest.Mon
         assert prompt
         return _grounded(prompt)
 
-    out = run_live(question="NVDA demand?", objective="o",
-                   as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"],
-                   dispatch=_fake_dispatch(), model=_ok,
-                   repo=repo, budgets=None, interrupt_after="freeze")
+    out = run_live(
+        question="NVDA demand?",
+        objective="o",
+        as_of="2025-06-30T00:00:00+00:00",
+        tickers=["NVDA"],
+        dispatch=_fake_dispatch(),
+        model=_ok,
+        repo=repo,
+        budgets=None,
+        interrupt_after="freeze",
+    )
     assert out["stop_reason"] == "interrupted:freeze"
     sid = out["session_id"]
     assert isinstance(sid, str)
@@ -464,9 +575,11 @@ def test_resume_after_freeze_skips_fetch(tmp_path: Path, monkeypatch: pytest.Mon
 
 
 def test_resume_after_one_committee_reruns_trio_on_same_freeze(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.research.runner import resume_live
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
 
@@ -474,10 +587,17 @@ def test_resume_after_one_committee_reruns_trio_on_same_freeze(
         assert prompt
         return _grounded(prompt)
 
-    out = run_live(question="NVDA demand?", objective="o",
-                   as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"],
-                   dispatch=_fake_dispatch(), model=_ok,
-                   repo=repo, budgets=None, interrupt_after="one-committee")
+    out = run_live(
+        question="NVDA demand?",
+        objective="o",
+        as_of="2025-06-30T00:00:00+00:00",
+        tickers=["NVDA"],
+        dispatch=_fake_dispatch(),
+        model=_ok,
+        repo=repo,
+        budgets=None,
+        interrupt_after="one-committee",
+    )
     assert out["stop_reason"] == "interrupted:one-committee"
     sid = out["session_id"]
     assert isinstance(sid, str)
@@ -502,6 +622,7 @@ def test_resume_after_one_committee_reruns_trio_on_same_freeze(
 
 def test_resume_dossier_resource_resolves(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.resources import read_resource
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
 
@@ -509,9 +630,16 @@ def test_resume_dossier_resource_resolves(tmp_path: Path, monkeypatch: pytest.Mo
         assert prompt
         return _grounded(prompt)
 
-    out = run_live(question="NVDA demand?", objective="o",
-                   as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"],
-                   dispatch=_fake_dispatch(), model=_ok, repo=repo, budgets=None)
+    out = run_live(
+        question="NVDA demand?",
+        objective="o",
+        as_of="2025-06-30T00:00:00+00:00",
+        tickers=["NVDA"],
+        dispatch=_fake_dispatch(),
+        model=_ok,
+        repo=repo,
+        budgets=None,
+    )
     sid = out["session_id"]
     assert isinstance(sid, str)
     did = out["dossier_id"]
@@ -521,8 +649,11 @@ def test_resume_dossier_resource_resolves(tmp_path: Path, monkeypatch: pytest.Mo
     assert isinstance(resolved, dict) and resolved.get("dossier_id") == did
     resolved_full = read_resource(
         f"dossier://{did}",
-        evidence=stores["evidence"], freezes=stores["freeze"],
-        dossiers=stores["dossier"], jobs=stores["job"], sessions=stores["research"],
+        evidence=stores["evidence"],
+        freezes=stores["freeze"],
+        dossiers=stores["dossier"],
+        jobs=stores["job"],
+        sessions=stores["research"],
     )
     assert resolved_full == resolved
 
@@ -531,6 +662,7 @@ def test_resume_failed_session_reports_error(tmp_path: Path, monkeypatch: pytest
     import subprocess
 
     from app.research.runner import LiveModelError, resume_live
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
 
@@ -557,6 +689,7 @@ def test_resume_failed_session_reports_error(tmp_path: Path, monkeypatch: pytest
 def test_scouts_run_serially_with_ordered_results() -> None:
     from app.research.agents.scout import run_scout
     from app.research.agents.sec_agent import run_sec_assignment
+
     seen: list[str] = []
 
     def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
@@ -569,14 +702,22 @@ def test_scouts_run_serially_with_ordered_results() -> None:
         seen.append(prompt[:40])
         return "[]"
 
-    dossier = run_sec_assignment("Q?", session_id="rs:t", wave_id=1, as_of="2025-06-30",
-                                 tickers=["NVDA"], dispatch=_dispatch, model=_model,
-                                 spawn=lambda a: run_scout(a, dispatch=_dispatch, model=_model))
+    dossier = run_sec_assignment(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        as_of="2025-06-30",
+        tickers=["NVDA"],
+        dispatch=_dispatch,
+        model=_model,
+        spawn=lambda a: run_scout(a, dispatch=_dispatch, model=_model),
+    )
     assert len(seen) == 3  # filings, financials, risk in assignment order
     assert isinstance(dossier, object) and dossier is not None
 
+
 def test_pit_unverified_historical_rejected_current_accepted() -> None:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
     from app.research.evidence import (
         Evidence,
@@ -585,10 +726,37 @@ def test_pit_unverified_historical_rejected_current_accepted() -> None:
         evidence_content_hash,
         ingest_evidence,
     )
-    hist = datetime(2025, 6, 30, tzinfo=timezone.utc)
+
+    hist = datetime(2025, 6, 30, tzinfo=UTC)
+
     def _mk(eid: str, known: datetime | None) -> Evidence:
         content = "content"
-        return Evidence(eid, "rs:pit", 1, "sec", "search_sec_filings", "s", "claim", content, evidence_content_hash(content), datetime(2025, 5, 1, tzinfo=timezone.utc), "https://sec.gov/x", "r1", None, known, None, "job:1", "sec_scout", (), (), None, None, {}, None)
+        return Evidence(
+            eid,
+            "rs:pit",
+            1,
+            "sec",
+            "search_sec_filings",
+            "s",
+            "claim",
+            content,
+            evidence_content_hash(content),
+            datetime(2025, 5, 1, tzinfo=UTC),
+            "https://sec.gov/x",
+            "r1",
+            None,
+            known,
+            None,
+            "job:1",
+            "sec_scout",
+            (),
+            (),
+            None,
+            None,
+            {},
+            None,
+        )
+
     led = EvidenceLedger()
     seen: list[tuple[str, dict[str, object]]] = []
     with pytest.raises(EvidenceRejectedError) as ei:
@@ -599,17 +767,32 @@ def test_pit_unverified_historical_rejected_current_accepted() -> None:
     out = ingest_evidence(led, _mk("EV-U2", None), as_of=None)
     assert out.evidence_id == "EV-U2"
     from app.research.agents.scout import _is_pit_eligible
+
     assert _is_pit_eligible(None, "2025-06-30") is False
     assert _is_pit_eligible(None, "unbounded") is True
 
+
 def test_budget_resume_hydrates_cumulative(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.runner import resume_live
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
+
     def _ok(prompt: str) -> str:
         assert prompt
         return _grounded(prompt)
-    out = run_live(question="NVDA demand?", objective="o", as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"], dispatch=_fake_dispatch(), model=_ok, repo=repo, budgets=None, interrupt_after="source")
+
+    out = run_live(
+        question="NVDA demand?",
+        objective="o",
+        as_of="2025-06-30T00:00:00+00:00",
+        tickers=["NVDA"],
+        dispatch=_fake_dispatch(),
+        model=_ok,
+        repo=repo,
+        budgets=None,
+        interrupt_after="source",
+    )
     assert out["stop_reason"] == "interrupted:source"
     sid = out["session_id"]
     assert isinstance(sid, str)
@@ -635,7 +818,16 @@ def test_two_wave_e2_tree_and_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyP
         assert prompt
         return _grounded(prompt, ["What drove the Q2 delta?"])
 
-    out = run_live(question="NVDA historical demand?", objective="o", as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"], dispatch=_fake_dispatch(), model=_model, repo=repo, budgets=DirectorBudgets(max_waves=2))
+    out = run_live(
+        question="NVDA historical demand?",
+        objective="o",
+        as_of="2025-06-30T00:00:00+00:00",
+        tickers=["NVDA"],
+        dispatch=_fake_dispatch(),
+        model=_model,
+        repo=repo,
+        budgets=DirectorBudgets(max_waves=2),
+    )
     assert out["stop_reason"] == "complete:wave2"
     assert str(out["wave_decision"]).startswith("max_waves")  # explicit int honored, waves are sequence numbers
     sid = out["session_id"]
@@ -660,24 +852,35 @@ def test_two_wave_e2_tree_and_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyP
     e2 = {e for e in raw2 if isinstance(e, str)} if isinstance(raw2, list) else set()
     assert e1 and e2 and e1 < e2  # cumulative E2 superset of E1
 
+
 def test_grounded_claims_reject_unknown_and_empty() -> None:
     import json as _json
 
     from app.research.agents import ModelOutputFailure, parse_grounded_claims
-    claims = parse_grounded_claims(_json.dumps([{"text": "revenue grew", "evidence_ids": ["EV-1"]}]), frozen=["EV-1", "EV-2"])
+
+    claims = parse_grounded_claims(
+        _json.dumps([{"text": "revenue grew", "evidence_ids": ["EV-1"]}]), frozen=["EV-1", "EV-2"]
+    )
     assert [c.text for c in claims] and claims[0].evidence_ids == ["EV-1"]
     with pytest.raises(ModelOutputFailure):
         parse_grounded_claims(_json.dumps([{"text": "invented trend", "evidence_ids": ["EV-999"]}]), frozen=["EV-1"])
     with pytest.raises(ModelOutputFailure):
-        parse_grounded_claims(_json.dumps([{"text": "Revenue grew with no citation.", "evidence_ids": []}]), frozen=["EV-1"])
+        parse_grounded_claims(
+            _json.dumps([{"text": "Revenue grew with no citation.", "evidence_ids": []}]), frozen=["EV-1"]
+        )
 
 
 def test_committee_refs_derive_from_claims_not_whole_freeze() -> None:
     from app.research.agents import claims_refs
     from app.research.agents.stockbot import run_stockbot
+
     analysis = run_stockbot(
-        "Q?", session_id="rs:t", wave_id=1, freeze_id="F1",
-        evidence_ids=["EV-1", "EV-2"], as_of="x",
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1", "EV-2"],
+        as_of="x",
         model=lambda prompt: _committee_output([{"text": "only first matters", "evidence_ids": ["EV-1"]}]),
         evidence_text="[EV-1] a\n[EV-2] b",
     )
@@ -689,44 +892,76 @@ def test_committee_unknown_id_fails_model_output() -> None:
     from app.research.agents import ModelOutputFailure
     from app.research.agents.bearbot import run_bearbot
     from app.research.agents.bullbot import run_bullbot
+
     with pytest.raises(ModelOutputFailure, match="EV-999"):
-        run_bullbot("Q?", session_id="rs:t", wave_id=1, freeze_id="F1",
-                    evidence_ids=["EV-1"], as_of="x",
-                    model=lambda prompt: _committee_output([{"text": "bad", "evidence_ids": ["EV-999"]}]), evidence_text="[EV-1] a")
+        run_bullbot(
+            "Q?",
+            session_id="rs:t",
+            wave_id=1,
+            freeze_id="F1",
+            evidence_ids=["EV-1"],
+            as_of="x",
+            model=lambda prompt: _committee_output([{"text": "bad", "evidence_ids": ["EV-999"]}]),
+            evidence_text="[EV-1] a",
+        )
     with pytest.raises(ModelOutputFailure, match="uncited"):
-        run_bearbot("Q?", session_id="rs:t", wave_id=1, freeze_id="F1",
-                    evidence_ids=["EV-1"], as_of="x",
-                    model=lambda prompt: _committee_output([{"text": "Bearish with no citation.", "evidence_ids": []}]), evidence_text="[EV-1] a")
+        run_bearbot(
+            "Q?",
+            session_id="rs:t",
+            wave_id=1,
+            freeze_id="F1",
+            evidence_ids=["EV-1"],
+            as_of="x",
+            model=lambda prompt: _committee_output([{"text": "Bearish with no citation.", "evidence_ids": []}]),
+            evidence_text="[EV-1] a",
+        )
 
 
 def test_scout_findings_cite_only_acquired_ids() -> None:
     """Scout boundary: only acquired ids ground; a bad record is dropped and reported, never fatal."""
     from app.research.agents.scout import ScoutAssignment, run_scout
-    assignment = ScoutAssignment(assignment_id="scout-filings", session_id="rs:t",
-                                 as_of="2025-06-30", role="filings",
-                                 question="Q?", tickers=[])
+
+    assignment = ScoutAssignment(
+        assignment_id="scout-filings", session_id="rs:t", as_of="2025-06-30", role="filings", question="Q?", tickers=[]
+    )
+
     def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
         assert name and args is not None
         if name == "browse_tools":
             return {}
         return {"evidence_ids": [{"evidence_id": "EV-1", "known_at": "2025-05-01"}]}
+
     import json as _json
-    good = run_scout(assignment, dispatch=_dispatch, model=lambda prompt: _json.dumps([{"text": "found", "evidence_ids": ["EV-1"]}]))
+
+    good = run_scout(
+        assignment, dispatch=_dispatch, model=lambda prompt: _json.dumps([{"text": "found", "evidence_ids": ["EV-1"]}])
+    )
     assert [c.evidence_ids for c in good.findings] == [["EV-1"]]
     # A fabricated id loses its own claim; the grounded sibling survives with a limitation.
-    mixed = run_scout(assignment, dispatch=_dispatch, model=lambda prompt: _json.dumps(
-        [{"text": "found", "evidence_ids": ["EV-1"]}, {"text": "bad", "evidence_ids": ["EV-999"]}]))
+    mixed = run_scout(
+        assignment,
+        dispatch=_dispatch,
+        model=lambda prompt: _json.dumps(
+            [{"text": "found", "evidence_ids": ["EV-1"]}, {"text": "bad", "evidence_ids": ["EV-999"]}]
+        ),
+    )
     assert [c.text for c in mixed.findings] == ["found"]
     assert any("dropped" in line for line in mixed.limitations)
     # An uncited non-unknown claim is dropped too: nothing ungrounded reaches the dossier.
-    uncited = run_scout(assignment, dispatch=_dispatch, model=lambda prompt: _json.dumps(
-        [{"text": "Something factual uncited.", "evidence_ids": []}]))
+    uncited = run_scout(
+        assignment,
+        dispatch=_dispatch,
+        model=lambda prompt: _json.dumps([{"text": "Something factual uncited.", "evidence_ids": []}]),
+    )
     assert uncited.findings == []
     assert any("dropped" in line for line in uncited.limitations)
+
+
 def test_dossier_preserves_per_claim_mapping(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.agents.bearbot import BearAnalysis
     from app.research.agents.bullbot import BullAnalysis
     from app.research.agents.stockbot import StockbotAnalysis
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     out = _run_wave(repo, _grounded)
@@ -738,6 +973,7 @@ def test_dossier_preserves_per_claim_mapping(tmp_path: Path, monkeypatch: pytest
     assert isinstance(bull, BullAnalysis)
     assert isinstance(bear, BearAnalysis)
     from app.research.agents import claims_refs as _crefs
+
     for analysis in (stock, bull, bear):
         frozen = set(analysis.evidence_ids)
         for claim in analysis.claims:
@@ -745,50 +981,81 @@ def test_dossier_preserves_per_claim_mapping(tmp_path: Path, monkeypatch: pytest
         assert set(_crefs(analysis.claims)) <= frozen
     from app.research.synthesis.committee import CommitteeDisagreement
     from app.research.synthesis.final import synthesize_final
+
     sid = out["session_id"]
     fid = out["freeze_id"]
     eids = out["evidence_ids"]
     disagreement = out["disagreement"]
     assert isinstance(sid, str) and isinstance(fid, str)
     assert isinstance(eids, list) and isinstance(disagreement, CommitteeDisagreement)
-    synth = synthesize_final("NVDA demand?", session_id=sid, wave_id=1,
-                             freeze_id=fid, as_of="x", stock=stock,
-                             bull=bull, bear=bear, disagreement=disagreement)
+    synth = synthesize_final(
+        "NVDA demand?",
+        session_id=sid,
+        wave_id=1,
+        freeze_id=fid,
+        as_of="x",
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=disagreement,
+    )
     from app.research.agents import claims_refs as _crefs2
+
     frozen_raw: object = repo.get_freeze(fid).get("evidence_ids", [])
     frozen_ids = {e for e in frozen_raw if isinstance(e, str)} if isinstance(frozen_raw, list) else set()
     assert frozen_ids  # the freeze is the committee's evidence universe
     for claim in synth.claims:
         assert claim.evidence_ids and set(claim.evidence_ids) <= frozen_ids
         # Per-claim mapping survives synthesis: same text -> exactly the trio's cited ids.
-        expected = {eid for analysis in (stock, bull, bear) for c in analysis.claims
-                    if c.text == claim.text for eid in c.evidence_ids}
+        expected = {
+            eid
+            for analysis in (stock, bull, bear)
+            for c in analysis.claims
+            if c.text == claim.text
+            for eid in c.evidence_ids
+        }
         assert set(claim.evidence_ids) == expected
     # Refs derive from the trio's per-claim mapping, never the whole freeze.
     assert set(_crefs2(synth.claims)) == set(_crefs(stock.claims)) | set(_crefs(bull.claims)) | set(_crefs(bear.claims))
+
 
 def test_resume_partial_source_reuses_completed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import sqlite3
 
     from app.research.repository import get_research_db_path
     from app.research.runner import resume_live
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
-    calls = {"n": 0}
     base = _fake_dispatch()
+    scouts_started = {"n": 0}
+
     def _crash(name: str, args: dict[str, object]) -> dict[str, object]:
-        if name == "call_tool":
-            calls["n"] += 1
-            # Deterministic cut (the fake makes a fixed call sequence per scout):
-            # two scouts completed, the third still running when the crash lands.
-            if calls["n"] > 20:
+        if name == "browse_tools":
+            scouts_started["n"] += 1
+            # Deterministic cut: each scout opens with browse_tools, so the third one
+            # starting means two completed and this one is mid-fetch (keying on a raw
+            # call count would drift with the scout's tool volume).
+            if scouts_started["n"] == 3:
                 raise KeyboardInterrupt("simulated crash mid-source-fetch")
         return base(name, args)
+
     def _ok(prompt: str) -> str:
         return _grounded(prompt)
+
     import pytest as _pt
+
     with _pt.raises(KeyboardInterrupt):
-        run_live(question="NVDA demand?", objective="o", as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"], dispatch=_crash, model=_ok, repo=repo, budgets=None)
+        run_live(
+            question="NVDA demand?",
+            objective="o",
+            as_of="2025-06-30T00:00:00+00:00",
+            tickers=["NVDA"],
+            dispatch=_crash,
+            model=_ok,
+            repo=repo,
+            budgets=None,
+        )
     db = get_research_db_path()
     with sqlite3.connect(db) as conn:
         rows = conn.execute("SELECT DISTINCT session_id FROM jobs").fetchall()
@@ -805,19 +1072,37 @@ def test_resume_partial_source_reuses_completed(tmp_path: Path, monkeypatch: pyt
     assert len([j for j in jobs_after if j.job_type == "source_agent"]) == 1
     completed = [j for j in jobs_after if j.job_type == "scout" and j.status == "completed"]
     aids = [(j.diagnostics or {}).get("assignment_id") for j in completed]
-    assert sorted(a for a in aids if isinstance(a, str)) == ["scout-filings", "scout-financials", "scout-risk"]
+    assert sorted(a for a in aids if isinstance(a, str)) == [
+        "scout-filings",
+        "scout-financials",
+        "scout-risk",
+    ]
     eids_final = [str(r.get("evidence_id")) for r in repo.list_evidence(sid)]
     assert len(eids_final) == len(set(eids_final))
+
 
 def test_run_resume_produce_complete_append_only_trace(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.evals.traces import get_trace_events, list_traces
     from app.research.runner import resume_live
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     monkeypatch.setenv("XDG_DATA_HOME", str(tmp_path / "data"))
     repo = ResearchRepository()
+
     def _ok(prompt: str) -> str:
         return _grounded(prompt)
-    out = run_live(question="NVDA demand?", objective="o", as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"], dispatch=_fake_dispatch(), model=_ok, repo=repo, budgets=None, interrupt_after="source")
+
+    out = run_live(
+        question="NVDA demand?",
+        objective="o",
+        as_of="2025-06-30T00:00:00+00:00",
+        tickers=["NVDA"],
+        dispatch=_fake_dispatch(),
+        model=_ok,
+        repo=repo,
+        budgets=None,
+        interrupt_after="source",
+    )
     sid = out["session_id"]
     assert isinstance(sid, str)
     traces = list_traces(sid)
@@ -825,8 +1110,15 @@ def test_run_resume_produce_complete_append_only_trace(tmp_path: Path, monkeypat
     tid = traces[0].trace_id
     evs = get_trace_events(tid)
     types = [e.event_type for e in evs]
-    for required in ("trace.opened", "tool.completed", "evidence.ingested", "discovery.ingested",
-                     "job.created", "job.completed", "model.completed"):
+    for required in (
+        "trace.opened",
+        "tool.completed",
+        "evidence.ingested",
+        "discovery.ingested",
+        "job.created",
+        "job.completed",
+        "model.completed",
+    ):
         assert required in types
     seqs = [e.seq for e in evs]
     assert len(set(seqs)) == len(seqs) and seqs == sorted(seqs)
@@ -855,25 +1147,51 @@ def test_run_resume_produce_complete_append_only_trace(tmp_path: Path, monkeypat
     resumed = next(e for e in evs2 if e.event_type == "trace.resumed")
     assert resumed.payload.get("trace_id") == tid and resumed.payload.get("session_id") == sid
     from app.research.evals.traces import get_trace
+
     header = get_trace(tid)
     assert header is not None and header.status == "completed" and header.conclusion
 
+
 def _svc_sid(repo: ResearchRepository, q: str = "NVDA demand?") -> tuple[str, str]:
     from app.research import service as _svc
+
     sid = _svc.create_research(q, "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
     jobs = repo.list_jobs(sid)
     return sid, jobs[0].job_id
 
-def _svc_item(eid: str, wave: int = 1) -> dict[str, object]:
-    """Observed-fact item with raw document provenance (accession + document + passage)."""
-    return {"evidence_id": eid, "wave_id": wave, "content": "c-" + eid, "claim_text": "c-" + eid,
-            "subject": "NVDA", "source_name": "SEC", "source_uri": "https://sec.gov/x",
-            "source_record_id": "0000320193-25-000079", "document_name": "nvda-20250331.htm",
-            "matching_passage": "Accelerated computing demand grew in the reporting period.",
-            "known_at": "2025-06-29T00:00:00+00:00"}
 
-def _committee_analysis(eid: str, follow_ups: Sequence[object] = (), claim_text: str = "finding",
-                        claim_type: str = "inference") -> dict[str, object]:
+@pytest.fixture(autouse=True)
+def _evidence_handle_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evidence admission in this module reloads through the fake archive, never the network."""
+    seam.install(monkeypatch)
+
+
+def _svc_item(
+    eid: str,
+    wave: int = 1,
+    passage: str = "Accelerated computing demand grew in the reporting period.",
+) -> dict[str, object]:
+    """Observed-fact item with the canonical handle for its cited passage."""
+
+    return {
+        "evidence_id": eid,
+        "wave_id": wave,
+        "content": "c-" + eid,
+        "claim_text": "c-" + eid,
+        "subject": "NVDA",
+        "source_name": "SEC",
+        "source_uri": "https://sec.gov/x",
+        "source_record_id": "0000320193-25-000079",
+        "document_name": "nvda-20250331.htm",
+        "matching_passage": passage,
+        "source_handle": seam.handle_for(passage),
+        "known_at": "2025-06-29T00:00:00+00:00",
+    }
+
+
+def _committee_analysis(
+    eid: str, follow_ups: Sequence[object] = (), claim_text: str = "finding", claim_type: str = "inference"
+) -> dict[str, object]:
     """Rich committee envelope mapping for service.record_committee_analysis (all required keys)."""
     return {
         "executive_view": f"{claim_text} read over the freeze.",
@@ -889,15 +1207,19 @@ def _committee_analysis(eid: str, follow_ups: Sequence[object] = (), claim_text:
 def _svc_ana(eid: str) -> dict[str, object]:
     return _committee_analysis(eid)
 
+
 def _svc_trio(repo: ResearchRepository, sid: str, eid: str) -> None:
     from app.research import service as _svc
+
     for role in ("stockbot", "bullbot", "bearbot"):
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
         _svc.record_committee_analysis(sid, jid, role, _svc_ana(eid), repo=repo)
 
+
 def test_committee_cannot_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.pi_gateway import PiSessionContext, execute_pi_tool
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
@@ -908,8 +1230,10 @@ def test_committee_cannot_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     out = execute_pi_tool("search_web", {"query": "x", "session_id": sid}, PiSessionContext(session_id="t1"))
     assert "forbids" in str(out.get("error", ""))
 
+
 def test_committee_cannot_add_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
@@ -923,8 +1247,10 @@ def test_committee_cannot_add_evidence(tmp_path: Path, monkeypatch: pytest.Monke
     with pytest.raises(ValueError, match="forbids"):
         _svc.authorize_and_consume_dispatch(sid, bear, "search_web", repo=repo)
 
+
 def test_role_job_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
@@ -936,8 +1262,10 @@ def test_role_job_mismatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
     with pytest.raises(ValueError, match="!="):
         _svc.record_committee_analysis(sid, stock, "bearbot", _svc_ana(eid), repo=repo)
 
+
 def test_evidence_rejected_on_completed_or_committee_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
@@ -951,8 +1279,10 @@ def test_evidence_rejected_on_completed_or_committee_job(tmp_path: Path, monkeyp
     with pytest.raises(ValueError):
         _svc.record_evidence(sid, bull, _svc_item(f"{sid}:ev:3"), repo=repo)
 
+
 def test_restart_after_e1_resume_completes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
@@ -967,8 +1297,10 @@ def test_restart_after_e1_resume_completes(tmp_path: Path, monkeypatch: pytest.M
     out = _svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=fresh)
     assert out["freeze_id"] == f"{sid}:1:freeze"
 
+
 def test_restart_after_2_of_3_committee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
@@ -984,8 +1316,10 @@ def test_restart_after_2_of_3_committee(tmp_path: Path, monkeypatch: pytest.Monk
     out = _svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=fresh)
     assert out["freeze_id"] == f"{sid}:1:freeze"
 
+
 def test_source_terminal_before_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
@@ -995,9 +1329,11 @@ def test_source_terminal_before_freeze(tmp_path: Path, monkeypatch: pytest.Monke
     _svc.complete_job(src, {}, repo=repo)
     assert _svc.freeze_session(sid, 1, repo=repo)["freeze_id"] == f"{sid}:1:freeze"
 
+
 def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import app.pi_gateway as _gw
     from app.pi_gateway import PiSessionContext, execute_pi_tool
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, jid = _svc_sid(repo)
@@ -1006,9 +1342,11 @@ def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     ctx.active_research_session_id = sid
     ctx.active_research_job_id = jid
     calls: list[tuple[str, dict[str, object]]] = []
+
     def _fake_execute(name: str, arguments: dict[str, object], model: str, context: object = None) -> dict[str, object]:
         calls.append((name, dict(arguments)))
         return {"result_type": "web_search", "query": arguments.get("query"), "results": [], "source": "exa"}
+
     monkeypatch.setattr(_gw, "execute_tool", _fake_execute)
     first = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
     assert "error" not in first, first
@@ -1020,10 +1358,44 @@ def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert calls[0][0] == "search_web" and calls[0][1] == {"query": "NVDA demand"}
     assert repo.get_job(jid).tool_budget == 0
     assert repo.get_session(sid).budget.get("tool_calls_used") == 1
-    kept = execute_pi_tool("research_add_evidence", {"session_id": sid, "job_id": jid, "item": _svc_item(f"{sid}:ev:1")}, ctx)
+    kept = execute_pi_tool(
+        "research_add_evidence", {"session_id": sid, "job_id": jid, "item": _svc_item(f"{sid}:ev:1")}, ctx
+    )
     assert "error" not in kept, kept
     assert repo.get_job(jid).tool_budget == 0
     assert repo.get_session(sid).budget.get("tool_calls_used") == 1
+
+
+def test_research_bound_dispatch_carries_research_session_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """SEC discovery sees the attached research session (exhaustive default), None when unattached."""
+    import app.pi_gateway as _gw
+    from app.pi_gateway import PiSessionContext, execute_pi_tool
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, jid = _svc_sid(repo)
+    seen: dict[str, object] = {}
+
+    def _fake_execute(name: str, arguments: dict[str, object], model: str, context: object = None) -> dict[str, object]:
+        seen["context_session"] = getattr(context, "research_session_id", "missing")
+        return {"search_id": "s1", "count": 0, "source": "SEC EDGAR"}
+
+    monkeypatch.setattr(_gw, "execute_tool", _fake_execute)
+    bound = PiSessionContext(
+        session_id="pi-bound",
+        active_research_session_id=sid,
+        active_research_job_id=jid,
+    )
+    out = execute_pi_tool("search_sec_filings", {"query": "Apple"}, bound)
+    assert "error" not in out, out
+    assert seen["context_session"] == sid
+
+    seen.clear()
+    unbound = PiSessionContext(session_id="pi-unbound")
+    out = execute_pi_tool("search_sec_filings", {"query": "Apple"}, unbound)
+    assert "error" not in out, out
+    assert seen["context_session"] is None
+
 
 def test_concurrent_dispatch_race_admits_one(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import threading
@@ -1196,11 +1568,14 @@ def test_record_evidence_rejects_bad_metadata(tmp_path: Path, monkeypatch: pytes
     good["metadata"] = {"source": "sec", "page": 3}
     out = _svc.record_evidence(sid, src, good, repo=repo)
     assert out["metadata"] == {"source": "sec", "page": 3}
+
+
 # ---------------------------------------------------------------------------
 # SEC-only NVDA/Anthropic regression + context/coverage/dedup/provenance.
 # Forward-compatible: new APIs via lazy getattr; behavior asserts only,
 # never exact call counts.
 # ---------------------------------------------------------------------------
+
 
 def _sec_only_policy() -> dict[str, JSONValue]:
     """SEC-only allowlist policy shape per contract (research_sources in)."""
@@ -1212,8 +1587,17 @@ def test_sec_only_policy_persisted_and_round_trips(tmp_path: Path, monkeypatch: 
     repo = ResearchRepository()
     sess = _session.create_session("NVDA AI demand?", "o", as_of=ASOF, policy=_sec_only_policy())
     doc = sess.to_dict()
-    for key in ("session_id", "query", "objective", "as_of", "status", "policy", "budget",
-                "source_policy", "temporal_scope"):
+    for key in (
+        "session_id",
+        "query",
+        "objective",
+        "as_of",
+        "status",
+        "policy",
+        "budget",
+        "source_policy",
+        "temporal_scope",
+    ):
         assert key in doc
     sp = doc["source_policy"]
     assert isinstance(sp, dict)
@@ -1238,6 +1622,7 @@ def test_sec_only_policy_persisted_and_round_trips(tmp_path: Path, monkeypatch: 
     assert loaded.temporal_scope == sess.temporal_scope
     # Round-trip via from_dict/validate preserves the contract keys.
     from app.research.models import ResearchSession as _RS
+
     back = _RS.from_dict(doc)
     back.validate()
     assert back.to_dict()["source_policy"] == doc["source_policy"]
@@ -1255,7 +1640,6 @@ def test_sec_only_nvda_anthropic_end_to_end(tmp_path: Path, monkeypatch: pytest.
     repo = ResearchRepository()
     calls: list[str] = []
 
-
     def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
         if name in ("search_tools", "browse_tools"):
             return {"matches": ["search_sec_filings", "list_sec_filings"]}
@@ -1266,19 +1650,33 @@ def test_sec_only_nvda_anthropic_end_to_end(tmp_path: Path, monkeypatch: pytest.
             # No-issuer probe (Anthropic, private): empty record, never an error.
             if "anthropic" in str(args).lower() and "nvda" not in str(args).lower():
                 return {"record": {}, "evidence_ids": []}
-            return {"record": {"id": "r-" + str(len(calls)), "known_at": "2025-05-01",
-                    "uri": "https://sec.gov/x", "record_id": "0001045810-25-000023"},
-                    "evidence_ids": ["EV-1", "EV-2"]}
+            return {
+                "record": {
+                    "id": "r-" + str(len(calls)),
+                    "known_at": "2025-05-01",
+                    "uri": "https://sec.gov/x",
+                    "record_id": "0001045810-25-000023",
+                },
+                "evidence_ids": ["EV-1", "EV-2"],
+            }
         return {}
 
     from app.research.agents.source_agent import build_research_context
+
     ctx = build_research_context("NVDA AI demand vs Anthropic private AI concepts?", ["NVDA"])
     blob = str(ctx).lower()
     assert "nvda" in blob
     assert "anthropic" in blob or "ai" in blob
-    out = run_live(question="NVDA AI demand vs Anthropic private AI concepts?", objective="o",
-                   as_of="2025-06-30T00:00:00+00:00", tickers=["NVDA"],
-                   dispatch=_dispatch, model=_grounded, repo=repo, budgets=None)
+    out = run_live(
+        question="NVDA AI demand vs Anthropic private AI concepts?",
+        objective="o",
+        as_of="2025-06-30T00:00:00+00:00",
+        tickers=["NVDA"],
+        dispatch=_dispatch,
+        model=_grounded,
+        repo=repo,
+        budgets=None,
+    )
     # No-issuer does not stop the session; NVDA filings + conceptual searches ran.
     assert out["stop_reason"] in ("complete:wave1", "complete:wave2")
     assert calls, "expected NVDA filing/conceptual SEC calls"
@@ -1304,6 +1702,7 @@ def test_sec_only_nvda_anthropic_end_to_end(tmp_path: Path, monkeypatch: pytest.
 def test_dedup_collapses_cosmetic_repeats() -> None:
     from app.research.agents.scout import normalize_query
     from app.research.agents.source_agent import normalize_query as _sa_norm
+
     assert normalize_query("AI demand") == normalize_query("AI   demand")
     assert normalize_query("AI Demand") == normalize_query("ai demand")
     assert _sa_norm("AI demand") == normalize_query("AI   demand")
@@ -1318,6 +1717,7 @@ def test_dedup_collapses_cosmetic_repeats() -> None:
 
 def test_scout_executes_normalized_repeat_once() -> None:
     from app.research.agents.scout import ScoutAssignment, run_scout
+
     seen: list[tuple[str, object]] = []
 
     def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
@@ -1329,10 +1729,16 @@ def test_scout_executes_normalized_repeat_once() -> None:
             seen.append((str(query), inner.get("as_of") if isinstance(inner, dict) else None))
         return {"evidence_ids": []}
 
-    assignment = ScoutAssignment(assignment_id="scout-filings", session_id="rs:t",
-                                 as_of="2025-06-30", role="filings", question="Q?",
-                                 tickers=[], queries=["AI demand", "AI   demand", "ai DEMAND"],
-                                 baseline=[])
+    assignment = ScoutAssignment(
+        assignment_id="scout-filings",
+        session_id="rs:t",
+        as_of="2025-06-30",
+        role="filings",
+        question="Q?",
+        tickers=[],
+        queries=["AI demand", "AI   demand", "ai DEMAND"],
+        baseline=[],
+    )
     result = run_scout(assignment, dispatch=_dispatch, model=lambda prompt: "[]")
     assert len(seen) == 1
     assert seen[0][0] == "AI demand"
@@ -1364,9 +1770,18 @@ def test_scout_material_events_args_always_carry_since() -> None:
 
     def _role_calls(as_of: str) -> list[tuple[str, dict[str, object]]]:
         calls.clear()
-        run_scout(ScoutAssignment(assignment_id="scout-filings", session_id="rs:t", as_of=as_of,
-                                  role="filings", question="What changed at NVDA?", tickers=["NVDA"]),
-                  dispatch=_dispatch, model=lambda prompt: "[]")
+        run_scout(
+            ScoutAssignment(
+                assignment_id="scout-filings",
+                session_id="rs:t",
+                as_of=as_of,
+                role="filings",
+                question="What changed at NVDA?",
+                tickers=["NVDA"],
+            ),
+            dispatch=_dispatch,
+            model=lambda prompt: "[]",
+        )
         # Every emitted role call passes the real schema check, not a hand-written shape.
         for tool, args in calls:
             assert _validate_tool_arguments(tool, args) is None, (as_of, tool, args)
@@ -1420,9 +1835,16 @@ def test_scout_unbounded_citations_reach_the_model() -> None:
     def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
         if name == "browse_tools":
             return {"matches": []}
-        return {"evidence_ids": [{"evidence_id": "EV-1", "known_at": "2011-03-16T16:33:51+00:00",
-                                  "claim_text": "Data center revenue grew"}],
-                "top_hits": []}
+        return {
+            "evidence_ids": [
+                {
+                    "evidence_id": "EV-1",
+                    "known_at": "2011-03-16T16:33:51+00:00",
+                    "claim_text": "Data center revenue grew",
+                }
+            ],
+            "top_hits": [],
+        }
 
     def _model(prompt: str) -> str:
         prompts.append(prompt)
@@ -1435,9 +1857,18 @@ def test_scout_unbounded_citations_reach_the_model() -> None:
         prompts.clear()
         journal.clear()
         return run_scout(
-            ScoutAssignment(assignment_id="scout-filings", session_id="rs:t", as_of=no_cutoff,
-                            role="filings", question="What changed at NVDA?", tickers=["NVDA"]),
-            dispatch=_dispatch, model=_model, journal=_journal)
+            ScoutAssignment(
+                assignment_id="scout-filings",
+                session_id="rs:t",
+                as_of=no_cutoff,
+                role="filings",
+                question="What changed at NVDA?",
+                tickers=["NVDA"],
+            ),
+            dispatch=_dispatch,
+            model=_model,
+            journal=_journal,
+        )
 
     for no_cutoff in ("unbounded", ""):
         result = _scout(no_cutoff)
@@ -1447,19 +1878,178 @@ def test_scout_unbounded_citations_reach_the_model() -> None:
         assert result.unknowns == [], no_cutoff
 
 
+def test_scout_executes_unscoped_counterparty_queries_before_the_model() -> None:
+    """Global counterparty searches run with no ticker/cik, pre-model; their hits are opened."""
+    from app.research.agents.scout import ScoutAssignment, run_scout
+
+    seq: list[str] = []
+    searched: list[dict[str, object]] = []
+
+    def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
+        if name == "browse_tools":
+            return {"matches": []}
+        inner = args.get("name")
+        inner_args = args.get("arguments")
+        assert isinstance(inner, str) and isinstance(inner_args, dict)
+        if inner == "search_sec_filings":
+            seq.append(f"search:{inner_args.get('query')}")
+            searched.append(inner_args)
+            return {
+                "top_hits": [{"accession": "0001-25-000001", "document": "ex-10.htm"}],
+                "evidence_ids": [],
+            }
+        if inner == "get_sec_document":
+            seq.append(f"open:{inner_args.get('accession_no')}")
+            return {
+                "evidence_ids": [
+                    {
+                        "evidence_id": "EV-1",
+                        "known_at": "2025-05-01",
+                        "claim_text": "ok",
+                    }
+                ]
+            }
+        return {"evidence_ids": []}
+
+    assignment = ScoutAssignment(
+        assignment_id="scout-filings",
+        session_id="rs:t",
+        as_of="2025-06-30",
+        role="filings",
+        question="What happens to Microsoft if OpenAI goes bankrupt?",
+        tickers=["MSFT"],
+        unscoped_queries=["OpenAI", "OpenAI exposure"],
+    )
+    run_scout(assignment, dispatch=_dispatch, model=lambda prompt: seq.append("model") or "[]")
+
+    unscoped = [a for a in searched if "query" in a]
+    assert [a["query"] for a in unscoped] == ["OpenAI", "OpenAI exposure"]
+    assert all("ticker" not in a and "cik" not in a for a in unscoped)
+    assert [e for e in seq if e.startswith("open:")] == ["open:0001-25-000001"]
+    assert seq[-1] == "model"  # every search, and the document read it surfaced, ran first
+
+
+def test_scout_expansion_searches_derived_queries_and_opens_new_documents() -> None:
+    """Expansion: passage-derived queries run, their documents open, and the loop stops at fixpoint."""
+    from app.research.agents.scout import ScoutAssignment, run_scout
+
+    searches: list[str] = []
+    opens: list[str] = []
+
+    def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
+        if name == "browse_tools":
+            return {"matches": []}
+        inner = str(args.get("name"))
+        inner_args = args.get("arguments")
+        assert isinstance(inner_args, dict)
+        if inner == "search_sec_filings":
+            query = str(inner_args.get("query"))
+            searches.append(query)
+            hit = ("ACC-1", "one.htm") if query == "assigned query" else ("ACC-2", "two.htm")
+            return {
+                "top_hits": [{"accession": hit[0], "document": hit[1]}],
+                "evidence_ids": [],
+            }
+        if inner == "get_sec_document":
+            accession = str(inner_args.get("accession_no"))
+            opens.append(accession)
+            text = "Hyperscaler concentration grew" if accession == "ACC-1" else "ok"
+            return {
+                "evidence_ids": [
+                    {
+                        "evidence_id": f"EV-{accession}",
+                        "known_at": "2025-05-01",
+                        "claim_text": text,
+                    }
+                ]
+            }
+        return {"evidence_ids": []}
+
+    assignment = ScoutAssignment(
+        assignment_id="scout-filings",
+        session_id="rs:t",
+        as_of="2025-06-30",
+        role="filings",
+        question="Q?",
+        tickers=[],
+        queries=["assigned query"],
+    )
+    run_scout(assignment, dispatch=_dispatch, model=lambda prompt: "[]")
+
+    # Round 1 = assigned query; round 2 = the terms the opened ACC-1 passage names.
+    assert searches == ["assigned query", "Hyperscaler", "concentration"]
+    assert opens == [
+        "ACC-1",
+        "ACC-2",
+    ]  # the document the derived searches surfaced, opened once
+
+
+def test_scout_expansion_never_reexecutes_a_seen_query() -> None:
+    """A derived term already executed (any case/whitespace form) is suppressed, never re-run."""
+    from app.research.agents.scout import ScoutAssignment, run_scout
+
+    searches: list[str] = []
+
+    def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
+        if name == "browse_tools":
+            return {"matches": []}
+        inner = str(args.get("name"))
+        inner_args = args.get("arguments")
+        assert isinstance(inner_args, dict)
+        if inner == "search_sec_filings":
+            searches.append(str(inner_args.get("query")))
+            return {
+                "top_hits": [{"accession": "ACC-1", "document": "one.htm"}],
+                "evidence_ids": [],
+            }
+        if inner == "get_sec_document":
+            return {
+                "evidence_ids": [
+                    {
+                        "evidence_id": "EV-1",
+                        "known_at": "2025-05-01",
+                        "claim_text": "concentration. Ferrari up.",
+                    }
+                ]
+            }
+        return {"evidence_ids": []}
+
+    assignment = ScoutAssignment(
+        assignment_id="scout-filings",
+        session_id="rs:t",
+        as_of="2025-06-30",
+        role="filings",
+        question="Q?",
+        tickers=[],
+        queries=["CONCENTRATION"],
+    )
+    run_scout(assignment, dispatch=_dispatch, model=lambda prompt: "[]")
+    assert searches == ["CONCENTRATION", "Ferrari"]
+
+
 def test_scout_prompt_renders_context_baseline_and_queries() -> None:
     """Scout prompt: context lines + relationships, latest-filing baseline, assigned queries."""
     from app.research.agents.scout import ScoutAssignment, build_scout_prompt
 
     assignment = ScoutAssignment(
-        assignment_id="scout-filings", session_id="rs:t", as_of="2026-08-10", role="filings",
-        question="NVDA data center growth?", tickers=["NVDA"],
-        context={"primary_entities": ["NVDA"], "concepts": ["accelerated computing", "  "],
-                 "relationships": [{"subject": "NVDA", "relation": "supplies", "object": "hyperscalers"},
-                                   {"subject": "NVDA", "relation": "  ", "object": "dropped"},
-                                   "not-a-triple"]},
+        assignment_id="scout-filings",
+        session_id="rs:t",
+        as_of="2026-08-10",
+        role="filings",
+        question="NVDA data center growth?",
+        tickers=["NVDA"],
+        context={
+            "primary_entities": ["NVDA"],
+            "concepts": ["accelerated computing", "  "],
+            "relationships": [
+                {"subject": "NVDA", "relation": "supplies", "object": "hyperscalers"},
+                {"subject": "NVDA", "relation": "  ", "object": "dropped"},
+                "not-a-triple",
+            ],
+        },
         baseline=["NVDA 10-Q data center segment", "NVDA 10-K competition"],
-        queries=["NVDA data center revenue"])
+        queries=["NVDA data center revenue"],
+    )
     prompt = build_scout_prompt(assignment)
     assert "Context primary_entities: NVDA" in prompt
     assert "Context concepts: accelerated computing" in prompt
@@ -1470,9 +2060,11 @@ def test_scout_prompt_renders_context_baseline_and_queries() -> None:
     assert "Assigned queries (search each; skip exact repeats already executed):" in prompt
     assert "- NVDA data center revenue" in prompt
 
-    bare = build_scout_prompt(ScoutAssignment(assignment_id="scout-risk", session_id="rs:t",
-                                               as_of="unbounded", role="risk", question="Q?",
-                                               tickers=[]))
+    bare = build_scout_prompt(
+        ScoutAssignment(
+            assignment_id="scout-risk", session_id="rs:t", as_of="unbounded", role="risk", question="Q?", tickers=[]
+        )
+    )
     assert "Context " not in bare and "Latest-filing baseline" not in bare
     assert "Assigned queries" not in bare and "NO ticker and NO cik" not in bare
     assert "scope tickers TBD" in bare and "As of: unbounded" in bare
@@ -1481,8 +2073,15 @@ def test_scout_prompt_renders_context_baseline_and_queries() -> None:
 
 def test_merge_context_unions_model_terms() -> None:
     from app.research.agents.source_agent import _merge_context, build_research_context
+
     base = build_research_context("NVDA AI demand?", ["NVDA"])
-    merged = _merge_context(base, {"concepts": ["accelerated computing"], "relationships": [{"subject": "NVDA", "relation": "supplies", "object": "hyperscalers"}]})
+    merged = _merge_context(
+        base,
+        {
+            "concepts": ["accelerated computing"],
+            "relationships": [{"subject": "NVDA", "relation": "supplies", "object": "hyperscalers"}],
+        },
+    )
     assert "accelerated computing" in str(merged["concepts"]).lower()
     rels = merged["relationships"]
     assert isinstance(rels, list)
@@ -1492,6 +2091,7 @@ def test_merge_context_unions_model_terms() -> None:
 
 def test_expand_queries_mines_findings_and_context() -> None:
     from app.research.agents.source_agent import build_research_context, expand_queries
+
     ctx = build_research_context("NVDA AI demand?", ["NVDA"])
     out = expand_queries(["nvda demand"], ["Hyperscaler concentration grew in filings"], ctx)
     assert out and all(q.strip() for q in out)
@@ -1500,22 +2100,30 @@ def test_expand_queries_mines_findings_and_context() -> None:
 
 def test_expansion_stop_prefers_info_over_counts() -> None:
     from app.research.agents.source_agent import expansion_stop
+
     assert expansion_stop(sec_answerable_remaining=False)[0] is True
     assert expansion_stop(new_queries=False)[0] is True
     assert expansion_stop(new_queries=True) == (False, "continue")
 
-@pytest.mark.parametrize(("question", "tickers", "must_contain"), [
-    ("Spirit AeroSystems Boeing 737 relationship and backlog?", ["SPR"], ("aerospace", "boeing")),
-    ("Novo Nordisk GLP-1 diabetes obesity outlook?", ["NVO"], ("glp", "diabetes", "obesity")),
-    ("Arista cloud networking datacenter Ethernet demand?", ["ANET"], ("cloud", "network", "datacenter")),
-    ("Albemarle lithium brine battery demand?", ["ALB"], ("lithium", "battery")),
-    ("Apple China supply chain and tariffs?", ["AAPL"], ("china", "supply")),
-])
-def test_cross_domain_context_carries_industry_terms(question: str, tickers: list[str], must_contain: tuple[str, ...]) -> None:
+
+@pytest.mark.parametrize(
+    ("question", "tickers", "must_contain"),
+    [
+        ("Spirit AeroSystems Boeing 737 relationship and backlog?", ["SPR"], ("aerospace", "boeing")),
+        ("Novo Nordisk GLP-1 diabetes obesity outlook?", ["NVO"], ("glp", "diabetes", "obesity")),
+        ("Arista cloud networking datacenter Ethernet demand?", ["ANET"], ("cloud", "network", "datacenter")),
+        ("Albemarle lithium brine battery demand?", ["ALB"], ("lithium", "battery")),
+        ("Apple China supply chain and tariffs?", ["AAPL"], ("china", "supply")),
+    ],
+)
+def test_cross_domain_context_carries_industry_terms(
+    question: str, tickers: list[str], must_contain: tuple[str, ...]
+) -> None:
     from app.research.agents.source_agent import (
         build_query_families,
         build_research_context,
     )
+
     ctx = build_research_context(question, tickers)
     blob = str(ctx).lower()
     assert any(term in blob for term in must_contain), blob[:500]
@@ -1535,6 +2143,7 @@ def test_private_counterparty_queries_reach_filings_scout() -> None:
         build_research_context,
         decompose_question,
     )
+
     question = "What happens to Microsoft if OpenAI goes bankrupt?"
     groups = _grouped_queries(build_research_context(question, ["MSFT"]))
     assert {"OpenAI", "OpenAI exposure", "OpenAI agreement", "OpenAI 8-K"} <= set(groups["cp"])
@@ -1542,8 +2151,9 @@ def test_private_counterparty_queries_reach_filings_scout() -> None:
     def _catalog_only(name: str, args: dict[str, object]) -> dict[str, object]:
         return {}  # discovery hint only; no query execution on this path
 
-    assignments = decompose_question(question, session_id="rs:t", as_of="2026-08-10",
-                                     tickers=["MSFT"], dispatch=_catalog_only)
+    assignments = decompose_question(
+        question, session_id="rs:t", as_of="2026-08-10", tickers=["MSFT"], dispatch=_catalog_only
+    )
     filings = next(a for a in assignments if a.role == "filings")
     assert "OpenAI" in filings.queries  # bare name -> unscoped EDGAR full-text search
     # The counterparty family is wired into the filings role and nowhere else.
@@ -1557,6 +2167,7 @@ def test_no_counterparty_question_keeps_existing_families() -> None:
         _grouped_queries,
         build_research_context,
     )
+
     ctx = build_research_context("NVDA data center revenue growth", ["NVDA"])
     assert ctx["related_entities"] == []
     assert _grouped_queries(ctx) == {
@@ -1569,44 +2180,109 @@ def test_no_counterparty_question_keeps_existing_families() -> None:
         "f": ["NVDA risk factors"],
         "related": [],
         "supp_bare": ["data", "center", "revenue", "growth"],
-        "supp_filing": ["data 8-K", "data proxy", "data N-PX", "data agreement",
-                        "center 8-K", "center proxy", "center N-PX", "center agreement",
-                        "revenue 8-K", "revenue proxy", "revenue N-PX", "revenue agreement",
-                        "growth 8-K", "growth proxy", "growth N-PX", "growth agreement"],
-        "supp_risk": ["data risk factor", "center risk factor", "revenue risk factor",
-                      "growth risk factor"],
+        "supp_filing": [
+            "data 8-K",
+            "data proxy",
+            "data N-PX",
+            "data agreement",
+            "center 8-K",
+            "center proxy",
+            "center N-PX",
+            "center agreement",
+            "revenue 8-K",
+            "revenue proxy",
+            "revenue N-PX",
+            "revenue agreement",
+            "growth 8-K",
+            "growth proxy",
+            "growth N-PX",
+            "growth agreement",
+        ],
+        "supp_risk": ["data risk factor", "center risk factor", "revenue risk factor", "growth risk factor"],
     }
 
 
-def test_counterparty_family_caps_entities_and_variants() -> None:
-    """Counterparty family: six entities max, four variants each, scope tickers excluded."""
+def test_counterparty_family_includes_every_related_entity() -> None:
+    """Counterparty family: all eight related entities, four variants each, scope tickers excluded."""
     from app.research.agents.source_agent import _grouped_queries
-    ctx: dict[str, object] = {"primary_entities": ["MSFT"],
-                              "related_entities": ["MSFT", *(f"Counter {i}" for i in range(8))]}
+
+    ctx: dict[str, object] = {
+        "primary_entities": ["MSFT"],
+        "related_entities": ["MSFT", *(f"Counter {i}" for i in range(8))],
+    }
     cp = _grouped_queries(ctx)["cp"]
-    assert len(cp) == 24  # 6 entities x (bare + exposure/agreement/8-K)
-    assert "MSFT" not in cp and "Counter 6" not in cp
+    assert len(cp) == 32  # 8 entities x (bare + exposure/agreement/8-K); no entity cap
+    assert "MSFT" not in cp and "Counter 7" in cp and "Counter 7 8-K" in cp
+
+
+def test_role_assignments_dispatch_every_material_query() -> None:
+    """No first-two-per-family cap: every planned family query reaches its role's assignment."""
+    from app.research.agents.source_agent import _grouped_queries, _role_assignments
+
+    ctx: dict[str, object] = {
+        "primary_entities": ["MSFT"],
+        "related_entities": ["Alpha", "Beta", "Gamma", "Delta"],
+        "industries": ["industrials", "software", "semiconductors", "services"],
+        "products": ["Azure", "Office", "Dynamics"],
+        "technologies": [],
+        "concepts": ["cloud"],
+        "risks": ["credit", "litigation", "regulatory", "supply"],
+        "catalysts": [],
+    }
+    groups = _grouped_queries(ctx)
+    assignments = _role_assignments("Q?", "rs:t", "2026-08-10", ["MSFT"], ctx, groups, [])
+    by_role = {a.role: a.queries for a in assignments}
+    for family, role in (
+        ("b", "filings"),
+        ("cp", "filings"),
+        ("related", "filings"),
+        ("supp_filing", "filings"),
+        ("c", "financials"),
+        ("d", "financials"),
+        ("supp_bare", "financials"),
+        ("f", "risk"),
+        ("supp_risk", "risk"),
+    ):
+        assert len(groups[family]) > 2, (family, groups[family])
+        assert [q for q in by_role[role] if q in set(groups[family])] == groups[family], family
 
 
 def test_scout_prompt_demands_global_search_for_non_filers() -> None:
     """Scout prompt: counterparty queries are listed as global - no ticker, no cik, no scope shortcut."""
     from app.research.agents.scout import ScoutAssignment, build_scout_prompt
-    assignment = ScoutAssignment(assignment_id="scout-filings", session_id="rs:t", as_of="2026-08-10",
-                                 role="filings", question="What happens to Microsoft if OpenAI goes bankrupt?",
-                                 tickers=["MSFT"], queries=["MSFT OpenAI"],
-                                 unscoped_queries=["OpenAI", "OpenAI exposure"])
+
+    assignment = ScoutAssignment(
+        assignment_id="scout-filings",
+        session_id="rs:t",
+        as_of="2026-08-10",
+        role="filings",
+        question="What happens to Microsoft if OpenAI goes bankrupt?",
+        tickers=["MSFT"],
+        queries=["MSFT OpenAI"],
+        unscoped_queries=["OpenAI", "OpenAI exposure"],
+    )
     prompt = build_scout_prompt(assignment)
     assert "NO ticker and NO cik" in prompt
     assert "- OpenAI exposure" in prompt
     assert "never conclude a relationship is absent from a scoped search" in prompt
-    # The branch must be actionable: open the hits, don't just search them.
-    assert "open the top two hits with get_sec_document" in prompt
+    # The branch must be truthful about what already ran: the unscoped searches execute
+    # before the model call and the documents their hits named are opened for it.
+    assert "these queries have already run with NO ticker and NO cik" in prompt
+    assert "already run" in prompt and "opened below" in prompt
     # ...and it leads the prompt, before the scoped query list.
     assert prompt.index("Counterparty branch first") < prompt.index("Assigned queries")
     # Without counterparty queries the block is absent: no instruction drift for ordinary questions.
-    scoped_only = build_scout_prompt(ScoutAssignment(
-        assignment_id="scout-filings", session_id="rs:t", as_of="2026-08-10", role="filings",
-        question="NVDA data center revenue growth", tickers=["NVDA"], queries=["NVDA"]))
+    scoped_only = build_scout_prompt(
+        ScoutAssignment(
+            assignment_id="scout-filings",
+            session_id="rs:t",
+            as_of="2026-08-10",
+            role="filings",
+            question="NVDA data center revenue growth",
+            tickers=["NVDA"],
+            queries=["NVDA"],
+        )
+    )
     assert "NO ticker and NO cik" not in scoped_only
 
 
@@ -1626,31 +2302,37 @@ def test_as_of_excludes_later_evidence() -> None:
     led = EvidenceLedger()
     seen: list[tuple[str, dict[str, object]]] = []
     with pytest.raises(EvidenceRejectedError):
-        ingest_evidence(led, _ev("EV-FUT2", sess.session_id, 1,
-                                 datetime(2025, 7, 1, tzinfo=timezone.utc)),
-                        as_of=ASOF, on_reject=lambda t, p: seen.append((t, p)))
+        ingest_evidence(
+            led,
+            _ev("EV-FUT2", sess.session_id, 1, datetime(2025, 7, 1, tzinfo=UTC)),
+            as_of=ASOF,
+            on_reject=lambda t, p: seen.append((t, p)),
+        )
     assert seen and seen[0][1]["reason"] == "PIT_VIOLATION"
     assert led.ids() == ()
     # Latest-doc respects cutoff: eligible doc ingests, later doc rejects.
-    ingest_evidence(led, _ev("EV-OK", sess.session_id, 1,
-                             datetime(2025, 5, 1, tzinfo=timezone.utc)),
-                    as_of=ASOF, on_reject=None)
+    ingest_evidence(led, _ev("EV-OK", sess.session_id, 1, datetime(2025, 5, 1, tzinfo=UTC)), as_of=ASOF, on_reject=None)
     assert led.ids() == ("EV-OK",)
 
 
 def test_coverage_shape_and_insufficient_never_terminal(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
     eid = f"{sid}:ev:1"
     _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
-    coverage: dict[str, object] = {"useful_for_question": "insufficient",
-                                   "resolved": [], "partially_resolved": [],
-                                   "unresolved": ["Anthropic private revenue"],
-                                   "source_limitations": ["SEC-only: no private-issuer filings"]}
-    out = _svc.submit_source_result(src, coverage=coverage,
-                                    evidence_ids=[], unresolved_questions=["Anthropic private revenue"], repo=repo)
+    coverage: dict[str, object] = {
+        "useful_for_question": "insufficient",
+        "resolved": [],
+        "partially_resolved": [],
+        "unresolved": ["Anthropic private revenue"],
+        "source_limitations": ["SEC-only: no private-issuer filings"],
+    }
+    out = _svc.submit_source_result(
+        src, coverage=coverage, evidence_ids=[], unresolved_questions=["Anthropic private revenue"], repo=repo
+    )
     assert out["job_status"] == "completed"
     # submit = source job complete only; session never terminal here.
     assert repo.get_session(sid).status not in ("completed", "failed", "cancelled")
@@ -1670,9 +2352,19 @@ def test_negatives_cite_searchrun_only() -> None:
     import dataclasses as _dc
 
     from app.sec.models import DocumentMatch, MatchingPassage, SearchRun
+
     fields = {f.name for f in _dc.fields(SearchRun)}
-    for required in ("id", "source", "query", "filters", "executed_at", "as_of",
-                     "matched_entities", "matched_documents", "matched_passages"):
+    for required in (
+        "id",
+        "source",
+        "query",
+        "filters",
+        "executed_at",
+        "as_of",
+        "matched_entities",
+        "matched_documents",
+        "matched_passages",
+    ):
         assert required in fields, sorted(fields)
     # Negative-claim shape: grounded positives cite document/passage/accession,
     # negatives cite the SearchRun id only — never 'not found' as 'does not exist'.
@@ -1684,6 +2376,7 @@ def test_negatives_cite_searchrun_only() -> None:
 
 def test_sec_gates_deny_non_sec_even_via_browse() -> None:
     from app.research.agents.source_agent import is_sec_tool
+
     for denied in ("query_finra", "get_short_interest", "search_web", "get_market_snapshot", "get_analyst_estimates"):
         assert is_sec_tool(denied) is False, denied
     for allowed in ("search_sec_filings", "list_sec_filings", "get_sec_document"):
@@ -1692,12 +2385,15 @@ def test_sec_gates_deny_non_sec_even_via_browse() -> None:
     import inspect as _inspect
 
     from app.research.runner import _LiveRun
+
     src = _inspect.getsource(_LiveRun._guarded_tool_call)
     assert "POLICY_DENIED" in src
     assert "is_sec_tool" in src
 
+
 def test_resolve_source_policy_sec_only_allowlist() -> None:
     from app.research.models import resolve_source_policy, validate_source_policy
+
     sec_only = resolve_source_policy({"research_sources": {"mode": "allowlist", "sources": ["SEC"]}})
     assert sec_only["mode"] == "allowlist"
     allowed = sec_only["allowed"]
@@ -1710,12 +2406,13 @@ def test_resolve_source_policy_sec_only_allowlist() -> None:
     with pytest.raises(ValueError, match="mode"):
         resolve_source_policy({"research_sources": {"mode": "someday", "sources": ["SEC"]}})
 
+
 def test_resolve_temporal_scope_modes() -> None:
     from datetime import datetime as _dt
-    from datetime import timezone as _tz
 
     from app.research.models import resolve_temporal_scope, validate_temporal_scope
-    now = _dt(2025, 6, 30, tzinfo=_tz.utc)
+
+    now = _dt(2025, 6, 30, tzinfo=UTC)
     # No date -> latest-available with cutoff set, never invented/None.
     latest = resolve_temporal_scope(query="NVDA demand?", now=now)
     assert latest["mode"] == "latest-available"
@@ -1734,50 +2431,84 @@ def test_resolve_temporal_scope_modes() -> None:
     assert quarter["mode"] == "range"
     assert quarter["start"] is not None and quarter["end"] is not None
     assert validate_temporal_scope(dict(latest)) == latest
+
+
 # ---------------------------------------------------------------------------
 # RegressionEval §17 suites (deterministic, fakes only, no network).
 # Naming: test_reg_<suite>_<behavior>. Contract stubs resolve via getattr
 # with a precise failure naming the missing source hook; no source edits.
 # ---------------------------------------------------------------------------
 
+
 def _reg_svc_sid(repo: ResearchRepository, q: str = "GS OpenAI exposure?") -> tuple[str, str]:
     from app.research import service as _svc
+
     sid = _svc.create_research(q, "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
     return sid, repo.list_jobs(sid)[0].job_id
 
+
 def _reg_cov(useful: str = "sufficient") -> dict[str, object]:
     """sufficient now needs the full structured envelope + no residual branches/questions."""
-    return {"useful_for_question": useful, "resolved": ["GS direct OpenAI exposure"],
-            "partially_resolved": [], "unresolved": [], "source_limitations": [],
-            "major_entities_investigated": ["GS", "OpenAI"],
-            "relationship_types_checked": ["investment", "commercial"],
-            "forms_examined": ["10-K"], "exhibits_examined": ["EX-10.1"],
-            "material_open_questions": [], "search_runs": ["s1"],
-            "covered_branches": ["GS direct OpenAI exposure"]}
+    return {
+        "useful_for_question": useful,
+        "resolved": ["GS direct OpenAI exposure"],
+        "partially_resolved": [],
+        "unresolved": [],
+        "source_limitations": [],
+        "major_entities_investigated": ["GS", "OpenAI"],
+        "relationship_types_checked": ["investment", "commercial"],
+        "forms_examined": ["10-K"],
+        "exhibits_examined": ["EX-10.1"],
+        "material_open_questions": [],
+        "search_runs": ["s1"],
+        "covered_branches": ["GS direct OpenAI exposure"],
+    }
+
 
 def _absence_cov(**over: object) -> dict[str, object]:
     """Full absence-observation coverage envelope (forms/dates/partitions/entities/docs/gaps + flags)."""
-    cov: dict[str, object] = {"forms": ["10-K"], "dates": ["2025-02-14"], "partitions": ["efts"],
-                              "entities": ["GS"], "docs": ["0000886982-26-000001"], "gaps": [],
-                              "pagination_complete": True, "complete": True}
+    cov: dict[str, object] = {
+        "forms": ["10-K"],
+        "dates": ["2025-02-14"],
+        "partitions": ["efts"],
+        "entities": ["GS"],
+        "docs": ["0000886982-26-000001"],
+        "gaps": [],
+        "pagination_complete": True,
+        "complete": True,
+    }
     cov.update(over)
     return cov
 
 
 def _reg_item(eid: str, wave: int = 1, **over: object) -> dict[str, object]:
-    base: dict[str, object] = {"evidence_id": eid, "wave_id": wave, "content": "c-" + eid,
-                               "claim_text": f"GS OpenAI-linked exposure per filing {eid}",
-                               "subject": "GS", "source_name": "SEC",
-                               "source_uri": "https://www.sec.gov/Archives/edgar/data/886982/000088698226000001/primary.htm",
-                               "source_record_id": "0000886982-26-000001",
-                               "document_name": "gs-10q-20260331.htm",
-                               "matching_passage": "The firm discloses OpenAI-linked exposure in the filing.",
-                               "known_at": "2025-06-29T00:00:00+00:00"}
+    base: dict[str, object] = {
+        "evidence_id": eid,
+        "wave_id": wave,
+        "content": "c-" + eid,
+        "claim_text": f"GS OpenAI-linked exposure per filing {eid}",
+        "subject": "GS",
+        "source_name": "SEC",
+        "source_uri": "https://www.sec.gov/Archives/edgar/data/886982/000088698226000001/primary.htm",
+        "source_record_id": "0000886982-26-000001",
+        "document_name": "gs-10q-20260331.htm",
+        "matching_passage": "The firm discloses OpenAI-linked exposure in the filing.",
+        "known_at": "2025-06-29T00:00:00+00:00",
+    }
     base.update(over)
+    if "source_handle" not in over:
+        passage = str(base["matching_passage"])
+        base["source_handle"] = seam.handle_for(
+            passage,
+            accession=str(base["source_record_id"]),
+            document=str(base["document_name"]),
+        )
     return base
+
 
 def test_reg_lifecycle_running_until_submit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -1790,6 +2521,7 @@ def test_reg_lifecycle_running_until_submit(tmp_path: Path, monkeypatch: pytest.
 
 def test_reg_lifecycle_atomic_submit_completes_job_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -1803,6 +2535,7 @@ def test_reg_lifecycle_atomic_submit_completes_job_only(tmp_path: Path, monkeypa
 
 def test_reg_lifecycle_double_submit_fails(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -1815,6 +2548,7 @@ def test_reg_lifecycle_double_submit_fails(tmp_path: Path, monkeypatch: pytest.M
 
 def test_reg_lifecycle_closed_rejects_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -1824,24 +2558,30 @@ def test_reg_lifecycle_closed_rejects_evidence(tmp_path: Path, monkeypatch: pyte
     with pytest.raises(ValueError, match="running|closed|completed"):
         _svc.record_evidence(sid, src, _reg_item(f"{sid}:ev:2"), repo=repo)
 
+
 # --- unlimited (4): 100+ distinct allowed, no default kill, dup-no-progress, diff queries ---
+
 
 def _reg_dispatch(repo: ResearchRepository, sid: str, jid: str, tool: str) -> None:
     from app.research import service as _svc
+
     _svc.authorize_and_consume_dispatch(sid, jid, tool, repo=repo)
 
 
 def test_reg_unlimited_100_distinct_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid = _svc.create_research("GS OpenAI exposure?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
     jobs = repo.list_jobs(sid)
     assert len(jobs) == 1
     jid = jobs[0].job_id
-    assert jobs[0].tool_budget is None, ("missing contract (LimitsLoopBudget owns "
+    assert jobs[0].tool_budget is None, (
+        "missing contract (LimitsLoopBudget owns "
         "app/research/jobs.py:job_tool_budget + app/research/models.py:DEFAULT_BUDGET): "
-        "unlimited=None; source job tool_budget must default None")
+        "unlimited=None; source job tool_budget must default None"
+    )
     for _ in range(100):
         _reg_dispatch(repo, sid, jid, "get_sec_document")
     assert repo.get_session(sid).budget.get("tool_calls_used") == 100
@@ -1849,9 +2589,12 @@ def test_reg_unlimited_100_distinct_allowed(tmp_path: Path, monkeypatch: pytest.
 
 def test_reg_unlimited_no_default_kill(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research.models import DEFAULT_BUDGET
-    assert DEFAULT_BUDGET.get("total_tool_budget") is None, ("missing contract (LimitsLoopBudget owns "
+
+    assert DEFAULT_BUDGET.get("total_tool_budget") is None, (
+        "missing contract (LimitsLoopBudget owns "
         "app/research/models.py:default_budget/DEFAULT_BUDGET): unlimited=None; "
-        f"total_tool_budget must default None, got {DEFAULT_BUDGET.get('total_tool_budget')!r}")
+        f"total_tool_budget must default None, got {DEFAULT_BUDGET.get('total_tool_budget')!r}"
+    )
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, jid = _reg_svc_sid(repo)
@@ -1862,12 +2605,15 @@ def test_reg_unlimited_no_default_kill(tmp_path: Path, monkeypatch: pytest.Monke
 
 def test_reg_unlimited_duplicate_no_progress_rejected() -> None:
     import app.research.director as _director
+
     normalize = getattr(_director, "normalize_research_action", None)
     loop_cls = getattr(_director, "LoopDetector", None)
-    assert callable(normalize) and loop_cls is not None, ("missing source hook (LimitsLoopBudget owns "
+    assert callable(normalize) and loop_cls is not None, (
+        "missing source hook (LimitsLoopBudget owns "
         "app/research/director.py:normalize_research_action + LoopDetector): contract normalize("
         "source,tool,query,ticker,forms,as_of,accession,objective)->tuple; "
-        "LoopDetector.check(action,result_hash,evidence_delta)->{duplicate,reason} + telemetry list")
+        "LoopDetector.check(action,result_hash,evidence_delta)->{duplicate,reason} + telemetry list"
+    )
     loop = loop_cls()
     action = normalize("sec", "get_sec_document", "GS 10-K", "GS", ("10-K",), "2025-06-30", "ACC-1", "exposure?")
     first = loop.check(action, "hash-a", 3)
@@ -1878,12 +2624,15 @@ def test_reg_unlimited_duplicate_no_progress_rejected() -> None:
 
 def test_reg_unlimited_different_queries_allowed() -> None:
     import app.research.director as _director
+
     normalize = getattr(_director, "normalize_research_action", None)
     loop_cls = getattr(_director, "LoopDetector", None)
-    assert callable(normalize) and loop_cls is not None, ("missing source hook (LimitsLoopBudget owns "
+    assert callable(normalize) and loop_cls is not None, (
+        "missing source hook (LimitsLoopBudget owns "
         "app/research/director.py:normalize_research_action + LoopDetector): contract normalize("
         "source,tool,query,ticker,forms,as_of,accession,objective)->tuple; "
-        "LoopDetector.check(action,result_hash,evidence_delta)->{duplicate,reason} + telemetry list")
+        "LoopDetector.check(action,result_hash,evidence_delta)->{duplicate,reason} + telemetry list"
+    )
     loop = loop_cls()
     a = normalize("sec", "get_sec_document", "GS 10-K risk", "GS", ("10-K",), "2025-06-30", "ACC-1", "exposure?")
     b = normalize("sec", "get_sec_document", "GS 10-Q MD&A", "GS", ("10-Q",), "2025-06-30", "ACC-2", "exposure?")
@@ -2011,20 +2760,24 @@ def test_dispatch_loop_gate_no_staged_job_unchanged(tmp_path: Path, monkeypatch:
 
 def test_reg_freshness_latest_default() -> None:
     from datetime import datetime as _dt
-    from datetime import timezone as _tz
 
     from app.research.models import resolve_temporal_scope
-    latest = resolve_temporal_scope(query="What happens to Goldman Sachs if OpenAI goes bankrupt?",
-                                    now=_dt(2025, 6, 30, tzinfo=_tz.utc))
+
+    latest = resolve_temporal_scope(
+        query="What happens to Goldman Sachs if OpenAI goes bankrupt?", now=_dt(2025, 6, 30, tzinfo=UTC)
+    )
     assert latest["mode"] == "latest-available"
     assert latest["as_of"] is not None
 
 
 def test_reg_freshness_latest_10k_pinned() -> None:
     from app.research.models import select_latest_baseline
-    filings: list[object] = [{"form": "10-K", "known_at": "2025-02-14", "filed_at": "2025-02-14", "accession_no": "OLD"},
-                             {"form": "10-K", "known_at": "2025-06-20", "filed_at": "2025-06-20", "accession_no": "NEW"},
-                             {"form": "10-K/A", "known_at": "2025-06-25", "filed_at": "2025-06-25", "accession_no": "AMD"}]
+
+    filings: list[object] = [
+        {"form": "10-K", "known_at": "2025-02-14", "filed_at": "2025-02-14", "accession_no": "OLD"},
+        {"form": "10-K", "known_at": "2025-06-20", "filed_at": "2025-06-20", "accession_no": "NEW"},
+        {"form": "10-K/A", "known_at": "2025-06-25", "filed_at": "2025-06-25", "accession_no": "AMD"},
+    ]
     base = select_latest_baseline(filings, as_of="2025-06-30")
     annual = base["annual_10k"]
     acc = annual.get("accession_no") if isinstance(annual, dict) else getattr(annual, "accession_no", None)
@@ -2033,9 +2786,17 @@ def test_reg_freshness_latest_10k_pinned() -> None:
 
 def test_reg_freshness_superseded_only_current_rejected() -> None:
     from app.research.models import select_latest_baseline, superseded_current_violation
-    filings: list[object] = [{"form": "10-K", "known_at": "2024-02-10", "filed_at": "2024-02-10", "accession_no": "OLD",
-                              "superseded_by": "NEW"},
-                             {"form": "10-K", "known_at": "2025-02-14", "filed_at": "2025-02-14", "accession_no": "NEW"}]
+
+    filings: list[object] = [
+        {
+            "form": "10-K",
+            "known_at": "2024-02-10",
+            "filed_at": "2024-02-10",
+            "accession_no": "OLD",
+            "superseded_by": "NEW",
+        },
+        {"form": "10-K", "known_at": "2025-02-14", "filed_at": "2025-02-14", "accession_no": "NEW"},
+    ]
     base = select_latest_baseline(filings, as_of="2025-06-30")
     annual = base["annual_10k"]
     acc = annual.get("accession_no") if isinstance(annual, dict) else getattr(annual, "accession_no", None)
@@ -2044,12 +2805,12 @@ def test_reg_freshness_superseded_only_current_rejected() -> None:
     assert superseded_current_violation(filings, "NEW", as_of="2025-06-30") is None
 
 
-
 def test_reg_freshness_historical_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     # PIT-eligible historical evidence ingests; a future known_at rejects.
     # Distinct accession per item: dedupe keys on source_record_id, so a shared
     # accession would return duplicate_of instead of reaching the PIT gate.
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid = _svc.create_research("GS 2024 exposure?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
@@ -2057,15 +2818,26 @@ def test_reg_freshness_historical_allowed(tmp_path: Path, monkeypatch: pytest.Mo
     out = _svc.record_evidence(sid, jid, _reg_item(f"{sid}:ev:1", known_at="2024-12-01T00:00:00+00:00"), repo=repo)
     assert out["evidence_id"] == f"{sid}:ev:1"
     with pytest.raises(ValueError, match="PIT_VIOLATION|rejected"):
-        _svc.record_evidence(sid, jid, _reg_item(f"{sid}:ev:2", known_at="2025-07-01T00:00:00+00:00",
-                                                 source_record_id="0000886982-26-000002",
-                                                 source_uri="https://www.sec.gov/Archives/edgar/data/886982/000088698226000002/primary.htm"), repo=repo)
+        _svc.record_evidence(
+            sid,
+            jid,
+            _reg_item(
+                f"{sid}:ev:2",
+                known_at="2025-07-01T00:00:00+00:00",
+                source_record_id="0000886982-26-000002",
+                source_uri="https://www.sec.gov/Archives/edgar/data/886982/000088698226000002/primary.htm",
+            ),
+            repo=repo,
+        )
+
 
 def test_reg_negatives_coverage_present() -> None:
     """The closed vocabularies carry the claim/provenance contract; default coverage keeps its keys."""
     from app.research.dossiers.sec import default_coverage
     from app.research.evidence import CLAIM_KINDS, PROVENANCE_KINDS
-    assert CLAIM_KINDS == ("observed_fact", "absence_observation")
+
+    # Evidence is raw-document claims only: a search-derived absence is coverage state.
+    assert CLAIM_KINDS == ("observed_fact",)
     assert PROVENANCE_KINDS == ("sec_source", "search_run", "none")
     cov = default_coverage()
     for key in ("forms", "sources_examined", "complete", "exclusions"):
@@ -2073,51 +2845,83 @@ def test_reg_negatives_coverage_present() -> None:
 
 
 def test_reg_negatives_scoped_no_hit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """A scoped no-hit observation records as a search-run absence with its full coverage envelope."""
+    """A scoped no-hit observation records as a coverage artifact with its full coverage envelope."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
     scoped_cov = _absence_cov(complete=False, gaps=["sections 4-6 unread"], pagination_complete=True)
-    out = _svc.record_evidence(sid, src, {"evidence_id": f"{sid}:ev:n1", "wave_id": 1,
-                                          "content": "no OpenAI bankruptcy exposure disclosed in sections 1-3 of the scoped GS 10-K",
-                                          "claim_text": "not found in sections 1-3 of the scoped GS 10-K: OpenAI bankruptcy exposure",
-                                          "claim_kind": "absence_observation",
-                                          "subject": "GS", "source_name": "SEC",
-                                          "known_at": "2025-06-29T00:00:00+00:00",
-                                          "search_id": "s1", "query": "GS OpenAI bankruptcy",
-                                          "coverage": scoped_cov}, repo=repo)
-    assert out["evidence_id"] == f"{sid}:ev:n1"
-    assert out.get("claim_kind") == "absence_observation"
-    prov = out.get("provenance")
-    assert isinstance(prov, dict)
-    assert prov.get("kind") == "search_run"
-    assert prov.get("search_id") == "s1" and prov.get("query") == "GS OpenAI bankruptcy"
-    stored = repo.list_evidence(sid)[0]
-    meta = stored.get("metadata")
-    assert isinstance(meta, dict) and meta.get("search_coverage") == scoped_cov
+    out = _svc.record_evidence(
+        sid,
+        src,
+        {
+            "wave_id": 1,
+            "content": "no OpenAI bankruptcy exposure disclosed in sections 1-3 of the scoped GS 10-K",
+            "claim_text": "not found in sections 1-3 of the scoped GS 10-K: OpenAI bankruptcy exposure",
+            "claim_kind": "absence_observation",
+            "subject": "GS",
+            "source_name": "SEC",
+            "known_at": "2025-06-29T00:00:00+00:00",
+            "search_id": "s1",
+            "query": "GS OpenAI bankruptcy",
+            "coverage": scoped_cov,
+        },
+        repo=repo,
+    )
+    assert out.get("recorded_as") == "coverage_artifact" and out.get("citable") is False
+    assert out.get("search_id") == "s1" and out.get("query") == "GS OpenAI bankruptcy"
+    assert out.get("coverage") == scoped_cov
+    stored = repo.list_coverage_artifacts(sid)[0]
+    assert stored.get("search_id") == "s1" and stored.get("coverage") == scoped_cov
+    assert repo.list_evidence(sid) == []  # coverage state never lands in the ledger
     with pytest.raises(ValueError, match="ERR_COVERAGE_REQUIRED"):
-        _svc.record_evidence(sid, src, {"evidence_id": f"{sid}:ev:n2", "wave_id": 1,
-                                        "content": "no exposure anywhere",
-                                        "claim_text": "no OpenAI exposure in any filing",
-                                        "claim_kind": "absence_observation",
-                                        "subject": "GS", "source_name": "SEC",
-                                        "known_at": "2025-06-29T00:00:00+00:00",
-                                        "search_id": "s1", "query": "GS OpenAI",
-                                        "coverage": {"forms": ["10-K"], "dates": [], "partitions": [],
-                                                     "docs": [], "gaps": [], "complete": False}}, repo=repo)
+        _svc.record_evidence(
+            sid,
+            src,
+            {
+                "wave_id": 1,
+                "content": "no exposure anywhere",
+                "claim_text": "no OpenAI exposure in any filing",
+                "claim_kind": "absence_observation",
+                "subject": "GS",
+                "source_name": "SEC",
+                "known_at": "2025-06-29T00:00:00+00:00",
+                "search_id": "s1",
+                "query": "GS OpenAI",
+                "coverage": {
+                    "forms": ["10-K"],
+                    "dates": [],
+                    "partitions": [],
+                    "docs": [],
+                    "gaps": [],
+                    "complete": False,
+                },
+            },
+            repo=repo,
+        )
 
 
 def test_reg_negatives_incomplete_stays_incomplete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
     _svc.record_evidence(sid, src, _reg_item(f"{sid}:ev:1"), repo=repo)
-    out = _svc.submit_source_result(src, coverage={"useful_for_question": "insufficient", "resolved": [],
-                                                   "partially_resolved": [], "unresolved": ["OpenAI private terms"],
-                                                   "source_limitations": ["SEC-only"]},
-                                    evidence_ids=[], unresolved_questions=["OpenAI private terms"], repo=repo)
+    out = _svc.submit_source_result(
+        src,
+        coverage={
+            "useful_for_question": "insufficient",
+            "resolved": [],
+            "partially_resolved": [],
+            "unresolved": ["OpenAI private terms"],
+            "source_limitations": ["SEC-only"],
+        },
+        evidence_ids=[],
+        unresolved_questions=["OpenAI private terms"],
+        repo=repo,
+    )
     assert out["job_status"] == "completed"
     stored = repo.get_job(src).result or {}
     assert isinstance(stored, dict)
@@ -2125,7 +2929,9 @@ def test_reg_negatives_incomplete_stays_incomplete(tmp_path: Path, monkeypatch: 
     assert isinstance(cov, dict) and cov.get("useful_for_question") == "insufficient"
     assert cov.get("complete") in (None, False)
 
+
 # --- PIT (3): accepted_at==known_at, TZ preserves instant, future rejected ---
+
 
 def test_reg_pit_accepted_at_is_known_at() -> None:
     from typing import override
@@ -2147,8 +2953,9 @@ def test_reg_pit_accepted_at_is_known_at() -> None:
         def document(self) -> str:
             return "primary.htm"
 
-    filing = _StubFiling(cik=886982, company="Goldman Sachs", form="10-K",
-                         filing_date="2025-02-14", accession_no="0000886982-26-000001")
+    filing = _StubFiling(
+        cik=886982, company="Goldman Sachs", form="10-K", filing_date="2025-02-14", accession_no="0000886982-26-000001"
+    )
     meta = filing_from_edgar(filing)
     assert meta.known_at == "2025-02-14T17:30:00Z"
     assert meta.accepted_at == meta.known_at
@@ -2156,26 +2963,29 @@ def test_reg_pit_accepted_at_is_known_at() -> None:
 
 def test_reg_pit_tz_preserves_instant() -> None:
     from app.research.models import pit_violated
+
     assert pit_violated("2025-06-30T00:00:00+00:00", "2025-06-29T20:00:00-04:00") is False
     assert pit_violated("2025-06-30T00:00:00+00:00", "2025-06-30T01:00:00+00:00") is True
 
 
 def test_reg_pit_future_rejected(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
     with pytest.raises(ValueError):
         _svc.record_evidence(sid, src, _reg_item(f"{sid}:ev:9", known_at="2025-07-01T00:00:00+00:00"), repo=repo)
 
+
 # --- freeze/committee (5): immutable, identical freeze ID, no source tools, new wave, decide ---
 def test_reg_freeze_immutable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import dataclasses as _dc
     from datetime import datetime as _dt
-    from datetime import timezone as _tz
 
     from app.research import service as _svc
     from app.research.freeze import EvidenceFreeze
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2186,14 +2996,18 @@ def test_reg_freeze_immutable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
     fid = str(frozen["freeze_id"])
     stored = repo.get_freeze(fid)
     assert stored["freeze_id"] == fid
-    now = _dt(2025, 6, 30, tzinfo=_tz.utc)
+    now = _dt(2025, 6, 30, tzinfo=UTC)
     with pytest.raises(_dc.FrozenInstanceError):
-        frozen_obj = EvidenceFreeze(freeze_id=fid, session_id=sid, wave_id=1, created_at=now,
-                                    as_of=now, evidence_ids=(eid,), content_hash="h")
+        frozen_obj = EvidenceFreeze(
+            freeze_id=fid, session_id=sid, wave_id=1, created_at=now, as_of=now, evidence_ids=(eid,), content_hash="h"
+        )
         _frozen_write(frozen_obj, "evidence_ids", ("tampered",))
     assert repo.get_freeze(fid)["freeze_id"] == fid
+
+
 def test_reg_freeze_identical_id_for_committee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2211,6 +3025,7 @@ def test_reg_freeze_identical_id_for_committee(tmp_path: Path, monkeypatch: pyte
 
 def test_reg_committee_cannot_call_source_tools(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2225,6 +3040,7 @@ def test_reg_committee_cannot_call_source_tools(tmp_path: Path, monkeypatch: pyt
 
 def test_reg_freeze_new_wave_new_freeze(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2238,6 +3054,7 @@ def test_reg_freeze_new_wave_new_freeze(tmp_path: Path, monkeypatch: pytest.Monk
 
 def test_reg_freeze_director_finalize_or_wave(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2247,17 +3064,26 @@ def test_reg_freeze_director_finalize_or_wave(tmp_path: Path, monkeypatch: pytes
     _svc.freeze_session(sid, 1, repo=repo)
     for role in ("stockbot", "bullbot", "bearbot"):
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
-        _svc.record_committee_analysis(sid, jid, role,
-                                       _committee_analysis(eid), repo=repo)
+        _svc.record_committee_analysis(sid, jid, role, _committee_analysis(eid), repo=repo)
     out = _svc.decide_wave2(sid, repo=repo)
     # §3: director gate set has no budget_exhausted (deleted); runtime_exceeded stays.
-    assert out["stop_reason"] in ("no_questions", "low_gain", "not_actionable", "continue",
-                                  "max_waves", "jobs_exceeded", "runtime_exceeded")
+    assert out["stop_reason"] in (
+        "no_questions",
+        "low_gain",
+        "not_actionable",
+        "continue",
+        "max_waves",
+        "jobs_exceeded",
+        "runtime_exceeded",
+    )
+
 
 # --- synthesis (4): supported trace, inference labeled, unknown, manageable ---
 
+
 def test_reg_synthesis_supported_traces_to_raw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2267,10 +3093,15 @@ def test_reg_synthesis_supported_traces_to_raw(tmp_path: Path, monkeypatch: pyte
     _svc.freeze_session(sid, 1, repo=repo)
     for role in ("stockbot", "bullbot", "bearbot"):
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
-        _svc.record_committee_analysis(sid, jid, role,
-                                       _committee_analysis(eid, claim_text="GS discloses OpenAI-linked exposure"), repo=repo)
-    out = _svc.finalize_session(sid, "GS exposure is filing-backed.",
-                                [{"text": "GS discloses OpenAI-linked exposure", "evidence_ids": [eid]}], repo=repo)
+        _svc.record_committee_analysis(
+            sid, jid, role, _committee_analysis(eid, claim_text="GS discloses OpenAI-linked exposure"), repo=repo
+        )
+    out = _svc.finalize_session(
+        sid,
+        "GS exposure is filing-backed.",
+        [{"text": "GS discloses OpenAI-linked exposure", "evidence_ids": [eid]}],
+        repo=repo,
+    )
     assert out["freeze_id"] == f"{sid}:1:freeze"
     final = repo.get_session(sid).final_result or {}
     assert isinstance(final, dict)
@@ -2291,15 +3122,50 @@ def test_reg_synthesis_inference_labeled() -> None:
 
     claim = GroundedClaim(text="OpenAI stress may widen GS spreads", evidence_ids=["EV-1"])
     assert claim.claim_type == "inference"
-    stock = StockbotAnalysis(session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                             as_of="x", question="Q?", answer="balanced", base_case="balanced", claims=[claim])
-    bull = BullAnalysis(session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"], as_of="x",
-                        question="Q?", stance="bullish", bull_case="resilient", claims=[claim])
-    bear = BearAnalysis(session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"], as_of="x",
-                        question="Q?", stance="bearish", bear_case="contagion", claims=[claim])
-    synth = synthesize_final("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", as_of="x",
-                             stock=stock, bull=bull, bear=bear,
-                             disagreement=compute_disagreement(stock, bull, bear))
+    stock = StockbotAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        question="Q?",
+        answer="balanced",
+        base_case="balanced",
+        claims=[claim],
+    )
+    bull = BullAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        question="Q?",
+        stance="bullish",
+        bull_case="resilient",
+        claims=[claim],
+    )
+    bear = BearAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        question="Q?",
+        stance="bearish",
+        bear_case="contagion",
+        claims=[claim],
+    )
+    synth = synthesize_final(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        as_of="x",
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=compute_disagreement(stock, bull, bear),
+    )
     raw_claims = synth.to_dict()["claims"]
     assert isinstance(raw_claims, list)
     rows = [r for r in raw_claims if isinstance(r, dict) and r.get("text") == claim.text]
@@ -2309,16 +3175,27 @@ def test_reg_synthesis_inference_labeled() -> None:
 
 def test_reg_synthesis_unknown_stays_unknown() -> None:
     from app.research.evals.evaluators import EvalInput, evaluate
-    inp = EvalInput(scenario_name="gs-openai-sec-only", answer_text="OpenAI private revenue share: UNKNOWN (no filing discloses it).",
-                    evidence_ids=("EV-1",), requires_evidence=True)
+
+    inp = EvalInput(
+        scenario_name="gs-openai-sec-only",
+        answer_text="OpenAI private revenue share: UNKNOWN (no filing discloses it).",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+    )
     assert evaluate(inp).passed
 
 
 def test_reg_synthesis_manageable_rejected_as_fact() -> None:
     from app.research.agents import ModelOutputFailure, parse_grounded_claims
+
     with pytest.raises(ModelOutputFailure):
-        parse_grounded_claims('[{"text": "GS will manageably absorb any OpenAI loss", "evidence_ids": []}]', frozen=["EV-1"])
+        parse_grounded_claims(
+            '[{"text": "GS will manageably absorb any OpenAI loss", "evidence_ids": []}]', frozen=["EV-1"]
+        )
+
+
 # --- evidence record_kind + claim labels (contract pins, stub-safe) ---
+
 
 def test_reg_evidence_record_kind_split(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
@@ -2329,25 +3206,40 @@ def test_reg_evidence_record_kind_split(tmp_path: Path, monkeypatch: pytest.Monk
         discovery_only,
         substantive_records,
     )
+
     assert RECORD_KINDS == frozenset({"discovery", "evidence"})
     assert DiscoveryRecord(record_id="d1", session_id="s", tool="search_sec_filings", query="GS 10-K").search_id is None
     assert EvidenceRecord(record_id="e1", session_id="s", evidence_id="EV-1", claim_text="c").evidence_id == "EV-1"
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
-    # A scoping search records as a discovery row: search-run provenance, never citable.
-    out = _svc.record_evidence(sid, src, {"evidence_id": f"{sid}:ev:d1", "wave_id": 1,
-                                          "content": "scoping search over GS filings",
-                                          "claim_text": "scoping search", "claim_kind": "absence_observation",
-                                          "subject": "GS", "source_name": "SEC",
-                                          "known_at": "2025-06-29T00:00:00+00:00",
-                                          "search_id": "s1", "query": "GS 10-K",
-                                          "coverage": _absence_cov(), "record_kind": "discovery"}, repo=repo)
-    assert out.get("record_kind") == "discovery"
+    # A scoping search records as a coverage artifact: search scope, never citable evidence.
+    out = _svc.record_evidence(
+        sid,
+        src,
+        {
+            "wave_id": 1,
+            "content": "scoping search over GS filings",
+            "claim_text": "scoping search",
+            "claim_kind": "absence_observation",
+            "subject": "GS",
+            "source_name": "SEC",
+            "known_at": "2025-06-29T00:00:00+00:00",
+            "search_id": "s1",
+            "query": "GS 10-K",
+            "coverage": _absence_cov(),
+            "record_kind": "discovery",
+        },
+        repo=repo,
+    )
+    assert out.get("recorded_as") == "coverage_artifact" and out.get("citable") is False
     assert out.get("claim_kind") == "absence_observation"
-    assert out.get("provenance") == {"kind": "search_run", "search_id": "s1", "query": "GS 10-K"}
+    assert "evidence_id" not in out and repo.list_evidence(sid) == []
+    assert repo.list_coverage_artifacts(sid)[0].get("search_id") == "s1"
     assert discovery_only([{"record_kind": "discovery"}]) is True
-    assert substantive_records([{"record_kind": "discovery"}, {"record_kind": "evidence"}]) == [{"record_kind": "evidence"}]
+    assert substantive_records([{"record_kind": "discovery"}, {"record_kind": "evidence"}]) == [
+        {"record_kind": "evidence"}
+    ]
 
 
 def test_reg_evidence_claim_labels() -> None:
@@ -2359,27 +3251,33 @@ def test_reg_evidence_claim_labels() -> None:
         ModelOutputFailure,
         parse_grounded_claims,
     )
+
     assert tuple(CLAIM_TYPES) == ("observed_fact", "inference", "unknown", "contradicted")
     assert GroundedClaim(text="GS revenue grew", evidence_ids=["EV-1"]).claim_type == "inference"
     declared = parse_grounded_claims(
-        '[{"text": "GS revenue grew", "claim_type": "observed_fact", "evidence_ids": ["EV-1"]}]', frozen=["EV-1"])
+        '[{"text": "GS revenue grew", "claim_type": "observed_fact", "evidence_ids": ["EV-1"]}]', frozen=["EV-1"]
+    )
     assert declared[0].claim_type == "observed_fact"
     # Wording and citation never type a claim: an undeclared confident sentence stays inference.
     undeclared = parse_grounded_claims(
-        '[{"text": "GS revenue grew per the filing, definitely observed.", "evidence_ids": ["EV-1"]}]', frozen=["EV-1"])
+        '[{"text": "GS revenue grew per the filing, definitely observed.", "evidence_ids": ["EV-1"]}]', frozen=["EV-1"]
+    )
     assert undeclared[0].claim_type == "inference"
     with pytest.raises(ModelOutputFailure):
-        parse_grounded_claims('[{"text": "GS revenue grew", "claim_type": "observed_fact", "evidence_ids": []}]',
-                              frozen=["EV-1"])
+        parse_grounded_claims(
+            '[{"text": "GS revenue grew", "claim_type": "observed_fact", "evidence_ids": []}]', frozen=["EV-1"]
+        )
     with pytest.raises(ModelOutputFailure):
         parse_grounded_claims('[{"text": "unclear", "claim_type": "shrug", "evidence_ids": ["EV-1"]}]', frozen=["EV-1"])
-    unknown = parse_grounded_claims('[{"text": "OpenAI terms UNKNOWN", "claim_type": "unknown", "evidence_ids": []}]',
-                                    frozen=["EV-1"])
+    unknown = parse_grounded_claims(
+        '[{"text": "OpenAI terms UNKNOWN", "claim_type": "unknown", "evidence_ids": []}]', frozen=["EV-1"]
+    )
     assert unknown[0].claim_type == "unknown" and unknown[0].evidence_ids == []
 
 
 def test_crap_source_policy_modes_and_errors() -> None:
     from app.research.models import resolve_source_policy, source_domain_allowed
+
     # Bare research_sources mapping (no outer key) resolves identically.
     bare = resolve_source_policy({"mode": "all", "sources": []})
     assert bare["mode"] == "all" and bare["allowed"] == []
@@ -2406,10 +3304,10 @@ def test_crap_source_policy_modes_and_errors() -> None:
 
 def test_crap_temporal_patterns() -> None:
     from datetime import datetime as _dt
-    from datetime import timezone as _tz
 
     from app.research.models import resolve_temporal_scope
-    now = _dt(2025, 6, 30, tzinfo=_tz.utc)
+
+    now = _dt(2025, 6, 30, tzinfo=UTC)
     assert resolve_temporal_scope(temporal="show all history please", now=now)["mode"] == "unbounded"
     assert resolve_temporal_scope(temporal="as of 2024-03-31", now=now)["as_of"] == "2024-03-31"
     last2 = resolve_temporal_scope(temporal="last 2 years", now=now)
@@ -2429,6 +3327,7 @@ def test_crap_temporal_patterns() -> None:
 
 def test_crap_baseline_current_and_quarterly_picks() -> None:
     from app.research.models import select_latest_baseline
+
     filings: list[object] = [
         {"form": "10-Q", "known_at": "2025-03-31", "accession_no": "Q1"},
         {"form": "10-Q", "known_at": "2025-06-20", "accession_no": "Q2"},
@@ -2450,6 +3349,7 @@ def test_crap_baseline_current_and_quarterly_picks() -> None:
 
 def test_crap_superseded_violation_edges() -> None:
     from app.research.models import superseded_current_violation
+
     assert superseded_current_violation([{"form": "8-K", "known_at": "2025-01-01"}], "X") is None
     filings: list[object] = [
         {"form": "10-K", "known_at": "2024-02-10", "accession_no": "OLD", "superseded_by": "NEW"},
@@ -2468,6 +3368,7 @@ def test_crap_discovery_only_edges() -> None:
         discovery_only,
         substantive_records,
     )
+
     assert discovery_only([]) is False
     assert discovery_only("nope") is False
     assert discovery_only([{"record_kind": "discovery"}, {"record_kind": "evidence"}]) is False
@@ -2475,6 +3376,7 @@ def test_crap_discovery_only_edges() -> None:
     assert discovery_only([DiscoveryRecord(record_id="d", session_id="s", tool="t", query="q")]) is False
     assert discovery_only([{"record_kind": "discovery", "metadata": {}}]) is True
     assert substantive_records([{"record_kind": "discovery"}, {}]) == [{}]
+
 
 # ---------------------------------------------------------------------------
 # Evals slice: committee invariants + finalization UX (offline fakes only).
@@ -2485,35 +3387,55 @@ def test_crap_discovery_only_edges() -> None:
 # in the same turn; a bare "finalized/N claims" with no answer fails.
 # ---------------------------------------------------------------------------
 
+
 def _eval_sid(repo: ResearchRepository) -> tuple[str, str]:
     from app.research import service as _svc
+
     sid = _svc.create_research("MSFT OpenAI exposure?", "o", as_of="2026-08-10T00:00:00+00:00", repo=repo)
     return sid, repo.list_jobs(sid)[0].job_id
 
 
 def _eval_item(eid: str, wave: int = 1) -> dict[str, object]:
-    return {"evidence_id": eid, "wave_id": wave, "content": "c-" + eid,
-            "claim_text": "MSFT Azure OpenAI-linked exposure per filing " + eid,
-            "subject": "MSFT", "source_name": "SEC",
-            "source_uri": "https://www.sec.gov/Archives/edgar/data/789790/000095017026001234/primary.htm",
-            "source_record_id": "0000950170-26-001234",
-            "document_name": "msft-10q-20260630.htm",
-            "matching_passage": "Azure OpenAI-linked exposure is disclosed in the filing.",
-            "known_at": "2026-08-01T00:00:00+00:00"}
+    return {
+        "evidence_id": eid,
+        "wave_id": wave,
+        "content": "c-" + eid,
+        "claim_text": "MSFT Azure OpenAI-linked exposure per filing " + eid,
+        "subject": "MSFT",
+        "source_name": "SEC",
+        "source_uri": "https://www.sec.gov/Archives/edgar/data/789790/000095017026001234/primary.htm",
+        "source_record_id": "0000950170-26-001234",
+        "document_name": "msft-10q-20260630.htm",
+        "matching_passage": "Azure OpenAI-linked exposure is disclosed in the filing.",
+        "source_handle": seam.handle_for(
+            "Azure OpenAI-linked exposure is disclosed in the filing.",
+            accession="0000950170-26-001234",
+            document="msft-10q-20260630.htm",
+        ),
+        "known_at": "2026-08-01T00:00:00+00:00",
+    }
 
 
 def _eval_cov() -> dict[str, object]:
-    return {"useful_for_question": "sufficient", "resolved": ["MSFT OpenAI exposure"],
-            "partially_resolved": [], "unresolved": [], "source_limitations": [],
-            "major_entities_investigated": ["MSFT", "OpenAI"],
-            "relationship_types_checked": ["investment", "commercial"],
-            "forms_examined": ["10-K"], "exhibits_examined": ["EX-10.1"],
-            "material_open_questions": [], "search_runs": ["s1"],
-            "covered_branches": ["MSFT Azure OpenAI-linked exposure"]}
+    return {
+        "useful_for_question": "sufficient",
+        "resolved": ["MSFT OpenAI exposure"],
+        "partially_resolved": [],
+        "unresolved": [],
+        "source_limitations": [],
+        "major_entities_investigated": ["MSFT", "OpenAI"],
+        "relationship_types_checked": ["investment", "commercial"],
+        "forms_examined": ["10-K"],
+        "exhibits_examined": ["EX-10.1"],
+        "material_open_questions": [],
+        "search_runs": ["s1"],
+        "covered_branches": ["MSFT Azure OpenAI-linked exposure"],
+    }
 
 
 def _eval_trio_ids(repo: ResearchRepository, sid: str, eid: str) -> tuple[str, str, str, str]:
     from app.research import service as _svc
+
     fid = str(_svc.freeze_session(sid, 1, repo=repo)["freeze_id"])
     trio = _svc.create_committee_jobs(sid, 1, repo=repo)
     created = trio.get("jobs")
@@ -2522,9 +3444,11 @@ def _eval_trio_ids(repo: ResearchRepository, sid: str, eid: str) -> tuple[str, s
 
 
 def test_eval_committee_same_freeze_and_trio_created_before_run(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _eval_sid(repo)
@@ -2537,21 +3461,21 @@ def test_eval_committee_same_freeze_and_trio_created_before_run(
     for jid, role in ((stock_jid, "stockbot"), (bull_jid, "bullbot"), (bear_jid, "bearbot")):
         job = repo.get_job(jid)
         assert job.job_type == role and job.status == "running"
-        _svc.record_committee_analysis(sid, jid, role,
-                                       _committee_analysis(eid), repo=repo)
+        _svc.record_committee_analysis(sid, jid, role, _committee_analysis(eid), repo=repo)
     assert all(repo.get_job(jid).status == "completed" for jid in (stock_jid, bull_jid, bear_jid))
     assert repo.get_session(sid).freeze_ids[-1] == fid
 
 
 def test_eval_committee_cross_role_write_rejected_and_freeze_immutable(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     import dataclasses as _dc
     from datetime import datetime as _dt
-    from datetime import timezone as _tz
 
     from app.research import service as _svc
     from app.research.freeze import EvidenceFreeze
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _eval_sid(repo)
@@ -2560,23 +3484,25 @@ def test_eval_committee_cross_role_write_rejected_and_freeze_immutable(
     _svc.submit_source_result(src, coverage=_eval_cov(), evidence_ids=[eid], repo=repo)
     fid, stock_jid, _bull_jid, _bear_jid = _eval_trio_ids(repo, sid, eid)
     with pytest.raises(ValueError, match="!="):
-        _svc.record_committee_analysis(sid, stock_jid, "bearbot",
-                                       _committee_analysis(eid), repo=repo)
-    now = _dt(2026, 8, 10, tzinfo=_tz.utc)
+        _svc.record_committee_analysis(sid, stock_jid, "bearbot", _committee_analysis(eid), repo=repo)
+    now = _dt(2026, 8, 10, tzinfo=UTC)
     with pytest.raises(_dc.FrozenInstanceError):
-        frozen_obj = EvidenceFreeze(freeze_id=fid, session_id=sid, wave_id=1, created_at=now,
-                                    as_of=now, evidence_ids=(eid,), content_hash="h")
+        frozen_obj = EvidenceFreeze(
+            freeze_id=fid, session_id=sid, wave_id=1, created_at=now, as_of=now, evidence_ids=(eid,), content_hash="h"
+        )
         _frozen_write(frozen_obj, "evidence_ids", ("tampered",))
-    _svc.record_committee_analysis(sid, stock_jid, "stockbot",
-                                   _committee_analysis(eid, ["Probe Azure terms?"]),
-                                   repo=repo)
+    _svc.record_committee_analysis(
+        sid, stock_jid, "stockbot", _committee_analysis(eid, ["Probe Azure terms?"]), repo=repo
+    )
     assert repo.get_freeze(fid)["freeze_id"] == fid
 
 
 def test_eval_committee_claims_resolve_and_requests_not_evidence(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _eval_sid(repo)
@@ -2585,17 +3511,18 @@ def test_eval_committee_claims_resolve_and_requests_not_evidence(
     _svc.submit_source_result(src, coverage=_eval_cov(), evidence_ids=[eid], repo=repo)
     _fid, stock_jid, _bull_jid, _bear_jid = _eval_trio_ids(repo, sid, eid)
     with pytest.raises(ValueError):
-        _svc.record_committee_analysis(sid, stock_jid, "stockbot",
-                                       _committee_analysis("EV-NOPE"), repo=repo)
+        _svc.record_committee_analysis(sid, stock_jid, "stockbot", _committee_analysis("EV-NOPE"), repo=repo)
     n_evidence = len(repo.list_evidence(sid))
-    _svc.record_committee_analysis(sid, stock_jid, "stockbot",
-                                   _committee_analysis(eid, ["Probe Azure terms?"]), repo=repo)
+    _svc.record_committee_analysis(
+        sid, stock_jid, "stockbot", _committee_analysis(eid, ["Probe Azure terms?"]), repo=repo
+    )
     assert len(repo.list_evidence(sid)) == n_evidence
 
 
 def test_eval_finalize_renders_answer_same_turn(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.research import service as _svc
     from app.research.evals.evaluators import EvalInput, evaluate
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _eval_sid(repo)
@@ -2605,20 +3532,30 @@ def test_eval_finalize_renders_answer_same_turn(tmp_path: Path, monkeypatch: pyt
     _svc.freeze_session(sid, 1, repo=repo)
     for role in ("stockbot", "bullbot", "bearbot"):
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
-        _svc.record_committee_analysis(sid, jid, role,
-                                       _committee_analysis(eid, claim_text="MSFT Azure exposure"), repo=repo)
+        _svc.record_committee_analysis(
+            sid, jid, role, _committee_analysis(eid, claim_text="MSFT Azure exposure"), repo=repo
+        )
     _svc.decide_wave2(sid, repo=repo)
-    out = _svc.finalize_session(sid, "MSFT Azure exposure is filing-backed.",
-                                [{"text": "MSFT Azure exposure", "evidence_ids": [eid]}], repo=repo)
+    out = _svc.finalize_session(
+        sid,
+        "MSFT Azure exposure is filing-backed.",
+        [{"text": "MSFT Azure exposure", "evidence_ids": [eid]}],
+        repo=repo,
+    )
     final = repo.get_session(sid).final_result or {}
     assert isinstance(final, dict) and str(final.get("answer", "")).strip()
     assert "filing-backed" in str(final.get("answer"))
     assert out["freeze_id"] == f"{sid}:1:freeze"
     rendered = _svc.inspect_research(sid, repo=repo)
     assert str(rendered.get("final", "") or final.get("answer", "")).strip()
-    bare = EvalInput(scenario_name="msft-openai-bankruptcy-sec-only",
-                     answer_text="finalized 1 claims", evidence_ids=(eid,),
-                     requires_evidence=True, finalized_claim_count=1, answered=False)
+    bare = EvalInput(
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        answer_text="finalized 1 claims",
+        evidence_ids=(eid,),
+        requires_evidence=True,
+        finalized_claim_count=1,
+        answered=False,
+    )
     assert "finalized-without-answer" in evaluate(bare).violations
 
 
@@ -2630,9 +3567,11 @@ def test_eval_finalize_renders_answer_same_turn(tmp_path: Path, monkeypatch: pyt
 # External behavior only: returned payloads, persisted rows, raised error codes.
 # ---------------------------------------------------------------------------
 
+
 def _inv_sid(repo: ResearchRepository, q: str = "NVDA OpenAI exposure?") -> tuple[str, str]:
     """Fresh session with its running source job: the only record_evidence boundary."""
     from app.research import service as _svc
+
     sid = _svc.create_research(q, "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
     return sid, repo.list_jobs(sid)[0].job_id
 
@@ -2647,13 +3586,21 @@ def _typed_committee_analysis(eid: str, text: str, claim_type: str) -> dict[str,
 def test_invariant_search_hit_is_never_evidence(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A search hit is navigation: no raw passage means ERR_RAW_SOURCE_REQUIRED and no persisted row."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
-    hit = {"evidence_id": f"{sid}:ev:1", "wave_id": 1,
-           "content": "NVDA 10-Q hit: accelerated computing demand",
-           "claim_text": "search hit", "subject": "NVDA", "source_name": "SEC",
-           "search_id": "s1", "query": "NVDA demand", "known_at": "2025-06-29T00:00:00+00:00"}
+    hit = {
+        "evidence_id": f"{sid}:ev:1",
+        "wave_id": 1,
+        "content": "NVDA 10-Q hit: accelerated computing demand",
+        "claim_text": "search hit",
+        "subject": "NVDA",
+        "source_name": "SEC",
+        "search_id": "s1",
+        "query": "NVDA demand",
+        "known_at": "2025-06-29T00:00:00+00:00",
+    }
     with pytest.raises(ValueError, match="ERR_RAW_SOURCE_REQUIRED") as excinfo:
         _svc.record_evidence(sid, src, hit, repo=repo)
     assert "navigation artifact" in str(excinfo.value)
@@ -2663,12 +3610,14 @@ def test_invariant_search_hit_is_never_evidence(tmp_path: Path, monkeypatch: pyt
 def test_invariant_search_id_never_passes_as_accession(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A search id offered as the filing accession is a provenance mismatch; junk fails the format gate."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
     with pytest.raises(ValueError, match="ERR_PROVENANCE_MISMATCH"):
-        _svc.record_evidence(sid, src, {**_svc_item(f"{sid}:ev:1"), "source_record_id": "s1", "search_id": "s1"},
-                             repo=repo)
+        _svc.record_evidence(
+            sid, src, {**_svc_item(f"{sid}:ev:1"), "source_record_id": "s1", "search_id": "s1"}, repo=repo
+        )
     with pytest.raises(ValueError, match="ERR_ACCESSION_FORMAT"):
         _svc.record_evidence(sid, src, {**_svc_item(f"{sid}:ev:2"), "source_record_id": "s-1"}, repo=repo)
     assert repo.list_evidence(sid) == []
@@ -2677,19 +3626,27 @@ def test_invariant_search_id_never_passes_as_accession(tmp_path: Path, monkeypat
 def test_invariant_raw_document_is_accepted_and_normalized(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Accession + document_name + passage is the accepted fact shape; a bare 18-digit run normalizes."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
     eid = f"{sid}:ev:1"
-    out = _svc.record_evidence(sid, src, {**_svc_item(eid), "source_record_id": "000032019325000079"}, repo=repo)
+    out = _svc.record_evidence(
+        sid,
+        src,
+        {**_svc_item(eid), "source_record_id": "000032019325000079"},
+        repo=repo,
+    )
     assert out["evidence_id"] == eid
     assert out.get("claim_kind") == "observed_fact"
-    assert out.get("provenance") == {
-        "kind": "sec_source", "accession_no": "0000320193-25-000079",
-        "document_name": "nvda-20250331.htm",
-        "passage": "Accelerated computing demand grew in the reporting period.",
-        "source_uri": "https://sec.gov/x",
-    }
+    prov = out.get("provenance")
+    assert isinstance(prov, dict)
+    passage = "Accelerated computing demand grew in the reporting period."
+    assert prov.get("kind") == "sec_source" and prov.get("accession_no") == "0000320193-25-000079"
+    assert prov.get("document_name") == "nvda-20250331.htm" and prov.get("passage") == passage
+    # The kernel stores the archive's bytes with the coordinates and hash it reloaded them at.
+    assert (prov.get("offset"), prov.get("end")) == (0, len(passage))
+    assert prov.get("text_hash") == sha256(passage.encode("utf-8")).hexdigest()
     assert out.get("record_kind") == "evidence"
     assert out.get("source_record_id") == "0000320193-25-000079"
 
@@ -2697,81 +3654,141 @@ def test_invariant_raw_document_is_accepted_and_normalized(tmp_path: Path, monke
 def test_invariant_dossier_summary_is_never_observed_fact(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Dossier/model summaries carry no raw passage: declared observed_fact they fail closed."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
-    summary = {"evidence_id": f"{sid}:ev:1", "wave_id": 1,
-               "content": "Dossier summary: NVDA demand is rising.",
-               "claim_text": "summary finding", "subject": "NVDA", "source_name": "SEC",
-               "known_at": "2025-06-29T00:00:00+00:00"}
-    with pytest.raises(ValueError, match="ERR_ACCESSION_FORMAT"):
+    summary = {
+        "evidence_id": f"{sid}:ev:1",
+        "wave_id": 1,
+        "content": "Dossier summary: NVDA demand is rising.",
+        "claim_text": "summary finding",
+        "subject": "NVDA",
+        "source_name": "SEC",
+        "known_at": "2025-06-29T00:00:00+00:00",
+    }
+    with pytest.raises(ValueError, match="ERR_RAW_SOURCE_REQUIRED"):
         _svc.record_evidence(sid, src, summary, repo=repo)
-    cited_only = {**summary, "evidence_id": f"{sid}:ev:2", "source_record_id": "0000320193-25-000079",
-                  "document_name": "nvda-20250331.htm"}
+    cited_only = {
+        **summary,
+        "evidence_id": f"{sid}:ev:2",
+        "source_record_id": "0000320193-25-000079",
+        "document_name": "nvda-20250331.htm",
+    }
     with pytest.raises(ValueError, match="ERR_RAW_SOURCE_REQUIRED"):
         _svc.record_evidence(sid, src, cited_only, repo=repo)
     assert repo.list_evidence(sid) == []
 
 
 def test_invariant_absence_observation_needs_search_scope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Absence = search run + full coverage + no accession; partial envelopes fail closed."""
+    """Absence = search run + full coverage + no accession, recorded as coverage state, never evidence."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
-    base = {"evidence_id": f"{sid}:ev:a1", "wave_id": 1, "content": "no NVDA capacity constraint disclosed",
-            "claim_text": "not disclosed in the searched scope", "claim_kind": "absence_observation",
-            "subject": "NVDA", "source_name": "SEC", "known_at": "2025-06-29T00:00:00+00:00",
-            "search_id": "s1", "query": "NVDA capacity"}
+    base = {
+        "wave_id": 1,
+        "content": "no NVDA capacity constraint disclosed",
+        "claim_text": "not disclosed in the searched scope",
+        "claim_kind": "absence_observation",
+        "subject": "NVDA",
+        "source_name": "SEC",
+        "known_at": "2025-06-29T00:00:00+00:00",
+        "search_id": "s1",
+        "query": "NVDA capacity",
+    }
     out = _svc.record_evidence(sid, src, {**base, "coverage": _absence_cov()}, repo=repo)
-    assert out.get("claim_kind") == "absence_observation"
-    prov = out.get("provenance")
-    assert isinstance(prov, dict) and prov.get("kind") == "search_run" and prov.get("search_id") == "s1"
+    assert out.get("recorded_as") == "coverage_artifact" and out.get("citable") is False
+    artifact_id = str(out.get("artifact_id"))
+    assert artifact_id.startswith(f"{sid}:cov:")
+    assert out.get("evidence_ids") == []
+    # Not evidence: neither the ledger nor the session evidence set grows...
+    assert repo.list_evidence(sid) == []
+    assert repo.get_session(sid).evidence_ids == []
+    # ...and the artifact stays inspectable as coverage state.
+    artifacts = repo.list_coverage_artifacts(sid)
+    assert [a.get("artifact_id") for a in artifacts] == [artifact_id]
+    assert artifacts[0].get("search_id") == "s1" and artifacts[0].get("coverage") == _absence_cov()
+    coverage_store = repo.resource_stores(sid)["coverage"]
+    stored = coverage_store[artifact_id]
+    assert isinstance(stored, dict) and stored.get("query") == "NVDA capacity"
+    # One scope is one artifact: a repeat is an idempotent write, not a second record.
+    again = _svc.record_evidence(sid, src, {**base, "coverage": _absence_cov()}, repo=repo)
+    assert again.get("accepted") is False and again.get("artifact_id") == artifact_id
+    assert len(repo.list_coverage_artifacts(sid)) == 1
     bad_covs: list[dict[str, object]] = [
-        {"forms": ["10-K"]},                      # missing keys
+        {"forms": ["10-K"]},  # missing keys
         _absence_cov(pagination_complete="yes"),  # flag is not a bool
-        _absence_cov(complete=None),              # flag is not a bool
+        _absence_cov(complete=None),  # flag is not a bool
     ]
     for i, bad_cov in enumerate(bad_covs):
         with pytest.raises(ValueError, match="ERR_COVERAGE_REQUIRED"):
-            _svc.record_evidence(sid, src, {**base, "evidence_id": f"{sid}:ev:b{i}", "coverage": bad_cov}, repo=repo)
+            _svc.record_evidence(
+                sid,
+                src,
+                {**base, "query": f"NVDA capacity {i}", "coverage": bad_cov},
+                repo=repo,
+            )
     with pytest.raises(ValueError, match="ERR_COVERAGE_REQUIRED"):
-        _svc.record_evidence(sid, src, {**base, "evidence_id": f"{sid}:ev:q", "query": "", "coverage": _absence_cov()},
-                             repo=repo)
+        _svc.record_evidence(sid, src, {**base, "query": "", "coverage": _absence_cov()}, repo=repo)
     with pytest.raises(ValueError, match="ERR_PROVENANCE_MISMATCH"):
-        _svc.record_evidence(sid, src, {**base, "evidence_id": f"{sid}:ev:x",
-                                        "source_record_id": "0000320193-25-000079",
-                                        "coverage": _absence_cov()}, repo=repo)
+        _svc.record_evidence(
+            sid,
+            src,
+            {
+                **base,
+                "source_record_id": "0000320193-25-000079",
+                "coverage": _absence_cov(),
+            },
+            repo=repo,
+        )
     # The same absence wording is not a fact without raw provenance.
     with pytest.raises(ValueError, match="ERR_RAW_SOURCE_REQUIRED"):
-        _svc.record_evidence(sid, src, {**base, "evidence_id": f"{sid}:ev:f", "claim_kind": "observed_fact"},
-                             repo=repo)
-    ids = {str(r.get("evidence_id")) for r in repo.list_evidence(sid)}
-    assert ids == {f"{sid}:ev:a1"}  # only the fully scoped absence landed
+        _svc.record_evidence(sid, src, {**base, "claim_kind": "observed_fact"}, repo=repo)
+    assert repo.list_evidence(sid) == []  # nothing retroactively became evidence
+    assert len(repo.list_coverage_artifacts(sid)) == 1
 
 
 def test_invariant_claim_kind_never_routed_by_wording(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Negative wording is gated by provenance, not lexis: raw provenance accepts it, none fails closed."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
     wording = "No OpenAI exposure exists anywhere in the GS filings and the business is unaffected."
     eid = f"{sid}:ev:1"
-    out = _svc.record_evidence(sid, src, {**_svc_item(eid), "claim_text": wording, "content": wording,
-                                          "matching_passage": wording}, repo=repo)
+    out = _svc.record_evidence(
+        sid,
+        src,
+        {
+            **_svc_item(eid, passage=wording),
+            "claim_text": wording,
+            "content": wording,
+            "matching_passage": wording,
+        },
+        repo=repo,
+    )
     assert out.get("claim_kind") == "observed_fact"
     prov = out.get("provenance")
     assert isinstance(prov, dict) and prov.get("kind") == "sec_source" and prov.get("passage") == wording
-    bare = {"evidence_id": f"{sid}:ev:2", "wave_id": 1, "content": wording, "claim_text": wording,
-            "subject": "GS", "source_name": "SEC", "known_at": "2025-06-29T00:00:00+00:00"}
+    bare = {
+        "evidence_id": f"{sid}:ev:2",
+        "wave_id": 1,
+        "content": wording,
+        "claim_text": wording,
+        "subject": "GS",
+        "source_name": "SEC",
+        "known_at": "2025-06-29T00:00:00+00:00",
+    }
     with pytest.raises(ValueError, match="ERR_ACCESSION_FORMAT|ERR_RAW_SOURCE_REQUIRED") as excinfo:
         _svc.record_evidence(sid, src, bare, repo=repo)
     assert "negat" not in str(excinfo.value).lower()  # no lexical negativity gate anywhere
 
 
-def test_invariant_absence_language_stays_scoped_in_synthesis() -> None:
-    """Absence renders as searched-scope language, never as real-world nonexistence."""
+def test_invariant_unknown_stays_unknown_and_absence_needs_coverage() -> None:
+    """Absence renders as searched-scope language; a generic unknown never becomes an absence claim."""
     from app.research.agents import GroundedClaim
     from app.research.agents.bearbot import BearAnalysis
     from app.research.agents.bullbot import BullAnalysis
@@ -2784,36 +3801,185 @@ def test_invariant_absence_language_stays_scoped_in_synthesis() -> None:
     )
     from app.tool_render import render_final_result
 
-    raw_claim = "The OpenAI relationship does not exist"
+    raw_claim = "Redeployment economics cannot be determined from the filings available"
     assert scoped_absence(raw_claim) == f"{SEC_SCOPE_ABSENCE}: {raw_claim}"
     assert scoped_absence("  ").startswith(SEC_SCOPE_ABSENCE)
-    claim = GroundedClaim(text=raw_claim, claim_type="unknown", evidence_ids=[])
-    stock = StockbotAnalysis(session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                             as_of="x", question="Q?", answer="balanced", base_case="balanced", claims=[claim])
-    bull = BullAnalysis(session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"], as_of="x",
-                        question="Q?", stance="bullish", bull_case="resilient", claims=[claim])
-    bear = BearAnalysis(session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"], as_of="x",
-                        question="Q?", stance="bearish", bear_case="contagion", claims=[claim])
-    synth = synthesize_final("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", as_of="x",
-                             stock=stock, bull=bull, bear=bear,
-                             disagreement=compute_disagreement(stock, bull, bear))
-    assert all(item.startswith(SEC_SCOPE_ABSENCE) for item in synth.absence_observations)
-    assert synth.absence_observations == [f"{SEC_SCOPE_ABSENCE}: {raw_claim}"]
-    assert f"- {SEC_SCOPE_ABSENCE}" in synth.answer
-    rendered = render_final_result(synth.to_dict())
+    unknown = GroundedClaim(text=raw_claim, claim_type="unknown", evidence_ids=[])
+    stock = StockbotAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        question="Q?",
+        answer="balanced",
+        base_case="balanced",
+        claims=[unknown],
+    )
+    bull = BullAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        question="Q?",
+        stance="bullish",
+        bull_case="resilient",
+        claims=[unknown],
+    )
+    bear = BearAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        question="Q?",
+        stance="bearish",
+        bear_case="contagion",
+        claims=[unknown],
+    )
+    # No coverage artifacts: the unknown stays an unknown, and no absence claim is invented from it.
+    synth = synthesize_final(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        as_of="x",
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=compute_disagreement(stock, bull, bear),
+    )
+    assert synth.absence_observations == []
+    assert raw_claim in synth.unknowns
+    assert not any(SEC_SCOPE_ABSENCE in item for item in synth.unknowns)
+    # With a coverage artifact, absence text is that artifact's, still scoped.
+    scoped = synthesize_final(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        as_of="x",
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=compute_disagreement(stock, bull, bear),
+        absence_observations=["no OpenAI funding terms disclosed"],
+    )
+    assert scoped.absence_observations == [f"{SEC_SCOPE_ABSENCE}: no OpenAI funding terms disclosed"]
+    assert f"- {SEC_SCOPE_ABSENCE}" in scoped.answer
+    assert raw_claim in scoped.unknowns  # the coverage artifact does not reclassify the unknown
+    rendered = render_final_result(scoped.to_dict())
     assert SEC_SCOPE_ABSENCE in rendered
+
+
+def test_invariant_direct_evidence_is_canonical_not_committee_labels() -> None:
+    """`observed_fact` on a committee claim never renders as direct evidence; canonical rows do."""
+    from app.research.agents import GroundedClaim
+    from app.research.agents.bearbot import BearAnalysis
+    from app.research.agents.bullbot import BullAnalysis
+    from app.research.agents.stockbot import StockbotAnalysis
+    from app.research.synthesis.committee import compute_disagreement
+    from app.research.synthesis.final import synthesize_final
+
+    labeled = GroundedClaim(
+        text="Microsoft will absorb the OpenAI loss",
+        claim_type="observed_fact",
+        evidence_ids=["EV-1"],
+    )
+    stock = StockbotAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        question="Q?",
+        answer="balanced",
+        base_case="balanced",
+        claims=[labeled],
+    )
+    bull = BullAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        question="Q?",
+        stance="bullish",
+        bull_case="resilient",
+    )
+    bear = BearAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="x",
+        question="Q?",
+        stance="bearish",
+        bear_case="contagion",
+    )
+    observation = {
+        "evidence_id": "EV-1",
+        "claim_text": "OpenAI investment carrying value",
+        "record_kind": "evidence",
+        "source_name": "SEC-10-K",
+        "provenance": {
+            "kind": "sec_source",
+            "accession_no": "0000320193-25-000079",
+            "document_name": "msft-10k.htm",
+            "passage": "OpenAI carrying value was $13.3B",
+        },
+    }
+    synth = synthesize_final(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        as_of="x",
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=compute_disagreement(stock, bull, bear),
+        observations=[observation],
+    )
+    direct = [str(row.get("text")) for row in synth.direct_evidence]
+    assert len(direct) == 1 and "msft-10k.htm" in direct[0] and "OpenAI carrying value was $13.3B" in direct[0]
+    assert all(labeled.text not in line for line in direct)  # a model label is not direct evidence
+    assert synth.direct_evidence[0]["evidence_ids"] == ["EV-1"]
+    # The committee reading still renders (as an interpretation), so nothing is silently dropped.
+    assert [row["text"] for row in synth.first_order_effects] == [labeled.text]
+    assert "What the evidence directly shows" in synth.answer and "msft-10k.htm" in synth.answer
+    # Without canonical observations the section is empty rather than model-labeled.
+    bare = synthesize_final(
+        "Q?",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        as_of="x",
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=compute_disagreement(stock, bull, bear),
+    )
+    assert bare.direct_evidence == []
 
 
 def test_invariant_sufficient_needs_structured_envelope(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """`sufficient` needs the full structured envelope; the legacy bare-sufficient fallback is gone."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
     eid = f"{sid}:ev:1"
     _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
-    legacy: dict[str, object] = {"useful_for_question": "sufficient", "resolved": ["NVDA demand"],
-                                 "partially_resolved": [], "unresolved": [], "source_limitations": []}
+    legacy: dict[str, object] = {
+        "useful_for_question": "sufficient",
+        "resolved": ["NVDA demand"],
+        "partially_resolved": [],
+        "unresolved": [],
+        "source_limitations": [],
+    }
     with pytest.raises(ValueError, match="ERR_COVERAGE_REQUIRED") as excinfo:
         _svc.submit_source_result(src, coverage=legacy, evidence_ids=[eid], repo=repo)
     assert "major_entities_investigated" in str(excinfo.value)  # the missing envelope is named
@@ -2824,23 +3990,27 @@ def test_invariant_sufficient_needs_structured_envelope(tmp_path: Path, monkeypa
 def test_invariant_sufficient_rejects_residual_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Any residual branch/question in a sufficient envelope fails; a clean envelope completes."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
     eid = f"{sid}:ev:1"
     _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
-    residuals: list[tuple[str, object]] = [("remaining_branches", ["private-lab terms"]),
-                                           ("material_open_questions", ["Is the exposure hedged?"]),
-                                           ("routes_unsearched", ["8-K exhibits"]),
-                                           ("major_entities_missing", ["OpenAI"])]
+    residuals: list[tuple[str, object]] = [
+        ("remaining_branches", ["private-lab terms"]),
+        ("material_open_questions", ["Is the exposure hedged?"]),
+        ("routes_unsearched", ["8-K exhibits"]),
+        ("major_entities_missing", ["OpenAI"]),
+    ]
     for key, value in residuals:
         cov: dict[str, object] = dict(_reg_cov())
         cov[key] = value
         with pytest.raises(ValueError, match="ERR_COVERAGE_INCOMPLETE"):
             _svc.submit_source_result(src, coverage=cov, evidence_ids=[eid], repo=repo)
     with pytest.raises(ValueError, match="ERR_COVERAGE_INCOMPLETE"):
-        _svc.submit_source_result(src, coverage=_reg_cov(), evidence_ids=[eid],
-                                  unresolved_questions=["still open?"], repo=repo)
+        _svc.submit_source_result(
+            src, coverage=_reg_cov(), evidence_ids=[eid], unresolved_questions=["still open?"], repo=repo
+        )
     assert repo.get_job(src).status == "running"
     out = _svc.submit_source_result(src, coverage=_reg_cov(), evidence_ids=[eid], repo=repo)
     assert out["job_status"] == "completed"
@@ -2853,7 +4023,9 @@ def test_invariant_sufficient_rejects_residual_branches(tmp_path: Path, monkeypa
     assert stored_cov.get("source_domain") == "SEC" and stored_cov.get("source_sufficiency") == "sufficient"
 
 
-def test_invariant_committee_trio_running_before_roles_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invariant_committee_trio_running_before_roles_complete(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """All three committee jobs exist RUNNING before any role finishes; all share one freeze."""
     import sqlite3
 
@@ -2866,7 +4038,8 @@ def test_invariant_committee_trio_running_before_roles_complete(tmp_path: Path, 
     def _committee_statuses() -> dict[str, str]:
         with sqlite3.connect(db) as conn:
             rows = conn.execute(
-                "SELECT job_type, status FROM jobs WHERE job_type IN ('stockbot','bullbot','bearbot')").fetchall()
+                "SELECT job_type, status FROM jobs WHERE job_type IN ('stockbot','bullbot','bearbot')"
+            ).fetchall()
         return {str(job_type): str(status) for job_type, status in rows}
 
     snapshots: list[dict[str, str]] = []
@@ -2888,16 +4061,21 @@ def test_invariant_committee_trio_running_before_roles_complete(tmp_path: Path, 
     from app.research.agents.bearbot import BearAnalysis
     from app.research.agents.bullbot import BullAnalysis
     from app.research.agents.stockbot import StockbotAnalysis
+
     assert isinstance(stock, StockbotAnalysis) and isinstance(bull, BullAnalysis) and isinstance(bear, BearAnalysis)
     assert stock.freeze_id == bull.freeze_id == bear.freeze_id == out["freeze_id"]
-    stored = {str((repo.get_job(j.job_id).result or {}).get("freeze_id"))
-              for j in repo.list_jobs(sid) if j.job_type in ("stockbot", "bullbot", "bearbot")}
+    stored = {
+        str((repo.get_job(j.job_id).result or {}).get("freeze_id"))
+        for j in repo.list_jobs(sid)
+        if j.job_type in ("stockbot", "bullbot", "bearbot")
+    }
     assert stored == {out["freeze_id"]}
 
 
 def test_invariant_committee_roles_stay_out_of_the_tool_lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Every committee role job is freeze-only: SEC/research tools and evidence writes are forbidden."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
@@ -2909,17 +4087,19 @@ def test_invariant_committee_roles_stay_out_of_the_tool_lane(tmp_path: Path, mon
     created = trio.get("jobs")
     assert isinstance(created, list) and len(created) == 3
     for jid in created:
-        for tool in ("search_sec_filings", "get_sec_document", "get_sec_filing",
-                     "research_add_evidence", "search_web"):
+        for tool in ("search_sec_filings", "get_sec_document", "get_sec_filing", "research_add_evidence", "search_web"):
             with pytest.raises(ValueError, match="forbids"):
                 _svc.authorize_and_consume_dispatch(sid, str(jid), tool, repo=repo)
         with pytest.raises(ValueError):
             _svc.record_evidence(sid, str(jid), _svc_item(f"{sid}:ev:2"), repo=repo)
 
 
-def test_invariant_committee_follow_ups_route_through_director_gate(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_invariant_committee_follow_ups_route_through_director_gate(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Committee requests drive the next-wave decision (never evidence) or stop at the gate."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
@@ -2930,8 +4110,9 @@ def test_invariant_committee_follow_ups_route_through_director_gate(tmp_path: Pa
     follow_up = "Do the exhibits cover the Azure terms?"
     for i, role in enumerate(("stockbot", "bullbot", "bearbot")):
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
-        _svc.record_committee_analysis(sid, jid, role,
-                                       _committee_analysis(eid, [follow_up] if i == 0 else []), repo=repo)
+        _svc.record_committee_analysis(
+            sid, jid, role, _committee_analysis(eid, [follow_up] if i == 0 else []), repo=repo
+        )
     assert len(repo.list_evidence(sid)) == 1  # requests never become evidence
     out = _svc.decide_next_wave(sid, repo=repo)
     assert out["authorized"] is True and out["targeted_question"] == follow_up
@@ -2946,12 +4127,70 @@ def test_invariant_committee_follow_ups_route_through_director_gate(tmp_path: Pa
     off_lane = {"question": "What does the press say about the terms?", "suggested_source": "web"}
     for i, role in enumerate(("stockbot", "bullbot", "bearbot")):
         jid = str(_svc.start_job(sid2, role, repo=repo, wave_id=1)["job_id"])
-        _svc.record_committee_analysis(sid2, jid, role,
-                                       _committee_analysis(eid2, [off_lane] if i == 0 else []), repo=repo)
+        _svc.record_committee_analysis(
+            sid2, jid, role, _committee_analysis(eid2, [off_lane] if i == 0 else []), repo=repo
+        )
     out2 = _svc.decide_next_wave(sid2, repo=repo)
     assert out2["authorized"] is False and out2["stop_reason"] == "not_actionable"
     assert repo.get_session(sid2).status == "synthesizing"
     assert len(repo.list_evidence(sid2)) == 1
+
+
+def test_invariant_insufficient_coverage_drives_continuation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """An honest insufficient dossier with actionable SEC residuals authorizes the next wave from its
+    coverage alone (the committee asked nothing); without residuals the run settles with unknowns."""
+    from app.research import service as _svc
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    question = "NVDA OpenAI exposure?"
+    sid, src = _inv_sid(repo, question)
+    eid = f"{sid}:ev:1"
+    _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
+    residual = "OpenAI private-lab terms"
+    _svc.submit_source_result(
+        src,
+        coverage={
+            "useful_for_question": "insufficient",
+            "major_entities_missing": [residual],
+            "unresolved": ["Is the exposure hedged?"],
+        },
+        evidence_ids=[eid],
+        unresolved_questions=["Is the exposure hedged?"],
+        repo=repo,
+    )
+    _svc.freeze_session(sid, 1, repo=repo)
+    for role in ("stockbot", "bullbot", "bearbot"):
+        jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
+        _svc.record_committee_analysis(sid, jid, role, _committee_analysis(eid), repo=repo)
+    out = _svc.decide_next_wave(sid, repo=repo)
+    assert out["authorized"] is True and out["targeted_domain"] == "SEC"
+    assert out["targeted_question"] == f"{question} :: targeted follow-up: {residual}"
+    assert residual in str(out["reason_detail"])
+    sess = repo.get_session(sid)
+    assert sess.status == "targeted_research" and sess.current_wave == 2
+    assert sess.targeted_question == out["targeted_question"]
+    # No actionable SEC residual: coverage challenges nothing, the committee gate settles the run.
+    sid2, src2 = _inv_sid(repo, "AMD private-lab terms?")
+    eid2 = f"{sid2}:ev:1"
+    _svc.record_evidence(sid2, src2, _svc_item(eid2), repo=repo)
+    _svc.submit_source_result(
+        src2,
+        coverage={
+            "useful_for_question": "insufficient",
+            "source_limitations": ["SEC-only: no private-issuer filings"],
+        },
+        evidence_ids=[eid2],
+        repo=repo,
+    )
+    _svc.freeze_session(sid2, 1, repo=repo)
+    for role in ("stockbot", "bullbot", "bearbot"):
+        jid = str(_svc.start_job(sid2, role, repo=repo, wave_id=1)["job_id"])
+        _svc.record_committee_analysis(sid2, jid, role, _committee_analysis(eid2), repo=repo)
+    out2 = _svc.decide_next_wave(sid2, repo=repo)
+    assert out2["authorized"] is False and out2["stop_reason"] == "no_questions"
+    assert "coverage challenge" not in str(out2["reason_detail"])
+    assert repo.get_session(sid2).status == "synthesizing"
 
 
 def test_invariant_claims_only_envelope_is_incomplete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -2964,8 +4203,16 @@ def test_invariant_claims_only_envelope_is_incomplete(tmp_path: Path, monkeypatc
 
     old_shape = _json.dumps({"claims": [{"text": "finding", "evidence_ids": ["EV-1"]}], "follow_ups": []})
     with pytest.raises(ModelOutputFailure, match="ERR_COMMITTEE_ENVELOPE_INCOMPLETE"):
-        run_stockbot("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"], as_of="x",
-                     model=lambda prompt: old_shape, evidence_text="[EV-1] a")
+        run_stockbot(
+            "Q?",
+            session_id="rs:t",
+            wave_id=1,
+            freeze_id="F1",
+            evidence_ids=["EV-1"],
+            as_of="x",
+            model=lambda prompt: old_shape,
+            evidence_text="[EV-1] a",
+        )
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _inv_sid(repo)
@@ -2975,9 +4222,9 @@ def test_invariant_claims_only_envelope_is_incomplete(tmp_path: Path, monkeypatc
     _svc.freeze_session(sid, 1, repo=repo)
     jid = str(_svc.start_job(sid, "stockbot", repo=repo, wave_id=1)["job_id"])
     with pytest.raises(ValueError, match="ERR_COMMITTEE_ENVELOPE_INCOMPLETE"):
-        _svc.record_committee_analysis(sid, jid, "stockbot",
-                                       {"claims": [{"text": "finding", "evidence_ids": [eid]}],
-                                        "follow_ups": []}, repo=repo)
+        _svc.record_committee_analysis(
+            sid, jid, "stockbot", {"claims": [{"text": "finding", "evidence_ids": [eid]}], "follow_ups": []}, repo=repo
+        )
     assert repo.get_job(jid).status == "running"  # the incomplete envelope never closes the job
 
 
@@ -2987,29 +4234,46 @@ def test_invariant_claim_type_is_declared_never_promoted() -> None:
     from app.research.agents.stockbot import run_stockbot
 
     def _run(model: Callable[[str], str]) -> StockbotAnalysis:
-        return run_stockbot("Q?", session_id="rs:t", wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                            as_of="x", model=model, evidence_text="[EV-1] a")
+        return run_stockbot(
+            "Q?",
+            session_id="rs:t",
+            wave_id=1,
+            freeze_id="F1",
+            evidence_ids=["EV-1"],
+            as_of="x",
+            model=model,
+            evidence_text="[EV-1] a",
+        )
 
-    undeclared = _run(lambda prompt: _committee_output([{"text": "Confirmed: revenue grew.", "evidence_ids": ["EV-1"]}]))
+    undeclared = _run(
+        lambda prompt: _committee_output([{"text": "Confirmed: revenue grew.", "evidence_ids": ["EV-1"]}])
+    )
     assert [c.claim_type for c in undeclared.claims] == ["inference"]
     assert undeclared.claims[0].evidence_ids == ["EV-1"]
-    declared = _run(lambda prompt: _committee_output(
-        [{"text": "Revenue grew.", "claim_type": "observed_fact", "evidence_ids": ["EV-1"]}]))
+    declared = _run(
+        lambda prompt: _committee_output(
+            [{"text": "Revenue grew.", "claim_type": "observed_fact", "evidence_ids": ["EV-1"]}]
+        )
+    )
     assert [c.claim_type for c in declared.claims] == ["observed_fact"]
     with pytest.raises(ModelOutputFailure, match="uncited"):
-        _run(lambda prompt: _committee_output(
-            [{"text": "Revenue grew.", "claim_type": "observed_fact", "evidence_ids": []}]))
+        _run(
+            lambda prompt: _committee_output(
+                [{"text": "Revenue grew.", "claim_type": "observed_fact", "evidence_ids": []}]
+            )
+        )
     with pytest.raises(ModelOutputFailure, match="EV-999"):
-        _run(lambda prompt: _committee_output(
-            [{"text": "Revenue grew.", "claim_type": "observed_fact", "evidence_ids": ["EV-999"]}]))
+        _run(
+            lambda prompt: _committee_output(
+                [{"text": "Revenue grew.", "claim_type": "observed_fact", "evidence_ids": ["EV-999"]}]
+            )
+        )
 
 
 def test_invariant_director_waves_continue_past_two() -> None:
-    """A material question advances wave N -> N+1 forever on new evidence; counts never finalize."""
+    """A material question advances wave N -> N+1 forever on new evidence; a zero-novelty wave stops
+    the run only once nothing unexplored is left, or at an explicitly configured operator limit."""
     from app.research.agents import ResearchRequest
-    from app.research.agents.bearbot import BearAnalysis
-    from app.research.agents.bullbot import BullAnalysis
-    from app.research.agents.stockbot import StockbotAnalysis
     from app.research.director import (
         DirectorBudgets,
         DirectorDeps,
@@ -3023,41 +4287,102 @@ def test_invariant_director_waves_continue_past_two() -> None:
     def _committee(_sid: str) -> tuple[StockbotAnalysis, BullAnalysis, BearAnalysis]:
         raise AssertionError("this gate test never runs a committee")
 
-    deps = DirectorDeps(create_session=lambda q, a: "rs:x", fetch_wave_evidence=lambda s: [],
-                        create_freeze=lambda s: "F1", run_committee=_committee,
-                        record_stop=lambda s, r: stops.append((s, r)))
+    deps = DirectorDeps(
+        create_session=lambda q, a: "rs:x",
+        fetch_wave_evidence=lambda s: [],
+        create_freeze=lambda s: "F1",
+        run_committee=_committee,
+        record_stop=lambda s, r: stops.append((s, r)),
+    )
 
     def _wave(wave: int, question: str) -> Wave1Result:
-        request = ResearchRequest(question=question, why_material="unresolved in the last freeze",
-                                  requested_source_domain="SEC", expected_gain="medium")
-        disagreement = CommitteeDisagreement(session_id="rs:x", wave_id=wave, freeze_id=f"F{wave}",
-                                             requested_research=[request])
-        return Wave1Result(session_id="rs:x", wave_id=wave, freeze_id=f"F{wave}",
-                           evidence_ids=["EV-1"], disagreement=disagreement, question="Is GS exposed?")
+        request = ResearchRequest(
+            question=question,
+            why_material="unresolved in the last freeze",
+            requested_source_domain="SEC",
+            expected_gain="medium",
+        )
+        disagreement = CommitteeDisagreement(
+            session_id="rs:x",
+            wave_id=wave,
+            freeze_id=f"F{wave}",
+            requested_research=[request],
+        )
+        return Wave1Result(
+            session_id="rs:x",
+            wave_id=wave,
+            freeze_id=f"F{wave}",
+            evidence_ids=["EV-1"],
+            disagreement=disagreement,
+            question="Is GS exposed?",
+        )
 
-    novelty = {"new_raw_documents": 1, "new_evidence_records": 2, "new_relationships": 1,
-               "resolved_questions": 1, "zero_novelty_waves": 0, "duplicate_actions_blocked": 0}
-    questions = {"What drove the Q2 delta?": 2, "Which exhibits cover the terms?": 3,
-                 "How does the hedge work?": 4, "What if the hedge fails?": 5}
+    novelty = {
+        "new_raw_documents": 1,
+        "new_evidence_records": 2,
+        "new_relationships": 1,
+        "resolved_questions": 1,
+        "zero_novelty_waves": 0,
+        "duplicate_actions_blocked": 0,
+    }
+    questions = {
+        "What drove the Q2 delta?": 2,
+        "Which exhibits cover the terms?": 3,
+        "How does the hedge work?": 4,
+        "What if the hedge fails?": 5,
+    }
     for question, wave in questions.items():
-        decision = decide_next_wave(_wave(wave - 1, question), deps=deps, budgets=DirectorBudgets(),
-                                    waves_used=wave - 1, novelty=novelty)
+        decision = decide_next_wave(
+            _wave(wave - 1, question),
+            deps=deps,
+            budgets=DirectorBudgets(),
+            waves_used=wave - 1,
+            novelty=novelty,
+        )
         assert decision.authorized is True and decision.stop_reason == "continue"
         assert decision.targeted_question == question and decision.targeted_domain == "SEC"
         assert len(stops) == wave - 1
-    # Convergence, not a wave number, is what stops the run.
-    zero = dict.fromkeys(("new_raw_documents", "new_evidence_records", "new_relationships",
-                          "resolved_questions"), 0)
-    zero.update({"zero_novelty_waves": 2, "duplicate_actions_blocked": 0})
-    stopped = decide_next_wave(_wave(5, "What else?"), deps=deps, budgets=DirectorBudgets(),
-                               waves_used=5, novelty=zero)
+    # Convergence, not a wave number or a streak: a zero-novelty wave with the committee question
+    # still unanswered keeps the branch alive, however long the streak already is.
+    zero = dict.fromkeys(
+        (
+            "new_raw_documents",
+            "new_evidence_records",
+            "new_relationships",
+            "resolved_questions",
+        ),
+        0,
+    )
+    zero.update({"zero_novelty_waves": 3, "duplicate_actions_blocked": 0})
+    still_open = decide_next_wave(
+        _wave(5, "What else?"),
+        deps=deps,
+        budgets=DirectorBudgets(),
+        waves_used=5,
+        novelty=zero,
+    )
+    assert still_open.authorized is True and still_open.stop_reason == "continue"
+    answered = _wave(5, "What else?")
+    answered.disagreement = CommitteeDisagreement(session_id="rs:x", wave_id=5, freeze_id="F5")
+    stopped = decide_next_wave(answered, deps=deps, budgets=DirectorBudgets(), waves_used=5, novelty=zero)
     assert stopped.authorized is False and stopped.stop_reason == "no_novelty"
+    # An explicit operator runaway guard stops a branch that still has questions, at its own count.
+    limited = decide_next_wave(
+        _wave(5, "What else?"),
+        deps=deps,
+        budgets=DirectorBudgets(zero_novelty_limit=2),
+        waves_used=5,
+        novelty={**zero, "zero_novelty_waves": 2},
+    )
+    assert limited.authorized is False and limited.stop_reason == "no_novelty"
+    assert "zero_novelty_limit=2" in limited.reason_detail
 
 
 def test_invariant_finalize_card_never_duplicates_the_answer(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The answer lives once in final_result; the finalize card is a short confirmation, not the answer."""
     from app.research import service as _svc
     from app.tool_render import render_tool_result
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _eval_sid(repo)
@@ -3085,7 +4410,6 @@ def test_invariant_finalize_card_never_duplicates_the_answer(tmp_path: Path, mon
     assert str(final.get("content", "")).startswith("Bottom line:")
 
 
-
 # --- property invariants: accession + typed-provenance parsing (plan: raw-source-boundary) ---
 
 _ACCESSION_ALPHABET = "0123456789abcdefABCDEF-"
@@ -3106,7 +4430,9 @@ def test_prop_accession_normalization_is_idempotent(text: str) -> None:
 
 
 @settings(max_examples=200, derandomize=True)
-@given(st.text(alphabet=_ACCESSION_ALPHABET, max_size=24), st.text(alphabet="0123456789abcdef", min_size=1, max_size=12))
+@given(
+    st.text(alphabet=_ACCESSION_ALPHABET, max_size=24), st.text(alphabet="0123456789abcdef", min_size=1, max_size=12)
+)
 def test_prop_provenance_accepts_exactly_canonical_accessions(blob: str, search_id: str) -> None:
     """sec_source provenance accepts exactly what accession normalization accepts; search runs stay search runs."""
     from app.research.evidence import (
@@ -3136,9 +4462,22 @@ def test_telemetry_derived_from_persisted_activity(tmp_path: Path, monkeypatch: 
     sid, src = _svc_sid(repo)
     eid = f"{sid}:ev:1"
     _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
-    repo.save_event(append_event(sid, "tool.completed", "runner", "runner", {"tool": "search_sec_filings", "args": {"query": "NVDA OpenAI supply"}}))
-    coverage: dict[str, object] = {"useful_for_question": "insufficient", "resolved": [], "partially_resolved": [],
-                                   "unresolved": ["private contract terms"], "source_limitations": ["SEC-only"]}
+    repo.save_event(
+        append_event(
+            sid,
+            "tool.completed",
+            "runner",
+            "runner",
+            {"tool": "search_sec_filings", "args": {"query": "NVDA OpenAI supply"}},
+        )
+    )
+    coverage: dict[str, object] = {
+        "useful_for_question": "insufficient",
+        "resolved": [],
+        "partially_resolved": [],
+        "unresolved": ["private contract terms"],
+        "source_limitations": ["SEC-only"],
+    }
     out = _svc.submit_source_result(src, coverage=coverage, evidence_ids=[], repo=repo)
     telemetry = out["telemetry"]
     assert isinstance(telemetry, dict)
@@ -3160,9 +4499,14 @@ def test_telemetry_gaps_mark_underivable_keys(tmp_path: Path, monkeypatch: pytes
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
-    sid, src = _svc_sid(repo)
-    coverage: dict[str, object] = {"useful_for_question": "insufficient", "resolved": [], "partially_resolved": [],
-                                   "unresolved": ["nothing yet"], "source_limitations": ["SEC-only"]}
+    _sid, src = _svc_sid(repo)
+    coverage: dict[str, object] = {
+        "useful_for_question": "insufficient",
+        "resolved": [],
+        "partially_resolved": [],
+        "unresolved": ["nothing yet"],
+        "source_limitations": ["SEC-only"],
+    }
     out = _svc.submit_source_result(src, coverage=coverage, evidence_ids=[], repo=repo)
     telemetry = out["telemetry"]
     assert isinstance(telemetry, dict)
@@ -3189,14 +4533,28 @@ def test_accession_forms_normalize_to_canonical() -> None:
 # persisted rows, raised errors.
 # ---------------------------------------------------------------------------
 
-def _nov_row(sid: str, eid: str, wave: int, *, accession: str = "", document: str = "",
-             record_id: str = "", subject: str = "NVDA", digest: str | None = None) -> dict[str, object]:
+
+def _nov_row(
+    sid: str,
+    eid: str,
+    wave: int,
+    *,
+    accession: str = "",
+    document: str = "",
+    record_id: str = "",
+    subject: str = "NVDA",
+    digest: str | None = None,
+) -> dict[str, object]:
     """Persisted evidence row for the novelty walk: raw provenance, record-id fallback, or no identity."""
-    row: dict[str, object] = {"evidence_id": eid, "session_id": sid, "wave_id": wave, "subject": subject,
-                              "content_hash": digest or f"h-{eid}"}
+    row: dict[str, object] = {
+        "evidence_id": eid,
+        "session_id": sid,
+        "wave_id": wave,
+        "subject": subject,
+        "content_hash": digest or f"h-{eid}",
+    }
     if accession:
-        row["provenance"] = {"kind": "sec_source", "accession_no": accession,
-                             "document_name": document, "passage": "p"}
+        row["provenance"] = {"kind": "sec_source", "accession_no": accession, "document_name": document, "passage": "p"}
     if record_id:
         row["source_record_id"] = record_id
         row["source_name"] = "SEC 10-K"
@@ -3213,17 +4571,29 @@ def test_gate_novelty_walks_rows_relationships_and_streak(tmp_path: Path, monkey
     repo.save_evidence(_nov_row(sid, f"{sid}:ev:1", 1, accession="0000320193-25-000079", document="a.htm"))
     repo.save_evidence(_nov_row(sid, f"{sid}:ev:2", 1, record_id="r-1"))  # accession fallback identity
     repo.save_evidence(_nov_row(sid, f"{sid}:ev:3", 1, subject="AMD"))  # no identity at all
-    repo.save_evidence(_nov_row(sid, f"{sid}:ev:4", 2, accession="0000320193-25-000079", document="a.htm",
-                               digest=f"h-{sid}:ev:1"))  # re-read of a held document
-    repo.save_evidence(_nov_row(sid, f"{sid}:ev:5", 2, accession="0000320193-25-000081", document="b.htm", subject="AMD"))
+    repo.save_evidence(
+        _nov_row(sid, f"{sid}:ev:4", 2, accession="0000320193-25-000079", document="a.htm", digest=f"h-{sid}:ev:1")
+    )  # re-read of a held document
+    repo.save_evidence(
+        _nov_row(sid, f"{sid}:ev:5", 2, accession="0000320193-25-000081", document="b.htm", subject="AMD")
+    )
     repo.save_event(append_event(sid, "research_loop_detected", "runner", "runner", {}))
     repo.save_event(append_event(sid, "wave.novelty", "runner", "runner", {"zero_novelty_actions": 2}))
     found = dataclasses.replace(repo.get_session(sid), current_wave=2)
     repo.save_session(found)
     novelty = _svc._gate_novelty(repo, found)
-    assert set(novelty) == {"new_raw_documents", "new_evidence_records", "new_entities", "new_relationships",
-                            "new_material_claims", "resolved_questions", "new_questions",
-                            "zero_novelty_waves", "duplicate_actions_blocked", "zero_novelty_actions"}
+    assert set(novelty) == {
+        "new_raw_documents",
+        "new_evidence_records",
+        "new_entities",
+        "new_relationships",
+        "new_material_claims",
+        "resolved_questions",
+        "new_questions",
+        "zero_novelty_waves",
+        "duplicate_actions_blocked",
+        "zero_novelty_actions",
+    }
     # Only ev:5 (new document) is new; ev:4 is the same document+hash the run already held.
     assert novelty["new_raw_documents"] == 1 and novelty["new_evidence_records"] == 1
     assert novelty["new_entities"] == 0  # NVDA + AMD were already subjects of the prior wave
@@ -3233,13 +4603,27 @@ def test_gate_novelty_walks_rows_relationships_and_streak(tmp_path: Path, monkey
     assert novelty["duplicate_actions_blocked"] == 1 and novelty["zero_novelty_actions"] == 2
 
     # A dossier relationship is a persisted novelty signal; a re-listed one is not new again.
-    repo.save_dossier({"dossier_id": f"{sid}:2:sec", "session_id": sid, "wave_id": 2, "coverage": {},
-                       "relationships": [{"kind": "supplier"}, "junk", {"kind": "customer"}]})
+    repo.save_dossier(
+        {
+            "dossier_id": f"{sid}:2:sec",
+            "session_id": sid,
+            "wave_id": 2,
+            "coverage": {},
+            "relationships": [{"kind": "supplier"}, "junk", {"kind": "customer"}],
+        }
+    )
     with_rels = _svc._gate_novelty(repo, found)
     assert with_rels["new_relationships"] == 2  # the non-mapping entry is not a relationship
     assert with_rels["new_evidence_records"] == 1
-    repo.save_dossier({"dossier_id": f"{sid}:1:sec", "session_id": sid, "wave_id": 1, "coverage": {},
-                       "relationships": [{"kind": "supplier"}]})
+    repo.save_dossier(
+        {
+            "dossier_id": f"{sid}:1:sec",
+            "session_id": sid,
+            "wave_id": 1,
+            "coverage": {},
+            "relationships": [{"kind": "supplier"}],
+        }
+    )
     # A relationship any other wave already lists is not fresh for the current wave.
     assert _svc._gate_novelty(repo, found)["new_relationships"] == 1
 
@@ -3250,6 +4634,7 @@ def test_gate_novelty_walks_rows_relationships_and_streak(tmp_path: Path, monkey
     # Unreadable dossier storage means no relationship signal, never a guessed one.
     def _boom(_session_id: str) -> list[dict[str, object]]:
         raise RuntimeError("dossier storage unavailable")
+
     monkeypatch.setattr(repo, "list_dossiers", _boom)
     degraded = _svc._gate_novelty(repo, found)
     assert degraded["new_relationships"] == 0 and degraded["new_evidence_records"] == 1
@@ -3262,10 +4647,19 @@ def test_telemetry_ledger_unresolvable_and_journal_fallback(tmp_path: Path, monk
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
-    repo.save_event(append_event(sid, "tool.completed", "runner", "runner",
-                                 {"tool": "search_sec_filings", "args": {"query": "NVDA 10-K"}}))
-    coverage: dict[str, object] = {"useful_for_question": "insufficient", "resolved": [], "partially_resolved": [],
-                                   "unresolved": [], "source_limitations": [], "search_runs": ["sr:not-persisted"]}
+    repo.save_event(
+        append_event(
+            sid, "tool.completed", "runner", "runner", {"tool": "search_sec_filings", "args": {"query": "NVDA 10-K"}}
+        )
+    )
+    coverage: dict[str, object] = {
+        "useful_for_question": "insufficient",
+        "resolved": [],
+        "partially_resolved": [],
+        "unresolved": [],
+        "source_limitations": [],
+        "search_runs": ["sr:not-persisted"],
+    }
     out = _svc.submit_source_result(src, coverage=coverage, evidence_ids=[], repo=repo)
     telemetry = out["telemetry"]
     assert isinstance(telemetry, dict)
@@ -3282,7 +4676,9 @@ def test_telemetry_ledger_unresolvable_and_journal_fallback(tmp_path: Path, monk
     assert degraded.get("telemetry_gaps") == []
 
 
-def test_telemetry_no_coverage_relationships_and_storage_degradation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_telemetry_no_coverage_relationships_and_storage_degradation(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """No persisted coverage/identity is a named gap; relationships come from dossiers or are omitted."""
     from app.research import service as _svc
 
@@ -3296,12 +4692,26 @@ def test_telemetry_no_coverage_relationships_and_storage_degradation(tmp_path: P
     assert bare.get("raw_documents_used") is None and bare.get("evidence_records") == 1
     gaps = bare.get("telemetry_gaps")
     assert isinstance(gaps, list)
-    assert {"branches_covered", "branches_remaining", "filings_opened", "documents_opened",
-            "raw_documents_used", "searches_count", "queries_attempted"} <= set(gaps)
+    assert {
+        "branches_covered",
+        "branches_remaining",
+        "filings_opened",
+        "documents_opened",
+        "raw_documents_used",
+        "searches_count",
+        "queries_attempted",
+    } <= set(gaps)
     assert "material_relationships_found" not in bare  # no dossier: the key is omitted, never zero
 
-    repo.save_dossier({"dossier_id": f"{sid}:1:sec", "session_id": sid, "wave_id": 1, "coverage": {},
-                       "relationships": [{"kind": "supplier"}, "junk"]})
+    repo.save_dossier(
+        {
+            "dossier_id": f"{sid}:1:sec",
+            "session_id": sid,
+            "wave_id": 1,
+            "coverage": {},
+            "relationships": [{"kind": "supplier"}, "junk"],
+        }
+    )
     with_rels = _svc._derive_telemetry(repo, sid)
     assert with_rels.get("material_relationships_found") == 1
     assert with_rels.get("evidence_records") == 1
@@ -3309,17 +4719,21 @@ def test_telemetry_no_coverage_relationships_and_storage_degradation(tmp_path: P
     # The coverage read succeeds, the relationship read then fails: omit the key, keep the rest.
     inner = repo.list_dossiers
     calls = itertools.count()
+
     def _flaky(session_id: str) -> list[dict[str, JSONValue]]:
         if next(calls) == 0:
             return inner(session_id)
         raise RuntimeError("dossier storage unavailable")
+
     monkeypatch.setattr(repo, "list_dossiers", _flaky)
     degraded = _svc._derive_telemetry(repo, sid)
     assert "material_relationships_found" not in degraded
     assert degraded.get("evidence_records") == 1
 
 
-def test_committee_jobs_partial_trio_rollback_leaves_reused_role_running(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_committee_jobs_partial_trio_rollback_leaves_reused_role_running(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A trio failing mid-creation fails only the jobs this call started; a reused role is left running."""
     from app.research import service as _svc
     from app.research.models import FailureCategory
@@ -3333,10 +4747,12 @@ def test_committee_jobs_partial_trio_rollback_leaves_reused_role_running(tmp_pat
     repo.save_job(_jobs.start_job(preexisting))
     real_start = _jobs.start_job
     calls = itertools.count()
+
     def _flaky(job: Job) -> Job:
         if next(calls) == 1:
             raise RuntimeError("start failed")
         return real_start(job)
+
     monkeypatch.setattr(_jobs, "start_job", _flaky)
     with pytest.raises(RuntimeError, match="start failed"):
         _svc.create_committee_jobs(sid, 1, repo=repo)
@@ -3366,8 +4782,18 @@ def test_finalize_claims_shapes_and_guards() -> None:
 
     shaped = _svc._finalize_claims(
         "sid",
-        [{"claim": "  inference from the freeze  ", "evidence_ids": ("EV-1",), "claim_type": None},
-         {"claim_text": "declared fact", "evidence_ids": ["EV-1"], "claim_type": "observed_fact"}],
+        [
+            {
+                "claim": "  inference from the freeze  ",
+                "evidence_ids": ("EV-1",),
+                "claim_type": None,
+            },
+            {
+                "claim_text": "declared fact",
+                "evidence_ids": ["EV-1"],
+                "claim_type": "observed_fact",
+            },
+        ],
         ["EV-1"],
     )
     assert [(c.text, c.claim_type, c.evidence_ids) for c in shaped] == [
@@ -3387,6 +4813,15 @@ def test_finalize_claims_shapes_and_guards() -> None:
         _svc._finalize_claims("sid", [non_mapping], ["EV-1"])
     with pytest.raises(ValueError, match="JSON-able"):
         _svc._finalize_claims("sid", [{"text": object(), "evidence_ids": ["EV-1"]}], ["EV-1"])
+    # A coverage artifact id is coverage state: it can never ground a claim, because
+    # the freeze's citable ids are ledger evidence ids only.
+    artifact_id = "rs:sid:cov:9d3f1a2b"
+    with pytest.raises(ModelOutputFailure, match="unknown evidence id"):
+        _svc._finalize_claims(
+            "sid",
+            [{"text": "absence as a finding", "evidence_ids": [artifact_id]}],
+            ["EV-1"],
+        )
 
 
 def test_unbounded_as_of_is_no_cutoff_for_every_pit_gate() -> None:
@@ -3420,9 +4855,13 @@ def test_counterparty_queries_are_assigned_unscoped() -> None:
     ctx = build_research_context("What happens to Microsoft if OpenAI goes bankrupt?", ["MSFT"])
     groups = _grouped_queries(ctx)
     assert "OpenAI" in groups["cp"]
-    assignments = decompose_question("What happens to Microsoft if OpenAI goes bankrupt?",
-                                     session_id="rs:t", as_of="2026-08-10", tickers=["MSFT"],
-                                     dispatch=lambda name, args: {})
+    assignments = decompose_question(
+        "What happens to Microsoft if OpenAI goes bankrupt?",
+        session_id="rs:t",
+        as_of="2026-08-10",
+        tickers=["MSFT"],
+        dispatch=lambda name, args: {},
+    )
     filings = next(a for a in assignments if a.role == "filings")
     assert "OpenAI" in filings.unscoped_queries
     prompt = build_scout_prompt(filings)
@@ -3430,6 +4869,11 @@ def test_counterparty_queries_are_assigned_unscoped() -> None:
     # Other scouts keep their scoped assignment: no global counterparty work.
     assert all(not a.unscoped_queries for a in assignments if a.role != "filings")
     # A question without a counterparty assigns no global queries.
-    plain = decompose_question("NVDA data center revenue growth", session_id="rs:t", as_of="2026-08-10",
-                              tickers=["NVDA"], dispatch=lambda name, args: {})
+    plain = decompose_question(
+        "NVDA data center revenue growth",
+        session_id="rs:t",
+        as_of="2026-08-10",
+        tickers=["NVDA"],
+        dispatch=lambda name, args: {},
+    )
     assert all(not a.unscoped_queries for a in plain)

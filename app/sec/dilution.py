@@ -14,11 +14,9 @@ FORMULAS = {
 
 _NQ = "not_quantifiable"
 
-_OFFERING_424B_FORMS = frozenset(
-    {"424B1", "424B2", "424B3", "424B4", "424B5", "424B7", "424B8"})
+_OFFERING_424B_FORMS = frozenset({"424B1", "424B2", "424B3", "424B4", "424B5", "424B7", "424B8"})
 
-_REGISTRATION_ACCESSION_FORMS = frozenset(
-    {f.strip().upper() for f in REGISTRATION_FORMS} | {"EFFECT", "RW"})
+_REGISTRATION_ACCESSION_FORMS = frozenset({f.strip().upper() for f in REGISTRATION_FORMS} | {"EFFECT", "RW"})
 
 
 def get_offering_history(
@@ -47,8 +45,7 @@ def get_fundamentals(
 
 
 def _positive(value: object) -> TypeGuard[int | float]:
-    return isinstance(value, (int, float)) and not isinstance(value, bool) \
-        and value > 0
+    return isinstance(value, (int, float)) and not isinstance(value, bool) and value > 0
 
 
 def _ratio_pct(part: object, whole: object) -> float | str:
@@ -80,6 +77,7 @@ def _fully_diluted_shares(existing_shares: object, parts: tuple[object, ...]) ->
     extra, bad = _extra_shares(parts)
     return _NQ if bad else existing_shares + extra
 
+
 def _cw_total(convertible_shares: object, warrant_shares: object) -> object:
     if convertible_shares is None and warrant_shares is None:
         return None
@@ -87,32 +85,35 @@ def _cw_total(convertible_shares: object, warrant_shares: object) -> object:
     warr: float = float(warrant_shares) if _is_share_count(warrant_shares) else 0.0
     return conv + warr
 
+
 def dilution_profile(
     *,
-    existing_shares: int | float | None = None,
-    new_shares: int | float | None = None,
-    price: int | float | None = None,
-    market_cap: int | float | None = None,
-    atm_size: int | float | None = None,
-    convertible_shares: int | float | None = None,
-    warrant_shares: int | float | None = None,
+    existing_shares: float | None = None,
+    new_shares: float | None = None,
+    price: float | None = None,
+    market_cap: float | None = None,
+    atm_size: float | None = None,
+    convertible_shares: float | None = None,
+    warrant_shares: float | None = None,
     source_accessions: Sequence[str] = (),
 ) -> dict[str, object]:
-    dilution_pct = _ratio_pct(new_shares, existing_shares + new_shares
-                              if _positive(existing_shares) and _positive(new_shares) else None)
+    dilution_pct = _ratio_pct(
+        new_shares, existing_shares + new_shares if _positive(existing_shares) and _positive(new_shares) else None
+    )
     atm_pct = _ratio_pct(atm_size, market_cap)
-    fully_diluted = _fully_diluted_shares(
-        existing_shares, (new_shares, convertible_shares, warrant_shares))
+    fully_diluted = _fully_diluted_shares(existing_shares, (new_shares, convertible_shares, warrant_shares))
     cw = _cw_total(convertible_shares, warrant_shares)
-    if cw is not None and _positive(cw) and isinstance(
-            fully_diluted, (int, float)) and fully_diluted > 0:
+    if cw is not None and _positive(cw) and isinstance(fully_diluted, (int, float)) and fully_diluted > 0:
         cw_pct: float | str = float(cw) / float(fully_diluted) * 100
     else:
         cw_pct = _NQ
     return {
         "inputs": {
-            "existing_shares": existing_shares, "new_shares": new_shares,
-            "price": price, "market_cap": market_cap, "atm_size": atm_size,
+            "existing_shares": existing_shares,
+            "new_shares": new_shares,
+            "price": price,
+            "market_cap": market_cap,
+            "atm_size": atm_size,
             "convertible_shares": convertible_shares,
             "warrant_shares": warrant_shares,
             "source_accessions": tuple(source_accessions or ()),
@@ -130,8 +131,7 @@ def _load_dilution_history(ticker_or_cik: str, as_of: str | None) -> list[Offeri
     try:
         # Shares are only ever read off 424B rows; registration rows need
         # accessions alone, so skip their live term fetches.
-        return get_offering_history(
-            ticker_or_cik, as_of=as_of, terms_forms=_OFFERING_424B_FORMS) or []
+        return get_offering_history(ticker_or_cik, as_of=as_of, terms_forms=_OFFERING_424B_FORMS) or []
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return []
 
@@ -141,7 +141,7 @@ def _existing_shares_of(facts: object) -> int | None:
         raw = facts.get("shares_outstanding") if isinstance(facts, dict) else None
         if isinstance(raw, (str, int, float)) and not isinstance(raw, bool):
             return int(float(raw))
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     return None
 
@@ -163,7 +163,7 @@ def _offering_share_value(offering: Offering) -> int | None:
         return None
     try:
         value = int(shares)
-    except (ValueError, TypeError):
+    except ValueError, TypeError:
         return None
     return value if value > 0 else None
 
@@ -205,15 +205,18 @@ def get_dilution_profile(
 ) -> dict[str, object]:
     history = _load_dilution_history(ticker_or_cik, as_of)
     existing = _load_existing_shares(ticker_or_cik, as_of)
-    disclosed_total, offering_accessions, registration_accessions, disclosed_known = \
-        _summarize_offering_shares(history)
-    out = dilution_profile(existing_shares=existing,
-                           new_shares=None,
-                           source_accessions=tuple(offering_accessions + registration_accessions))
+    disclosed_total, offering_accessions, registration_accessions, disclosed_known = _summarize_offering_shares(history)
+    out = dilution_profile(
+        existing_shares=existing,
+        new_shares=None,
+        source_accessions=tuple(offering_accessions + registration_accessions),
+    )
     out["fully_diluted_shares"] = _NQ
     out["sum_of_disclosed_share_counts"] = disclosed_total if disclosed_known else None
     out["offering_accessions"] = tuple(offering_accessions)
     out["registration_accessions"] = tuple(registration_accessions)
     out["registered_capacity"] = "not_quantifiable"
-    out["note"] = ("Observed only: 424B share counts are summed across disclosures without deduplication. This is not confirmed issuance and must not be interpreted as incremental dilution. Registration filings (S-1/S-3/F-1/F-3/S-8/EFFECT/RW, including /A amendments) are listed as individual accessions, never summed into capacity; dilution_pct stays not_quantifiable.")
+    out["note"] = (
+        "Observed only: 424B share counts are summed across disclosures without deduplication. This is not confirmed issuance and must not be interpreted as incremental dilution. Registration filings (S-1/S-3/F-1/F-3/S-8/EFFECT/RW, including /A amendments) are listed as individual accessions, never summed into capacity; dilution_pct stays not_quantifiable."
+    )
     return out
