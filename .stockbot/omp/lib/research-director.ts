@@ -523,7 +523,7 @@ export async function resumeResearch(
  return { sessionId, prompt: adv.prompt };
 }
 
-export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: string, asOf?: string): Promise<Advance> {
+export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: string, asOf?: string, opts?: { keepRun?: boolean }): Promise<Advance> {
  const m = runs.get(runId);
  if (!m) return null;
  const sid = m.sessionId;
@@ -536,7 +536,7 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  const { session, jobs, latestFreeze } = snapshot;
  const final = session.final_result;
  if ((final && typeof final === "object") || TERMINAL[str(session.status)]) {
-  runs.delete(runId);
+  if (!opts?.keepRun) runs.delete(runId);
   const fr = (final && typeof final === "object" ? final : {}) as Json;
   const rendered = renderFinalAnswer(fr);
   // Same-turn delivery: a rich final_result resolves to the substantive

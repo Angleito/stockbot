@@ -38,4 +38,4 @@ None
 
 ## Optional arguments
 
-None
+- `freeze_id` (string): Optional freeze scope: an evidence read must be a member of that freeze's evidence set.

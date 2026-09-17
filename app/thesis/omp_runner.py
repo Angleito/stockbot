@@ -15,7 +15,7 @@ from pathlib import Path
 
 from app.config import get_data_root
 
-_EXTENSION = ".omp/extensions/stockbot.ts"
+_EXTENSION = ".stockbot/omp/index.ts"
 
 _RECORDER_GRACE_S = 15.0
 
@@ -83,7 +83,7 @@ def _omp_cmd(prompt: str) -> list[str]:
     provider = os.environ.get("STOCKBOT_PROVIDER", "").strip()
     model = os.environ.get("STOCKBOT_MODEL", "").strip()
     flags = ([ "--provider", provider ] if provider else []) + ([ "--model", model ] if model else [])
-    return ["omp", "-p", "--config", ".omp/stockbot.yml", "--no-session", "--no-extensions", "--no-skills", "--no-rules", "--tools=task", "--extension", _EXTENSION, *flags, "--", prompt]
+    return ["omp", "-p", "--config", ".stockbot/omp/stockbot.yml", "--no-session", "--no-extensions", "--no-skills", "--no-rules", "--tools=task", "--extension", _EXTENSION, *flags, "--", prompt]
 
 
 def _omp_data_env(env: dict[str, str], data_root: Path | str | None) -> None:

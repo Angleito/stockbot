@@ -5,7 +5,7 @@
     "command": "bun test tests/pi_extension.test.ts"
   },
   "mutate": [
-    ".omp/**/*.ts"
+    ".stockbot/omp/**/*.ts"
   ],
   "checkers": [],
   "coverageAnalysis": "off",

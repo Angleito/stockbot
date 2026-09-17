@@ -3,16 +3,16 @@
  * Single source of truth stays in Python (app/tools.py TOOLS); tool schemas
  * pass through as raw JSON documents, and the system prompt comes from
  * the bridge `describe` response (app/prompts.py PI_RESEARCH_PROMPT) plus
- * the raw `.omp/thesis-workflow.yaml` thesis workflow text appended at startup.
+ * the raw `.stockbot/omp/thesis-workflow.yaml` thesis workflow text appended at startup.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "../lib/research-director.ts";
+import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
-import { registerYoutubeAnalytics } from "../lib/youtube-analytics.ts";
+import { registerYoutubeAnalytics } from "./lib/youtube-analytics.ts";
 import { Text, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
 
 export type Json = Record<string, unknown>;
@@ -42,6 +42,17 @@ export function toolCallRequest(
  if (researchContext?.sessionId) req.active_research_session_id = researchContext.sessionId;
  if (researchContext?.jobId) req.active_research_job_id = researchContext.jobId;
  return req;
+}
+
+export function extractAssistantAnswer(messages: unknown): string {
+ const list = Array.isArray(messages) ? (messages as Json[]) : [];
+ const assistants = list.filter((m) => m.role === "assistant");
+ const last = assistants[assistants.length - 1] as Json | undefined;
+ const blocks = last && Array.isArray(last.content) ? (last.content as Json[]) : [];
+ return blocks
+  .filter((b) => b.type === "text" && typeof b.text === "string")
+  .map((b) => b.text as string)
+  .join("\n");
 }
 
 export function bridgeModelText(bridge: Json): string {
@@ -652,7 +663,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
  }
 
  // --- thesis workflow (raw text, never YAML-parsed in TS) ---
- const WORKFLOW_PATH = `${ROOT}/.omp/thesis-workflow.yaml`;
+ const WORKFLOW_PATH = `${ROOT}/.stockbot/omp/thesis-workflow.yaml`;
  let workflowText = "";
  let workflowDown = false;
  let workflowDetail = "";
@@ -1126,6 +1137,21 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   emit({ event: "turn_end", turn: event.turnIndex });
   refreshStatus(ctx);
  });
+ // Headless staged loop: session_stop is the only hook whose return value the
+ // runtime reads as a continuation (agent_end is notify-only). Staged runs
+ // (bound by /research) feed the kernel advance here so bare -p prompts loop
+ // fetch→freeze→trio→finalize without a slash; unstaged runs settle normally.
+ pi.on("session_stop", async (event) => {
+  if (!stagedResearchRuns.has(runId)) return undefined;
+  let driver: Advance = null;
+  try {
+   driver = await advanceOnAgentEnd(runId, extractAssistantAnswer((event as unknown as Json).messages), dataRoots.get(runId), asOfs.get(runId), { keepRun: true });
+  } catch (err) {
+   console.error(`[stockbot] research director session_stop advance failed: ${err instanceof Error ? err.message : String(err)}`);
+  }
+  if (driver && !driver.done) return { continue: true, additionalContext: driver.prompt };
+  return undefined;
+ });
  pi.on("agent_end", async (event) => {
   // One-shot routing continuation: discovery found tools but none ran.
   // Flags are set before queueing so re-entry cannot loop. The first end
@@ -1151,18 +1177,15 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     await emit({ event: "routing_continuation_failed" });
    }
   }
-  const messages = Array.isArray(event.messages) ? (event.messages as unknown as Json[]) : [];
-  const assistants = messages.filter((m) => m.role === "assistant");
-  const last = assistants[assistants.length - 1] as Json | undefined;
-  const blocks = last && Array.isArray(last.content) ? (last.content as Json[]) : [];
-  let answer = blocks
-   .filter((b) => b.type === "text" && typeof b.text === "string")
-   .map((b) => b.text as string)
-   .join("\n");
+  let answer = extractAssistantAnswer(event.messages);
   // Staged ResearchDirector: null when no /research run is staged for this
   // run id, so non-driver turns fall through untouched. A stage prompt queues
   // one follow-up turn (mirroring the routing continuation above); completion
   // falls through with the authoritative kernel answer.
+  const stopContinued = stagedResearchRuns.has(runId) && (event as unknown as Json).willContinue === true;
+  // session_stop already continued the staged loop: agent_end must not queue a
+  // second follow-up, and terminal observability stays with the final settle.
+  if (stopContinued) return;
   let driver: Advance = null;
   try {
    driver = await advanceOnAgentEnd(runId, answer, dataRoots.get(runId), asOfs.get(runId));

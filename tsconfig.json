@@ -1,1 +1,1 @@
-{"compilerOptions": {"allowImportingTsExtensions": true, "lib": ["es2024", "dom"], "module": "esnext", "moduleResolution": "bundler", "skipLibCheck": true, "strict": true, "target": "es2022", "types": ["bun-types"]}, "include": [".omp/extensions/stockbot.ts", "tests/pi_extension.test.ts"]}
+{"compilerOptions": {"allowImportingTsExtensions": true, "lib": ["es2024", "dom"], "module": "esnext", "moduleResolution": "bundler", "skipLibCheck": true, "strict": true, "target": "es2022", "types": ["bun-types"]}, "include": [".stockbot/omp/index.ts", "tests/pi_extension.test.ts"]}
