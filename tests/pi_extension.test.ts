@@ -1628,7 +1628,7 @@ test("success, zero-match, and terminal failure never inject a continuation", as
 	}
 });
 
-test("research director stages fetch, freeze, gate, and finalize via stubbed bridge", async () => {
+test("research director stages fetch, freeze, and finalize via stubbed bridge (TypeSafe owns continuation)", async () => {
 	const ops: string[] = [];
 	const SID = "rs:driver1";
 	const FID = `${SID}:1:freeze`;
@@ -1640,7 +1640,6 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	let spawned: { job_id: string; job_type: string; wave_id: number }[] = [];
 	let spawnN = 0;
 	let finalized = false;
-	let decided = false;
 	let srcStatus = "running";
 	let bridgeFn: (req: Json) => Promise<Json> = async () => ({ error: "unset" });
 	setResearchBridge((bridgeFn = async (req: Json) => {
@@ -1654,9 +1653,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 					result: {
 						session: finalized
 							? { session_id: SID, status: "completed", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: { answer: "kernel synthesis", freeze_id: FID, claims: [] } }
-							: decided
-								? { session_id: SID, status: "synthesizing", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null }
-								: { session_id: SID, status: "researching", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null },
+							: { session_id: SID, status: "researching", evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null },
 						jobs: [
 							{ job_id: "job:src", session_id: SID, status: srcStatus, wave_id: 1, job_type: "source_agent" },
 							...spawned.map((s) => ({ job_id: s.job_id, session_id: SID, status: committee.some((c) => c.jobs.includes(s.job_id)) ? "completed" : "running", wave_id: s.wave_id, job_type: s.job_type })),
@@ -1695,9 +1692,6 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 				const jtype = String(req.type ?? "source_agent");
 				spawned.push({ job_id: jid, job_type: jtype, wave_id: Number(req.wave_id) });
 				return { result: { job_id: jid, session_id: SID, status: "running", wave_id: Number(req.wave_id), job_type: jtype } };
-			case "research.wave.decide":
-				decided = true;
-				return { result: { authorized: false, stop_reason: "no_questions", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
 			case "research.session.finalize": {
 				const claims = (req as Json).claims;
 				if (!Array.isArray(claims) || claims.length === 0) return { error: "claims_required" };
@@ -1779,8 +1773,10 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 		expect(adv.prompt).toContain(EV1);
 	}
 	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create"]);
-	// Full trio recorded: the gate decides the next wave (declined here), then
-	// the driver prompts canonical finalization on the freeze.
+	// Full trio recorded with no next-wave job: the staged driver finalizes on
+	// this freeze with a TypeSafe-continuation hint (no Python decide call).
+	// Continuation is TypeSafe-owned: main calls research_judge_continuation /
+	// candidate and the task gate consumes a continue_research auth.
 	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1", "job:auto-2", "job:auto-3"] }];
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
@@ -1789,14 +1785,15 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 		expect(adv.prompt).not.toContain("research.session.finalize");
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
+		expect(adv.prompt).toContain("research_judge_continuation");
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create", "research.wave.decide"]);
-	// Declined wave-2 finalizes without further RPC; Pi finalizes through the
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create"]);
+	// Finalize prompt stays stable without further RPC; Pi finalizes through the
 	// canonical tool while the dotted bridge op keeps its kernel claims guard.
 	adv = await advanceOnAgentEnd(runId, "model synthesis text");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) expect(adv.prompt).toContain("research_finalize");
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create", "research.wave.decide"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create"]);
 	// Pi's finalize with empty claims is rejected (claims_required); director stays open.
 	const rejected = await bridgeFn({ op: "research.session.finalize", session_id: SID, answer: "x", claims: [] });
 	expect(rejected.error).toBe("claims_required");
@@ -1837,7 +1834,7 @@ function resumeSession(sid: string, over: Json = {}): Json {
 		...over,
 	};
 }
-function resumeBridge(state: ResumeState, ops: ResumeOp[], gate?: Json): (req: Json) => Promise<Json> {
+function resumeBridge(state: ResumeState, ops: ResumeOp[]): (req: Json) => Promise<Json> {
 	let n = 0;
 	return async (req: Json) => {
 		ops.push({ op: String(req.op), type: req.type, wave_id: req.wave_id, job_id: req.job_id });
@@ -1886,8 +1883,6 @@ function resumeBridge(state: ResumeState, ops: ResumeOp[], gate?: Json): (req: J
 				state.jobs.push({ job_id: jid, job_type: String(req.type), wave_id: Number(req.wave_id), status: "running" });
 				return { result: { job_id: jid, session_id: String(state.session.session_id), status: "running", wave_id: Number(req.wave_id), job_type: String(req.type) } };
 			}
-			case "research.wave.decide":
-				return gate ?? { result: { authorized: false, stop_reason: "no_questions", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
 			default:
 				return { error: "unknown_op" };
 		}
@@ -2150,7 +2145,7 @@ test("research director restart: E2 resumes committee on F2 without source work"
 	expectFreezeIds(resumed.prompt, F2, [E1, E2], [F1]);
 });
 
-test("research director restart: E2 trio complete on a non-synthesized freeze id asks the gate, then finalizes", async () => {
+test("research director restart: E2 trio complete finalizes with a TypeSafe-continuation hint", async () => {
 	const SID = "rs:resume-e2done";
 	const F1 = `${SID}:1:freeze`;
 	const FC = "freeze:custom-wave2";
@@ -2181,11 +2176,12 @@ test("research director restart: E2 trio complete on a non-synthesized freeze id
 	};
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-e2done");
-	// The completed trio only reaches the gate: no source-start and no freeze,
-	// and a declined gate finalizes on the freeze the trio just closed.
-	expect(resumeTransitions(ops)).toEqual(["research.wave.decide"]);
+	// Trio complete with no next-wave job: finalize on the closed freeze with
+	// the TypeSafe-continuation hint; no source-start, no freeze, no decide RPC.
+	expect(resumeTransitions(ops)).toEqual([]);
 	expect(resumed.prompt).toContain("research_finalize");
 	expect(resumed.prompt).not.toContain("research.session.finalize");
+	expect(resumed.prompt).toContain("research_judge_continuation");
 	expectFreezeIds(resumed.prompt, FC, [E1, E2], [F1]);
 });
 
@@ -2334,7 +2330,7 @@ test("extension registers session_shutdown bridge cleanup", async () => {
 	await handlers["session_shutdown"]({ type: "session_shutdown", reason: "quit" });
 });
 
-test("research director provisions wave-2 source job on authorization", async () => {
+test("research director provisions wave-2 source job on settled authorization", async () => {
 	const ops: { op: string; wave_id?: unknown; job_type?: unknown; job_id?: unknown }[] = [];
 	const SID = "rs:driver2";
 	const FID1 = `${SID}:1:freeze`;
@@ -2347,10 +2343,13 @@ test("research director provisions wave-2 source job on authorization", async ()
 	let committee: { freeze_id: string; wave_id: number; jobs: string[] }[] = [
 		{ freeze_id: FID1, wave_id: 1, jobs: ["job:1", "job:2", "job:3"] },
 	];
-	// Authorization persists in the session snapshot once the gate decides.
-	let status = "analyzing";
-	let targeted_question = "";
-	let targeted_domain = "";
+	// Settled authorization persists in the session snapshot (current_wave past
+	// the latest freeze + targeted question), never a Python decide call: the
+	// staged driver provisions the next wave's source job from kernel state.
+	let status = "targeted_research";
+	let current_wave = 2;
+	let targeted_question = "How did Q3 go?";
+	let targeted_domain = "SEC";
 	let w2job = "";
 	let w2status = "running";
 	let trio2: string[] = [];
@@ -2362,7 +2361,7 @@ test("research director provisions wave-2 source job on authorization", async ()
 			case "research.session.inspect":
 				return {
 					result: {
-						session: { session_id: SID, status, evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null, targeted_question, targeted_domain },
+						session: { session_id: SID, status, current_wave, evidence_ids: evidence, freeze_ids: freezes, committee_runs: committee, final_result: null, targeted_question, targeted_domain },
 						jobs: [
 							{ job_id: "job:1", session_id: SID, status: "completed", wave_id: 1, job_type: "stockbot" },
 							{ job_id: "job:2", session_id: SID, status: "completed", wave_id: 1, job_type: "bullbot" },
@@ -2375,11 +2374,6 @@ test("research director provisions wave-2 source job on authorization", async ()
 						latest_freeze: freezeRecords[freezes[freezes.length - 1]] ?? null,
 					},
 				};
-			case "research.wave.decide":
-				status = "targeted_research";
-				targeted_question = "How did Q3 go?";
-				targeted_domain = "SEC";
-				return { result: { authorized: true, stop_reason: "continue", reason_detail: "follow-up requested", targeted_question, targeted_domain } };
 			case "research.committee.create":
 				// Atomic trio: all three RUNNING together, reused on repeat calls.
 				if (trio2.length === 0) trio2 = ["job:trio2-1", "job:trio2-2", "job:trio2-3"];
@@ -2410,11 +2404,11 @@ test("research director provisions wave-2 source job on authorization", async ()
 	const starts = ops.filter((o) => o.op === "research.job.start");
 	expect(starts.length).toBe(1);
 	expect(starts[0].wave_id).toBe(2);
-	// Source-start is followed by a refreshed inspect so the staged run
-	// context rebinds before the fetch prompt goes out.
+	// No decide RPC: the settled snapshot (current_wave past the freeze)
+	// authorizes the wave. Source-start is followed by a refreshed inspect so
+	// the staged run context rebinds before the fetch prompt goes out.
 	const seq = ops.map((o) => o.op);
-	expect(seq.indexOf("research.wave.decide")).toBeGreaterThan(-1);
-	expect(seq.indexOf("research.job.start")).toBeGreaterThan(seq.indexOf("research.wave.decide"));
+	expect(seq).not.toContain("research.wave.decide");
 	expect(seq.lastIndexOf("research.session.inspect")).toBeGreaterThan(seq.indexOf("research.job.start"));
 	// E2 stays unfrozen while the freeze already covers every session id.
 	adv = await advanceOnAgentEnd(runId, "");
@@ -2548,42 +2542,43 @@ function waveState(sid: string, wave: number): ResumeState {
 	};
 }
 
-const AUTHORIZED_GATE: Json = {
-	result: { authorized: true, stop_reason: "continue", reason_detail: "open branch", targeted_question: "Who supplies the fab?", targeted_domain: "SEC" },
-};
-
-test("research director waves on while the gate authorizes: wave 4 after wave 3, no ceiling", async () => {
+test("research director provisions wave 4 from settled authorization: no ceiling, no decide RPC", async () => {
 	const SID = "rs:waves";
 	const state = waveState(SID, 3);
+	// Settled gate: kernel already authorized wave 4 (current_wave past the
+	// latest freeze + targeted question). The staged driver provisions the
+	// wave-4 source job from snapshot state; continuation itself stays
+	// TypeSafe-owned via the task gate, never a Python decide call here.
+	state.session = { ...state.session, status: "targeted_research", current_wave: 4, targeted_question: "Who supplies the fab?", targeted_domain: "SEC" };
 	const ops: ResumeOp[] = [];
-	setResearchBridge(resumeBridge(state, ops, AUTHORIZED_GATE));
+	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-waves-4a");
-	expect(resumeTransitions(ops)).toEqual(["research.wave.decide", "research.job.start"]);
+	expect(resumeTransitions(ops)).toEqual(["research.job.start"]);
 	expect(ops.find((o) => o.op === "research.job.start")).toMatchObject({ type: "source_agent", wave_id: 4 });
 	expect(resumed.prompt).toContain("Wave-4");
 	expect(resumed.prompt).toContain("Who supplies the fab?");
 	expect(resumed.prompt).toContain("research_add_evidence");
 	expect(resumed.prompt).not.toContain("research_finalize");
 	expect(state.jobs.some((j) => j.job_type === "source_agent" && j.wave_id === 4 && j.status === "running")).toBe(true);
-	// Wave-4 source still fetching with nothing past the freeze: keep fetching on
-	// the same authorization, never a second gate call for freeze 3.
+	// Wave-4 source still fetching with nothing past the freeze: keep fetching
+	// on the same settled authorization, never a decide call for freeze 3.
 	const resumedB = await resumeResearch(SID, "run-waves-4b");
-	expect(resumeTransitions(ops)).toEqual(["research.wave.decide", "research.job.start"]);
+	expect(resumeTransitions(ops)).toEqual(["research.job.start"]);
 	expect(resumedB.prompt).toContain("Wave-4");
 	expect(resumedB.prompt).toContain("research_add_evidence");
 	expect(resumedB.prompt).not.toContain("research_finalize");
 });
 
-test("research director finalizes when the gate declines a late wave", async () => {
+test("research director finalizes a late wave with no next-wave job", async () => {
 	const SID = "rs:waves-stop";
 	const state = waveState(SID, 4);
 	const ops: ResumeOp[] = [];
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-waves-stop");
-	expect(resumeTransitions(ops)).toEqual(["research.wave.decide"]);
+	expect(resumeTransitions(ops)).toEqual([]);
 	expect(ops.filter((o) => o.op === "research.job.start").length).toBe(0);
 	expect(resumed.prompt).toContain("research_finalize");
-	expect(resumed.prompt).toContain("no_questions");
+	expect(resumed.prompt).toContain("research_judge_continuation");
 	expect(resumed.prompt).not.toContain("research_add_evidence");
 	expectFreezeIds(resumed.prompt, `${SID}:4:freeze`, [`${SID}:ev:1`, `${SID}:ev:4`], [`${SID}:3:freeze`]);
 });
@@ -2949,8 +2944,8 @@ test("Freeze parity mirrors kernel hash and drift", async () => {
 	expect(checkFreezeDrift("E1", ["ev:a"], recs)).toContain("drifted");
 	expect(checkFreezeDrift("E1", ["ev:a", "ev:b"], [...recs, recs[0]])).toContain("duplicate");
 });
-	// Shared-corpus differential 2026-09-17: py hash d2e13c22...746eb11e AGREE,
-	// order-stable AGREE, empty sha256 AGREE; drift ok/short/dup all AGREE.
+// Shared-corpus differential 2026-09-17: py hash d2e13c22...746eb11e AGREE,
+// order-stable AGREE, empty sha256 AGREE; drift ok/short/dup all AGREE.
 test("committee results record three analyses", async () => {
 	const SID = "rs:task-record";
 	const F1 = `${SID}:1:freeze`;

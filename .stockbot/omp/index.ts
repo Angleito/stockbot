@@ -14,6 +14,9 @@ import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, p
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
 import { registerYoutubeAnalytics } from "./lib/youtube-analytics.ts";
 import { Text, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
+import { authorizationStore, consumeMatchingAuth, consumeOpenRoleAccepts, drainRoleAccepts, finalizeActionHash, hasOpenRoleAccepts, hashAction, isExactRepeat } from "./lib/research-control.ts";
+import { JUDGE_TOOL_NAMES, registerResearchJudgeTools } from "./tools/research-judge-tools.ts";
+import { REVIEW_TOOL_NAMES, registerOutputReviewTools } from "./tools/output-review-tools.ts";
 
 export type Json = Record<string, unknown>;
 
@@ -661,6 +664,17 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     : undefined,
   });
  }
+ // Native TypeSafe judge/review tools: in-process via the TS SDK, never via
+ // the bridge or Python. Registered only when the bridge handshake succeeds so
+ // the visible roster keeps its contract (bridge schemas + discovery set);
+ // semantic judgments never depend on Python either way. Committee agents never
+ // receive them (see agents/*.md).
+ if (!bridgeDown) {
+  registerResearchJudgeTools(pi);
+  registerOutputReviewTools(pi);
+ }
+ const NATIVE_TOOLS: Record<string, true> = {};
+ for (const name of [...JUDGE_TOOL_NAMES, ...REVIEW_TOOL_NAMES]) NATIVE_TOOLS[name] = true;
 
  // --- thesis workflow (raw text, never YAML-parsed in TS) ---
  const WORKFLOW_PATH = `${ROOT}/.stockbot/omp/thesis-workflow.yaml`;
@@ -712,6 +726,16 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
  // Inactive direct schemas stay uncallable (hallucinated direct calls
  // block); call_tool remains the active fallback. Non-research host tools
  // keep the pre-existing RESEARCH-only block.
+ // sec-agent rounds per binding run: the first source wave is free; each
+ // further round needs a one-time continue_research authorization from a
+ // judge tool. Declared before the handler so no task call can hit the TDZ.
+ const sourceSpawns = new Map<string, number>();
+ const taskHashes = new Map<string, Set<string>>();
+ function seenHashes(currentRunId: string): Set<string> {
+  let seen = taskHashes.get(currentRunId);
+  if (!seen) taskHashes.set(currentRunId, (seen = new Set()));
+  return seen;
+ }
  pi.on("tool_call", async (event, ctx) => {
   // Main task interception first: the Director owns every main-session spawn
   // (stage-gated sec-agent/trio). sec-agent -> sec-scout fan-out runs inside
@@ -721,13 +745,56 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    if (!isMainSession(ctx)) return;
    try {
     const taskInput = (((event as unknown as Json).input ?? {}) as Json);
+    const rawTasks: unknown = taskInput.tasks;
+    const taskItems: Json[] = Array.isArray(rawTasks) ? (rawTasks as Json[]) : [];
+    const agentNames: string[] = [];
+    for (const item of taskItems) {
+     if (item && typeof item === "object" && "agent" in item && typeof item.agent === "string") agentNames.push(item.agent);
+    }
+    const wantsSource = agentNames.includes("sec-agent");
+    const wantsCommittee = agentNames.includes("stockbot") || agentNames.includes("bullbot") || agentNames.includes("bearbot");
+    // §47 exact-repeat: same normalized task batch needs no new wave.
+    // Empty batches are invalid input, not an action: leave them for the
+    // batch-form validator below instead of misreporting them as duplicates.
+    let taskHash = "";
+    if (taskItems.length > 0) {
+     try {
+      taskHash = hashAction(taskItems);
+     } catch {
+      taskHash = "";
+     }
+     if (taskHash && isExactRepeat(seenHashes(runId), taskHash)) {
+      const reason = "Exact repeat of a prior task batch with no new information; blocked as a duplicate rather than spending a new wave.";
+      emit({ event: "security_block", tool: event.toolName, reason });
+      blocks++;
+      return { block: true, reason };
+     }
+    }
+    if (wantsSource && (sourceSpawns.get(runId) ?? 0) >= 1 && !consumeMatchingAuth(authorizationStore, runId, "continue_research")) {
+     const reason = "Another source-agent round needs a TypeSafe continuation or candidate authorization; call research_judge_continuation or research_judge_candidate first.";
+     emit({ event: "security_block", tool: event.toolName, reason });
+     blocks++;
+     return { block: true, reason };
+    }
+    if (wantsCommittee && !consumeMatchingAuth(authorizationStore, runId, "launch_committee")) {
+     const reason = "Committee launch needs a TypeSafe coverage COMPLETE authorization; call research_judge_coverage first.";
+     emit({ event: "security_block", tool: event.toolName, reason });
+     blocks++;
+     return { block: true, reason };
+    }
     const plan = await planTaskCall({ researchKey: runId, toolCallId: event.toolCallId }, taskInput, dataRoots.get(runId), asOfs.get(runId));
     if (plan.block) {
      emit({ event: "security_block", tool: event.toolName, reason: plan.reason ?? "task spawn refused" });
      blocks++;
      return { block: true, reason: plan.reason ?? "Stockbot task gate: spawn refused" };
     }
-    await emit({ event: "task_planned", tool: event.toolName, tool_call_id: event.toolCallId });
+    // Allowed committee launch: prior ACCEPTs graded older outputs, drain them.
+    if (wantsCommittee) drainRoleAccepts(authorizationStore, runId);
+    if (agentNames.includes("sec-agent")) sourceSpawns.set(runId, (sourceSpawns.get(runId) ?? 0) + 1);
+    if (taskHash) seenHashes(runId).add(taskHash);
+    // Durable gate audit: decision fields ride the task_planned sqlite row
+    // (agents, hashes, round) — never task text, prompts, or evidence.
+    await emit({ event: "task_planned", tool: event.toolName, tool_call_id: event.toolCallId, agents: agentNames, task_hash: taskHash || undefined, source_round: sourceSpawns.get(runId) ?? 0 });
     if (plan.input) return { input: plan.input as Record<string, unknown> };
     return;
    } catch (err) {
@@ -742,6 +809,9 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   // prompts with their own tools (research_read/research_add_evidence) and
   // must never hit the RESEARCH roster or per-binding routing counters.
   if (!isMainSession(ctx)) return;
+  // Native TypeSafe tools bypass the bridge roster: the model calls them by
+  // name and the registry above executes them in-process.
+  if (NATIVE_TOOLS[event.toolName]) return;
   let isActive = false;
   try {
    isActive = pi.getActiveTools().includes(event.toolName);
@@ -752,6 +822,41 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    emit({ event: "security_block", tool: event.toolName, reason: "not a RESEARCH tool" });
    blocks++;
    return { block: true, reason: `Stockbot RESEARCH-only: '${event.toolName}' is not enabled` };
+  }
+  // Finalize gate: research_finalize via call_tool needs a one-time finalize
+  // authorization bound to the reviewed answer. The kernel stays
+  // authoritative; this blocks the model from skipping its own final review
+  // or swapping in an unreviewed answer (draft B after PASS on draft A).
+  // Straight-line fail-closed: any throw below still blocks finalization.
+  const finArgs: unknown = (event as unknown as Json).input;
+  const finInner: unknown = event.toolName === "call_tool" && finArgs && typeof finArgs === "object" ? (finArgs as Json).name : undefined;
+  if (typeof finInner === "string" && finInner === "research_finalize") {
+   let allowed = false;
+   let rolesAccepted = false;
+   try {
+    const finParams: unknown = finArgs && typeof finArgs === "object" ? (finArgs as Json).arguments : undefined;
+    const finAnswer: unknown = finParams && typeof finParams === "object" ? (finParams as Json).answer : undefined;
+    rolesAccepted = hasOpenRoleAccepts(authorizationStore, runId);
+    allowed = typeof finAnswer === "string" && rolesAccepted && consumeMatchingAuth(authorizationStore, runId, "finalize", finalizeActionHash(finAnswer)) && consumeOpenRoleAccepts(authorizationStore, runId);
+   } catch {
+    allowed = false;
+   }
+   if (!allowed) {
+    const reason = rolesAccepted
+     ? "Finalization needs a TypeSafe final-gate PASS on this exact answer; call research_review_final with the same answer first."
+     : "Finalization needs TypeSafe ACCEPT on all three role outputs plus a final-gate PASS on this exact answer; call research_review_role_output per role, then research_review_final with the same answer.";
+    emit({ event: "security_block", tool: finInner, reason });
+    blocks++;
+    return { block: true, reason };
+   }
+   // Durable gate audit: answer hash rides a routing sqlite row (never prose).
+   try {
+    const finParams: unknown = finArgs && typeof finArgs === "object" ? (finArgs as Json).arguments : undefined;
+    const finAnswer: unknown = finParams && typeof finParams === "object" ? (finParams as Json).answer : undefined;
+    emit({ event: "routing_continuation", reason: "typesafe_finalize_allowed", answer_hash: finalizeActionHash(finAnswer) });
+   } catch {
+    // logging never breaks research
+   }
   }
   // Stage gate (UX-only; the kernel gate is authoritative): staged research runs
   // may only use stage-appropriate tools. Unknown stages fail open.
@@ -1091,6 +1196,19 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   lastCtx = ctx;
   const startedAt = toolStartedAt.get(event.toolCallId);
   toolStartedAt.delete(event.toolCallId);
+  // Durable judgment audit: native TypeSafe results already carry
+  // details.audit (raw p_yes, bank version, threshold, model, result —
+  // never inputs, transcripts, or key material). Persist the audit into
+  // the tool end sqlite row so runs stay queryable after the turn.
+  let audit: unknown;
+  try {
+   const res = event.result as { details?: unknown } | undefined;
+   const details = res && typeof res === "object" ? (res.details as Record<string, unknown> | undefined) : undefined;
+   const maybe = details && typeof details === "object" ? details.audit : undefined;
+   if (maybe && typeof maybe === "object") audit = maybe;
+  } catch {
+   audit = undefined;
+  }
   void emit({
    event: "tool_execution_end",
    tool: event.toolName,
@@ -1098,6 +1216,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    is_error: event.isError,
    started_at: startedAt,
    completed_at: new Date().toISOString(),
+   ...(audit !== undefined ? { typesafe_audit: audit } : {}),
   });
   refreshStatus(ctx);
  });

@@ -1,0 +1,88 @@
+import { expect, test } from "bun:test";
+import { authorizeCandidate, judgeContinuation } from "../.stockbot/omp/lib/typesafe/decisions.ts";
+import { FakeEvaluator } from "../.stockbot/omp/lib/typesafe/evaluator.ts";
+import { PACKS, QUESTION_BANK } from "../.stockbot/omp/lib/typesafe/questions.ts";
+import { yes } from "../.stockbot/omp/lib/typesafe/thresholds.ts";
+import type { JudgmentMap } from "../.stockbot/omp/lib/typesafe/types.ts";
+
+const CONT = [...PACKS.continuation];
+const CAND = [...PACKS.candidate];
+const state = { unresolved: ["supplier exposure"], candidate: "search exhibits" };
+
+function full(ids: string[], v: number, except: Record<string, number> = {}): Record<string, number> {
+	return Object.fromEntries(ids.map((id) => [id, except[id] ?? v]));
+}
+
+async function judgedCont(p: Record<string, number>, hasCandidate: boolean) {
+	const judgments: JudgmentMap = {};
+	for (const [id, v] of Object.entries(p)) judgments[id] = { p_yes: v, yes: yes(v) };
+	const { results } = await new FakeEvaluator(judgments).evaluate(
+		state,
+		CONT.map((id) => QUESTION_BANK[id]),
+	);
+	return judgeContinuation(results, hasCandidate);
+}
+
+async function judgedCand(p: Record<string, number>) {
+	const judgments: JudgmentMap = {};
+	for (const [id, v] of Object.entries(p)) judgments[id] = { p_yes: v, yes: yes(v) };
+	const { results } = await new FakeEvaluator(judgments).evaluate(
+		state,
+		CAND.map((id) => QUESTION_BANK[id]),
+	);
+	return authorizeCandidate(results);
+}
+
+test("unresolved and improvable continues", async () => {
+	expect((await judgedCont(full(CONT, 0.2, { N01: 0.9, N03: 0.85 }), false)).decision).toBe("continue");
+});
+
+test("honest stop with no candidate stops", async () => {
+	expect((await judgedCont(full(CONT, 0.2, { N05: 0.9, N06: 0.9 }), false)).decision).toBe("stop");
+});
+
+test("stop holds whether or not a candidate is queued", async () => {
+	expect((await judgedCont(full(CONT, 0.2, { N05: 0.9, N06: 0.9 }), true)).decision).toBe("stop");
+});
+
+test("unresolved but not improvable stops", async () => {
+	expect((await judgedCont(full(CONT, 0.2, { N01: 0.9, N03: 0.2 }), false)).decision).toBe("stop");
+});
+
+test("missing judgments fail closed to stop", async () => {
+	const { results } = await new FakeEvaluator({}).evaluate(
+		state,
+		CONT.map((id) => QUESTION_BANK[id]),
+	);
+	expect(judgeContinuation(results, false).decision).toBe("stop");
+});
+
+test("0.70 boundary on N01/N03 decides continue", async () => {
+	expect((await judgedCont(full(CONT, 0.2, { N01: 0.7, N03: 0.7 }), false)).decision).toBe("continue");
+	expect((await judgedCont(full(CONT, 0.2, { N01: 0.7, N03: 0.6999 }), false)).decision).toBe("stop");
+});
+
+test("targeted, novel, likely-useful candidate is authorized", async () => {
+	expect(await judgedCand(full(CAND, 0.9))).toBe(true);
+});
+
+test("off-target candidate is not authorized", async () => {
+	expect(await judgedCand(full(CAND, 0.9, { N07: 0.2 }))).toBe(false);
+});
+
+test("duplicate of completed research is not authorized", async () => {
+	expect(await judgedCand(full(CAND, 0.9, { N09: 0.2 }))).toBe(false);
+});
+
+test("untargeted candidate is not authorized", async () => {
+	expect(await judgedCand(full(CAND, 0.9, { N12: 0.2 }))).toBe(false);
+});
+
+test("advisory N11 alone never blocks authorization", async () => {
+	expect(await judgedCand(full(CAND, 0.9, { N11: 0.1 }))).toBe(true);
+});
+
+test("0.70 boundary on every gating candidate question", async () => {
+	expect(await judgedCand(full(CAND, 0.9, { N07: 0.7, N08: 0.7, N09: 0.7, N10: 0.7, N12: 0.7 }))).toBe(true);
+	expect(await judgedCand(full(CAND, 0.9, { N10: 0.6999 }))).toBe(false);
+});

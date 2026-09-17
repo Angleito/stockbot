@@ -1,10 +1,12 @@
-/** Staged ResearchDirector driver: fetch -> freeze -> atomic trio -> gate -> [next wave, while the gate authorizes] -> finalize.
+/** Staged ResearchDirector driver: fetch -> freeze -> atomic trio -> settled gate -> [next wave, while TypeSafe authorizes] -> finalize.
  *
  * OMP owns the model loop; this module owns stage order only. Every transition is
  * kernel-gated fail-closed: predicates read research.session.inspect results, at most
  * one transition RPC fires per stage step, and kernel errors keep the run entry (nothing
- * is ever invented). The wave gate alone decides continue vs finalize, for every wave:
- * no wave ceiling lives here. The model dispatches SEC work as one task batch for
+ * is ever invented). TypeSafe continuation/candidate judges authorize extra waves via the
+ * OMP task gate (one-time continue_research auth); this staged driver only drives waves
+ * the kernel snapshot already settled and never calls Python wave-decide itself.
+ * The model dispatches SEC work as one task batch for
  * sec-agent and the committee as one task batch for the trio, with prompts naming
  * the call_tool verbs and research ids each child must pass through verbatim.
  * No subprocesses, no cli.py, no thresholds, and no budgets live here.
@@ -405,7 +407,7 @@ function sourceSteps(sessionId: string, jobId: string, asOf?: string): string {
   `its sec-scout batch fans out inside its own session. ` +
   `Provenance is kernel-validated and ${cutoff}; unprovenanced or out-of-order calls fail closed. ` +
   `When this source investigation is complete, the sec-agent MUST call research_submit_source_result exactly once with the structured coverage {"useful_for_question": "sufficient"|"insufficient", ...}, evidence_ids, and unresolved_questions, then stop. ` +
-  `That ends this source job and returns control to the Director, which owns freezing, waves, and the session; it never freezes, ends a wave, or ends the session. Do not attempt to freeze.`
+  `That ends this source job and returns control to the parent OMP run, which owns orchestration; TypeSafe judge tools assess sufficiency and coverage while data tools provide material. It never freezes, ends a wave, or ends the session. Do not attempt to freeze.`
  );
 }
 
@@ -423,7 +425,7 @@ function wavePrompt(wave: number, sessionId: string, jobId: string, targeted: st
   `${label} authorized for research session ${sessionId}${targeted}. Dispatch SEC research now as one task batch with context and one task for agent sec-agent ` +
   `(task: this wave's objective plus branch guidance; the batch plans the omp-owned source job). ` +
   sourceSteps(sessionId, jobId, asOf) +
-  ` If evidence is insufficient, include it in unresolved_questions; the Director decides the next wave.`
+  ` If evidence is insufficient, include it in unresolved_questions; TypeSafe continuation/candidate judges authorize the next wave via the task gate.`
  );
 }
 
@@ -476,7 +478,7 @@ async function freezeWave(sessionId: string, wave: number, dataRoot?: string, as
 // next. A role already running is reused; a recorded role is left alone. The
 // Director then prompts this context to dispatch the trio as one OMP task
 // batch (planTaskCall + recordTaskResult); no subprocess ever authors a role.
-async function seedTrio(runId: string, sessionId: string, wave: number, dataRoot?: string, asOf?: string, note = ""): Promise<Advance> {
+async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf?: string, note = ""): Promise<Advance> {
  try {
   await rpc("research.committee.create", { session_id: sessionId, wave_id: wave }, dataRoot, asOf);
  } catch (err) {
@@ -564,44 +566,37 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
   const src1Status = str(src1?.status);
   if (src1 && (src1Status === "running" || src1Status === "queued"))
    return { done: false, prompt: `Source still running for research session ${sid}. ${sourceSteps(sid, str(src1.job_id), asOf)}` };
-  let frozen: Json;
   try {
-   frozen = await freezeWave(sid, 1, dataRoot, asOf);
+   const frozen = await freezeWave(sid, 1, dataRoot, asOf);
+   const reason = str((frozen.pending_next_action as Json | undefined)?.reason ?? (latestFreeze?.pending_next_action as Json | undefined)?.reason ?? "");
+   const limit = reason ? ` Evidence limitations: ${reason}.` : "";
+   return seedTrio(sid, 1, dataRoot, asOf, limit ? `${limit} ` : "");
   } catch (err) {
    return { done: false, prompt: `Freeze for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Add or repair evidence with Call call_tool with name="research_add_evidence", then continue.` };
   }
-  const reason = str((frozen.pending_next_action as Json | undefined)?.reason ?? (latestFreeze?.pending_next_action as Json | undefined)?.reason ?? "");
-  const limit = reason ? ` Evidence limitations: ${reason}.` : "";
-  return seedTrio(runId, sid, 1, dataRoot, asOf, limit ? `${limit} ` : "");
  }
  if (!d.trio.done) {
   // Committee stage: one atomic RPC guarantees the whole trio exists RUNNING
   // before any dispatch prompt (existing role jobs are reused, recorded roles
   // stay out of the prompt); the Director then dispatches the trio as one OMP
   // task batch (planTaskCall + recordTaskResult).
-  return seedTrio(runId, sid, d.trio.wave, dataRoot, asOf);
+  return seedTrio(sid, d.trio.wave, dataRoot, asOf);
  }
- // Trio complete for the latest freeze: the wave gate alone decides continue vs
- // finalize, for every wave — there is no wave ceiling.
+ // Trio complete for the latest freeze: OMP + TypeSafe owns continuation
+ // (§§13/19/36-37). Python decide_next_wave is NOT invoked from this path:
+ // the staged driver never auto-continues. gateStopped = kernel already
+ // declined this freeze (SYNTHESIZING/terminal): finalize. gateSettled = a
+ // next-wave source job (or wave advance) already exists: keep driving it.
+ // Otherwise finalize here; only a TypeSafe continue/candidate auth (consumed
+ // by the task gate) may open another round — never an automatic decide call.
  const trioIds = trioJobIdsForFreeze(session, d.trio.fid);
  if (d.gateStopped) {
-  // Restart after a gate stop: the kernel already declined this freeze.
   return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), `Wave gate stopped research session ${sid}. `, trioIds) };
  }
- let targeted = d.targeted;
  if (!d.gateSettled) {
-  let dec: Json;
-  try {
-   dec = await rpc("research.wave.decide", { session_id: sid }, dataRoot, asOf);
-  } catch (err) {
-   return { done: false, prompt: `Wave gate for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Reply with model text only; the run stays staged.` };
-  }
-  if (dec.authorized !== true)
-   return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), `Wave gate stopped research session ${sid} (${str(dec.stop_reason) || "no further wave"}). `, trioIds) };
-  const tq = str(dec.targeted_question);
-  const td = str(dec.targeted_domain);
-  targeted = tq && td ? ` on ${td}: ${tq}` : tq || td;
+  return { done: false, prompt: `${finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), `Trio complete for research session ${sid}. `, trioIds)} To investigate a remaining material gap instead, call research_judge_continuation or research_judge_candidate; only a TypeSafe continue/candidate authorization permits another sec-agent round.` };
  }
+ const targeted = d.targeted;
  // Authorized: drive the next wave's source job, fetch, freeze, trio, gate.
  const N = d.activeWave;
  const activeSrc = jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === N);
@@ -634,7 +629,7 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  }
  const reasonN = str((frozenN.pending_next_action as Json | undefined)?.reason ?? "");
  const limitN = reasonN ? ` Evidence limitations: ${reasonN}.` : "";
- return seedTrio(runId, sid, N, dataRoot, asOf, limitN ? `${limitN} ` : "");
+ return seedTrio(sid, N, dataRoot, asOf, limitN ? `${limitN} ` : "");
 }
 // --- Director task interception policy (OMP runtime) ---------------------------
 // The Director owns every main-session spawn: SOURCE_RESEARCH allows sec-agent

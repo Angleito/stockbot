@@ -1,0 +1,1 @@
+{"entry": [".stockbot/omp/index.ts", "tests/typesafe_*.test.ts"], "project": [".stockbot/omp/**/*.ts", "tests/typesafe_*.test.ts"]}

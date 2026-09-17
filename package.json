@@ -36,6 +36,7 @@
     "eval:holdout": "venv/bin/python scripts/verify_pi_tools.py --holdout",
     "eval:model": "venv/bin/python scripts/verify_judge.py --all",
     "eval:full": "venv/bin/python scripts/verify_pi_tools.py --routing && venv/bin/python scripts/verify_pi_tools.py --confusion && venv/bin/python scripts/verify_judge.py --all",
+    "eval:typesafe": "bun test ./tests/typesafe_live.eval.ts",
     "verify:e2e": "FINRA_USE_MOCK=0 venv/bin/python scripts/verify_pi_tools.py --agent-loop",
     "verify-integrity": "venv/bin/python scripts/verify_type_escape_hatches.py",
     "verify-secrets": "gitleaks git . --no-banner --config .gitleaks.toml --redact",
@@ -51,7 +52,8 @@
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "18.2.3",
-    "@oh-my-pi/pi-tui": "18.2.3"
+    "@oh-my-pi/pi-tui": "18.2.3",
+    "@typesafe-ai/sdk": "^0.6.0"
   },
   "devDependencies": {
     "@stryker-mutator/core": "^10.0.0",
