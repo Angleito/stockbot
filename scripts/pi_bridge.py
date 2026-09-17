@@ -580,7 +580,15 @@ def _pi_event_record_core(recorder: RunRecorder, event: str, request: Mapping[st
 
 def _pi_event_record_aux(recorder: RunRecorder, event: str, request: Mapping[str, object], meta: dict[str, object] | None) -> bool:
     """Routing/turn events; True when handled."""
-    if event in ("routing_continuation", "routing_continuation_failed", "routing_metrics"):
+    if event in (
+        "routing_continuation",
+        "routing_continuation_failed",
+        "routing_metrics",
+        "task_planned",
+        "task_result",
+        "subagent_started",
+        "subagent_finished",
+    ):
         _pi_event_record_routing(recorder, event, meta or {})
         return True
     if event in ("turn_start", "turn_end", "message_end"):
@@ -1022,6 +1030,60 @@ def _op_research_job_heartbeat(request: Mapping[str, object], protocol_id: str) 
     return {"id": protocol_id, "result": out}
 
 
+def _op_research_job_runtime(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Dumb dispatch: research.job.runtime -> service.attach_job_runtime (accepted keys filtered there)."""
+    job_id = request.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
+    try:
+        out = _kernel.attach_job_runtime(
+            job_id, dict(request), repo=ResearchRepository(data_root=ctx.data_root))
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": out}
+
+
+def _op_research_job_fail(
+    request: Mapping[str, object], protocol_id: str
+) -> dict[str, object]:
+    """Dumb dispatch: research.job.fail -> service.fail_job."""
+    job_id = _required_arg(request, "job_id")
+    category = _required_arg(request, "category")
+    message = _required_arg(request, "message")
+    if job_id is None or category is None or message is None:
+        return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
+    try:
+        job = _kernel.fail_job(
+            job_id, category, message, repo=ResearchRepository(data_root=ctx.data_root),
+        )
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": job}
+
+
+def _op_research_job_cancel(
+    request: Mapping[str, object], protocol_id: str
+) -> dict[str, object]:
+    """Dumb dispatch: research.job.cancel -> service.cancel_job."""
+    job_id = request.get("job_id")
+    if not isinstance(job_id, str) or not job_id:
+        return {"id": protocol_id, "error": "missing_arg"}
+    ctx = _bridge_ctx(request)
+    try:
+        job = _kernel.cancel_job(job_id, repo=ResearchRepository(data_root=ctx.data_root))
+    except _kernel.ResearchNotFound:
+        return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
+    except ValueError as exc:
+        return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
+    return {"id": protocol_id, "result": job}
+
+
 def _events_paging(request: Mapping[str, object]) -> tuple[str | None, int, int]:
     """job/limit/cursor shapes for research.events; untrusted shapes fall back."""
     raw_job = request.get("job_id")
@@ -1164,6 +1226,9 @@ _RESEARCH_OPS: tuple[str, ...] = (
     "research.session.finalize",
     "research.source.submit",
     "research.job.heartbeat",
+    "research.job.runtime",
+    "research.job.fail",
+    "research.job.cancel",
     "research.events",
 )
 
@@ -1203,6 +1268,12 @@ def _handle_research_committee(op: object, request: dict[str, object], protocol_
         return _op_research_source_submit(request, protocol_id)
     if op == "research.job.heartbeat":
         return _op_research_job_heartbeat(request, protocol_id)
+    if op == "research.job.runtime":
+        return _op_research_job_runtime(request, protocol_id)
+    if op == "research.job.fail":
+        return _op_research_job_fail(request, protocol_id)
+    if op == "research.job.cancel":
+        return _op_research_job_cancel(request, protocol_id)
     if op == "research.events":
         return _op_research_events(request, protocol_id)
     return None

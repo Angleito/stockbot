@@ -150,10 +150,24 @@ def test_egress_allowlist_no_forbidden():
 
 def test_tool_gate_flags():
     stockbot = json.loads(PACKAGE_JSON.read_text())["scripts"]["stockbot"]
-    for flag in ("--no-builtin-tools", "--no-extensions", "--no-skills",
-                 "--no-prompt-templates", "--no-context-files",
-                 "--extension .pi/extensions/stockbot.ts"):
+    assert stockbot.split()[0] == "omp", "stockbot script must launch the OMP binary"
+    for flag in ("--config", ".omp/stockbot.yml", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--tools=task",
+                 "-e .omp/extensions/stockbot.ts"):
         assert flag in stockbot, f"missing from stockbot script: {flag}"
+    for stale in ("--no-builtin-tools", "--no-prompt-templates", "--no-context-files", "STOCKBOT_PI_"):
+        assert stale not in stockbot, f"stale Pi flag in stockbot script: {stale}"
+    # Barebones yml: --tools=task gates the registry but goal/hub/memory/learn/
+    # checkpoint/MCP re-add tools outside the allowlist, so the overlay must
+    # pin every bypass key. Typo'd keys fail silent — assert exact YAML text.
+    overlay = (ROOT / ".omp" / "stockbot.yml").read_text()
+    for key in ("goal:\n  enabled: false", "todo:\n  enabled: false", 'backend: "off"',
+                "autolearn:\n  enabled: false", "checkpoint:\n  enabled: false",
+                "enableProjectConfig: false", "ttsr:\n  enabled: false",
+                "web_search:\n  enabled: false", "security:\n  enabled: false",
+                "ask:\n  enabled: false", "bash:\n  enabled: false",
+                "browser:\n  enabled: false", "computer:\n  enabled: false",
+                "eval:\n  js: false", "github:\n  enabled: false"):
+        assert key in overlay, f"missing from .omp/stockbot.yml: {key!r}"
 
 def test_kit_create_docs():
     text = HOST_SETUP.read_text()

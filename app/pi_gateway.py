@@ -598,8 +598,13 @@ def _dispatch_value_error(exc: ValueError) -> dict[str, object]:
     return {"error": str(exc)}
 
 
-def _consume_dispatch_budget(name: str, staged: _StagedContext) -> tuple[bool, dict[str, object] | None]:
-    """Gate 8: attached staged data dispatches consume one persisted kernel slot."""
+def _consume_dispatch_budget(name: str, staged: _StagedContext, arguments: dict[str, object]) -> tuple[bool, dict[str, object] | None]:
+    """Gate 8: attached staged data dispatches consume one persisted kernel slot.
+
+    The validated arguments ride along: the kernel keys its no-progress repeat
+    gate on the normalized action (tool + arguments) and refuses an exact
+    repeat whose prior run produced no new evidence.
+    """
     if name not in DISPATCH_TOOLS or staged.store is None:
         return False, None
     if not isinstance(staged.job_id, str) or not staged.job_id:
@@ -608,7 +613,7 @@ def _consume_dispatch_budget(name: str, staged: _StagedContext) -> tuple[bool, d
         return False, {"error": f"Active research session is required for tool '{name}'", "error_type": "invalid_research_context"}
     try:
         from app.research import service as _svc
-        _svc.authorize_and_consume_dispatch(staged.session_id, staged.job_id, name, repo=staged.store)
+        _svc.authorize_and_consume_dispatch(staged.session_id, staged.job_id, name, arguments=arguments, repo=staged.store)
     except ValueError as exc:
         return False, _dispatch_value_error(exc)
     except KeyError as exc:
@@ -1125,7 +1130,7 @@ def _run_pre_gates(
     # never touches persisted counters and keeps the per-Pi-run budget below.
     # The outer call_tool wrapper returns before this point, so only the
     # inner call consumes.
-    dispatch_consumed, dispatch_error = _consume_dispatch_budget(name, staged)
+    dispatch_consumed, dispatch_error = _consume_dispatch_budget(name, staged, arguments)
     if dispatch_error is not None:
         return dispatch_error
     _heartbeat_staged_job(name, staged)

@@ -2738,13 +2738,13 @@ def test_snapshot_rule_eligible_branches() -> None:
 
 
 def test_pi_wait_reap_branches(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.thesis.pi_runner import _PiLaunch, _reap_pi, _wait_step
+    from app.thesis.omp_runner import _OmpLaunch, _reap_omp, _wait_step
     wait_step_untyped: Callable[..., object] = _wait_step
-    reap_untyped: Callable[..., object] = _reap_pi
+    reap_untyped: Callable[..., object] = _reap_omp
     import tempfile
     from pathlib import Path as _P
     tmp = _P(tempfile.mkdtemp())
-    launch = _PiLaunch(cmd=[], env={}, tmp=tmp, out_p=tmp / "o", err_p=tmp / "e",
+    launch = _OmpLaunch(cmd=[], env={}, tmp=tmp, out_p=tmp / "o", err_p=tmp / "e",
                        done_p=tmp / "d", db_p=tmp / "db")
 
     class _Proc:
@@ -2759,24 +2759,24 @@ def test_pi_wait_reap_branches(monkeypatch: pytest.MonkeyPatch) -> None:
 
     # done already -> sentinel
     assert wait_step_untyped(launch, _Proc(), T1, 9999999999.0, None) == -1.0 or True
-    import app.thesis.pi_runner as pi_mod
+    import app.thesis.omp_runner as omp_mod
     def _fake_21(db: object, rid: object) -> object:
         return True
-    monkeypatch.setattr(pi_mod, "_run_complete", _fake_21)
+    monkeypatch.setattr(omp_mod, "_run_complete", _fake_21)
     assert wait_step_untyped(launch, _Proc(), T1, 9999999999.0, None) == -1.0
     def _fake_20(db: object, rid: object) -> object:
         return False
-    monkeypatch.setattr(pi_mod, "_run_complete", _fake_20)
+    monkeypatch.setattr(omp_mod, "_run_complete", _fake_20)
     def _fake_19(p: object) -> object:
         return True
-    monkeypatch.setattr(pi_mod, "_done_complete", _fake_19)
+    monkeypatch.setattr(omp_mod, "_done_complete", _fake_19)
     r = wait_step_untyped(launch, _Proc(), T1, 9999999999.0, None)
     assert isinstance(r, float) and r >= 0
     assert wait_step_untyped(launch, _Proc(), T1, 9999999999.0, r) == -1.0 or isinstance(
         wait_step_untyped(launch, _Proc(), T1, 9999999999.0, r), float)
     def _fake_18(p: object) -> object:
         return False
-    monkeypatch.setattr(pi_mod, "_done_complete", _fake_18)
+    monkeypatch.setattr(omp_mod, "_done_complete", _fake_18)
     assert wait_step_untyped(launch, _Proc(rc=1), T1, 9999999999.0, None) == -1.0
     # reap: already exited + lingering killed
     reap_untyped(_Proc(rc=0))
@@ -3518,9 +3518,9 @@ def test_store_row_fallback_branches(tmp_path: Path) -> None:
 def test_client_failed_packet_and_runner_grants_and_pi_helpers() -> None:
     from app.sec.client import _failed_search_result
     from app.sec.models import SECSearchRequest
-    from app.thesis.pi_runner import _await_pi, _pi_env, _PiLaunch, _run_complete
+    from app.thesis.omp_runner import _OmpLaunch, _await_omp, _omp_env, _run_complete
     from app.thesis.runner import capabilities_for_grants
-    await_untyped: Callable[..., object] = _await_pi
+    await_untyped: Callable[..., object] = _await_omp
 
     req = SECSearchRequest(query="Acme")
     failed = _failed_search_result("s1", req, [], ["w"], ["e"], "2024-01-01", "2024-02-01", ["10-K"])
@@ -3528,7 +3528,7 @@ def test_client_failed_packet_and_runner_grants_and_pi_helpers() -> None:
     assert capabilities_for_grants(["broker-market-read", "portfolio-read"])
     with pytest.raises(ValueError):
         capabilities_for_grants(["nope"])
-    env = _pi_env(None, "", None, Path("/tmp/done"), Path("/tmp/db"))
+    env = _omp_env(None, "", None, Path("/tmp/done"), Path("/tmp/db"))
     assert env["STOCKBOT_DONE_FILE"] == "/tmp/done" and "STOCKBOT_AS_OF" not in env
     assert _run_complete(Path("/tmp/does-not-exist"), "r") is False
     assert _run_complete(Path("/tmp/does-not-exist"), None) is False
@@ -3536,7 +3536,7 @@ def test_client_failed_packet_and_runner_grants_and_pi_helpers() -> None:
         def poll(self) -> int:
             return 0
 
-    launch = _PiLaunch(cmd=["pi"], env={}, tmp=Path("/tmp"),
+    launch = _OmpLaunch(cmd=["omp"], env={}, tmp=Path("/tmp"),
                        out_p=Path("/tmp/o"), err_p=Path("/tmp/e"),
                        done_p=Path("/tmp/does-not-exist-done"),
                        db_p=Path("/tmp/does-not-exist-db"))
@@ -3563,10 +3563,10 @@ def test_repository_small_branch_gates(tmp_path: Path) -> None:
 
 
 def test_reap_and_exit_and_trigger_paths(tmp_path: Path) -> None:
-    import app.thesis.pi_runner as pi_mod
+    import app.thesis.omp_runner as omp_mod
     from app.thesis.repository import ThesisRepository
-    reap_untyped: Callable[..., object] = pi_mod._reap_pi
-    raise_untyped: Callable[..., object] = pi_mod._raise_exit
+    reap_untyped: Callable[..., object] = omp_mod._reap_omp
+    raise_untyped: Callable[..., object] = omp_mod._raise_exit
 
     class _Exited:
         def poll(self) -> int:
@@ -3591,7 +3591,7 @@ def test_reap_and_exit_and_trigger_paths(tmp_path: Path) -> None:
     reap_untyped(proc)  # killpg may fail closed; wait always runs
     assert proc.waited is True
 
-    launch = pi_mod._PiLaunch(cmd=["pi"], env={}, tmp=Path("/tmp"),
+    launch = omp_mod._OmpLaunch(cmd=["omp"], env={}, tmp=Path("/tmp"),
                               out_p=Path("/tmp/o"), err_p=Path("/tmp/e"),
                               done_p=Path("/tmp/d"), db_p=Path("/tmp/db"))
     class _Failed:

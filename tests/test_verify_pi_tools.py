@@ -419,19 +419,20 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
     assert os.environ.get("STOCKBOT_DATA_DIR") == str(durable)
     assert len(captured_cmds) == 2
     for cmd in captured_cmds:
-
-        assert "--no-builtin-tools" in cmd
+        assert "--config" in cmd
+        assert ".omp/stockbot.yml" in cmd
         assert "--no-extensions" in cmd
         assert "--no-skills" in cmd
-        assert "--no-prompt-templates" in cmd
-        assert "--no-context-files" in cmd
+        assert "--no-rules" in cmd
+        assert "--no-tools" in cmd
+        assert "--tools=task" not in cmd
+        assert "--no-builtin-tools" not in cmd
         assert "--exclude-tools" not in cmd
-        assert cmd.index("--no-context-files") < cmd.index("--")
+        assert cmd.index("--no-rules") < cmd.index("--")
         assert cmd[-2] == "--"
         assert cmd[-1] == "prompt"
-        assert cmd[:8] == ["pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-                          "--no-prompt-templates", "--no-context-files"]
-        assert cmd[8:10] == ["--extension", v.EXTENSION]
+        assert cmd[:11] == ["omp", "-p", "--config", ".omp/stockbot.yml", "--no-session", "--no-extensions",
+                           "--no-skills", "--no-rules", "--no-tools", "--extension", v.EXTENSION]
 
 
 
@@ -962,7 +963,7 @@ def test_explicit_prompt_exact_dispatch_shape() -> None:
 
 def test_pi_research_prompt_hidden_dispatch_contract() -> None:
     from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
-    assert PROMPT_VERSION == "33"
+    assert PROMPT_VERSION == "34"
     assert "TOOL USE" in PI_RESEARCH_PROMPT
     assert "exactly once" not in PI_RESEARCH_PROMPT.lower()
     assert "call that tool before answering" not in PI_RESEARCH_PROMPT
@@ -1476,7 +1477,7 @@ def test_pi_completion_argv_carries_no_prompt():
     argv = vas._pi_completion_argv("openai", "gpt-x", "PDF head:\x00\x00%PDF-1.5")
     assert "PDF head" not in " ".join(argv)
     assert "\x00" not in "".join(argv)
-    assert argv[-1] == "--no-context-files"
+    assert argv == ["omp", "-p", "--no-session", "--no-tools", "--provider", "openai", "--model", "gpt-x"]
 
 
 def test_clean_prompt_strips_nul():

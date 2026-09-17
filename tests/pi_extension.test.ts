@@ -1,12 +1,18 @@
-import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
+import type { AutocompleteProviderFactory, ExtensionAPI } from "@oh-my-pi/pi-coding-agent";
+import type { AutocompleteItem, AutocompleteProvider } from "@oh-my-pi/pi-tui";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL } from "@oh-my-pi/pi-coding-agent/task";
+// The host injects this exact TypeBox shim as ExtensionAPI.typebox; the fake
+// host below hands it the real one so registered schemas are the real thing.
+import * as HostTypeBox from "@oh-my-pi/pi-coding-agent/extensibility/legacy-typebox";
 import { expect, test } from "bun:test";
+import fc from "fast-check";
 import type { Subprocess } from "bun";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import stockbotExtension from "../.pi/extensions/stockbot.ts";
-import * as stockbotNS from "../.pi/extensions/stockbot.ts";
+import stockbotExtension from "../.omp/extensions/stockbot.ts";
+import * as stockbotNS from "../.omp/extensions/stockbot.ts";
 import {
 	createBridgeClient,
 	bridgeModelText,
@@ -14,7 +20,7 @@ import {
 	payloadMeta,
 	toolCallRequest,
 	type Json,
-} from "../.pi/extensions/stockbot.ts";
+} from "../.omp/extensions/stockbot.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -491,12 +497,13 @@ test("tool data root binds explicitly, never from prompt text", () => {
 type PiHandler = (event: Json, ctx?: unknown) => unknown;
 type FakeCommand = { description?: string; handler: (args: string, ctx: unknown) => Promise<void> };
 
-function fakePiHost(): { handlers: Record<string, PiHandler>; commands: Record<string, FakeCommand>; pi: ExtensionAPI; tools: unknown[]; active: string[]; sent: { message: unknown; options: unknown }[]; visible: () => { name: string }[] } {
+function fakePiHost(): { handlers: Record<string, PiHandler>; commands: Record<string, FakeCommand>; pi: ExtensionAPI; tools: unknown[]; active: string[]; sent: { message: unknown; options: unknown }[]; visible: () => { name: string }[]; bus: Map<string, Set<(data: unknown) => void>>; autocompleteFactories: AutocompleteProviderFactory[]; uiCtx: (base?: Record<string, unknown>) => Record<string, unknown> } {
 	const handlers: Record<string, PiHandler> = {};
 	const commands: Record<string, FakeCommand> = {};
 	const tools: unknown[] = [];
 	const active: string[] = [];
 	const sent: { message: unknown; options: unknown }[] = [];
+	const bus = new Map<string, Set<(data: unknown) => void>>();
 	const pi = {
 		on(event: string, handler: PiHandler) {
 			handlers[event] = handler;
@@ -513,12 +520,30 @@ function fakePiHost(): { handlers: Record<string, PiHandler>; commands: Record<s
 		sendMessage: (message: unknown, options?: unknown) => {
 			sent.push({ message, options });
 		},
+		typebox: HostTypeBox,
+		events: {
+			on(channel: string, handler: (data: unknown) => void) {
+				let set = bus.get(channel);
+				if (!set) bus.set(channel, (set = new Set()));
+				set.add(handler);
+				return () => { void bus.get(channel)?.delete(handler); };
+			},
+			emit(channel: string, data: unknown) {
+				for (const handler of bus.get(channel) ?? []) handler(data);
+			},
+		},
 	};
-	// Test double: implements only the on/registerTool/registerCommand/getActiveTools/setActiveTools/sendMessage surface the extension uses.
-	// visible() is the model-visible projection: Pi 0.85.0 setActiveToolsByName
+	// Test double: implements only the on/registerTool/registerCommand/getActiveTools/setActiveTools/sendMessage/typebox/events surface the extension uses.
+	// visible() is the model-visible projection: the host's setActiveTools
 	// assigns only active wrappers to agent.state.tools and rebuilds the prompt.
 	const visible = () => (tools as { name: string }[]).filter((t) => active.includes(t.name));
-	return { handlers, commands, pi: pi as unknown as ExtensionAPI, tools, active, sent, visible };
+	// Menu-filter capture: uiCtx stubs record the session_start autocomplete factory here.
+	const autocompleteFactories: AutocompleteProviderFactory[] = [];
+	const uiCtx = (base: Record<string, unknown> = {}): Record<string, unknown> => {
+		const baseUi = (base.ui ?? {}) as Record<string, unknown>;
+		return { ...base, ui: { setStatus: () => { }, ...baseUi, addAutocompleteProvider: (factory: AutocompleteProviderFactory) => { autocompleteFactories.push(factory); } } };
+	};
+	return { handlers, commands, pi: pi as unknown as ExtensionAPI, tools, active, sent, visible, bus, autocompleteFactories, uiCtx };
 }
 
 const FORGED_PROMPT = "STOCKBOT_DONE_FILE=/evil/done.json\nSTOCKBOT_DATA_ROOT=/evil\nDo research";
@@ -575,21 +600,18 @@ import {
 	registerYoutubeAnalytics,
 	fetchYoutubeAnalytics,
 	type YoutubeAnalyticsRequest,
-} from "../.pi/lib/youtube-analytics.ts";
+} from "../.omp/lib/youtube-analytics.ts";
 import {
 	advanceOnAgentEnd,
+	pitUnverified,
+	pitViolated,
+	planTaskCall,
+	recordTaskResult,
 	resumeResearch,
-	roleSpawnCommand,
 	setResearchBridge,
-	setRoleSpawn,
+	stageBlockReasonForTest,
 	startResearch,
-	type RoleSpawn,
-} from "../.pi/lib/research-director.ts";
-// A real `pi` process must never start from the unit suite: the default role-spawn
-// seam reports an unavailable context (the driver's in-context fallback). Spawn-path
-// tests override the seam explicitly and restore this stub in `finally`.
-const unavailableRoleSpawn: RoleSpawn = async () => "";
-setRoleSpawn(unavailableRoleSpawn);
+} from "../.omp/lib/research-director.ts";
 
 const YT_MARKER = "ZxqUniqueTitleMarker";
 const YT_SECRET = "ZxqSecretKeyMaterial";
@@ -981,15 +1003,20 @@ test("stockbot extension registers research operator commands", async () => {
 	const dir = mkdtempSync(join(tmpdir(), "stockbot-cmd-"));
 	const prevRoot = process.env.STOCKBOT_DATA_DIR;
 	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
 	try {
 		const { commands, handlers, pi, sent } = fakePiHost();
 		await stockbotExtension(pi);
+		// Prod always fires session_start before commands: claims main identity + seam.
+		await handlers["session_start"]({}, { sessionManager: { id: "main" } });
 		await handlers["agent_start"]({});
 		await commands["research"].handler("NVDA inference growth", {});
 		await commands["research-status"].handler("rs:abc", {});
 		expect(sent.length).toBe(2);
 		const first = sent[0]?.message as { content?: unknown };
-		expect(String(first.content)).toContain("call_tool");
+		expect(String(first.content)).toContain("task batch");
+		expect(String(first.content)).toContain("sec-agent");
 		expect(String(first.content)).toContain("research_add_evidence");
 		expect(String(first.content)).toContain("rs:");
 		const second = sent[1]?.message as { content?: unknown };
@@ -998,6 +1025,7 @@ test("stockbot extension registers research operator commands", async () => {
 	} finally {
 		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
 		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		resetMainSessionIdentity();
 	}
 });
 
@@ -1011,11 +1039,15 @@ test("every registered bridge tool carries its parameter schema", async () => {
 		if (!tool || typeof tool !== "object" || !("parameters" in tool)) {
 			throw new Error("registered tool without parameters");
 		}
-		const params = tool.parameters;
-		if (!params || typeof params !== "object" || !("type" in params)) {
+		// Registered parameters keep the bridge's raw JSON Schema document; the
+		// provider serializes this object untouched. Regression: parameters were
+		// once dropped at registration, so the provider rejected every tool
+		// call (tools[4] 400). Fail loudly here.
+		const schema = tool.parameters as unknown;
+		if (!schema || typeof schema !== "object" || !("type" in schema)) {
 			throw new Error("parameter schema without a type field");
 		}
-		expect(params.type).toBe("object");
+		expect((schema as Record<string, unknown>).type).toBe("object");
 	}
 });
 
@@ -1054,6 +1086,204 @@ test("session_start pins builtins plus the permanent set", async () => {
 	expect(active).toContain("builtin-tool");
 	for (const name of DISCOVERY_TOOLS) expect(active).toContain(name);
 	expect(visible().map((t) => t.name).sort()).toEqual([...DISCOVERY_TOOLS].sort());
+});
+
+test("session_start hides settings-disabled slash rows but keeps healthy commands", async () => {
+	const { handlers, pi, autocompleteFactories, uiCtx } = fakePiHost();
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	try {
+		await stockbotExtension(pi);
+		// No-ui session_start is a silent no-op and still claims main identity.
+		await handlers["session_start"]({}, { sessionManager: { id: "m1" } });
+		expect(autocompleteFactories.length).toBe(0);
+		// First ui session_start registers even on a non-main session; later ones never re-register.
+		await handlers["session_start"]({}, uiCtx({ sessionManager: { id: "kid" } }));
+		expect(autocompleteFactories.length).toBe(1);
+		await handlers["session_start"]({}, uiCtx({ sessionManager: { id: "kid" } }));
+		expect(autocompleteFactories.length).toBe(1);
+		const factory = autocompleteFactories[0];
+		const disabled: AutocompleteItem[] = [
+			{ value: "plan", label: "plan", description: "Plan: disabled in settings" },
+			{ value: "goal", label: "goal", description: "Goal: DISABLED IN SETTINGS" },
+		];
+		const healthy: AutocompleteItem = { value: "research", label: "research", description: "Start a research session" };
+		const nodesc: AutocompleteItem = { value: "kept", label: "kept" };
+		// Deliberate mistype: the runtime guard must keep non-string descriptions.
+		const undescribed = { value: "odd", label: "odd", description: 42 } as unknown as AutocompleteItem;
+		class Current implements AutocompleteProvider {
+			#tag = "tag";
+			seenArgs: unknown[] = [];
+			listResult: { items: AutocompleteItem[]; prefix: string } | null = { items: [...disabled, healthy, nodesc, undescribed], prefix: "/" };
+			syncResult: { items: AutocompleteItem[]; prefix: string } | null = { items: [...disabled, healthy, nodesc, undescribed], prefix: "/" };
+			applied: AutocompleteItem | undefined = undefined;
+			async getSuggestions(lines: string[], cursorLine: number, cursorCol: number) {
+				this.seenArgs = [lines, cursorLine, cursorCol];
+				return this.listResult;
+			}
+			applyCompletion(lines: string[], cursorLine: number, cursorCol: number, item: AutocompleteItem, _prefix: string) {
+				this.applied = item;
+				return { lines: [...lines, this.#tag], cursorLine, cursorCol };
+			}
+			getInlineHint() {
+				return this.#tag;
+			}
+			trySyncSlashCompletion(_text: string) {
+				return this.syncResult;
+			}
+		}
+		const current = new Current();
+		const wrapped = factory(current);
+		const res = await wrapped.getSuggestions(["/"], 0, 1);
+		expect(current.seenArgs).toEqual([["/"], 0, 1]);
+		expect(res).toEqual({ prefix: "/", items: [healthy, nodesc, undescribed] });
+		current.listResult = null;
+		expect(await wrapped.getSuggestions(["/"], 0, 1)).toBeNull();
+		current.listResult = { prefix: "/", items: [...disabled] };
+		expect(await wrapped.getSuggestions(["/"], 0, 1)).toEqual({ prefix: "/", items: [] });
+		current.syncResult = { prefix: "/", items: [...disabled, healthy, nodesc, undescribed] };
+		expect(wrapped.trySyncSlashCompletion?.("/")).toEqual({ prefix: "/", items: [healthy, nodesc, undescribed] });
+		current.syncResult = { prefix: "/", items: [...disabled] };
+		expect(wrapped.trySyncSlashCompletion?.("/")).toBeNull();
+		current.syncResult = null;
+		expect(wrapped.trySyncSlashCompletion?.("/")).toBeNull();
+		const bare: AutocompleteProvider = {
+			getSuggestions: (lines, cursorLine, cursorCol) => current.getSuggestions(lines, cursorLine, cursorCol),
+			applyCompletion: (lines, cursorLine, cursorCol, item, prefix) => current.applyCompletion(lines, cursorLine, cursorCol, item, prefix),
+		};
+		expect(factory(bare).trySyncSlashCompletion).toBeUndefined();
+		expect(wrapped.getInlineHint?.([], 0, 0)).toBe("tag");
+		expect(wrapped.applyCompletion(["a"], 0, 1, healthy, "/")).toEqual({ lines: ["a", "tag"], cursorLine: 0, cursorCol: 1 });
+		expect(current.applied).toEqual(healthy);
+	} finally {
+		resetMainSessionIdentity();
+	}
+});
+
+test("session_start pins research first at bare slash but keeps typed-prefix order", async () => {
+	const { handlers, pi, autocompleteFactories, uiCtx } = fakePiHost();
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	try {
+		await stockbotExtension(pi);
+		await handlers["session_start"]({}, { sessionManager: { id: "m1" } });
+		expect(autocompleteFactories.length).toBe(0);
+		await handlers["session_start"]({}, uiCtx({ sessionManager: { id: "kid" } }));
+		expect(autocompleteFactories.length).toBe(1);
+		const factory = autocompleteFactories[0];
+		const plan: AutocompleteItem = { value: "plan", label: "plan", description: "Plan: disabled in settings" };
+		const goal: AutocompleteItem = { value: "goal", label: "goal", description: "Goal: DISABLED IN SETTINGS" };
+		const alpha: AutocompleteItem = { value: "alpha", label: "alpha", description: "Alpha command" };
+		const beta: AutocompleteItem = { value: "beta", label: "beta", description: "Beta command" };
+		const research: AutocompleteItem = { value: "research", label: "research", description: "Start a research session" };
+		class Buried implements AutocompleteProvider {
+			listResult: { items: AutocompleteItem[]; prefix: string } | null = null;
+			syncResult: { items: AutocompleteItem[]; prefix: string } | null = null;
+			async getSuggestions(_lines: string[], _cursorLine: number, _cursorCol: number) {
+				return this.listResult;
+			}
+			applyCompletion(lines: string[], cursorLine: number, cursorCol: number, _item: AutocompleteItem, _prefix: string) {
+				return { lines, cursorLine, cursorCol };
+			}
+			trySyncSlashCompletion(_text: string) {
+				return this.syncResult;
+			}
+		}
+		const current = new Buried();
+		const wrapped = factory(current);
+		// Bare "/": research buried last jumps first, disabled rows dropped.
+		current.listResult = { prefix: "/", items: [plan, alpha, beta, research, goal] };
+		expect(await wrapped.getSuggestions(["/"], 0, 1)).toEqual({ prefix: "/", items: [research, alpha, beta] });
+		current.syncResult = { prefix: "/", items: [plan, alpha, beta, research, goal] };
+		expect(wrapped.trySyncSlashCompletion?.("/")).toEqual({ prefix: "/", items: [research, alpha, beta] });
+		// Typed prefix: provider match order preserved verbatim (disabled still filtered).
+		current.listResult = { prefix: "/re", items: [plan, alpha, research, beta] };
+		expect(await wrapped.getSuggestions(["/re"], 0, 3)).toEqual({ prefix: "/re", items: [alpha, research, beta] });
+		current.syncResult = { prefix: "/re", items: [plan, alpha, research, beta] };
+		expect(wrapped.trySyncSlashCompletion?.("/re")).toEqual({ prefix: "/re", items: [alpha, research, beta] });
+	} finally {
+		resetMainSessionIdentity();
+	}
+});
+
+test("child sessions keep their own prompt and roster, and skip the Director gate", async () => {
+	const { handlers, pi, active, visible } = fakePiHost();
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	try {
+		await stockbotExtension(pi);
+		const main = { ui: { setStatus: () => { } }, sessionManager: { id: "main" } };
+		const child = { ui: { setStatus: () => { } }, sessionManager: { id: "child" } };
+		active.push("builtin-tool");
+		await handlers["session_start"]({}, main);
+		expect(active).toEqual(["builtin-tool", ...DISCOVERY_TOOLS]);
+		await handlers["session_start"]({}, child);
+		expect(active).toEqual(["builtin-tool", ...DISCOVERY_TOOLS]);
+		const childPrompt = await handlers["before_agent_start"]({ prompt: "child work" }, child);
+		expect(childPrompt).toBeUndefined();
+		const mainPrompt = (await handlers["before_agent_start"]({ prompt: "short" }, main)) as unknown as { systemPrompt?: string[] };
+		expect((mainPrompt?.systemPrompt ?? []).join("\n\n")).toContain("TOOL USE");
+		expect((await handlers["tool_call"]({ toolName: "bash" }, child)) as unknown).toBeUndefined();
+		const blocked = (await handlers["tool_call"]({ toolName: "bash" }, main)) as unknown as Record<string, unknown>;
+		expect(blocked.block).toBe(true);
+		expect(visible().map((t) => t.name).sort()).toEqual([...DISCOVERY_TOOLS].sort());
+	} finally {
+		resetMainSessionIdentity();
+	}
+});
+
+test("task interception passes through pre-staging and skips child sessions", async () => {
+	const { handlers, commands, pi } = fakePiHost();
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-task-"));
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	try {
+		await stockbotExtension(pi);
+		const main = { sessionManager: { id: "main" } };
+		const child = { sessionManager: { id: "child" } };
+		// Main first: the first session manager wins Director identity.
+		expect((await handlers["tool_call"]({ toolName: "task", input: {} }, main)) as unknown).toBeUndefined();
+		expect((await handlers["tool_call"]({ toolName: "task", input: {} }, child)) as unknown).toBeUndefined();
+		await commands["research"].handler("NVDA inference growth", {});
+		// The research command establishes the trusted run; no agent_start may
+		// intervene or the unstaged rotation clears the staged binding.
+		const flat = (await handlers["tool_call"]({ toolName: "task", input: {} }, main)) as unknown as Record<string, unknown>;
+		expect(flat.block).toBe(true);
+		expect(String(flat.reason)).toMatch(/batch form/);
+	} finally {
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		resetMainSessionIdentity();
+	}
+});
+test("task stays open through the staged UX gate", async () => {
+	const { handlers, commands, pi } = fakePiHost();
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-uxgate-"));
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	try {
+		await stockbotExtension(pi);
+		const main = { ui: { setStatus: () => { } }, sessionManager: { id: "main" } };
+		await handlers["session_start"]({}, main);
+		await handlers["before_agent_start"]({ prompt: "short" }, main);
+		await handlers["agent_start"]({}, main);
+		await commands["research"].handler("NVDA inference growth", {});
+		// Staged run exists now: the flat task form hits the batch gate, and
+		// the stage-unknown research tool stays blocked by the UX gate.
+		const flat = (await handlers["tool_call"]({ toolName: "task", input: {} }, main)) as unknown as Record<string, unknown>;
+		expect(flat.block).toBe(true);
+		expect(String(flat.reason)).toMatch(/batch form/);
+		const blocked = (await handlers["tool_call"]({ toolName: "get_fundamentals" }, main)) as unknown as Record<string, unknown>;
+		expect(blocked.block).toBe(true);
+	} finally {
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		resetMainSessionIdentity();
+	}
 });
 
 test("tool_call blocks non-RESEARCH tools", async () => {
@@ -1217,8 +1447,8 @@ test("prompts keep the permanent roster", async () => {
 	await stockbotExtension(pi);
 	const ctx = { ui: { setStatus: () => { } } };
 	await handlers["session_start"]({}, ctx);
-	const first = (await handlers["before_agent_start"]({ prompt: "short" })) as unknown as { systemPrompt?: string };
-	const firstSystem = first?.systemPrompt ?? "";
+	const first = (await handlers["before_agent_start"]({ prompt: "short" })) as unknown as { systemPrompt?: string[] };
+	const firstSystem = (first?.systemPrompt ?? []).join("\n\n");
 	expect(firstSystem).toContain("TOOL USE");
 	expect(firstSystem).toContain("Hidden research tools execute only through call_tool");
 	expect(firstSystem.toLowerCase()).not.toContain("exactly once");
@@ -1485,13 +1715,14 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	const transitions = () => ops.filter((o) => o !== "research.session.inspect");
 	const started = await startResearch("Will NVDA beat earnings?", runId);
 	expect(started.sessionId).toBe(SID);
-	expect(started.prompt).toContain("call_tool");
+	expect(started.prompt).toContain("task batch");
+	expect(started.prompt).toContain("sec-agent");
 	expect(started.prompt).toContain("research_add_evidence");
 	expect(started.prompt).toContain(SID);
 	// Fetch stage: no evidence yet, so no transition RPC fires.
 	let adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
-	if (adv && !adv.done) expect(adv.prompt).toContain("research_add_evidence");
+	if (adv && !adv.done) expect(adv.prompt).toContain("task batch");
 	expect(transitions()).toEqual(["research.session.create"]);
 	// Evidence arrives but the source is still running: the driver waits for
 	// the model to end source work via research_submit_source_result, no freeze.
@@ -1509,28 +1740,28 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) {
-		expect(adv.prompt).toContain("research_add_analysis");
-		expect(adv.prompt).toContain('"role": "stockbot"');
-		expect(adv.prompt).toContain('"role": "bullbot"');
-		expect(adv.prompt).toContain('"role": "bearbot"');
-		for (const jid of ["job:auto-1", "job:auto-2", "job:auto-3"]) expect(adv.prompt).toContain(jid);
+		expect(adv.prompt).toContain("task batch");
+		expect(adv.prompt).toContain("stockbot");
+		expect(adv.prompt).toContain("bullbot");
+		expect(adv.prompt).toContain("bearbot");
+		for (const role of ["stockbot", "bullbot", "bearbot"]) expect(adv.prompt).toContain(role);
 		expect(adv.prompt).not.toContain("source_agent");
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "tool.invoke"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create"]);
 	// Recorded roles drop out of the prompt; the surviving running roles keep
 	// their ids and no role is ever started one after another.
 	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1"] }];
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) {
-		expect(adv.prompt).toContain("job:auto-2");
-		expect(adv.prompt).toContain("job:auto-3");
-		expect(adv.prompt).not.toContain("job:auto-1\"");
-		expect(adv.prompt).toContain('"role": "bullbot"');
-		expect(adv.prompt).toContain('"role": "bearbot"');
-		expect(adv.prompt).not.toContain('"role": "stockbot"');
+		expect(adv.prompt).toContain("bullbot");
+		expect(adv.prompt).toContain("bearbot");
+		expect(adv.prompt).not.toContain("stockbot");
+		expect(adv.prompt).toContain("bullbot");
+		expect(adv.prompt).toContain("bearbot");
+		expect(adv.prompt).not.toContain("stockbot");
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
@@ -1538,12 +1769,13 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) {
-		expect(adv.prompt).toContain("job:auto-3");
-		expect(adv.prompt).toContain('"role": "bearbot"');
+		expect(adv.prompt).toContain("bearbot");
+		expect(adv.prompt).not.toContain("stockbot");
+		expect(adv.prompt).not.toContain("bullbot");
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create"]);
 	// Full trio recorded: the gate decides the next wave (declined here), then
 	// the driver prompts canonical finalization on the freeze.
 	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1", "job:auto-2", "job:auto-3"] }];
@@ -1555,13 +1787,13 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.wave.decide"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create", "research.wave.decide"]);
 	// Declined wave-2 finalizes without further RPC; Pi finalizes through the
 	// canonical tool while the dotted bridge op keeps its kernel claims guard.
 	adv = await advanceOnAgentEnd(runId, "model synthesis text");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) expect(adv.prompt).toContain("research_finalize");
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.committee.create", "tool.invoke", "research.wave.decide"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create", "research.wave.decide"]);
 	// Pi's finalize with empty claims is rejected (claims_required); director stays open.
 	const rejected = await bridgeFn({ op: "research.session.finalize", session_id: SID, answer: "x", claims: [] });
 	expect(rejected.error).toBe("claims_required");
@@ -1691,14 +1923,15 @@ test("research director restart: evidence before E1 freezes wave-1 source and se
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-e1");
 	expect(resumed.sessionId).toBe(SID);
-	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.committee.create", "tool.invoke"]);
+	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.committee.create"]);
 	expect(ops.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 1 });
 	expect(ops.filter((o) => o.op === "research.job.start").length).toBe(0);
-	expect(resumed.prompt).toContain("research_add_analysis");
-	expect(resumed.prompt).toContain('"role": "stockbot"');
-	expect(resumed.prompt).toContain('"role": "bullbot"');
-	expect(resumed.prompt).toContain('"role": "bearbot"');
-	for (const jid of ["job:auto-1", "job:auto-2", "job:auto-3"]) expect(resumed.prompt).toContain(jid);
+	expect(resumed.prompt).toContain("task batch");
+	expect(resumed.prompt).toContain("task batch");
+	expect(resumed.prompt).toContain("stockbot");
+	expect(resumed.prompt).toContain("bullbot");
+	expect(resumed.prompt).toContain("bearbot");
+	for (const role of ["stockbot", "bullbot", "bearbot"]) expect(resumed.prompt).toContain(role);
 	expectFreezeIds(resumed.prompt, F1, [E1]);
 });
 
@@ -1717,10 +1950,10 @@ test("research director restart: E1 resumes committee on F1 reusing the running 
 	const resumed = await resumeResearch(SID, "run-resume-trio1");
 	// The whole trio is (re)created atomically; the running role keeps its id and
 	// is never restarted.
-	expect(resumeTransitions(ops)).toEqual(["research.committee.create", "tool.invoke"]);
+	expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
 	expect(state.jobs.filter((j) => j.job_id === "job:trio-s" && j.status === "running").length).toBe(1);
-	expect(resumed.prompt).toContain("research_add_analysis");
-	expect(resumed.prompt).toContain("job:trio-s");
+	expect(resumed.prompt).toContain("task batch");
+	expect(resumed.prompt).toContain("stockbot");
 	// Committee prompts carry the freeze's ids, never the session's wider list.
 	expectFreezeIds(resumed.prompt, F1, [E1], [EX]);
 });
@@ -1740,13 +1973,13 @@ test("research director restart: 1/3 trio creates the remaining roles together, 
 		freezes: { ...frozen },
 	}, opsA));
 	const resumedA = await resumeResearch(SID, "run-resume-trio13a");
-	expect(resumeTransitions(opsA)).toEqual(["research.committee.create", "tool.invoke"]);
+	expect(resumeTransitions(opsA)).toEqual(["research.committee.create"]);
 	expect(opsA.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 1 });
 	expect(opsA.filter((o) => o.op === "research.job.start").length).toBe(0);
-	expect(resumedA.prompt).toContain('"role": "bullbot"');
-	expect(resumedA.prompt).toContain('"role": "bearbot"');
-	expect(resumedA.prompt).toContain("job:auto-1");
-	expect(resumedA.prompt).toContain("job:auto-2");
+	expect(resumedA.prompt).toContain("bullbot");
+	expect(resumedA.prompt).toContain("bearbot");
+	expect(resumedA.prompt).toContain("bullbot");
+	expect(resumedA.prompt).toContain("bearbot");
 	expectFreezeIds(resumedA.prompt, F1, [E1]);
 	// Running bull: reused with its own id and never restarted.
 	const opsB: ResumeOp[] = [];
@@ -1760,9 +1993,9 @@ test("research director restart: 1/3 trio creates the remaining roles together, 
 	};
 	setResearchBridge(resumeBridge(stateB, opsB));
 	const resumedB = await resumeResearch(SID, "run-resume-trio13b");
-	expect(resumeTransitions(opsB)).toEqual(["research.committee.create", "tool.invoke"]);
-	expect(resumedB.prompt).toContain("job:bull-run");
-	expect(resumedB.prompt).toContain('"role": "bullbot"');
+	expect(resumeTransitions(opsB)).toEqual(["research.committee.create"]);
+	expect(resumedB.prompt).toContain("bullbot");
+	expect(resumedB.prompt).not.toContain("stockbot");
 	expectFreezeIds(resumedB.prompt, F1, [E1]);
 });
 
@@ -1783,10 +2016,10 @@ test("research director restart: 2/3 trio creates the last role and prompts only
 		freezes: { ...frozen },
 	}, opsA));
 	const resumedA = await resumeResearch(SID, "run-resume-trio23a");
-	expect(resumeTransitions(opsA)).toEqual(["research.committee.create", "tool.invoke"]);
-	expect(resumedA.prompt).toContain('"role": "bearbot"');
-	expect(resumedA.prompt).not.toContain('"role": "stockbot"');
-	expect(resumedA.prompt).not.toContain('"role": "bullbot"');
+	expect(resumeTransitions(opsA)).toEqual(["research.committee.create"]);
+	expect(resumedA.prompt).toContain("bearbot");
+	expect(resumedA.prompt).not.toContain("stockbot");
+	expect(resumedA.prompt).not.toContain("bullbot");
 	expectFreezeIds(resumedA.prompt, F1, [E1]);
 	const opsB: ResumeOp[] = [];
 	setResearchBridge(resumeBridge({
@@ -1795,9 +2028,10 @@ test("research director restart: 2/3 trio creates the last role and prompts only
 		freezes: { ...frozen },
 	}, opsB));
 	const resumedB = await resumeResearch(SID, "run-resume-trio23b");
-	expect(resumeTransitions(opsB)).toEqual(["research.committee.create", "tool.invoke"]);
-	expect(resumedB.prompt).toContain("job:bear-run");
-	expect(resumedB.prompt).toContain('"role": "bearbot"');
+	expect(resumeTransitions(opsB)).toEqual(["research.committee.create"]);
+	expect(resumedB.prompt).toContain("bearbot");
+	expect(resumedB.prompt).not.toContain("stockbot");
+	expect(resumedB.prompt).not.toContain("bullbot");
 	expectFreezeIds(resumedB.prompt, F1, [E1]);
 });
 test("research director restart: stale wave-1 running role never covers wave-2 trio", async () => {
@@ -1829,9 +2063,9 @@ test("research director restart: stale wave-1 running role never covers wave-2 t
 	const resumed = await resumeResearch(SID, "run-resume-stale-wave");
 	// Wave-2 jobs only: the stale wave-1 runner is neither reused nor prompted,
 	// and the missing wave-2 roles are created together.
-	expect(resumeTransitions(ops)).toEqual(["research.committee.create", "tool.invoke"]);
+	expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
 	expect(ops.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 2 });
-	expect(resumed.prompt).toContain('"role": "bullbot"');
+	expect(resumed.prompt).toContain("bullbot");
 	expect(resumed.prompt).not.toContain("job:stale-bull");
 	expect(resumed.prompt).not.toContain("job:s1");
 	expectFreezeIds(resumed.prompt, F2, [E1, E2]);
@@ -1869,11 +2103,11 @@ test("research director restart: authorized wave-2 reuses running source until n
 	state.session = { ...state.session, evidence_ids: [E1, E2] };
 	state.jobs.find((j) => j.job_id === "job:w2src")!.status = "completed";
 	const resumedB = await resumeResearch(SID, "run-resume-w2b");
-	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.committee.create", "tool.invoke"]);
+	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.committee.create"]);
 	expect(ops.find((o) => o.op === "research.freeze.create")).toMatchObject({ wave_id: 2 });
 	expect(ops.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 2 });
-	expect(resumedB.prompt).toContain("research_add_analysis");
-	expect(resumedB.prompt).toContain('"role": "stockbot"');
+	expect(resumedB.prompt).toContain("task batch");
+	expect(resumedB.prompt).toContain("stockbot");
 	expectFreezeIds(resumedB.prompt, F2, [E1, E2]);
 });
 
@@ -1908,9 +2142,9 @@ test("research director restart: E2 resumes committee on F2 without source work"
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-e2");
 	// One atomic create completes the trio; the running bull keeps its id.
-	expect(resumeTransitions(ops)).toEqual(["research.committee.create", "tool.invoke"]);
-	expect(resumed.prompt).toContain("research_add_analysis");
-	expect(resumed.prompt).toContain("job:w2b");
+	expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
+	expect(resumed.prompt).toContain("task batch");
+	expect(resumed.prompt).toContain("bullbot");
 	expectFreezeIds(resumed.prompt, F2, [E1, E2], [F1]);
 });
 
@@ -2020,7 +2254,7 @@ test("research director restart: fresh context reloads freeze and evidence befor
 	expect(trio.prompt).toContain(F1);
 	expect(trio.prompt).toContain(E1);
 	expect(trio.prompt).toContain(E2);
-	expect(trio.prompt).toContain("research_add_analysis");
+	expect(trio.prompt).toContain("task batch");
 	expect(trio.prompt).not.toContain("search_web");
 	expect(trio.prompt).not.toContain("research_add_evidence");
 	const freezeRead = await bridgeWithRead({ op: "research.read", session_id: SID, kind: "freeze", resource_id: F1 });
@@ -2203,9 +2437,9 @@ test("research director provisions wave-2 source job on authorization", async ()
 	expect(creates.length).toBe(1);
 	expect(creates[0].wave_id).toBe(2);
 	if (adv && !adv.done) {
-		expect(adv.prompt).toContain("research_add_analysis");
-		for (const role of ["stockbot", "bullbot", "bearbot"]) expect(adv.prompt).toContain(`"role": "${role}"`);
-		for (const jid of ["job:trio2-1", "job:trio2-2", "job:trio2-3"]) expect(adv.prompt).toContain(jid);
+		expect(adv.prompt).toContain("task batch");
+		for (const role of ["stockbot", "bullbot", "bearbot"]) expect(adv.prompt).toContain(role);
+
 		expect(adv.prompt).toContain(FID2);
 		expect(adv.prompt).toContain(ev1);
 		expect(adv.prompt).toContain(ev2);
@@ -2268,8 +2502,9 @@ test("research command writes isolated data root, default db untouched", async (
 	const prevRoot = process.env.STOCKBOT_DATA_DIR;
 	process.env.STOCKBOT_DATA_DIR = tmpData;
 	try {
-		const { commands, pi } = fakePiHost();
+		const { commands, handlers, pi } = fakePiHost();
 		await stockbotExtension(pi);
+		await handlers["session_start"]({}, { sessionManager: { id: "main" } });
 		await commands["research"].handler("Isolation probe question?", {});
 		expect(existsSync(join(tmpData, "research.sqlite"))).toBe(true);
 		let after: string;
@@ -2360,6 +2595,8 @@ test("director prompts carry the raw-source item shape and the rich analysis env
 		freezes: {},
 	}, fetchOps));
 	const fetching = await resumeResearch(fetchSID, "run-prompt-fetch");
+	expect(fetching.prompt).toContain("task batch");
+	expect(fetching.prompt).toContain("sec-agent");
 	expect(fetching.prompt).toContain("research_add_evidence");
 	// Accession + document name + raw passage: search hits alone are not evidence.
 	expect(fetching.prompt).toContain("source_record_id");
@@ -2384,11 +2621,11 @@ test("director prompts carry the raw-source item shape and the rich analysis env
 		freezes: { [F1]: { freeze_id: F1, session_id: trioSID, wave_id: 1, evidence_ids: [E1] } },
 	}, trioOps));
 	const trio = await resumeResearch(trioSID, "run-prompt-trio");
-	// Rich envelope, not a claims-only shape.
-	for (const key of ["executive_view", "impact_channels", "materiality", "uncertainties", "what_would_change", "follow_ups"]) {
+	// Task-batch dispatch: names the trio roles and the structured envelope
+	// fields the batch children must return (detailed shape lives in the agent defs).
+	for (const key of ["stockbot", "bullbot", "bearbot", "task batch", "claims", "claim_type", "impact channels", "materiality", "uncertainties", "what_would_change", "follow_ups"]) {
 		expect(trio.prompt).toContain(key);
 	}
-	expect(trio.prompt).toContain("claim_type");
 	expect(trio.prompt).toContain("observed_fact");
 	// Factual claims must cite the frozen evidence ids; nothing else is allowed.
 	expect(trio.prompt).toContain("must cite the frozen evidence ids");
@@ -2481,287 +2718,455 @@ test("agent_end renders the persisted answer once and resume repeats that same a
 	}
 });
 
-// --- committee roles: one fresh model context per role (one-shot spawn seam) ---
-
-async function withRoleEnv<T>(fn: () => Promise<T>): Promise<T> {
-	const saved: [string, string | undefined][] = [
-		["STOCKBOT_PI_PROVIDER", process.env.STOCKBOT_PI_PROVIDER],
-		["STOCKBOT_PI_MODEL", process.env.STOCKBOT_PI_MODEL],
-	];
-	process.env.STOCKBOT_PI_PROVIDER = "granite-local";
-	process.env.STOCKBOT_PI_MODEL = "test-model";
-	try {
-		return await fn();
-	} finally {
-		for (const [key, value] of saved) {
-			if (value === undefined) delete process.env[key];
-			else process.env[key] = value;
-		}
-	}
-}
-
-// The role instruction wording routes each prompt back to its role, so a prompt
-// missing its role's orders cannot pass through as another role's analysis.
-function roleOfPrompt(prompt: string): string {
-	if (prompt.includes("balanced base case")) return "stockbot";
-	if (prompt.includes("resilience case")) return "bullbot";
-	return "bearbot";
-}
-
-function roleEnvelope(role: string, evidenceId: string): Json {
-	return {
-		executive_view: `view-${role}`,
-		claims: [{ text: `claim-${role}`, claim_type: "inference", evidence_ids: [evidenceId] }],
-		impact_channels: [{ text: `channel-${role}`, direction: "mixed", evidence_ids: [evidenceId] }],
-		materiality: { overall: "medium", reasoning: `${role} read` },
-		uncertainties: [`uncertainty-${role}`],
-		what_would_change: [`change-${role}`],
-		follow_ups: [`Does the evidence support the ${role} read?`],
-	};
-}
-
-function roleState(sid: string, evidenceIds: string[]): ResumeState {
-	const fid = `${sid}:1:freeze`;
-	return {
-		session: resumeSession(sid, { status: "analyzing", evidence_ids: evidenceIds, freeze_ids: [fid], committee_runs: [], current_wave: 1 }),
+// --- committee: Director dispatches the trio as one OMP task batch ---
+test("committee dispatch prompts one task batch for the trio roles", async () => {
+	const SID = "rs:roles-task";
+	const E1 = `${SID}:ev:1`;
+	const F1 = `${SID}:1:freeze`;
+	const ops: ResumeOp[] = [];
+	const state: ResumeState = {
+		session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }),
 		jobs: [],
-		freezes: { [fid]: { freeze_id: fid, session_id: sid, wave_id: 1, evidence_ids: evidenceIds } },
+		freezes: { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } },
 	};
-}
+	setResearchBridge(resumeBridge(state, ops));
+	const resumed = await resumeResearch(SID, "run-roles-task");
+	expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
+	for (const role of ["stockbot", "bullbot", "bearbot"]) expect(resumed.prompt).toContain(role);
+	expect(resumed.prompt).toContain("task batch");
+	expect(resumed.prompt).not.toContain("research_add_analysis");
+	expect(state.jobs.map((j) => j.status)).toEqual(["running", "running", "running"]);
+});
 
-// resumeBridge plus the two wire ops the spawn path uses: the research_read
-// passthrough that supplies the frozen evidence text and the analysis record
-// that completes each role job (recorded exactly as the kernel would).
-function roleBridge(state: ResumeState, ops: ResumeOp[], records: Json[], gate?: Json): (req: Json) => Promise<Json> {
-	const base = resumeBridge(state, ops, gate);
-	return async (req: Json) => {
-		const op = String(req.op);
-		if (op === "tool.invoke") {
-			const args = (req.arguments ?? {}) as Json;
-			const kind = String(args.kind);
-			const rid = String(args.resource_id);
-			ops.push({ op: `tool.invoke:${kind}` });
-			const record = kind === "freeze" ? state.freezes[rid] : kind === "evidence" ? { evidence_id: rid, content: `EVIDENCE-MARKER-${rid}` } : undefined;
-			if (!record) return { error: "unknown_resource" };
-			return { result: { content: `kind: ${kind}\nresource_id: ${rid}\nrecord: ${JSON.stringify(record)}`, meta: { record } } };
-		}
-		if (op === "research.analysis.record") {
-			ops.push({ op });
-			records.push(req);
-			const jobId = String(req.job_id);
-			const job = state.jobs.find((j) => j.job_id === jobId);
-			if (!job) return { error: "unknown_job" };
-			job.status = "completed";
-			const fids = (state.session.freeze_ids ?? []) as string[];
-			const fid = fids[fids.length - 1];
-			const runs = state.session.committee_runs as { freeze_id: string; wave_id: number; jobs: string[] }[];
-			const run = runs.find((r) => r.freeze_id === fid);
-			if (run) run.jobs.push(jobId);
-			else runs.push({ freeze_id: fid, wave_id: job.wave_id, jobs: [jobId] });
-			return { result: { job_id: jobId, role: req.role, status: "completed" } };
-		}
-		return base(req);
-	};
-}
+test("director plans sec-agent with stable name, context, and omp-owned job", async () => {
+	const SID = "rs:task-sec";
+	const starts: Json[] = [];
+	const ops: ResumeOp[] = [];
+	const inner = resumeBridge({
+		session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }),
+		jobs: [{ job_id: "job:src-old", job_type: "source_agent", wave_id: 1, status: "running" }],
+		freezes: {},
+	}, ops);
+	setResearchBridge(async (req: Json) => {
+		if (req.op === "research.job.start") starts.push(req);
+		return inner(req);
+	});
+	await resumeResearch(SID, "run-task-sec");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-sec", toolCallId: "call-sec-1" },
+		{ context: "batch ctx", tasks: [{ agent: "sec-agent", task: "fetch SEC filings" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	const input = plan.input as Json;
+	const tasks = input.tasks as Json[];
+	expect(tasks.length).toBe(1);
+	expect(String(tasks[0].name)).toBe("sec-agent-jobauto1");
+	expect(String(tasks[0].task)).toContain(`research_session_id=${SID}`);
+	expect(String(tasks[0].task)).toContain("research_job_id=job:auto-1");
+	expect(String(tasks[0].task)).toContain("source_domain=SEC");
+	expect(String(tasks[0].task)).toContain("fetch SEC filings");
+	expect(String(input.context)).toContain("research_job_id=job:auto-1");
+	expect(String(input.context)).toContain("batch ctx");
+	expect(starts.length).toBe(1);
+	expect(starts[0].type).toBe("source_agent");
+	expect(starts[0].wave_id).toBe(1);
+	expect(starts[0].budget).toMatchObject({ owner: "omp" });
+});
 
-test("committee roles spawn three fresh contexts in parallel and record each envelope", async () => {
-	const SID = "rs:roles";
+test("director blocks unknown agent and committee roles in source stage", async () => {
+	const SID = "rs:task-block";
+	setResearchBridge(resumeBridge({
+		session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }),
+		jobs: [],
+		freezes: {},
+	}, []));
+	await resumeResearch(SID, "run-task-block");
+	const unknown = await planTaskCall(
+		{ researchKey: "run-task-block", toolCallId: "call-block-1" },
+		{ tasks: [{ agent: "nope-agent", task: "x" }] },
+	);
+	expect(unknown.block).toBe(true);
+	expect(String(unknown.reason)).toContain("Director may not spawn 'nope-agent'");
+	expect(String(unknown.reason)).toContain("stage SOURCE_RESEARCH");
+	expect(String(unknown.reason)).toContain(SID);
+	expect(String(unknown.reason)).toContain("sec-agent");
+	const committee = await planTaskCall(
+		{ researchKey: "run-task-block", toolCallId: "call-block-2" },
+		{ tasks: [{ agent: "stockbot", task: "analyze" }] },
+	);
+	expect(committee.block).toBe(true);
+	expect(String(committee.reason)).toContain("Director may not spawn 'stockbot'");
+});
+
+test("director blocks committee without a freeze, then names all three roles", async () => {
+	const SID = "rs:task-trio";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
-	const E2 = `${SID}:ev:2`;
+	setResearchBridge(resumeBridge({
+		session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }),
+		jobs: [],
+		freezes: {},
+	}, []));
+	await resumeResearch(SID, "run-task-trio");
+	const noFreeze = await planTaskCall(
+		{ researchKey: "run-task-trio", toolCallId: "call-trio-0" },
+		{ tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] },
+	);
+	// Source stage still refuses the committee before the freeze check runs.
+	expect(noFreeze.block).toBe(true);
 	const ops: ResumeOp[] = [];
-	const records: Json[] = [];
-	const state = roleState(SID, [E1, E2]);
-	const order: string[] = [];
-	const prompts: string[] = [];
-	setResearchBridge(roleBridge(state, ops, records, AUTHORIZED_GATE));
-	try {
-		const resumed = await withRoleEnv(async () => {
-			setRoleSpawn(async (prompt) => {
-				const role = roleOfPrompt(prompt);
-				order.push(`start:${role}`);
-				prompts.push(prompt);
-				await new Promise((resolve) => setTimeout(resolve, 5));
-				order.push(`end:${role}`);
-				return `Here you go:\n\`\`\`json\n${JSON.stringify(roleEnvelope(role, E1))}\n\`\`\``;
-			});
-			return resumeResearch(SID, "run-roles");
-		});
-		// Three spawned role processes read the frozen evidence, one per role.
-		expect(prompts.length).toBe(3);
-		expect(prompts.map(roleOfPrompt).sort()).toEqual(["bearbot", "bullbot", "stockbot"]);
-		// The frozen evidence text itself (not just ids) and the question reach each role.
-		for (const prompt of prompts) {
-			expect(prompt).toContain(`EVIDENCE-MARKER-${E1}`);
-			expect(prompt).toContain(`EVIDENCE-MARKER-${E2}`);
-			expect(prompt).toContain(F1);
-			expect(prompt).toContain("Question under research: Will NVDA beat earnings?");
-			expect(prompt).toContain("raw JSON only");
-		}
-		// Every spawn starts before any resolves: three contexts run at once.
-		const started = order.map((e, i) => (e.startsWith("start:") ? i : -1)).filter((i) => i >= 0);
-		const ended = order.map((e, i) => (e.startsWith("end:") ? i : -1)).filter((i) => i >= 0);
-		expect(started.length).toBe(3);
-		expect(ended.length).toBe(3);
-		expect(Math.max(...started)).toBeLessThan(Math.min(...ended));
-		// Each role's own job id carries its own parsed envelope (fences and all).
-		expect(records.length).toBe(3);
-		for (const role of ["stockbot", "bullbot", "bearbot"]) {
-			const record = records.find((r) => String(r.role) === role);
-			expect(record).toBeDefined();
-			const job = state.jobs.find((j) => j.job_id === String(record?.job_id));
-			expect(job?.job_type).toBe(role);
-			const analysis = (record?.analysis ?? {}) as Json;
-			expect(analysis.executive_view).toBe(`view-${role}`);
-			expect((analysis.claims as Json[])[0]).toEqual({ text: `claim-${role}`, claim_type: "inference", evidence_ids: [E1] });
-		}
-		// The trio is closed kernel-side, so this same advance runs the wave gate
-		// and authorizes the next wave: the model is never asked to author a role.
-		expect(resumeTransitions(ops)).toEqual([
-			"research.committee.create",
-			"tool.invoke:freeze",
-			"tool.invoke:evidence",
-			"tool.invoke:evidence",
-			"research.analysis.record",
-			"research.analysis.record",
-			"research.analysis.record",
-			"research.wave.decide",
-			"research.job.start",
-		]);
-		expect(resumed.prompt).toContain("Wave-2");
-		expect(resumed.prompt).toContain("fresh per-role contexts");
-		expect(resumed.prompt).not.toContain("research_add_analysis");
-	} finally {
-		setRoleSpawn(unavailableRoleSpawn);
-	}
+	setResearchBridge(resumeBridge({
+		session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }),
+		jobs: [],
+		freezes: { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } },
+	}, ops));
+	await resumeResearch(SID, "run-task-trio-frozen");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-trio-frozen", toolCallId: "call-trio-1" },
+		{ tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	const names = ((plan.input as Json).tasks as Json[]).map((t) => String(t.name));
+	expect(names).toEqual(["stockbot-jobauto1", "bullbot-jobauto2", "bearbot-jobauto3"]);
+	expect(ops.filter((o) => o.op === "research.committee.create").length).toBe(2);
+	// No freeze on the session: the committee path refuses before creating jobs.
+	const bare: ResumeOp[] = [];
+	setResearchBridge(resumeBridge({
+		session: { ...resumeSession(SID, { status: "analyzing", evidence_ids: [E1], committee_runs: [], current_wave: 1 }), freeze_ids: [F1] },
+		jobs: [],
+		freezes: {},
+	}, bare));
+	await resumeResearch(SID, "run-task-trio-nofreeze");
+	const createdBefore = bare.filter((o) => o.op === "research.committee.create").length;
+	const refused = await planTaskCall(
+		{ researchKey: "run-task-trio-nofreeze", toolCallId: "call-trio-2" },
+		{ tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] },
+	);
+	expect(refused.block).toBe(true);
+	expect(String(refused.reason)).toContain("No evidence freeze exists");
+	expect(bare.filter((o) => o.op === "research.committee.create").length).toBe(createdBefore);
 });
 
-test("committee roles spawn with pi's own provider defaults when no override is set", async () => {
-	const SID = "rs:roles-unset";
-	const E1 = `${SID}:ev:1`;
-	const ops: ResumeOp[] = [];
-	const records: Json[] = [];
-	const state = roleState(SID, [E1]);
-	setResearchBridge(roleBridge(state, ops, records));
-	const prompts: string[] = [];
-	setRoleSpawn(async (prompt) => {
-		prompts.push(prompt);
-		return JSON.stringify(roleEnvelope(roleOfPrompt(prompt), E1));
+test("director refuses sec-scout: nested fan-out runs inside sec-agent's own session", async () => {
+	const SID = "rs:task-scout";
+	setResearchBridge(async (req: Json) => {
+		if (req.op === "research.session.inspect")
+			return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: null } };
+		if (req.op === "research.session.create")
+			return { result: { session_id: SID } };
+		return { error: "unknown_op" };
 	});
-	const savedProvider = process.env.STOCKBOT_PI_PROVIDER;
-	const savedModel = process.env.STOCKBOT_PI_MODEL;
-	try {
-		delete process.env.STOCKBOT_PI_PROVIDER;
-		delete process.env.STOCKBOT_PI_MODEL;
-		// No override: argv carries pi's own defaults (no --provider/--model flags).
-		const argv = roleSpawnCommand("Q?");
-		expect(argv).not.toContain("--provider");
-		expect(argv).not.toContain("--model");
-		const resumed = await resumeResearch(SID, "run-roles-unset");
-		expect(prompts.length).toBe(3);
-		expect(records.length).toBe(3);
-		expect(resumeTransitions(ops)).toContain("research.analysis.record");
-		expect(resumed.prompt).toContain("fresh per-role contexts");
-	} finally {
-		if (savedProvider === undefined) delete process.env.STOCKBOT_PI_PROVIDER;
-		else process.env.STOCKBOT_PI_PROVIDER = savedProvider;
-		if (savedModel === undefined) delete process.env.STOCKBOT_PI_MODEL;
-		else process.env.STOCKBOT_PI_MODEL = savedModel;
-		setRoleSpawn(unavailableRoleSpawn);
-	}
+	await startResearch("q?", "run-task-scout");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-scout", toolCallId: "call-scout-1" },
+		{ tasks: [{ agent: "sec-scout", task: "open filings" }] },
+	);
+	expect(plan.block).toBe(true);
+	expect(String(plan.reason)).toContain("Director may not spawn 'sec-scout'");
+});
+test("UX stage gate mirrors kernel allowlists", () => {
+	expect(stageBlockReasonForTest("SOURCE_RESEARCH", "research_add_evidence")).toBeUndefined();
+	expect(stageBlockReasonForTest("SOURCE_RESEARCH", "research_read_search")).toBeUndefined();
+	expect(stageBlockReasonForTest("COMMITTEE", "research_add_analysis")).toContain("Stage COMMITTEE forbids");
+	expect(stageBlockReasonForTest("COMMITTEE", "research_add_evidence")).toContain("Stage COMMITTEE forbids");
+	expect(stageBlockReasonForTest("FINAL", "research_finalize")).toBeUndefined();
+	expect(stageBlockReasonForTest("COMMITTEE", "browse_tools")).toBeUndefined();
 });
 
-test("role context spawn failure or unparseable envelope falls back without crashing", async () => {
-	const cases: [string, RoleSpawn, string][] = [
-		["spawn error", async () => {
-			throw new Error("spawn blew up");
-		}, "spawn blew up"],
-		["prose output", async () => "I could not produce JSON.", "no JSON envelope"],
-		["empty output", async () => "", "no JSON envelope"],
-	];
-	for (const [name, seam, reason] of cases) {
-		const SID = `rs:roles-fail-${name.replace(/\s+/g, "-")}`;
-		const E1 = `${SID}:ev:1`;
-		const ops: ResumeOp[] = [];
-		const records: Json[] = [];
-		const state = roleState(SID, [E1]);
-		setResearchBridge(roleBridge(state, ops, records));
-		setRoleSpawn(seam);
-		try {
-			const resumed = await withRoleEnv(() => resumeResearch(SID, `run-${SID}`));
-			// The spawn failed, so nothing was recorded and the prompt authors in context.
-			expect(records.length).toBe(0);
-			expect(state.jobs.map((j) => j.status)).toEqual(["running", "running", "running"]);
-			expect(resumed.prompt).toContain("Role contexts unavailable");
-			expect(resumed.prompt).toContain(reason);
-			expect(resumed.prompt).toContain("research_add_analysis");
-			for (const role of ["stockbot", "bullbot", "bearbot"]) expect(resumed.prompt).toContain(`"role": "${role}"`);
-		} finally {
-			setRoleSpawn(unavailableRoleSpawn);
-		}
-	}
+test("PIT parity mirrors kernel gates", () => {
+	// Unbounded sentinel never gates (Python: test_unbounded_as_of_is_no_cutoff_for_every_pit_gate).
+	expect(pitViolated("unbounded", "2011-03-16T16:33:51+00:00")).toBe(false);
+	expect(pitViolated("UNBOUNDED ", "2026-01-01T00:00:00+00:00")).toBe(false);
+	expect(pitUnverified("unbounded", null)).toBe(false);
+	expect(pitUnverified("unbounded", undefined)).toBe(false);
+	// None/empty on either side never violates; unbounded as_of needs no proof.
+	expect(pitViolated(null, null)).toBe(false);
+	expect(pitViolated(null, "2025-06-30T00:00:00+00:00")).toBe(false);
+	expect(pitViolated("2025-06-30T00:00:00+00:00", null)).toBe(false);
+	expect(pitUnverified(null, null)).toBe(false);
+	// Bounded cutoff keeps the strict rule: future known_at violates, past does not.
+	expect(pitViolated("2025-06-30T00:00:00+00:00", "2026-01-01T00:00:00+00:00")).toBe(true);
+	expect(pitViolated("2025-06-30T00:00:00+00:00", "2025-01-01T00:00:00+00:00")).toBe(false);
+	// Same instant in another offset is not a violation (Python: test_reg_pit_tz_preserves_instant).
+	expect(pitViolated("2025-06-30T00:00:00+00:00", "2025-06-29T20:00:00-04:00")).toBe(false);
+	expect(pitViolated("2025-06-30T00:00:00+00:00", "2025-06-30T01:00:00+00:00")).toBe(true);
+	// Historical as_of with missing known_at is unverified (Python: crap_paths cases).
+	expect(pitUnverified("2025-06-30", null)).toBe(true);
+	expect(pitUnverified("2025-06-30T00:00:00+00:00", undefined)).toBe(true);
+	expect(pitUnverified("2025-06-30T00:00:00+00:00", "2025-01-01T00:00:00+00:00")).toBe(false);
+	// Deliberate divergence from Python (see coerceTime note): non-ISO input is
+	// "no verdict" (false), never "PIT clean" — Python raises, the ingest gate
+	// catches it as PROVENANCE_FAILURE. Kernel stays authoritative.
+	expect(pitViolated("", "2025-01-01T00:00:00+00:00")).toBe(false);
+	expect(pitViolated("garbage", "2025-01-01T00:00:00+00:00")).toBe(false);
+	expect(pitViolated("2025-06-30", "garbage")).toBe(false);
+	// Unbounded as_of never violates, for any known_at string.
+	fc.assert(fc.property(fc.string(), (known) => pitViolated("unbounded", known) === false), { seed: 42 });
 });
 
-test("null role seam keeps authoring in context without reading evidence or spawning", async () => {
-	const SID = "rs:roles-null";
+test("committee results record three analyses", async () => {
+	const SID = "rs:task-record";
+	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
 	const ops: ResumeOp[] = [];
 	const records: Json[] = [];
-	const state = roleState(SID, [E1]);
-	setResearchBridge(roleBridge(state, ops, records));
-	setRoleSpawn(null);
+	setResearchBridge(async (req: Json) => {
+		ops.push({ op: String(req.op), type: req.type, wave_id: req.wave_id, job_id: req.job_id });
+		if (req.op === "research.session.inspect")
+			return { result: { session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } } };
+		if (req.op === "research.committee.create")
+			return { result: { session_id: SID, wave_id: 1, jobs: ["job:stock-1", "job:bull-1", "job:bear-1"] } };
+		if (req.op === "research.job.runtime")
+			return { result: {} };
+		if (req.op === "research.analysis.record") {
+			records.push(req);
+			return { result: {} };
+		}
+		return { error: "unknown_op" };
+	});
+	await resumeResearch(SID, "run-task-record");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-record", toolCallId: "call-rec-1" },
+		{ tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	await recordTaskResult(
+		{ researchKey: "run-task-record", toolCallId: "call-rec-1" },
+		{
+			results: ["stockbot", "bullbot", "bearbot"].map((role) => ({
+				exit_code: 0,
+				structured_output: {
+					status: "ok",
+					data: {
+						role,
+						executive_view: "v",
+						claims: [{ text: "c", claim_type: "inference", evidence_ids: [E1] }],
+						impact_channels: [{ text: "ch", direction: "mixed", evidence_ids: [E1] }],
+						materiality: { overall: "medium", reasoning: "r" },
+						uncertainties: ["u"],
+						what_would_change: ["w"],
+						follow_ups: ["Does the evidence support this read?"],
+					},
+				},
+			})),
+		},
+	);
+	expect(records.length).toBe(3);
+	expect(records.map((r) => r.role)).toEqual(["stockbot", "bullbot", "bearbot"]);
+	expect(records.map((r) => r.job_id)).toEqual(["job:stock-1", "job:bull-1", "job:bear-1"]);
+});
+test("incomplete committee envelope fails before record", async () => {
+	const SID = "rs:task-record-shape";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const records: Json[] = [];
+	const failures: Json[] = [];
+	setResearchBridge(async (req: Json) => {
+		if (req.op === "research.session.inspect")
+			return { result: { session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } } };
+		if (req.op === "research.committee.create")
+			return { result: { session_id: SID, wave_id: 1, jobs: ["job:stock-1", "job:bull-1", "job:bear-1"] } };
+		if (req.op === "research.job.runtime")
+			return { result: {} };
+		if (req.op === "research.job.fail") {
+			failures.push(req);
+			return { result: {} };
+		}
+		if (req.op === "research.analysis.record") {
+			records.push(req);
+			return { result: {} };
+		}
+		return { error: "unknown_op" };
+	});
+	await resumeResearch(SID, "run-task-record-shape");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-record-shape", toolCallId: "call-shape-1" },
+		{ tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	await recordTaskResult(
+		{ researchKey: "run-task-record-shape", toolCallId: "call-shape-1" },
+		{ results: [{ exit_code: 0, structured_output: { status: "ok", data: { role: "stockbot", executive_view: "v", claims: [] } } }, { exit_code: 0 }, { exit_code: 0 }] },
+	);
+	expect(records.length).toBe(0);
+	const shape = failures.find((f) => String(f.job_id) === "job:stock-1");
+	expect(shape).toBeDefined();
+	expect((shape as unknown as Json).category).toBe("model_output_failure");
+	expect(String((shape as unknown as Json).message)).toContain("incomplete analysis envelope");
+});
+test("nonzero exit fails the job as tool_error", async () => {
+	const SID = "rs:task-fail";
+	let failed: Json | null = null;
+	setResearchBridge(async (req: Json) => {
+		if (req.op === "research.session.inspect")
+			return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: null } };
+		if (req.op === "research.job.start")
+			return { result: { job_id: "job:src-9", session_id: SID, status: "running", wave_id: 1, job_type: "source_agent" } };
+		if (req.op === "research.job.runtime")
+			return { result: {} };
+		if (req.op === "research.job.fail") {
+			failed = req;
+			return { result: {} };
+		}
+		return { error: "unknown_op" };
+	});
+	await resumeResearch(SID, "run-task-fail");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-fail", toolCallId: "call-fail-1" },
+		{ tasks: [{ agent: "sec-agent", task: "fetch" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	await recordTaskResult(
+		{ researchKey: "run-task-fail", toolCallId: "call-fail-1" },
+		{ results: [{ exit_code: 1, stderr: "boom" }] },
+	);
+	expect((failed as unknown as Json).job_id).toBe("job:src-9");
+	expect((failed as unknown as Json).category).toBe("tool_error");
+});
+test("sec-agent submit-completed skips the no-submit fail; direct return fails", async () => {
+	const SID = "rs:task-submit-check";
+	let status = "running";
+	let failed: Json | null = null;
+	setResearchBridge(async (req: Json) => {
+		if (req.op === "research.session.inspect")
+			return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status }], pending_next_action: null, latest_freeze: null } };
+		if (req.op === "research.job.start")
+			return { result: { job_id: "job:src-1", session_id: SID, status: "running", wave_id: 1, job_type: "source_agent" } };
+		if (req.op === "research.job.runtime")
+			return { result: {} };
+		if (req.op === "research.job.fail") {
+			failed = req;
+			return { result: {} };
+		}
+		return { error: "unknown_op" };
+	});
+	await resumeResearch(SID, "run-task-submit");
+	await planTaskCall(
+		{ researchKey: "run-task-submit", toolCallId: "call-submit-a" },
+		{ tasks: [{ agent: "sec-agent", task: "fetch" }] },
+	);
+	// sec-agent submitted inside its own context: kernel completed the job.
+	status = "completed";
+	await recordTaskResult(
+		{ researchKey: "run-task-submit", toolCallId: "call-submit-a" },
+		{ results: [{ exit_code: 0 }] },
+	);
+	expect(failed).toBeNull();
+	await planTaskCall(
+		{ researchKey: "run-task-submit", toolCallId: "call-submit-b" },
+		{ tasks: [{ agent: "sec-agent", task: "fetch" }] },
+	);
+	// Direct return with no submit: job still running, fails closed.
+	status = "running";
+	await recordTaskResult(
+		{ researchKey: "run-task-submit", toolCallId: "call-submit-b" },
+		{ results: [{ exit_code: 0 }] },
+	);
+	expect((failed as unknown as Json).job_id).toBe("job:src-1");
+	expect((failed as unknown as Json).category).toBe("model_output_failure");
+	expect(String((failed as unknown as Json).message)).toContain("without submitting a source result");
+});
+test("tool_result handler records planned task outcomes", async () => {
+	const SID = "rs:task-handler-record";
+	const kinds: string[] = [];
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-handler-record-"));
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
 	try {
-		// Env is configured, so only the null seam can keep contexts unavailable:
-		// the advance goes straight to the in-context trio call with no spawn and
-		// therefore no frozen-evidence read (a spawn attempt would have to read it).
-		const resumed = await withRoleEnv(() => resumeResearch(SID, "run-roles-null"));
-		expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
-		expect(records.length).toBe(0);
-		expect(state.jobs.map((j) => j.status)).toEqual(["running", "running", "running"]);
-		expect(resumed.prompt).toContain("Role contexts unavailable");
-		expect(resumed.prompt).toContain("role spawns are disabled");
-		expect(resumed.prompt).toContain("research_add_analysis");
-		for (const role of ["stockbot", "bullbot", "bearbot"]) expect(resumed.prompt).toContain(`"role": "${role}"`);
+		const { handlers, commands, pi } = fakePiHost();
+		await stockbotExtension(pi);
+		const main = { sessionManager: { id: "main" } };
+		// Deferred seam: main session_start claims identity + bridge before stub.
+		await handlers["session_start"]({}, main);
+		// Stub after session_start (session_start claims the real seam first).
+		setResearchBridge(async (req: Json) => {
+			kinds.push(String(req.op));
+			if (req.op === "research.session.inspect")
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: null } };
+			if (req.op === "research.session.create")
+				return { result: { session_id: SID } };
+			if (req.op === "research.job.start")
+				return { result: { job_id: "job:handler-1", session_id: SID, status: "running", wave_id: 1, job_type: "source_agent" } };
+			if (req.op === "research.job.runtime") return { result: { job_id: "job:handler-1" } };
+			if (req.op === "research.session.resume")
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: null } };
+			return { error: "unknown_op" };
+		});
+		await commands["research"].handler("handler record probe", {});
+		const callId = "call-handler-1";
+		const revised = (await handlers["tool_call"](
+			{ toolName: "task", toolCallId: callId, input: { context: "c", tasks: [{ agent: "sec-agent", task: "fetch" }] } },
+			main,
+		)) as unknown as Record<string, unknown>;
+		expect(revised.input).toBeDefined();
+		await (handlers["tool_result"] as (event: unknown, ctx: unknown) => Promise<unknown>)(
+			{ toolName: "task", toolCallId: callId, isError: false, details: { results: [{ exit_code: 0 }] } },
+			main,
+		);
+		// Director RPCs via the stub seam; task_planned/task_result traces ride
+		// the per-binding callBridge, not this seam, so they are not in kinds.
+		expect(kinds.filter((k) => k === "research.job.start").length).toBe(1);
+		expect(kinds.filter((k) => k === "research.job.runtime").length).toBe(1);
 	} finally {
-		setRoleSpawn(unavailableRoleSpawn);
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		resetMainSessionIdentity();
 	}
 });
 
-test("role spawn command is the frozen one-shot pi argv", async () => {
-	const savedProvider = process.env.STOCKBOT_PI_PROVIDER;
-	const savedModel = process.env.STOCKBOT_PI_MODEL;
+test("lifecycle frames forward to kernel traces and unsubscribe on shutdown", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-lifecycle-"));
+	const logFile = join(dir, "events.log");
+	// Stub bridge child: answers the describe/doctor handshake and logs pi_event frames.
+	const script = `const fs=require('fs');const LOG=${JSON.stringify(logFile)};let b='';process.stdin.on('data',c=>{b+=c.toString();let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i).trim();b=b.slice(i+1);if(!l)continue;try{const o=JSON.parse(l);if(o.op==='describe'){process.stdout.write(JSON.stringify({id:o.id,system_prompt:'p',tools:[{function:{name:'browse_tools',description:'b',parameters:{type:'object'}}},{function:{name:'call_tool',description:'c',parameters:{type:'object'}}},{function:{name:'search_tools',description:'s',parameters:{type:'object'}}}]})+'\\n');}else if(o.op==='doctor'){process.stdout.write(JSON.stringify({id:o.id,bridge_ok:true,tool_count:3})+'\\n');}else{if(o.op==='pi_event')fs.appendFileSync(LOG,l+'\\n');process.stdout.write(JSON.stringify({id:o.id,ok:true})+'\\n');}}catch{}}});`;
+	const kids: ChildProcessWithoutNullStreams[] = [];
+	const { handlers, pi, bus } = fakePiHost();
 	try {
-		delete process.env.STOCKBOT_PI_PROVIDER;
-		delete process.env.STOCKBOT_PI_MODEL;
-		// No override: pi resolves its own provider/model.
-		expect(roleSpawnCommand("Q?")).toEqual([
-			"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-			"--no-prompt-templates", "--no-context-files", "--", "Q?",
-		]);
-		await withRoleEnv(async () => {
-			expect(roleSpawnCommand("Q?")).toEqual([
-				"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-				"--no-prompt-templates", "--no-context-files", "--provider", "granite-local",
-				"--model", "test-model", "--", "Q?",
-			]);
+		await stockbotExtension(pi, () => {
+			const child = spawnScript(script);
+			kids.push(child);
+			return child;
 		});
-		// One override emits only its own flag (mirrors pi_runner._pi_cmd): a
-		// configured provider is never dropped because the model env is unset.
-		process.env.STOCKBOT_PI_PROVIDER = "granite-local";
-		expect(roleSpawnCommand("Q?")).toEqual([
-			"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-			"--no-prompt-templates", "--no-context-files", "--provider", "granite-local", "--", "Q?",
-		]);
-		delete process.env.STOCKBOT_PI_PROVIDER;
-		process.env.STOCKBOT_PI_MODEL = "test-model";
-		expect(roleSpawnCommand("Q?")).toEqual([
-			"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-			"--no-prompt-templates", "--no-context-files", "--model", "test-model", "--", "Q?",
-		]);
+		const fire = (payload: unknown) => {
+			for (const handler of bus.get(TASK_SUBAGENT_LIFECYCLE_CHANNEL) ?? []) handler(payload);
+		};
+		fire({ id: "parent.child-1", agent: "sec-agent", status: "started", parentToolCallId: "call-1", sessionFile: "/tmp/s.jsonl" });
+		fire({ id: "parent.child-1", agent: "sec-agent", status: "completed", parentToolCallId: "call-1", sessionFile: "/tmp/s.jsonl" });
+		fire({ agent: "sec-agent", status: "started" });
+		fire({ id: "parent.child-2", status: "started" });
+		// Real clock: frames cross a real child process boundary (see file header).
+		const startedAt = Date.now();
+		let lines: string[] = [];
+		for (; ;) {
+			try {
+				lines = readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean);
+			} catch {
+				lines = [];
+			}
+			if (lines.length >= 2 || Date.now() - startedAt > 2000) break;
+			await new Promise((r) => setTimeout(r, 10));
+		}
+		expect(lines.length).toBe(2);
+		const first = JSON.parse(lines[0]) as Json;
+		const second = JSON.parse(lines[1]) as Json;
+		expect(first.event).toBe("subagent_started");
+		expect(first.runtime_id).toBe("parent.child-1");
+		expect(first.agent).toBe("sec-agent");
+		expect(second.event).toBe("subagent_finished");
+		expect(second.status).toBe("completed");
+		await handlers["session_shutdown"]({});
+		fire({ id: "parent.child-3", agent: "sec-agent", status: "started" });
+		await new Promise((r) => setTimeout(r, 100));
+		expect(readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean).length).toBe(2);
 	} finally {
-		if (savedProvider === undefined) delete process.env.STOCKBOT_PI_PROVIDER;
-		else process.env.STOCKBOT_PI_PROVIDER = savedProvider;
-		if (savedModel === undefined) delete process.env.STOCKBOT_PI_MODEL;
-		else process.env.STOCKBOT_PI_MODEL = savedModel;
+		for (const kid of kids) {
+			try {
+				kid.kill("SIGKILL");
+			} catch {
+				// already exited
+			}
+		}
 	}
 });

@@ -29,7 +29,7 @@
     "verify-judge-one": "venv/bin/python scripts/verify_judge.py --scenario",
     "verify-strict": "venv/bin/python scripts/strict_routing_harness.py",
     "verify-harness": "venv/bin/python -m pytest tests/test_research_harness.py tests/test_research_timeout_resume.py -q",
-    "verify-agent": "venv/bin/python scripts/verify_agent_scenarios.py --model \"${STOCKBOT_PI_MODEL}\" --provider \"${STOCKBOT_PI_PROVIDER}\"",
+    "verify-agent": "venv/bin/python scripts/verify_agent_scenarios.py --model \"${STOCKBOT_MODEL}\" --provider \"${STOCKBOT_PROVIDER}\"",
     "verify:live": "bun run verify-agent",
     "eval:routing": "venv/bin/python scripts/verify_pi_tools.py --routing && venv/bin/python scripts/strict_routing_harness.py",
     "eval:confusion": "venv/bin/python scripts/verify_pi_tools.py --confusion",
@@ -44,12 +44,13 @@
     "update-tool-catalog": "venv/bin/python scripts/update_tool_catalog.py",
     "verify": "bun run clean-env && bun run setup && bun run test && bun run typecheck && bun run typecheck-ts && bun run verify-integrity && bun run verify-secrets && bun run verify-deps && bun run verify-tools && bun run verify-tool-health && bun run verify-judge-self-check && bun run verify-harness",
     "sandbox-doctor": "venv/bin/python scripts/sandbox_doctor.py",
-    "stockbot": "pi --no-builtin-tools --no-extensions --no-skills --no-prompt-templates --no-context-files --extension .pi/extensions/stockbot.ts",
-    "stockbot:granite": "STOCKBOT_PI_PROVIDER=granite-local STOCKBOT_PI_MODEL=lmstudio-community/granite-4.1-8b-GGUF:Q4_K_M bun run stockbot",
+    "stockbot": "omp --config .omp/stockbot.yml --no-extensions --no-skills --no-rules --no-lsp --tools=task -e .omp/extensions/stockbot.ts ${STOCKBOT_MODEL:+--model \"$STOCKBOT_MODEL\"}",
+    "stockbot:granite": "STOCKBOT_MODEL=lmstudio-community/granite-4.1-8b-GGUF:Q4_K_M bun run stockbot",
     "llama": "llama-server --models-dir ${HOME}/.cache/huggingface/hub --models-preset ${HOME}/.config/llama-server/presets.ini --models-max 1 --host 127.0.0.1 --port 8080"
   },
   "dependencies": {
-    "@earendil-works/pi-coding-agent": "0.85.1"
+    "@oh-my-pi/pi-coding-agent": "18.2.3",
+    "@oh-my-pi/pi-tui": "18.2.3"
   },
   "devDependencies": {
     "@stryker-mutator/core": "^10.0.0",

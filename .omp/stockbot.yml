@@ -1,0 +1,72 @@
+# Stockbot runtime overlay: task-only tools, synchronous batches, no
+# background spawning, no accidental repo mutation or extra review passes.
+# --tools=task gates the registry (createTools allowlist), but these yml keys
+# close the bypass paths: goal/hub/memory/learn/checkpoint/MCP add tools back
+# outside the allowlist (tools/index.ts isToolAllowed + sdk.ts alwaysInclude).
+# Verified keys in @oh-my-pi/pi-coding-agent settings-schema; typos fail silent.
+async:
+  enabled: false
+task:
+  maxRecursionDepth: 3
+  isolation:
+    enabled: false
+advisor:
+  enabled: false
+goal:
+  enabled: false
+todo:
+  enabled: false
+memory:
+  backend: "off"
+autolearn:
+  enabled: false
+checkpoint:
+  enabled: false
+mcp:
+  enableProjectConfig: false
+eval:
+  js: false
+  py: false
+  tools:
+    enabled: false
+browser:
+  enabled: false
+computer:
+  enabled: false
+lsp:
+  enabled: false
+compaction:
+  enabled: false
+ttsr:
+  enabled: false
+github:
+  enabled: false
+web_search:
+  enabled: false
+security:
+  enabled: false
+ask:
+  enabled: false
+bash:
+  enabled: false
+debug:
+  enabled: false
+glob:
+  enabled: false
+grep:
+  enabled: false
+astGrep:
+  enabled: false
+astEdit:
+  enabled: false
+read:
+  summarize:
+    enabled: false
+fetch:
+  enabled: false
+plan:
+  enabled: false
+skills:
+  enabled: false
+prewalk:
+  enabled: false

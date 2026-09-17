@@ -816,3 +816,157 @@ def test_analysis_record_reaches_committee_analysis(
     assert recorded.result["executive_view"] == "NVDA demand is supported by the filed evidence."
     assert repo.get_session(sid).committee_runs == [
         {"freeze_id": fid, "wave_id": 1, "jobs": [jid]}]
+
+
+def test_research_job_runtime_wire_op(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """research.job.runtime: arg shapes, then runtime identity merged into the persisted job."""
+    from app.research import service as _svc
+    from app.research.repository import ResearchRepository
+    monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
+
+    def _dispatch(request: dict[str, object]) -> dict[str, object]:
+        out = pi_bridge._handle(json.dumps(
+            {"id": "a0", "op": "research.job.runtime", **request}))
+        assert isinstance(out, dict)
+        return out
+
+    assert _dispatch({"runtime": "omp"}) == {"id": "a0", "error": "missing_arg"}
+    assert _dispatch({"job_id": "nope", "runtime": "omp", "data_root": str(tmp_path)}) == {
+        "id": "a0", "error": "unknown_job", "job_id": "nope"}
+
+    repo = ResearchRepository(data_root=tmp_path)
+    sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+    jid = repo.list_jobs(sid)[0].job_id
+    first = _dispatch({"job_id": jid, "runtime": "omp", "runtime_agent_id": "agent-1",
+                       "data_root": str(tmp_path)})
+    partial = first["result"]
+    assert isinstance(partial, dict)
+    assert partial["diagnostics"] == {"runtime": "omp", "runtime_agent_id": "agent-1"}
+    second = _dispatch({"job_id": jid, "runtime_task_call_id": "call-7",
+                        "runtime_session_file": "/tmp/s.jsonl", "data_root": str(tmp_path)})
+    stored = ResearchRepository(data_root=tmp_path).get_job(jid).diagnostics
+    assert stored == {"runtime": "omp", "runtime_agent_id": "agent-1",
+                      "runtime_task_call_id": "call-7", "runtime_session_file": "/tmp/s.jsonl"}
+    done = second["result"]
+    assert isinstance(done, dict)
+    assert done["diagnostics"] == stored
+    assert repo.get_job(jid).status == "running"
+
+
+def test_research_job_start_records_omp_owner(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """OMP job creation records owner=omp through the existing budget.owner override."""
+    from app.research import service as _svc
+    from app.research.repository import ResearchRepository
+    monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
+    repo = ResearchRepository(data_root=tmp_path)
+    sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+    out = pi_bridge._handle(json.dumps({
+        "id": "a0", "op": "research.job.start", "session_id": sid,
+        "budget": {"owner": "omp"}, "data_root": str(tmp_path)}))
+    assert isinstance(out, dict)
+    result = out["result"]
+    assert isinstance(result, dict)
+    assert result["owner"] == "omp"
+    assert ResearchRepository(data_root=tmp_path).get_job(str(result["job_id"])).owner == "omp"
+
+
+def test_research_job_fail_cancel_wire_ops(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """research.job.fail/cancel: arg shapes, invalid category, happy paths incl. terminal no-op."""
+    from app.research import service as _svc
+    from app.research.repository import ResearchRepository
+    monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
+
+    def _dispatch(op: str, request: dict[str, object]) -> dict[str, object]:
+        out = pi_bridge._handle(json.dumps({"id": "a0", "op": op, **request}))
+        assert isinstance(out, dict)
+        return out
+
+    assert _dispatch("research.job.fail", {}) == {"id": "a0", "error": "missing_arg"}
+    assert _dispatch("research.job.fail", {"job_id": "j"}) == {"id": "a0", "error": "missing_arg"}
+    assert _dispatch("research.job.fail", {"job_id": "j", "category": "timeout"}) == {
+        "id": "a0", "error": "missing_arg"}
+    assert _dispatch("research.job.cancel", {}) == {"id": "a0", "error": "missing_arg"}
+    assert _dispatch(
+        "research.job.fail",
+        {"job_id": "nope", "category": "timeout", "message": "m", "data_root": str(tmp_path)},
+    ) == {"id": "a0", "error": "unknown_job", "job_id": "nope"}
+    assert _dispatch("research.job.cancel", {"job_id": "nope", "data_root": str(tmp_path)}) == {
+        "id": "a0", "error": "unknown_job", "job_id": "nope"}
+
+    repo = ResearchRepository(data_root=tmp_path)
+    sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+    jid = repo.list_jobs(sid)[0].job_id
+    bad = _dispatch(
+        "research.job.fail",
+        {"job_id": jid, "category": "bogus", "message": "m", "data_root": str(tmp_path)},
+    )
+    assert bad["error"] == "invalid_arg"
+    assert isinstance(bad.get("detail"), str)
+    assert repo.get_job(jid).status == "running"
+
+    failed = _dispatch(
+        "research.job.fail",
+        {"job_id": jid, "category": "timeout", "message": "hit", "data_root": str(tmp_path)},
+    )
+    result = failed["result"]
+    assert isinstance(result, dict)
+    assert result["status"] == "failed"
+    failure = result["failure"]
+    assert isinstance(failure, dict)
+    assert failure["category"] == "timeout"
+    again = _dispatch("research.job.cancel", {"job_id": jid, "data_root": str(tmp_path)})
+    terminal = again["result"]
+    assert isinstance(terminal, dict)
+    assert terminal["status"] == "failed"
+
+    sid2 = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+    jid2 = repo.list_jobs(sid2)[0].job_id
+    cancelled = _dispatch("research.job.cancel", {"job_id": jid2, "data_root": str(tmp_path)})
+    result2 = cancelled["result"]
+    assert isinstance(result2, dict)
+    assert result2["status"] == "cancelled"
+    late = _dispatch(
+        "research.job.fail",
+        {"job_id": jid2, "category": "timeout", "message": "late", "data_root": str(tmp_path)},
+    )
+    late_result = late["result"]
+    assert isinstance(late_result, dict)
+    assert late_result["status"] == "cancelled"
+
+
+def test_pi_event_task_planned_result_persist() -> None:
+    run_id = _run_id("task-trace")
+    _start_session(run_id)
+    try:
+        event_type, _ = _routing_event_roundtrip(run_id, "task_planned", {"job_id": "j-1"})
+        assert event_type == "task_planned"
+        event_type, _ = _routing_event_roundtrip(run_id, "task_result", {"job_id": "j-1"})
+        assert event_type == "task_result"
+    finally:
+        _teardown_run(run_id)
+
+
+def test_pi_event_subagent_lifecycle_persists() -> None:
+    run_id = _run_id("subagent-trace")
+    _start_session(run_id)
+    try:
+        event_type, kwargs = _routing_event_roundtrip(
+            run_id, "subagent_started", {"runtime_id": "p.c1", "agent": "sec-agent"}
+        )
+        assert event_type == "subagent_started"
+        metadata = kwargs.get("metadata")
+        assert isinstance(metadata, dict)
+        assert metadata["agent"] == "sec-agent"
+        event_type, _ = _routing_event_roundtrip(
+            run_id, "subagent_finished",
+            {"runtime_id": "p.c1", "agent": "sec-agent", "status": "completed"},
+        )
+        assert event_type == "subagent_finished"
+    finally:
+        _teardown_run(run_id)

@@ -3,7 +3,7 @@
 A tick queries canonical Stockbot sources from persisted checkpoints, normalizes
 hits to stable canonical events, persists one pending trigger per new meaningful
 event, then runs each pending trigger oldest-first via ``run_trigger`` (one
-normal-Pi launch each). Ticks with nothing new make zero Pi calls.
+OMP launch each). Ticks with nothing new make zero OMP calls.
 
 No broker, price, Greeks, or options monitoring exists here on purpose: rules
 without a reliable canonical backing stay ``enabled: false``/``unsupported``

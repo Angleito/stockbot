@@ -268,8 +268,8 @@ def test_agent_scenario_helpers():
     name, inner = vas._extract_call_tool_request({"name": "t", "arguments": {"a": 1}})
     assert (name, inner) == ("t", {"a": 1})
     assert vas._extract_call_tool_request({}) == ("", {})
-    assert vas.resolve_provider_model("p", "m", {"STOCKBOT_PI_PROVIDER": "x", "STOCKBOT_PI_MODEL": "y"}) == ("p", "m")
-    # Re-pinned: an unset provider/model is the flag-less default (Pi's own CLI default), not a failure.
+    assert vas.resolve_provider_model("p", "m", {"STOCKBOT_PROVIDER": "x", "STOCKBOT_MODEL": "y"}) == ("p", "m")
+    # Re-pinned: an unset provider/model is the flag-less default (OMP's own CLI default), not a failure.
     assert vas.resolve_provider_model(None, None, {}) == ("", "")
     assert vas._selected_names(argparse.Namespace(scenario="s")) == ["s"]
     assert vas._scenario_map() != {}

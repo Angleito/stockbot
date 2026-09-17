@@ -1,9 +1,9 @@
-"""Bounded Pi runs over a thesis trigger (stdlib + PyYAML only).
+"""Bounded OMP runs over a thesis trigger (stdlib + PyYAML only).
 
-Automated monitoring launches one normal-Pi subprocess per pending trigger
-(see app.thesis.pi_runner); Pi persists its own findings through the
+Automated monitoring launches one OMP subprocess per pending trigger
+(see app.thesis.omp_runner); OMP persists its own findings through the
 canonical thesis tools. The runner only selects the trigger, builds a small
-bounded prompt, launches Pi without holding any lock across the subprocess,
+bounded prompt, launches OMP without holding any lock across the subprocess,
 and acknowledges the stable trigger ID only once a durable trigger-linked
 journal entry exists. A failed launch (or a run with no such journal) leaves
 the trigger pending with valid partial tool writes intact (at-least-once
@@ -21,7 +21,7 @@ from app.policy import Capability
 from app.storage.ids import run_id as new_run_id
 from app.thesis.context import ResearchContext, build_live_context
 from app.thesis.models import JSONValue, Trigger
-from app.thesis.pi_runner import run_thesis_pi
+from app.thesis.omp_runner import run_thesis_omp
 from app.thesis.repository import ThesisRepository
 
 _GRANTS: dict[str, Capability] = {
@@ -194,9 +194,9 @@ def run_trigger(
     *,
     known_at: str | None = None,
 ) -> RunOutcome:
-    """Launch normal Pi for one pending trigger; ack that trigger ID only.
+    """Launch OMP for one pending trigger; ack that trigger ID only.
 
-    Failure (bad state, over-budget context, Pi launch/timeout/nonzero, or no
+    Failure (bad state, over-budget context, OMP launch/timeout/nonzero, or no
     durable trigger-linked journal) raises before acknowledgement, so the
     trigger stays pending and valid partial tool writes are retained for the
     retry.
@@ -211,20 +211,20 @@ def run_trigger(
         raise KeyError(f"unknown trigger: {trigger_id!r}")
     if trigger.status != "pending":
         raise ValueError(f"<runner>: trigger {trigger_id!r} is {trigger.status}, not pending")
-    # PIT/budget gate: raises before any Pi call when context is over budget.
+    # PIT/budget gate: raises before any OMP call when context is over budget.
     ctx = build_live_context(repository, tid, trigger, data_cutoff=known_at)
     root = getattr(repository, "root", None)
     data_root = root.parent if root is not None else get_data_root()
     rid = new_run_id()
     prompt = _build_prompt(thesis_id=tid, trigger=trigger, data_cutoff=known_at, ctx=ctx, run_id=rid)
     try:
-        run_thesis_pi(thesis_id=tid, trigger_id=trigger.trigger_id,
+        run_thesis_omp(thesis_id=tid, trigger_id=trigger.trigger_id,
                        prompt=prompt, data_root=data_root, run_id=rid)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
         if not repository.has_journal_for_trigger(tid, trigger.trigger_id, run_id=rid):
             raise RuntimeError(
                 f"<runner>: no durable journal for trigger {trigger.trigger_id!r} (thesis {tid!r});"
-                f" Pi must write a material thesis_journal entry with trigger_id {trigger.trigger_id!r}"
+                f" OMP must write a material thesis_journal entry with trigger_id {trigger.trigger_id!r}"
                 f" and run_id {rid!r} before the trigger can be acknowledged;"
                 " leaving pending for retry"
             )

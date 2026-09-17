@@ -1,23 +1,17 @@
 /** Staged ResearchDirector driver: fetch -> freeze -> atomic trio -> gate -> [next wave, while the gate authorizes] -> finalize.
  *
- * Pi owns the model loop; this module owns stage order only. Every transition is
+ * OMP owns the model loop; this module owns stage order only. Every transition is
  * kernel-gated fail-closed: predicates read research.session.inspect results, at most
  * one transition RPC fires per stage step, and kernel errors keep the run entry (nothing
  * is ever invented). The wave gate alone decides continue vs finalize, for every wave:
- * no wave ceiling lives here. The model does SEC dispatch and evidence authoring
- * through the call_tool verbs named in each prompt, while committee roles are authored
- * in fresh per-role contexts (pi's own provider defaults; STOCKBOT_PI_PROVIDER/
- * STOCKBOT_PI_MODEL override them when configured): one one-shot `pi` process per
- * role — never this conversation — with the frozen evidence text carried in its own
- * prompt. Every spawn, parse, or record failure falls back to authoring in this
- * context, so the staged flow never regresses. No cli.py, no thresholds, and no budgets
- * live here.
+ * no wave ceiling lives here. The model dispatches SEC work as one task batch for
+ * sec-agent and the committee as one task batch for the trio, with prompts naming
+ * the call_tool verbs and research ids each child must pass through verbatim.
+ * No subprocesses, no cli.py, no thresholds, and no budgets live here.
  *
  * Restart-safe: runs map runId to sessionId only; all stage state derives from
  * kernel inspect via deriveState, so /research-resume re-attaches a fresh run.
  */
-
-import { spawn } from "node:child_process";
 
 type Json = Record<string, unknown>;
 export type BridgeCall = (req: Json) => Promise<Json>;
@@ -243,13 +237,14 @@ function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | null): S
 // UX-only mirror of the kernel stage gate (kernel stays authoritative):
 // positive canonical control allowlists plus discovery, same reason string,
 // fail open otherwise. COMMITTEE/FINAL therefore block every unlisted data tool.
-const STAGE_GATE_DISCOVERY: Record<string, true> = { browse_tools: true, search_tools: true, describe_tool: true, list_tool_domains: true, call_tool: true };
+const STAGE_GATE_DISCOVERY: Record<string, true> = { browse_tools: true, search_tools: true, describe_tool: true, list_tool_domains: true, call_tool: true, task: true };
 const STAGE_GATE_SOURCE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_read_search: true, research_cancel: true, research_add_evidence: true, research_submit_source_result: true };
-const STAGE_GATE_COMMITTEE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_add_analysis: true };
+const STAGE_GATE_COMMITTEE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true };
 const STAGE_GATE_FINAL_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_finalize: true };
 // Local controls, thesis actions, and dotted bridge ops are never staged data
-// dispatches; SOURCE blocks them while unlisted data tools pass.
-const STAGE_GATE_NON_DISPATCH: Record<string, true> = { research_start: true, research_add_evidence: true, research_submit_source_result: true, research_read_search: true, research_add_analysis: true, research_finalize: true, thesis_create: true, thesis_show: true, thesis_refine: true, thesis_watch: true, thesis_journal: true, thesis_status: true, "research.session.inspect": true, "research.session.resume": true, "research.session.finalize": true, "research.job.start": true, "research.job.complete": true, "research.freeze.create": true };
+// dispatches; SOURCE blocks them while unlisted data tools pass. (SOURCE extras
+// live in STAGE_GATE_SOURCE_EXTRA above, so they must not repeat here.)
+const STAGE_GATE_NON_DISPATCH: Record<string, true> = { research_start: true, research_add_analysis: true, research_finalize: true, thesis_create: true, thesis_show: true, thesis_refine: true, thesis_watch: true, thesis_journal: true, thesis_status: true, "research.session.inspect": true, "research.session.resume": true, "research.session.finalize": true, "research.job.start": true, "research.job.complete": true, "research.freeze.create": true };
 function stageBlockReason(stage: Stage, toolName: string): string | undefined {
  if (STAGE_GATE_DISCOVERY[toolName]) return undefined;
  if (stage === "COMMITTEE") return STAGE_GATE_COMMITTEE_EXTRA[toolName] ? undefined : `Stage ${stage} forbids tool '${toolName}'`;
@@ -257,12 +252,61 @@ function stageBlockReason(stage: Stage, toolName: string): string | undefined {
  if (STAGE_GATE_SOURCE_EXTRA[toolName]) return undefined;
  return STAGE_GATE_NON_DISPATCH[toolName] ? `Stage ${stage} forbids tool '${toolName}'` : undefined;
 }
+export function stageBlockReasonForTest(stage: Stage, toolName: string): string | undefined {
+ return stageBlockReason(stage, toolName);
+}
 export function blockReasonForRun(runId: string, toolName: string): string | undefined {
  const sid = runs.get(runId)?.sessionId;
  if (!sid) return undefined;
  const seen = lastSeen.get(sid);
  if (!seen) return undefined;
  return stageBlockReason(deriveState(seen.session, seen.jobs, seen.latestFreeze).stage, toolName);
+}
+
+// PIT parity mirror (kernel stays authoritative): pure mirrors of
+// app/research/models.py pit_violated/pit_unverified. Export + test only,
+// never called in prod paths. DIVERGENCE (deliberate, fail-closed-false):
+// Python _coerce_time RAISES on non-ISO input ("" / "garbage" / non-string,
+// caught by _ingest_pit_gate as PROVENANCE_FAILURE); coerceTime returns null
+// so pitViolated/pitUnverified return false instead. A TS consumer must treat
+// false-with-unparseable-input as "no verdict", never as "PIT clean".
+const NO_CUTOFF_AS_OF: Record<string, true> = { unbounded: true };
+function coerceTime(v: unknown): number | null {
+ if (v === null || v === undefined) return null;
+ if (v instanceof Date) {
+  const ms = v.getTime();
+  return Number.isNaN(ms) ? null : ms;
+ }
+ if (typeof v !== "string") return null;
+ const raw = v.trim();
+ if (!raw || !/^\d{4}-\d{2}-\d{2}/.test(raw)) return null;
+ const text = raw.replace(" ", "T");
+ const stamped = /^\d{4}-\d{2}-\d{2}$/.test(text)
+  ? `${text}T00:00:00Z`
+  : /([zZ]|[+-]\d{2}:?\d{2}(:\d{2})?)$/.test(text)
+   ? text
+   : `${text}Z`;
+ const ms = Date.parse(stamped);
+ return Number.isNaN(ms) ? null : ms;
+}
+function asOfBounded(asOf: unknown): boolean {
+ if (asOf === null || asOf === undefined) return false;
+ if (typeof asOf === "string") {
+  const text = asOf.trim().toLowerCase();
+  return text.length > 0 && !NO_CUTOFF_AS_OF[text];
+ }
+ return asOf instanceof Date;
+}
+export function pitViolated(asOf: unknown, knownAt: unknown): boolean {
+ if (typeof asOf === "string" && NO_CUTOFF_AS_OF[asOf.trim().toLowerCase()]) return false;
+ const start = coerceTime(asOf);
+ const known = coerceTime(knownAt);
+ if (start === null || known === null) return false;
+ return known > start;
+}
+export function pitUnverified(asOf: unknown, knownAt: unknown): boolean {
+ if (knownAt !== null && knownAt !== undefined) return false;
+ return asOfBounded(asOf);
 }
 
 async function inspect(sessionId: string, dataRoot?: string, asOf?: string): Promise<InspectSnapshot> {
@@ -294,33 +338,27 @@ const SOURCE_WORKFLOW =
 function sourceSteps(sessionId: string, jobId: string, asOf?: string): string {
  const cutoff = asOf && asOf.length > 0 ? `known_at must be an ISO-8601 timestamp on or before the session cutoff ${asOf}` : `no session cutoff applies; known_at may be any ISO-8601 timestamp or omitted`;
  return (
-  `${SOURCE_WORKFLOW}Record each finding with Call call_tool with name="research_add_evidence" and arguments={"session_id": "${sessionId}", "job_id": "${jobId}", ${ITEM_SHAPE}}. ` +
+  `${SOURCE_WORKFLOW}The sec-agent child records evidence with research_add_evidence on session ${sessionId} and job ${jobId} (${ITEM_SHAPE}); ` +
+  `its sec-scout batch fans out inside its own session. ` +
   `Provenance is kernel-validated and ${cutoff}; unprovenanced or out-of-order calls fail closed. ` +
-  `When this source investigation is complete, you MUST call research_submit_source_result exactly once with the structured coverage {"useful_for_question": "sufficient"|"insufficient", ...}, evidence_ids, and unresolved_questions, then stop. ` +
+  `When this source investigation is complete, the sec-agent MUST call research_submit_source_result exactly once with the structured coverage {"useful_for_question": "sufficient"|"insufficient", ...}, evidence_ids, and unresolved_questions, then stop. ` +
   `That ends this source job and returns control to the Director, which owns freezing, waves, and the session; it never freezes, ends a wave, or ends the session. Do not attempt to freeze.`
  );
 }
 
 function fetchPrompt(sessionId: string, jobId: string, question: string, asOf?: string): string {
  return (
-  `Research session ${sessionId} created for "${question}". Fetch evidence now: dispatch SEC research with ` +
-  `Call call_tool with name="search_sec_filings" (or list_sec_filings / get_sec_document), then open what you find. ` +
+  `Research session ${sessionId} created for "${question}". Dispatch SEC research now as one task batch with context and one task for agent sec-agent ` +
+  `(task: the research objective plus branch guidance; the batch plans the omp-owned source job). ` +
   sourceSteps(sessionId, jobId, asOf)
  );
 }
-// Analysis shape: the rich committee envelope, every factual claim cited to a
-// frozen evidence id. One contract string serves both authoring paths (the
-// in-context research_add_analysis call and the per-role spawn prompt).
-const ANALYSIS_ENVELOPE =
- `{"executive_view": "<your read in 1-3 sentences>", "claims": [{"text": "<finding>", "claim_type": "observed_fact"|"inference"|"unknown"|"contradicted", "evidence_ids": ["<frozen evidence id>"]}], ` +
- `"impact_channels": [{"text": "<how it transmits>", "evidence_ids": ["<frozen evidence id>"], "direction": "positive"|"negative"|"mixed"}], ` +
- `"materiality": {"overall": "critical"|"high"|"medium"|"low", "reasoning": "<why>"}, "uncertainties": ["<open question>"], "what_would_change": ["<observable change>"], "follow_ups": ["<question?>"]}`;
 
 function wavePrompt(wave: number, sessionId: string, jobId: string, targeted: string, asOf?: string): string {
  const label = wave <= 1 ? "Wave-1" : `Wave-${wave}`;
  return (
-  `${label} authorized for research session ${sessionId}${targeted}. Fetch this wave's evidence with ` +
-  `Call call_tool with name="search_sec_filings" (or get_material_events / get_sec_document), then open what you find. ` +
+  `${label} authorized for research session ${sessionId}${targeted}. Dispatch SEC research now as one task batch with context and one task for agent sec-agent ` +
+  `(task: this wave's objective plus branch guidance; the batch plans the omp-owned source job). ` +
   sourceSteps(sessionId, jobId, asOf) +
   ` If evidence is insufficient, include it in unresolved_questions; the Director decides the next wave.`
  );
@@ -331,16 +369,12 @@ function trioJobIdsForFreeze(session: Json, fid: string): string[] {
 }
 
 function trioPrompt(sessionId: string, freezeId: string, mapping: Json[], allowedIds: string, note = ""): string {
- const calls = mapping
-  .map(
-   (j) =>
-    `Call call_tool with name="research_add_analysis" and arguments={"session_id": "${sessionId}", "job_id": "${str(j.job_id)}", "role": "${str(j.job_type)}", "analysis": ${ANALYSIS_ENVELOPE}}`,
-  )
-  .join(" ");
+ const roles = mapping.map((j) => str(j.job_type)).filter(Boolean).join(", ");
  return (
   `${note}Fresh context? Reload first: Call call_tool with name="research_read" and arguments={"session_id": "${sessionId}", "kind": "freeze", "resource_id": "${freezeId}"}, ` +
   `then Call call_tool with name="research_read" and arguments={"session_id": "${sessionId}", "kind": "evidence", "resource_id": "<id>"} for each id you will cite. ` +
-  `Committee may READ frozen state; it must NOT fetch new evidence. Evidence frozen as ${freezeId}. Author each role now, one call per role (${calls}). ` +
+  `Committee may READ frozen state; it must NOT fetch new evidence. Evidence frozen as ${freezeId}. Dispatch the committee now as one task batch with context and tasks for these roles: ${roles}. ` +
+  `Each role reads only the frozen evidence and returns exactly the structured envelope (claims with claim_type and evidence_ids, impact channels with direction, materiality with reasoning, uncertainties, what_would_change, follow_ups). ` +
   `Every factual claim must cite the frozen evidence ids it rests on — observed_fact and contradicted need at least one, inference needs at least one, unknown may carry none — and the only allowed ids are: ${allowedIds}. ` +
   `Unknown ids fail closed naming them.`
  );
@@ -374,157 +408,16 @@ async function freezeWave(sessionId: string, wave: number, dataRoot?: string, as
  return rpc("research.freeze.create", { session_id: sessionId, wave_id: wave }, dataRoot, asOf);
 }
 
-// --- fresh per-role contexts -------------------------------------------------
-// Kernel role semantics: the same frozen evidence, read three independent ways.
-const ROLE_ORDERS: Record<string, string> = {
- stockbot: "You are Stockbot: the balanced base case. State what the frozen evidence most likely implies, weighted as it stands.",
- bullbot: "You are Bullbot: the resilience case. State the strongest limited-damage reading the frozen evidence actually supports.",
- bearbot: "You are Bearbot: the downside case. State the strongest contagion reading the frozen evidence actually supports.",
-};
-const ROLE_RULES =
- `Each claim is exactly {"text", "claim_type", "evidence_ids"}; claim_type is one of observed_fact / inference / unknown / contradicted, ` +
- `where observed_fact, inference and contradicted need at least one frozen evidence id and unknown may cite none. ` +
- `Each impact channel is {"text", "direction", "evidence_ids"} with at least one frozen evidence id and direction positive, negative or mixed. ` +
- `materiality is {"overall": "critical"|"high"|"medium"|"low", "reasoning": "<why>"}; uncertainties and what_would_change are plain string lists; ` +
- `every follow_up is a question string of 12-500 characters ending in "?". ` +
- `Argue only what the evidence supports: no fabricated optimism, no fabricated pessimism, and mark what the evidence cannot settle as unknown. `;
-
-export type RoleSpawn = (prompt: string) => Promise<string>;
-// Production default: the one-shot `pi` process (flag-less unless the env
-// override is configured). Tests and embedders set `null`, which declares fresh
-// role contexts unavailable — a null seam never spawns anything.
-let roleSpawn: RoleSpawn | null = spawnPiRole;
-export function setRoleSpawn(fn: RoleSpawn | null): void {
- roleSpawn = fn;
-}
-// One model call plus process start-up; mirrors the verify harness's 300s run cap.
-const ROLE_SPAWN_TIMEOUT_MS = 300_000;
-
-/** Frozen per-role CLI argv; pi resolves the provider/model when no override is set. */
-export function roleSpawnCommand(prompt: string): string[] {
- const provider = (process.env.STOCKBOT_PI_PROVIDER ?? "").trim();
- const model = (process.env.STOCKBOT_PI_MODEL ?? "").trim();
- const flags = [...(provider ? ["--provider", provider] : []), ...(model ? ["--model", model] : [])];
- return [
-  "pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-  "--no-prompt-templates", "--no-context-files", ...flags, "--", prompt,
- ];
-}
-
-// One-shot role process: stdout only, killed on timeout, "" on any failure (the
-// caller falls back to in-context authoring, so nothing throws past it).
-function spawnPiRole(prompt: string): Promise<string> {
- const argv = roleSpawnCommand(prompt);
- return new Promise<string>((resolve) => {
-  let settled = false;
-  let timer: ReturnType<typeof setTimeout>;
-  const finish = (out: string): void => {
-   if (settled) return;
-   settled = true;
-   clearTimeout(timer);
-   resolve(out);
-  };
-  const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "ignore"] });
-  let out = "";
-  timer = setTimeout(() => {
-   try {
-    child.kill("SIGKILL");
-   } catch {
-    // already gone
-   }
-   finish("");
-  }, ROLE_SPAWN_TIMEOUT_MS);
-  child.stdout?.on("data", (chunk) => {
-   out += String(chunk);
-  });
-  child.on("error", () => finish(""));
-  child.on("close", () => finish(out));
- });
-}
-
-function rolePrompt(role: string, question: string, freezeId: string, allowedIds: string, evidenceText: string): string {
- return (
-  `${ROLE_ORDERS[role] ?? `You are the ${role} analyst on this committee.`}\n` +
-  `Question under research: ${question}\n` +
-  `Frozen evidence ${freezeId} is reproduced below in full; it is your only material and you have no tools.\n${evidenceText}\n` +
-  `${ROLE_RULES}Cite only these frozen evidence ids: ${allowedIds}. ` +
-  `Respond with raw JSON only — no prose, no code fences — in exactly this shape: ${ANALYSIS_ENVELOPE}`
- );
-}
-
-// Frozen evidence text for one freeze, read with the same verb the in-context
-// prompt names (research_read over the bridge), so a role sees exactly what the
-// kernel froze. Any unreadable record fails the whole read (no partial evidence).
-async function frozenEvidenceText(sessionId: string, freezeId: string, ids: string[], dataRoot?: string, asOf?: string): Promise<string> {
- const readText = async (kind: string, resourceId: string): Promise<string> => {
-  const res = await rpc("tool.invoke", { name: "research_read", arguments: { session_id: sessionId, kind, resource_id: resourceId } }, dataRoot, asOf);
-  return str(res.content).trim();
- };
- const freezeText = await readText("freeze", freezeId);
- if (!freezeText) throw new Error(`freeze ${freezeId} unreadable`);
- const evidence = await Promise.all(ids.map((id) => readText("evidence", id)));
- if (evidence.some((text) => text.length === 0)) throw new Error("frozen evidence unreadable");
- return [freezeText, ...evidence].join("\n\n");
-}
-
-// Model text at a trust boundary: take the JSON object and let the kernel
-// validate the envelope (missing keys and unknown ids fail there, not here).
-function parseRoleEnvelope(text: string): Json {
- const body = text.trim();
- const start = body.indexOf("{");
- const end = body.lastIndexOf("}");
- if (start < 0 || end <= start) throw new Error("role context returned no JSON envelope");
- const parsed: unknown = JSON.parse(body.slice(start, end + 1));
- if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) throw new Error("role context returned a non-object envelope");
- return parsed as Json;
-}
-
-// Author + record every role in its own context. Null once all three are recorded;
-// otherwise the note explaining the fallback, which the caller reports in its prompt.
-async function authorTrioInFreshContexts(
- sessionId: string, question: string, freezeId: string, allowedIds: string[], roles: Json[], dataRoot?: string, asOf?: string,
-): Promise<string | null> {
- // No seam: fresh role contexts are unavailable by construction, so no frozen
- // evidence is read and nothing can spawn (a null seam never starts a real `pi`).
- const spawnRole = roleSpawn;
- if (!spawnRole) return "Role contexts unavailable (role spawns are disabled); author in this context. ";
- try {
-  const evidenceText = await frozenEvidenceText(sessionId, freezeId, allowedIds, dataRoot, asOf);
-  const jobs = roles.map((job) => ({ job, prompt: rolePrompt(str(job.job_type), question, freezeId, allowedIds.join(", "), evidenceText) }));
-  // Every role process starts before any is awaited: three contexts, one wall clock.
-  const envelopes = (await Promise.all(jobs.map((j) => spawnRole(j.prompt)))).map((text) => parseRoleEnvelope(text));
-  await Promise.all(
-   jobs.map((j, i) =>
-    rpc("research.analysis.record", { session_id: sessionId, job_id: str(j.job.job_id), role: str(j.job.job_type), analysis: envelopes[i] }, dataRoot, asOf),
-   ),
-  );
-  return null;
- } catch (err) {
-  return `Role contexts unavailable (${err instanceof Error ? err.message : String(err)}); author in this context. `;
- }
-}
-
-// The question the roles answer: the session's question plus this wave's target.
-function committeeQuestion(session: Json, sessionId: string): string {
- const base = str(session.query) || str(session.objective) || sessionId;
- const targeted = str(session.targeted_question);
- return targeted ? `${base} Follow-up for this wave: ${targeted}` : base;
-}
-
-// Which authoring path ran, stated in the prompt the model receives next.
-const NOTE_ROLES_AUTHORED = "Committee roles were authored and recorded in three fresh per-role contexts. ";
-
 // Atomic trio: one RPC creates every missing committee job (status RUNNING)
 // together, so no role is ever started, awaited, and only then followed by the
-// next. A role already running is reused; a recorded role is left alone.
-// The driver authors + records the roles in fresh per-role contexts here; on any
-// spawn/parse/record failure the returned prompt authors the remaining roles in
-// this context.
+// next. A role already running is reused; a recorded role is left alone. The
+// Director then prompts this context to dispatch the trio as one OMP task
+// batch (planTaskCall + recordTaskResult); no subprocess ever authors a role.
 async function seedTrio(runId: string, sessionId: string, wave: number, dataRoot?: string, asOf?: string, note = ""): Promise<Advance> {
  try {
   await rpc("research.committee.create", { session_id: sessionId, wave_id: wave }, dataRoot, asOf);
  } catch (err) {
-  return { done: false, prompt: `Committee creation for research session ${sessionId} failed (${err instanceof Error ? err.message : String(err)}). Keep authoring analyses with Call call_tool with name="research_add_analysis".` };
+  return { done: false, prompt: `Committee creation for research session ${sessionId} failed (${err instanceof Error ? err.message : String(err)}). Dispatch the committee as one task batch.` };
  }
  let snapshot: InspectSnapshot;
  try {
@@ -537,30 +430,7 @@ async function seedTrio(runId: string, sessionId: string, wave: number, dataRoot
  if (d.trio.done) {
   return { done: false, prompt: finalizePrompt(sessionId, d.trio.fid, allowed, `${note}Trio complete for research session ${sessionId}. `, trioJobIdsForFreeze(snapshot.session, d.trio.fid)) };
  }
- const failure = await authorTrioInFreshContexts(sessionId, committeeQuestion(snapshot.session, sessionId), d.trio.fid, d.freezeEvidenceIds, d.trio.eligible, dataRoot, asOf);
- // Kernel truth decides: roles recorded by the fresh contexts complete the trio,
- // and a partial record leaves only the survivors for in-context authoring.
- const current = await freshState(sessionId, d, dataRoot, asOf);
- if (current.trio.done) {
-  // Kernel truth: every role is recorded, so this same advance continues into
-  // the kernel's next state (the wave gate, or finalize on a decline).
-  const after = await advanceOnAgentEnd(runId, "", dataRoot, asOf);
-  return after && !after.done ? { done: false, prompt: `${NOTE_ROLES_AUTHORED}${after.prompt}` } : after;
- }
- // Not every role is recorded: the note says which authoring path ran and the
- // prompt covers exactly the roles the kernel still has open.
- return { done: false, prompt: trioPrompt(sessionId, current.trio.fid, current.trio.eligible, current.freezeEvidenceIds.join(", "), `${note}${failure ?? ""}`) };
-}
-
-// Roles recorded by a spawn attempt change the eligible set, so re-read the
-// kernel after one; a failed read keeps the snapshot the attempt started from.
-async function freshState(sessionId: string, fallback: StageState, dataRoot?: string, asOf?: string): Promise<StageState> {
- try {
-  const snapshot = await inspect(sessionId, dataRoot, asOf);
-  return deriveState(snapshot.session, snapshot.jobs, snapshot.latestFreeze);
- } catch {
-  return fallback;
- }
+ return { done: false, prompt: trioPrompt(sessionId, d.trio.fid, d.trio.eligible, allowed, note) };
 }
 
 export async function startResearch(
@@ -643,9 +513,9 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  }
  if (!d.trio.done) {
   // Committee stage: one atomic RPC guarantees the whole trio exists RUNNING
-  // before any authoring prompt (existing role jobs are reused, recorded roles
-  // stay out of the prompt); with provider/model configured the roles are
-  // authored + recorded in fresh per-role contexts inside seedTrio.
+  // before any dispatch prompt (existing role jobs are reused, recorded roles
+  // stay out of the prompt); the Director then dispatches the trio as one OMP
+  // task batch (planTaskCall + recordTaskResult).
   return seedTrio(runId, sid, d.trio.wave, dataRoot, asOf);
  }
  // Trio complete for the latest freeze: the wave gate alone decides continue vs
@@ -702,4 +572,257 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  const reasonN = str((frozenN.pending_next_action as Json | undefined)?.reason ?? "");
  const limitN = reasonN ? ` Evidence limitations: ${reasonN}.` : "";
  return seedTrio(runId, sid, N, dataRoot, asOf, limitN ? `${limitN} ` : "");
+}
+// --- Director task interception policy (OMP runtime) ---------------------------
+// The Director owns every main-session spawn: SOURCE_RESEARCH allows sec-agent
+// only, COMMITTEE allows the trio only, FINAL allows nothing. Nested fan-out
+// runs inside the sec-agent's own child session, which passes the main-session
+// gate through untouched; the kernel spawn policy stays the single owner there.
+const num = (v: unknown): number | null => (typeof v === "number" && Number.isInteger(v) ? v : null);
+const DIRECTOR_SPAWNS = ["sec-agent", "stockbot", "bullbot", "bearbot"];
+const STAGE_AGENTS: Record<Stage, string[]> = {
+ SOURCE_RESEARCH: ["sec-agent"],
+ COMMITTEE: ["stockbot", "bullbot", "bearbot"],
+ FINAL: [],
+};
+const JOB_TYPE: Record<string, string> = {
+ "sec-agent": "source_agent",
+ stockbot: "stockbot",
+ bullbot: "bullbot",
+ bearbot: "bearbot",
+};
+export interface TaskPlanContext {
+ researchKey: string;
+ toolCallId: string;
+}
+export interface TaskPlan {
+ block?: true;
+ reason?: string;
+ input?: Json;
+}
+interface PlannedItem {
+ sessionId: string;
+ jobId: string;
+ jobType: string;
+ agentType: string;
+ wave: number;
+ name: string;
+}
+const plannedByCall = new Map<string, { sessionId: string; items: PlannedItem[] }>();
+function shortSuffix(jobId: string): string {
+ const cleaned = jobId.replace(/[^a-zA-Z0-9]/g, "");
+ return cleaned.slice(-8).toLowerCase() || "job";
+}
+function researchContextBlock(b: { sessionId: string; jobId: string; wave: number; asOf?: string; freezeId?: string }): string {
+ const rows = [
+  `research_session_id=${b.sessionId}`,
+  `research_job_id=${b.jobId}`,
+  `wave_id=${b.wave}`,
+  `as_of=${b.asOf && b.asOf.length > 0 ? b.asOf : "-"}`,
+  `freeze_id=${b.freezeId && b.freezeId.length > 0 ? b.freezeId : "-"}`,
+  `source_domain=SEC`,
+ ];
+ return `# Research context (kernel-authoritative; pass these ids through verbatim)\n${rows.join("\n")}`;
+}
+// Pre-record shape guard mirroring the kernel's rich-envelope contract
+// (COMMITTEE_REQUIRED_KEYS + typed claims/channels + {overall, reasoning}
+// materiality). Structural only — the kernel stays authoritative on freeze
+// grounding and follow-up shape. Returns the first defect, or "" when shaped.
+function committeeEnvelopeError(data: Json): string {
+ for (const key of ["executive_view", "claims", "impact_channels", "materiality", "uncertainties", "what_would_change", "follow_ups"]) {
+  if (!(key in data)) return `missing '${key}'`;
+ }
+ if (typeof data.executive_view !== "string") return "'executive_view' must be a string";
+ for (const key of ["claims", "impact_channels", "uncertainties", "what_would_change", "follow_ups"]) {
+  if (!Array.isArray(data[key])) return `'${key}' must be a list`;
+ }
+ for (const [i, claim] of (data.claims as unknown[]).entries()) {
+  if (!claim || typeof claim !== "object") return `'claims[${i}]' must be an object`;
+  const row = claim as Json;
+  if (typeof row.text !== "string" || !row.text.trim()) return `'claims[${i}].text' must be a non-empty string`;
+  if (!["observed_fact", "inference", "unknown", "contradicted"].includes(str(row.claim_type))) return `'claims[${i}].claim_type' must be one of observed_fact|inference|unknown|contradicted`;
+  if (!Array.isArray(row.evidence_ids)) return `'claims[${i}].evidence_ids' must be a list`;
+ }
+ for (const [i, channel] of (data.impact_channels as unknown[]).entries()) {
+  if (!channel || typeof channel !== "object") return `'impact_channels[${i}]' must be an object`;
+  const row = channel as Json;
+  if (typeof row.text !== "string" || !row.text.trim()) return `'impact_channels[${i}].text' must be a non-empty string`;
+  if (!["positive", "negative", "mixed"].includes(str(row.direction))) return `'impact_channels[${i}].direction' must be one of positive|negative|mixed`;
+  if (!Array.isArray(row.evidence_ids)) return `'impact_channels[${i}].evidence_ids' must be a list`;
+ }
+ const mat = data.materiality;
+ if (!mat || typeof mat !== "object") return "'materiality' must be an object";
+ if (!["critical", "high", "medium", "low"].includes(str((mat as Json).overall).trim().toLowerCase())) return "'materiality.overall' must be one of critical|high|medium|low";
+ if (typeof (mat as Json).reasoning !== "string") return "'materiality.reasoning' must be a string";
+ return "";
+}
+function failureCategory(result: Json): string {
+ if (result.retry_failure ?? result.retryFailure) return "provider_error";
+ const error = str(result.error);
+ if (/timeout|timed out/i.test(error)) return "timeout";
+ if (/schema|structured|invalid output/i.test(error)) return "model_output_failure";
+ return "tool_error";
+}
+export async function planTaskCall(ctx: TaskPlanContext, input: Json, dataRoot?: string, asOf?: string): Promise<TaskPlan> {
+ const mem = runs.get(ctx.researchKey);
+ if (!mem) return {};
+ const items = objs(input.tasks);
+ if (items.length === 0)
+  return { block: true, reason: "Research task calls must use the batch form: provide context and a non-empty tasks array." };
+ let snapshot: InspectSnapshot;
+ try {
+  snapshot = await inspect(mem.sessionId, dataRoot, asOf);
+ } catch (err) {
+  return { block: true, reason: `Research session ${mem.sessionId} is unreadable (${err instanceof Error ? err.message : String(err)}); the spawn is refused.` };
+ }
+ const sessionId = mem.sessionId;
+ const stage = deriveState(snapshot.session, snapshot.jobs, snapshot.latestFreeze).stage;
+ // No parent threading: the Director plans omp-owned top-level jobs only (no
+ // parent arg), so every child is a fresh root the kernel owns outright.
+ const allowed = DIRECTOR_SPAWNS.filter((a) => (STAGE_AGENTS[stage] ?? []).includes(a));
+ for (const item of items) {
+  const agentType = str(item.agent);
+  if (!allowed.includes(agentType))
+   return { block: true, reason: `Director may not spawn '${agentType}' in research session ${sessionId} at stage ${stage}; allowed: ${allowed.join(", ") || "none"}.` };
+ }
+ try {
+  const isCommittee = items.some((item) => (ROLES as readonly string[]).includes(str(item.agent)));
+  const roleJobs = new Map<string, string>();
+  let freezeId = "";
+  const cw = typeof snapshot.session.current_wave === "number" && Number.isInteger(snapshot.session.current_wave) ? (snapshot.session.current_wave as number) : 0;
+  let wave = Math.max(cw, strs(snapshot.session.freeze_ids).length + 1, 1);
+  if (isCommittee) {
+   const freeze = snapshot.latestFreeze;
+   if (!freeze)
+    return { block: true, reason: `No evidence freeze exists for research session ${sessionId}; freeze the wave before running the committee.` };
+   freezeId = str(freeze.freeze_id);
+   wave = typeof freeze.wave_id === "number" && Number.isInteger(freeze.wave_id) ? (freeze.wave_id as number) : wave;
+   const created = await rpc("research.committee.create", { session_id: sessionId, wave_id: wave }, dataRoot, asOf);
+   let freshJobs: Json[] = [];
+   try {
+    freshJobs = (await inspect(sessionId, dataRoot, asOf)).jobs;
+   } catch {
+    freshJobs = [];
+   }
+   for (const role of ROLES) {
+    const hit = freshJobs.find((j) => str(j.job_type) === role && j.wave_id === wave);
+    const jid = str(hit?.job_id);
+    if (jid) roleJobs.set(role, jid);
+   }
+   if (roleJobs.size < ROLES.length) {
+    const returned = strs(created.jobs);
+    if (returned.length >= ROLES.length) {
+     ROLES.forEach((role, i) => {
+      if (!roleJobs.has(role) && returned[i]) roleJobs.set(role, returned[i]);
+     });
+    } else {
+     for (const job of objs(created.jobs)) {
+      const t = str(job.job_type);
+      const jid2 = str(job.job_id);
+      if ((ROLES as readonly string[]).includes(t) && jid2 && !roleJobs.has(t)) roleJobs.set(t, jid2);
+     }
+    }
+   }
+   if (roleJobs.size < ROLES.length)
+    return { block: true, reason: `Committee creation for research session ${sessionId} returned ${roleJobs.size} of ${ROLES.length} role jobs; the batch is refused.` };
+  }
+  const planned: PlannedItem[] = [];
+  const outItems: Json[] = [];
+  for (const item of items) {
+   const agentType = str(item.agent);
+   const jobType = JOB_TYPE[agentType] ?? agentType;
+   let jobId = roleJobs.get(agentType) ?? "";
+   let itemWave = wave;
+   if (!jobId) {
+    const job = await rpc("research.job.start", { session_id: sessionId, type: jobType, wave_id: itemWave, budget: { owner: "omp" } }, dataRoot, asOf);
+    jobId = str(job.job_id);
+    if (!jobId) return { block: true, reason: `research.job.start returned no job id for '${agentType}'.` };
+    const w = num(job.wave_id);
+    if (w !== null) itemWave = w;
+   }
+   const name = `${agentType}-${shortSuffix(jobId)}`;
+   planned.push({ sessionId, jobId, jobType, agentType, wave: itemWave, name });
+   const taskText = str(item.task);
+   outItems.push({
+    ...item,
+    name,
+    task: `${researchContextBlock({ sessionId, jobId, wave: itemWave, asOf, freezeId })}${taskText.length > 0 ? `\n\n${taskText}` : ""}`,
+   });
+  }
+  plannedByCall.set(ctx.toolCallId, { sessionId, items: planned });
+  const first = planned[0];
+  const contextText = str(input.context);
+  const shared = researchContextBlock({ sessionId, jobId: first.jobId, wave: first.wave, asOf, freezeId });
+  return {
+   input: {
+    ...input,
+    context: `${shared}\nEach item carries its own research_job_id; use the id in your own item, not this batch-wide one.${contextText.length > 0 ? `\n\n${contextText}` : ""}`,
+    tasks: outItems,
+   },
+  };
+ } catch (err) {
+  return { block: true, reason: `Research job creation failed (${err instanceof Error ? err.message : String(err)}); the spawn is refused and no child was started.` };
+ }
+}
+export async function recordTaskResult(ctx: TaskPlanContext, details: Json, dataRoot?: string, asOf?: string): Promise<void> {
+ const plan = plannedByCall.get(ctx.toolCallId);
+ if (!plan) return;
+ plannedByCall.delete(ctx.toolCallId);
+ const results = objs(details.results);
+ for (const [index, item] of plan.items.entries()) {
+  const result = results[index] ?? {};
+  try {
+   try {
+    await rpc("research.job.runtime", { job_id: item.jobId, runtime: "omp", runtime_agent_id: item.name, runtime_task_call_id: ctx.toolCallId, runtime_agent_type: item.agentType }, dataRoot, asOf);
+   } catch {
+    // best-effort runtime attach never throws
+   }
+   if (result.aborted === true) {
+    await rpc("research.job.cancel", { job_id: item.jobId }, dataRoot, asOf);
+    continue;
+   }
+   const exitCode = num(result.exit_code) ?? num(result.exitCode) ?? 0;
+   if (exitCode !== 0) {
+    await rpc("research.job.fail", { job_id: item.jobId, category: failureCategory(result), message: str(result.stderr) || str(result.error) || "OMP child failed" }, dataRoot, asOf);
+    continue;
+   }
+   const out = (result.structured_output ?? result.structuredOutput) as Json | null | undefined;
+   let data: Json | null = null;
+   let invalid = false;
+   if (out && typeof out === "object") {
+    if (str((out as Json).status) === "invalid") invalid = true;
+    else {
+     const d = (out as Json).data;
+     data = d && typeof d === "object" ? (d as Json) : null;
+    }
+   }
+   if (invalid) {
+    await rpc("research.job.fail", { job_id: item.jobId, category: "model_output_failure", message: `structured output for '${item.agentType}' failed schema validation` }, dataRoot, asOf);
+    continue;
+   }
+   if ((ROLES as readonly string[]).includes(item.jobType)) {
+    if (!data) {
+     await rpc("research.job.fail", { job_id: item.jobId, category: "model_output_failure", message: `committee role '${item.jobType}' returned no analysis envelope` }, dataRoot, asOf);
+     continue;
+    }
+    const shapeError = committeeEnvelopeError(data);
+    if (shapeError) {
+     await rpc("research.job.fail", { job_id: item.jobId, category: "model_output_failure", message: `committee role '${item.jobType}' returned an incomplete analysis envelope (${shapeError})` }, dataRoot, asOf);
+     continue;
+    }
+    await rpc("research.analysis.record", { session_id: plan.sessionId, job_id: item.jobId, role: item.jobType, analysis: data }, dataRoot, asOf);
+    continue;
+   }
+   const after = await rpc("research.session.inspect", { session_id: plan.sessionId }, dataRoot, asOf);
+   const open = objs(after.jobs).some((j) => str(j.job_id) === item.jobId && str(j.status) === "running");
+   if (open)
+    await rpc("research.job.fail", { job_id: item.jobId, category: "model_output_failure", message: `'${item.agentType}' returned without submitting a source result` }, dataRoot, asOf);
+  } catch (err) {
+   try {
+    await rpc("research.job.fail", { job_id: item.jobId, category: "synthesis_failed", message: err instanceof Error ? err.message : String(err) }, dataRoot, asOf);
+   } catch {
+    // job already terminal; nothing further to record
+   }
+  }
+ }
 }

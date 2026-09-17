@@ -36,8 +36,8 @@ class _ReplaySource:
         return [e for e in self.events if e.known_at <= known_at]
 
 
-class _ReplayPi:
-    """Fake run_thesis_pi: each launch applies the repository writes Pi's tool
+class _ReplayOmp:
+    """Fake run_thesis_omp: each launch applies the repository writes OMP's tool
     calls would have made for that tick's event."""
 
     def __init__(self, repository: ThesisRepository) -> None:
@@ -86,9 +86,9 @@ class _ReplayPi:
                 effective_at=as_of or T5)
 
 
-def _replay_pi(monkeypatch: pytest.MonkeyPatch, repository: ThesisRepository) -> _ReplayPi:
-    fake = _ReplayPi(repository)
-    monkeypatch.setattr(runner_mod, "run_thesis_pi", fake)
+def _replay_omp(monkeypatch: pytest.MonkeyPatch, repository: ThesisRepository) -> _ReplayOmp:
+    fake = _ReplayOmp(repository)
+    monkeypatch.setattr(runner_mod, "run_thesis_omp", fake)
     return fake
 
 
@@ -126,7 +126,7 @@ def test_replay_t0_through_t5_point_in_time_and_idempotent(tmp_path: Path, monke
         CanonicalEvent(event_id="t5", canonical_ref="edgar:NVDA:8-K:t5", source="sec_filings",
                        known_at=T5, entity="NVDA", summary="NVDA 8-K major guidance cut"),
     ])
-    gw = _replay_pi(monkeypatch, r)
+    gw = _replay_omp(monkeypatch, r)
 
     res1 = tick(r, tid, {"sec_filings": src}, known_at=T1)
     assert gw.calls == 0 and res1.triggers_created == [] and _journals(root, t.slug) == []
@@ -201,7 +201,7 @@ def test_external_evidence_rule_loads_unsupported_and_never_live(tmp_path: Path,
     src = _ReplaySource([CanonicalEvent(
         event_id="x1", canonical_ref="ext:nvda:x1", source="sec_filings",
         known_at=T3, entity="NVDA", summary="NVDA note")])
-    gw = _replay_pi(monkeypatch, r)
+    gw = _replay_omp(monkeypatch, r)
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T4)
     rules = r.load_watch_rules(t.thesis_id)
     assert rules[0].enabled is False and rules[0].support_status == "unsupported"

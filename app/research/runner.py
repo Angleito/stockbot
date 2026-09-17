@@ -1,23 +1,11 @@
-"""Live research runner: sequential SEC waves + committee, real dispatch/model.
+"""Retired live-research loop (deterministic test helper only).
 
-Wave N (N = 1..unlimited): source job -> SEC tools (real) -> validate dossier ->
-freeze EN -> committee trio on that freeze -> disagreement -> per-wave novelty
-from persisted deltas -> ``decide_next_wave``. Authorized keeps going: next
-source job -> fetch -> freeze -> trio -> gate. Convergence (zero-novelty
-branch, exact repeated action, no material committee request) or an explicitly
-configured budget ends the run with final synthesis over the newest freeze.
-Waves are sequence numbers: nothing here stops at a fixed wave count.
-Each step persists to ResearchRepository and appends the journal; validators
-(budgets/PIT/freeze/dossier) stay authoritative and are never bypassed.
-Only document-opening tool results (get_sec_document/get_sec_filing) ingest as
-evidence with SEC source provenance; search/navigation results persist as
-discovery records and are never citable as evidence.
-
-Resume: ``resume_live`` continues an interrupted session (source/freeze/
-one-committee) to a final result without duplicating completed work. Fetch
-is skipped when wave evidence exists, freeze is skipped when its id already
-resolves, and the committee trio always reruns because analyses are not
-persisted. FAILED/COMPLETED/CANCELLED sessions are never silently reopened.
+Production research runs the OMP path: omp binary + Stockbot extension +
+ResearchDirector task batches + Python kernel verification
+(see scripts/verify_agent_scenarios.py). This module's sequential
+in-process loop (source job -> fetch -> freeze -> trio -> gate) stays only
+because deterministic unit tests pin its step behavior; it must not gain new
+production callers.
 """
 
 from __future__ import annotations
@@ -1994,12 +1982,13 @@ def run_live(
     provider: str = "fake",
     model_name: str | None = None,
 ) -> dict[str, object]:
-    """Run live research from wave 1 and persist every step; resume never duplicates.
+    """Retired production entrypoint (deterministic test helper only).
 
-    Waves run sequentially for as long as ``decide_next_wave`` authorizes them
-    (no fixed ceiling; only configured budgets, coverage, committee requests,
-    and measured novelty/loops stop the run), then the newest freeze is
-    synthesized. ``interrupt_after`` stops early at a named boundary.
+    Live evals run the production OMP path (omp + extension + Director + task
+    subagents + kernel; see scripts/verify_agent_scenarios.py). This in-process
+    loop must not gain new callers. Waves run sequentially while
+    ``decide_next_wave`` authorizes them; ``interrupt_after`` stops early at a
+    named boundary.
     """
     if interrupt_after not in (None, "source", "freeze", "one-committee"):
         raise ValueError(f"runner: 'interrupt_after' must be source/freeze/one-committee, got {interrupt_after!r}")
@@ -2309,14 +2298,14 @@ def resume_live(
     provider: str = "fake",
     model_name: str | None = None,
 ) -> dict[str, object]:
-    """Continue an interrupted session to a final result without duplicating work.
+    """Retired production entrypoint (deterministic test helper only).
 
-    Preloads the evidence ledger (skipping duplicates) and dossier ids, seeds
-    the evidence counter from the existing wave count so ids are never reused,
-    skips fetch when wave evidence exists, skips freeze when its id already
-    resolves, then always reruns the full committee trio on the freeze because
-    analyses are not persisted. Closes with the next-wave gate + synthesis tail.
-    FAILED/COMPLETED/CANCELLED sessions raise instead of silently reopening.
+    Resume in production is the staged ResearchDirector (resumeResearch) over
+    the persisted kernel session, not this in-process loop. Must not gain new
+    callers. Preloads the evidence ledger (skipping duplicates) and dossier
+    ids, skips fetch/freeze when already done, reruns the committee trio,
+    closes with the next-wave gate + synthesis tail. FAILED/COMPLETED/
+    CANCELLED sessions raise instead of silently reopening.
     """
     store: ResearchRepository = repo if repo is not None else ResearchRepository()
     limits: DirectorBudgets = budgets if budgets is not None else DirectorBudgets()

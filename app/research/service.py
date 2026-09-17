@@ -50,13 +50,16 @@ if TYPE_CHECKING:
 
 __all__ = [
     "ResearchNotFound",
+    "attach_job_runtime",
     "authorize_and_consume_dispatch",
+    "cancel_job",
     "cancel_research",
     "complete_job",
     "create_committee_jobs",
     "create_research",
     "decide_next_wave",
     "decide_wave2",
+    "fail_job",
     "finalize_session",
     "freeze_session",
     "heartbeat_job",
@@ -173,6 +176,31 @@ def heartbeat_job(job_id: str, *, repo: ResearchRepository | Path | str | None =
     beat = _replace(job, last_heartbeat_at=utcnow())
     store.save_job(beat)
     return beat.to_dict()
+
+
+# Closed runtime-identity vocabulary the OMP session writes into Job.diagnostics.
+_JOB_RUNTIME_KEYS: tuple[str, ...] = (
+    "runtime", "runtime_agent_id", "runtime_parent_agent_id",
+    "runtime_task_call_id", "runtime_agent_type", "runtime_session_file",
+)
+
+
+def attach_job_runtime(job_id: str, runtime: Mapping[str, object] | None = None, *,
+                       repo: ResearchRepository | Path | str | None = None) -> dict[str, JSONValue]:
+    """Merge OMP runtime identity into one job's diagnostics and persist it.
+
+    Only accepted keys with non-empty string values are written; everything
+    else (other keys, blanks, non-strings, prior values) is left untouched so
+    partial calls accumulate across the job's life.
+    """
+    store = _repo(repo)
+    job = _require_job(store, job_id)
+    merged = dict(job.diagnostics)
+    merged.update({key: value for key, value in (runtime or {}).items()
+                   if key in _JOB_RUNTIME_KEYS and isinstance(value, str) and value})
+    updated = replace(job, diagnostics=merged)
+    store.save_job(updated)
+    return updated.to_dict()
 
 
 def _jobs_by_status(job_list: list[Job]) -> dict[str, list[dict[str, JSONValue]]]:
@@ -384,6 +412,38 @@ def complete_job(
         return job.to_dict()
     store.save_job(done)
     transition_job_completed(job.session_id, job.job_id, repo=store)
+    return store.get_job(job.job_id).to_dict()
+
+
+def fail_job(
+    job_id: str,
+    category: str,
+    message: str,
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, JSONValue]:
+    """Mark a Pi-run job failed; terminal jobs return current state (no-op)."""
+    store = _repo(repo)
+    job = _require_job(store, job_id)
+    if job.status in _TERMINAL_JOBS:
+        return job.to_dict()
+    done = _jobs.fail_job(job, category, message)
+    store.save_job(done)
+    return store.get_job(job.job_id).to_dict()
+
+
+def cancel_job(
+    job_id: str,
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, JSONValue]:
+    """Mark a Pi-run job cancelled; terminal jobs return current state (no-op)."""
+    store = _repo(repo)
+    job = _require_job(store, job_id)
+    if job.status in _TERMINAL_JOBS:
+        return job.to_dict()
+    done = _jobs.cancel_job(job)
+    store.save_job(done)
     return store.get_job(job.job_id).to_dict()
 
 
@@ -2233,14 +2293,86 @@ def _dispatch_check_domain(job: Job, job_id: str, tool_name: str) -> None:
         raise ValueError(f"dispatch: tool {tool_name!r} outside SEC domain for job {job_id!r}")
 
 
+# Job-diagnostics slot: normalized dispatch action key -> session evidence count when it ran.
+_DISPATCH_ACTIONS = "dispatch_actions"
+
+
+def _dispatch_action(job: Job, found: ResearchSession, tool_name: str, arguments: Mapping[str, object]) -> tuple[str, str, str, str, tuple[str, ...], str, str, str, str]:
+    """Deterministic identity of one dispatch: normalized action fields + canonical arguments.
+
+    Semantic fields mirror the runner's loop key through
+    ``normalize_research_action`` (source/tool/query/ticker/forms/as_of/
+    accession/objective); the call's own arguments ride along verbatim so two
+    distinct calls — two documents of one accession, two queries — are never
+    one action. Staging ids are routing metadata, not action identity.
+    """
+    from .director import normalize_research_action
+
+    args = {key: value for key, value in arguments.items() if key not in ("session_id", "job_id")}
+    forms = args.get("forms")
+    entity = args.get("ticker") or args.get("identifier") or args.get("entity") or args.get("query")
+    action = normalize_research_action(
+        job.source_domain or "", tool_name,
+        str(args.get("query") or ""), str(entity or ""),
+        forms if isinstance(forms, (list, tuple, str)) else (),
+        str(args.get("as_of") or ""), str(args.get("accession_no") or ""), found.objective,
+    )
+    return (*action, json.dumps(args, sort_keys=True, default=str))
+
+
+def _dispatch_loop_gate(store: ResearchRepository, found: ResearchSession, job: Job,
+                        tool_name: str, arguments: Mapping[str, object] | None) -> None:
+    """Refuse an exact repeat of an action already dispatched for this job with no new evidence.
+
+    State rides in the job's persisted ``diagnostics`` (action key -> session
+    evidence count when the action ran), so a resumed session keeps detecting
+    loops. Only exact repeats with zero evidence growth are refused: a
+    materially different action, or the same action after new evidence landed,
+    always runs — no numeric cap on searches, filings, documents, waves, or
+    jobs. A refused repeat raises ``research_loop_detected`` (the gateway's
+    error channel) and journals the same event, which ``decide_next_wave``
+    counts as ``duplicate_actions_blocked``.
+
+    A dispatch without arguments carries no action identity and passes through
+    untracked: the model path always supplies the validated arguments, so this
+    only shields direct kernel callers.
+    """
+    if arguments is None:
+        return
+    action = _dispatch_action(job, found, tool_name, arguments)
+    key = json.dumps(list(action))
+    raw_seen = job.diagnostics.get(_DISPATCH_ACTIONS)
+    seen: dict[str, JSONValue] = dict(raw_seen) if isinstance(raw_seen, Mapping) else {}
+    count = len(store.list_evidence(found.session_id))
+    prior = seen.get(key)
+    if isinstance(prior, int) and not isinstance(prior, bool) and count <= prior:
+        _emit(store, found.session_id, "research_loop_detected", {
+            "job_id": job.job_id, "tool": tool_name, "action": list(action), "query": action[2],
+            "evidence_count": count, "reason": "research_loop_detected",
+        })
+        raise ValueError(
+            f"research_loop_detected: {tool_name!r} repeats an action that already ran with no new evidence "
+            f"(evidence_count={count}); vary the arguments or record the findings it produced before retrying"
+        )
+    seen[key] = count
+    # ponytail: read-modify-write on the job row; a lost concurrent update can
+    # only re-admit a repeat (never block a fresh action), so it needs no lock.
+    store.save_job(replace(job, diagnostics={**job.diagnostics, _DISPATCH_ACTIONS: seen}))
+
+
 def authorize_and_consume_dispatch(
     session_id: str,
     job_id: str,
     tool_name: str,
     *,
+    arguments: Mapping[str, object] | None = None,
     repo: ResearchRepository | Path | str | None = None,
 ) -> dict[str, object]:
-    """Authorize one tool dispatch, then atomically consume job + global budget slots."""
+    """Authorize one tool dispatch, then atomically consume job + global budget slots.
+
+    ``arguments`` is the validated tool call's argument mapping; it keys the
+    no-progress repeat gate (a refused repeat raises ``research_loop_detected``).
+    """
     from .stage import check_stage_tool, stage_for_session
 
     store = _repo(repo)
@@ -2251,6 +2383,9 @@ def authorize_and_consume_dispatch(
         billed, spent = store.consume_dispatch_budget(session_id, job_id)
     except KeyError as exc:
         raise ResearchNotFound(exc.args[0] if exc.args else str(exc)) from None
+    # Budget first, repeat gate second (the runner's order), so an exhausted
+    # budget keeps its own refusal verbatim.
+    _dispatch_loop_gate(store, found, spent, tool_name, arguments)
     raw_used: object = billed.budget.get("tool_calls_used", 0)
     used = raw_used if isinstance(raw_used, int) and not isinstance(raw_used, bool) else 0
     return {"session_id": session_id, "job_id": job_id, "tool_name": tool_name,

@@ -1,19 +1,19 @@
 /** Stockbot Pi extension: RESEARCH-only tools via scripts/pi_bridge.py.
  *
  * Single source of truth stays in Python (app/tools.py TOOLS); tool schemas
- * pass through untouched via Type.Unsafe, and the system prompt comes from
+ * pass through as raw JSON documents, and the system prompt comes from
  * the bridge `describe` response (app/prompts.py PI_RESEARCH_PROMPT) plus
- * the raw `.pi/stockbot.yaml` thesis workflow text appended at startup.
+ * the raw `.omp/thesis-workflow.yaml` thesis workflow text appended at startup.
  */
 
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
-import type { ExtensionAPI, ExtensionContext, Theme } from "@earendil-works/pi-coding-agent";
-import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "../lib/research-director.ts";
+import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
+import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "../lib/research-director.ts";
+import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
 import { registerYoutubeAnalytics } from "../lib/youtube-analytics.ts";
-import { Text } from "@earendil-works/pi-tui";
-import { Type } from "typebox";
+import { Text, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
 
 export type Json = Record<string, unknown>;
 
@@ -401,18 +401,108 @@ export function createBridgeClient(
 
  return { callBridge, close };
 }
+// Module-level Director identity: factory re-runs per child session (fresh
+// eventBus, fresh ExtensionAPI, fresh runner per session), so each binding gets
+// its own closure. Identity must live here: the first session id seen on
+// session_start wins. String id (not object identity): getSessionId is stable
+// across moveTo; a wrapped/cloned manager would break ===.
+let mainSessionId: string | null = null;
+export function resetMainSessionIdentity(): void {
+ mainSessionId = null;
+}
+function sessionIdOf(ctx: ExtensionContext | undefined | null): string | null {
+ try {
+  const mgr: unknown = ctx?.sessionManager;
+  if (mgr && typeof mgr === "object") {
+   if ("getSessionId" in mgr && typeof mgr.getSessionId === "function") {
+    const id: unknown = mgr.getSessionId();
+    if (typeof id === "string" && id) return id;
+   }
+   // Test doubles carry a bare string id; production always has getSessionId().
+   if ("id" in mgr && typeof mgr.id === "string" && mgr.id) return mgr.id;
+  }
+ } catch {
+  return null;
+ }
+ return null;
+}
+function isMainSession(ctx: ExtensionContext): boolean {
+ // Manager-less contexts (tests, non-session callers) keep legacy behavior.
+ const id = sessionIdOf(ctx);
+ if (!id) return true;
+ if (mainSessionId === null) {
+  mainSessionId = id;
+  return true;
+ }
+ return mainSessionId === id;
+}
+// Slash-menu filter: core "/" rows disabled via settings still list with a
+// "disabled in settings" description; hide those rows so users never pick a
+// dead command. Disabled behavior itself is untouched — only the listing.
+function isDisabledInSettings(description: unknown): boolean {
+ return typeof description === "string" && /disabled in settings/i.test(description);
+}
+// Bare "/" scores every command equally; pin our single entry point first
+// without touching typed-prefix match order.
+function pinResearchFirst<T extends { value: string }>(items: T[], prefix: string): T[] {
+ if (!/^\s*\/$/.test(prefix)) return items;
+ const idx = items.findIndex((item) => item.value === "research");
+ if (idx <= 0) return items;
+ const found = items[idx];
+ if (found === undefined) return items;
+ return [found, ...items.slice(0, idx), ...items.slice(idx + 1)];
+}
+// Items without a string description are always kept.
+// Wrap the current autocomplete provider, dropping disabled-in-settings rows.
+// Every other member stays a bound passthrough (never spread: a class
+// instance may hold #private fields that spread would drop).
+function wrapAutocompleteProvider(current: AutocompleteProvider): AutocompleteProvider {
+ return new Proxy(current, {
+  get(target, prop, _receiver) {
+   if (prop === "getSuggestions") {
+    return async (...args: Parameters<AutocompleteProvider["getSuggestions"]>) => {
+     const result = await target.getSuggestions(...args);
+     if (result === null) return null;
+     const items = result.items.filter((item) => !isDisabledInSettings(item.description));
+     return { prefix: result.prefix, items: pinResearchFirst(items, result.prefix) };
+    };
+   }
+   if (prop === "trySyncSlashCompletion") {
+    const sync = target.trySyncSlashCompletion;
+    if (typeof sync !== "function") return undefined;
+    return (textBeforeCursor: string) => {
+     const result = sync.call(target, textBeforeCursor);
+     if (result === null) return null;
+     const items = result.items.filter((item) => !isDisabledInSettings(item.description));
+     if (items.length === 0) return null;
+     return { prefix: result.prefix, items: pinResearchFirst(items, result.prefix) };
+    };
+   }
+   const value = Reflect.get(target, prop, target);
+   if (typeof value === "function") return value.bind(target);
+   return value;
+  },
+ });
+}
 
 export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: () => ChildProcessWithoutNullStreams) {
  registerYoutubeAnalytics(pi);
+ // Per-binding bridge process: every session (main + each child) re-runs this
+ // factory, so each binding owns a private callBridge closure. The Director
+ // seam is module-global: only the main binding claims it, on first main
+ // session_start — a child overwrite would reroute Director RPCs mid-turn.
+ // Tests calling handlers without session_start must fire main session_start
+ // first (prod always does before any command or task frame).
  const { callBridge, close } = createBridgeClient(spawnBridge ?? spawnPythonBridge);
- setResearchBridge((req) => callBridge(req));
- pi.on("session_shutdown", () => {
-  try {
-   close();
-  } catch {
-   // already closed
-  }
- });
+ let bridgeClaimed = false;
+ const claimBridgeForMain = (): void => {
+  if (bridgeClaimed) return;
+  bridgeClaimed = true;
+  setResearchBridge((req) => callBridge(req));
+ };
+ // (lifecycle subscription lives below emit/runId/seq init: subscribing at
+ // factory top would close over runId/seq in TDZ during the describe/doctor
+ // handshake, throwing ReferenceError on any early frame.)
 
  // --- describe: prompt + RESEARCH tool registry ---
  const [describe, doctor] = await Promise.all([callBridge({ op: "describe" }, 30_000), callBridge({ op: "doctor" }, 30_000)]);
@@ -448,8 +538,8 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    name: fn.name,
    label: fn.name,
    description: fn.description,
-   parameters: Type.Unsafe(fn.parameters),
-   async execute(toolCallId, params) {
+   parameters: fn.parameters as ToolDefinition["parameters"],
+   async execute(_toolCallId: string, params: unknown) {
     toolCalls++;
     if (fn.name === "browse_tools" || fn.name === "search_tools") routing.discoveryCalls++;
     if (fn.name === "call_tool") routing.callToolCount++;
@@ -466,7 +556,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     // Native full-question passes stay untouched; assisted calls are tagged
     // in the returned text and counted separately (bridge only persists
     // routing_metrics/agent tool rows, so no separate event is emitted).
-    let effParams = params;
+    let effParams = (params ?? {}) as Json;
     let searchAssisted = false;
     let searchOriginalQuery = "";
     if (fn.name === "search_tools") {
@@ -476,11 +566,11 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
      if (isShortQuery(q) && stored.length > q.trim().length + 10) {
       searchAssisted = true;
       searchOriginalQuery = q.trim();
-      effParams = { ...(bag as Record<string, unknown>), query: stored } as typeof params;
+      effParams = { ...(bag as Record<string, unknown>), query: stored };
       routing.assistedSearchCalls++;
      }
     }
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, toolCallId, fn.name, effParams as Json, 0, dataRoots.get(runId), asOfs.get(runId), researchContextForRun(runId)));
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, _toolCallId, fn.name, effParams, 0, dataRoots.get(runId), asOfs.get(runId), researchContextForRun(runId)));
     const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : undefined;
     const failed = typeof bridge.error === "string" || (inner !== undefined && typeof inner.error === "string");
     const invalid = inner !== undefined && (inner.error_type === "unknown_tool" || inner.error_type === "invalid_tool_arguments");
@@ -522,8 +612,8 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     };
    },
    renderCall: cardSpec
-    ? (args, theme) => {
-     // Pi validates params against the schema before render.
+    ? (args: unknown, _options: unknown, theme: Theme) => {
+     // The host validates params against the schema before render.
      const bag: Json = args as Json;
      return card(
       cardSpec.title,
@@ -533,7 +623,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     }
     : undefined,
    renderResult: cardSpec
-    ? (result, _opts, theme) => {
+    ? (result, _opts, theme, _args) => {
      try {
       // Details are the bridge result object built in execute above.
       const details: Json =
@@ -562,7 +652,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
  }
 
  // --- thesis workflow (raw text, never YAML-parsed in TS) ---
- const WORKFLOW_PATH = `${ROOT}/.pi/stockbot.yaml`;
+ const WORKFLOW_PATH = `${ROOT}/.omp/thesis-workflow.yaml`;
  let workflowText = "";
  let workflowDown = false;
  let workflowDetail = "";
@@ -580,7 +670,9 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
  }
 
  // --- prompt replacement (coding prompt -> research prompt) ---
- pi.on("before_agent_start", async (event) => {
+ pi.on("before_agent_start", async (event, ctx) => {
+  // Child sessions run their agent-definition prompts; only the Director gets the research prompt.
+  if (!isMainSession(ctx)) return;
   // Independent prompt boundary: reset routing. A queued routing
   // continuation reuses its state instead.
   if (!routing.continuationPending) {
@@ -589,24 +681,56 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   pendingQuestion = event.prompt;
   if (bridgeDown)
    return {
-    systemPrompt:
+    systemPrompt: [
      `Stockbot research tools are unavailable (${bridgeDetail}). ` +
      "Decline investment-research questions as tool-unavailable; do not answer from model knowledge.",
+    ],
    };
   if (workflowDown)
    return {
-    systemPrompt:
+    systemPrompt: [
      `Stockbot thesis workflow is unavailable (${workflowDetail}). ` +
      "Decline thesis work until the workflow file is restored; do not answer from model knowledge.",
+    ],
    };
-  if (systemPrompt) return { systemPrompt: systemPrompt + "\n\n" + workflowText };
+  // OMP replaces policy as a string[]; one entry keeps the exact Pi text.
+  if (systemPrompt) return { systemPrompt: [systemPrompt + "\n\n" + workflowText] };
  });
 
  // --- RESEARCH gate: registered tools only, and only while active ---
  // Inactive direct schemas stay uncallable (hallucinated direct calls
  // block); call_tool remains the active fallback. Non-research host tools
  // keep the pre-existing RESEARCH-only block.
- pi.on("tool_call", (event) => {
+ pi.on("tool_call", async (event, ctx) => {
+  // Main task interception first: the Director owns every main-session spawn
+  // (stage-gated sec-agent/trio). sec-agent -> sec-scout fan-out runs inside
+  // the sec-agent child session, which passes through untouched; the kernel
+  // spawn policy still enforces there.
+  if (event.toolName === "task") {
+   if (!isMainSession(ctx)) return;
+   try {
+    const taskInput = (((event as unknown as Json).input ?? {}) as Json);
+    const plan = await planTaskCall({ researchKey: runId, toolCallId: event.toolCallId }, taskInput, dataRoots.get(runId), asOfs.get(runId));
+    if (plan.block) {
+     emit({ event: "security_block", tool: event.toolName, reason: plan.reason ?? "task spawn refused" });
+     blocks++;
+     return { block: true, reason: plan.reason ?? "Stockbot task gate: spawn refused" };
+    }
+    await emit({ event: "task_planned", tool: event.toolName, tool_call_id: event.toolCallId });
+    if (plan.input) return { input: plan.input as Record<string, unknown> };
+    return;
+   } catch (err) {
+    const reason = `Stockbot task gate failed (${err instanceof Error ? err.message : String(err)})`;
+    emit({ event: "security_block", tool: event.toolName, reason });
+    blocks++;
+    return { block: true, reason };
+   }
+  }
+  // Director-only gate for everything else: the main session owns research
+  // routing, prompt policy, and roster. Child bindings run agent-definition
+  // prompts with their own tools (research_read/research_add_evidence) and
+  // must never hit the RESEARCH roster or per-binding routing counters.
+  if (!isMainSession(ctx)) return;
   let isActive = false;
   try {
    isActive = pi.getActiveTools().includes(event.toolName);
@@ -621,7 +745,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   // Stage gate (UX-only; the kernel gate is authoritative): staged research runs
   // may only use stage-appropriate tools. Unknown stages fail open.
   try {
-   const rawArgs: unknown = (event as unknown as Json).args ?? (event as unknown as Json).params;
+   const rawArgs: unknown = (event as unknown as Json).input;
    const inner: unknown = event.toolName === "call_tool" && rawArgs && typeof rawArgs === "object" ? (rawArgs as Json).name : undefined;
    const target = typeof inner === "string" && inner ? inner : event.toolName;
    const reason = blockReasonForRun(runId, target);
@@ -632,6 +756,16 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    }
   } catch {
    // fail open; the kernel gate still enforces.
+  }
+ });
+ pi.on("tool_result", async (event, ctx) => {
+  if (!isMainSession(ctx)) return;
+  if (event.toolName !== "task") return;
+  try {
+   await recordTaskResult({ researchKey: runId, toolCallId: event.toolCallId }, ((event.details ?? {}) as unknown as Json), dataRoots.get(runId), asOfs.get(runId));
+   await emit({ event: "task_result", tool: event.toolName, tool_call_id: event.toolCallId, is_error: event.isError });
+  } catch (err) {
+   console.error(`[stockbot] task result recording failed: ${err instanceof Error ? err.message : String(err)}`);
   }
  });
 
@@ -711,7 +845,37 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    false,
   ).catch(() => ({ error: "bridge_unavailable" }));
  }
-
+ // OMP lifecycle -> kernel trace: task spawns publish on the session bus, so a
+ // started frame names the child before its tool_result lands and a settled
+ // frame closes it. Each binding subscribes its own bus; the handler emits via
+ // this binding's runId. Synchronous spawns also emit tool_result, which stays
+ // the authoritative per-job record; unknown payloads are ignored.
+ const unsubLifecycle = pi.events?.on(TASK_SUBAGENT_LIFECYCLE_CHANNEL, (raw: unknown) => {
+  const payload = (raw ?? {}) as Partial<SubagentLifecyclePayload>;
+  if (typeof payload.id !== "string" || !payload.id) return;
+  if (typeof payload.agent !== "string" || !payload.agent) return;
+  if (payload.status === "started") {
+   void emit({ event: "subagent_started", runtime_id: payload.id, agent: payload.agent, parent_tool_call_id: payload.parentToolCallId, session_file: payload.sessionFile });
+   return;
+  }
+  if (payload.status === "completed" || payload.status === "failed" || payload.status === "aborted") {
+   void emit({ event: "subagent_finished", runtime_id: payload.id, agent: payload.agent, status: payload.status, parent_tool_call_id: payload.parentToolCallId, session_file: payload.sessionFile });
+  }
+ });
+ pi.on("session_shutdown", () => {
+  // Each binding closes only its own bridge proc; createBridgeClient.close is
+  // idempotent and per-binding, so a child shutdown cannot kill the parent.
+  try {
+   close();
+  } catch {
+   // already closed
+  }
+  try {
+   unsubLifecycle?.();
+  } catch {
+   // already unsubscribed
+  }
+ });
  function refreshStatus(ctx: ExtensionContext | null) {
   if (!ctx) return;
   try {
@@ -732,7 +896,30 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   }
  }
 
- pi.on("session_start", (_event, ctx) => {
+ let menuFilterInstalled = false;
+
+ pi.on("session_start", async (_event, ctx) => {
+  // Slash-menu filter first: hide core "/" rows disabled via settings. Once
+  // per binding and independent of the Director gate below (every TUI session
+  // gets it); headless/test contexts without ui stay a silent no-op.
+  if (!menuFilterInstalled) {
+   try {
+    const ui = ctx?.ui;
+    if (typeof ui?.addAutocompleteProvider === "function") {
+     ui.addAutocompleteProvider((current) => wrapAutocompleteProvider(current));
+     menuFilterInstalled = true;
+    }
+   } catch {
+    // non-TUI modes without autocomplete: ignore
+   }
+  }
+  // Director-only roster pin: child bindings share this module but own their
+  // per-binding hostTools/lastCtx; only the first session pins the roster.
+  // OMP applies activation asynchronously, so await it before refreshStatus.
+  if (!isMainSession(ctx)) return;
+  // First main session_start owns Director RPCs: claim the module seam now so
+  // a later child factory re-run can never reroute it mid-turn.
+  claimBridgeForMain();
   lastCtx = ctx;
   // Capture non-Stockbot host tools once and pin the stable visible grammar:
   // host tools plus the permanent discovery set. Direct research schemas stay
@@ -740,7 +927,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   // discovery, keeping the provider prompt cache stable.
   hostTools = pi.getActiveTools().filter((n) => !registeredResearch.has(n));
   const permanent = DISCOVERY_TOOLS.filter((n) => registeredResearch.has(n));
-  pi.setActiveTools([...new Set([...hostTools, ...permanent])]);
+  await pi.setActiveTools([...new Set([...hostTools, ...permanent])]);
   refreshStatus(lastCtx);
  });
 
@@ -926,7 +1113,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    usage: {
     prompt_tokens: input + cacheRead + cacheWrite,
     completion_tokens: num(usage.output),
-    reasoning_tokens: num(usage.reasoning),
+    reasoning_tokens: num(usage.reasoningTokens),
     prompt_tokens_details: { cached_tokens: cacheRead },
     total_tokens: num(usage.totalTokens),
     cost: num(cost.total),

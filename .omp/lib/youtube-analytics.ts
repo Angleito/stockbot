@@ -10,15 +10,14 @@ import type {
  ExtensionAPI,
  ExtensionCommandContext,
  Theme,
-} from "@earendil-works/pi-coding-agent";
+} from "@oh-my-pi/pi-coding-agent";
 import {
  type Component,
  type KeybindingsManager,
- stripTerminalSequences,
  truncateToWidth,
  type TUI,
  wrapTextWithAnsi,
-} from "@earendil-works/pi-tui";
+} from "@oh-my-pi/pi-tui";
 
 type Json = Record<string, unknown>;
 
@@ -209,9 +208,16 @@ interface PanelMeta {
  warnings: string[];
 }
 
+// @oh-my-pi/pi-tui ships no stripTerminalSequences, so drop CSI (ESC [ … final
+// byte), OSC (ESC ] … BEL/ST) and APC (ESC _ … BEL/ST) sequences here before
+// rendering. A bare ESC with no known introducer is left for the C0 strip
+// below, so no escape byte reaches the terminal inside visible text.
+const TERMINAL_SEQUENCE = /\x1b(?:\[[0-?]*[ -/]*[@-~]|\][^\x07\x1b]*(?:\x07|\x1b\\)|_[^\x07\x1b]*(?:\x07|\x1b\\))/g;
+
 /** Strip control/escape sequences at render time; words otherwise unchanged. */
 function safeText(value: unknown): string {
- return stripTerminalSequences(String(value ?? ""))
+ return String(value ?? "")
+  .replace(TERMINAL_SEQUENCE, "")
   .replace(/[\r\n]+/g, " ")
   .replace(/[\x00-\x08\x0B\x0C\x0E-\x1F\x7F]/g, "");
 }

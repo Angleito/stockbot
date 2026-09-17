@@ -36,8 +36,8 @@ class _Src:
         return [e for e in self.events if e.known_at <= known_at]
 
 
-class _Pi:
-    """Fake run_thesis_pi: counts launches; ok-runs apply repo writes like Pi's tool calls."""
+class _Omp:
+    """Fake run_thesis_omp: counts launches; ok-runs apply repo writes like OMP's tool calls."""
     def __init__(self, fail: bool = False, write: Callable[..., None] | None = None) -> None:
         self.fail = fail
         self.write = write
@@ -56,7 +56,7 @@ class _Pi:
         self.run_ids.append(rid)
         self.last_run_id = rid
         if self.fail:
-            raise RuntimeError("pi boom")
+            raise RuntimeError("omp boom")
         if self.write is not None:
             try:
                 self.write(thesis_id, trigger_id, rid)
@@ -64,9 +64,9 @@ class _Pi:
                 self.write(thesis_id, trigger_id)
 
 
-def _pi(monkeypatch: pytest.MonkeyPatch, fail: bool = False, write: Callable[..., None] | None = None) -> _Pi:
-    fake = _Pi(fail=fail, write=write)
-    monkeypatch.setattr(runner_mod, "run_thesis_pi", fake)
+def _omp(monkeypatch: pytest.MonkeyPatch, fail: bool = False, write: Callable[..., None] | None = None) -> _Omp:
+    fake = _Omp(fail=fail, write=write)
+    monkeypatch.setattr(runner_mod, "run_thesis_omp", fake)
     return fake
 
 
@@ -97,7 +97,7 @@ def _journal_count(tmp_path: Path, slug: str) -> int:
     return len(list((tmp_path / "theses" / slug / "journal").glob("*.md")))
 
 
-# -- expression assessment via fake-Pi run_trigger outcomes ---------------------
+# -- expression assessment via fake-OMP run_trigger outcomes ---------------------
 
 def test_timing_mismatch_flagged_without_changing_thesis_state(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path, exprs=[{"instrument": "option", "direction": "long",
@@ -119,7 +119,7 @@ def test_timing_mismatch_flagged_without_changing_thesis_state(tmp_path: Path, m
                                       "near-term filing cuts against puts timing",
                               "known_at": T2}}, run_id)
 
-    fake = _pi(monkeypatch, write=_write)
+    fake = _omp(monkeypatch, write=_write)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     assert r.load_thesis(t.thesis_id).expressions[0].status == "flagged"
@@ -138,7 +138,7 @@ def test_bullish_equity_asks_no_options_questions(tmp_path: Path, monkeypatch: p
     def _journal_ok(tid: str, trig_id: str, run_id: str) -> None:
         r.append_journal_entry(
             tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "run_id": run_id})
-    fake = _pi(monkeypatch, write=_journal_ok)
+    fake = _omp(monkeypatch, write=_journal_ok)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     questions = r.load_questions(t.thesis_id)
@@ -162,7 +162,7 @@ def test_covered_call_without_portfolio_leaves_ownership_unresolved(tmp_path: Pa
                               "body": "ownership unresolved without portfolio read",
                               "known_at": T2}}, run_id)
 
-    fake = _pi(monkeypatch, write=_write)
+    fake = _omp(monkeypatch, write=_write)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     assert r.load_thesis(t.thesis_id).expressions[0].deterministic_support == "unknown"
@@ -186,7 +186,7 @@ def test_long_puts_without_market_has_no_invented_prices_or_greeks(tmp_path: Pat
                               "body": "not evaluable without market read; no quotes fetched",
                               "known_at": T2}}, run_id)
 
-    _pi(monkeypatch, write=_write)
+    _omp(monkeypatch, write=_write)
     run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     body = _journal_text(tmp_path, t.slug)
     assert not re.search(r"\$\s*\d", body)
@@ -195,14 +195,14 @@ def test_long_puts_without_market_has_no_invented_prices_or_greeks(tmp_path: Pat
 
 def test_unknown_and_processed_triggers_raise(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path)
-    fake = _pi(monkeypatch)
+    fake = _omp(monkeypatch)
     with pytest.raises(KeyError):
         run_trigger(r, t.thesis_id, "trigger:nope", known_at=T2)
     trig = r.create_trigger(t.thesis_id, canonical_refs=["ev:1"], summary="s", summary_origin="deterministic")
     def _journal_ok2(tid: str, trig_id: str, run_id: str) -> None:
         r.append_journal_entry(
             tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "run_id": run_id})
-    fake = _pi(monkeypatch, write=_journal_ok2)
+    fake = _omp(monkeypatch, write=_journal_ok2)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     with pytest.raises(ValueError):
@@ -212,15 +212,15 @@ def test_unknown_and_processed_triggers_raise(tmp_path: Path, monkeypatch: pytes
 
 # -- monitoring ----------------------------------------------------------------
 
-def test_irrelevant_event_produces_zero_pi_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_irrelevant_event_produces_zero_omp_calls(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path)
-    fake = _pi(monkeypatch)
+    fake = _omp(monkeypatch)
     src = _Src([_ev("ev:irr", entity="UNRELATEDCORPXYZ", summary="unrelated corp files")])
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert fake.calls == 0 and res.triggers_created == [] and res.no_op
 
 
-def test_duplicate_event_produces_zero_second_pi_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_duplicate_event_produces_zero_second_omp_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path)
 
     def _write(tid: str, trig_id: str, run_id: str) -> None:
@@ -231,7 +231,7 @@ def test_duplicate_event_produces_zero_second_pi_call(tmp_path: Path, monkeypatc
             "journal_entry": {"entry_id": "journal:t1", "title": "t", "body": "ok",
                               "known_at": T2}}, run_id)
 
-    fake = _pi(monkeypatch, write=_write)
+    fake = _omp(monkeypatch, write=_write)
     src = _Src([_ev("ev:d")])
     first = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert fake.calls == 1 and len(first.triggers_created) == 1
@@ -241,7 +241,7 @@ def test_duplicate_event_produces_zero_second_pi_call(tmp_path: Path, monkeypatc
 
 def test_identical_events_within_one_tick_coalesce_to_one_call(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path)
-    fake = _pi(monkeypatch)
+    fake = _omp(monkeypatch)
     src = _Src([_ev("ev:same"), _ev("ev:same")])
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert len(res.triggers_created) == 1 and fake.calls == 1
@@ -274,7 +274,7 @@ def test_relevant_filing_produces_one_bounded_call(tmp_path: Path, monkeypatch: 
                               "body": "reviewed filing; risk factors mention cyclicality",
                               "known_at": T2}}, run_id)
 
-    fake = _pi(monkeypatch, write=_write)
+    fake = _omp(monkeypatch, write=_write)
     res = tick(r, t.thesis_id, {"sec_filings": FilingSrc()}, known_at=T2)
     assert fake.calls == 1 and len(res.triggers_created) == 1
     assert "cyclicality" in _journal_text(tmp_path, t.slug)
@@ -285,7 +285,7 @@ def test_simultaneous_meaningful_events_produce_bounded_calls(tmp_path: Path, mo
     def _journal_ok3(tid: str, trig_id: str, run_id: str) -> None:
         r.append_journal_entry(
             tid, {"title": "t", "body": "ok", "trigger_id": trig_id, "run_id": run_id})
-    fake = _pi(monkeypatch, write=_journal_ok3)
+    fake = _omp(monkeypatch, write=_journal_ok3)
     src = _Src([_ev("ev:a", summary="NVDA files 10-K"), _ev("ev:b", summary="NVDA 8-K event")])
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert len(res.triggers_created) == 2 and fake.calls == 2
@@ -298,14 +298,14 @@ def test_possible_invalidator_produces_one_call(tmp_path: Path, monkeypatch: pyt
         {"evidence_id": "ev:seed", "thesis_id": t.thesis_id, "canonical_ref": "seed:1",
          "summary": "analyst warns of demand collapse scenario for NVDA", "known_at": T1}]},
         "run:seed")
-    fake = _pi(monkeypatch)
+    fake = _omp(monkeypatch)
     res = tick(r, t.thesis_id, {}, known_at=T2)
     assert fake.calls == 1 and len(res.triggers_created) == 1
 
 
 def test_expression_impact_event_tags_expression_ids(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path, exprs=[{"structure": "long puts", "status": "active"}])
-    fake = _pi(monkeypatch)
+    fake = _omp(monkeypatch)
     src = _Src([_ev("ev:x", summary="NVDA volatility event affects puts")])
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert fake.calls == 1
@@ -316,16 +316,16 @@ def test_expression_impact_event_tags_expression_ids(tmp_path: Path, monkeypatch
 def test_source_failure_leaves_checkpoint_unadvanced(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path)
     before = r.load_checkpoint(t.thesis_id).to_dict()
-    fake = _pi(monkeypatch)
+    fake = _omp(monkeypatch)
     res = tick(r, t.thesis_id, {"sec_filings": _Src(fail=True)}, known_at=T2)
     assert fake.calls == 0 and res.triggers_created == []
     assert r.load_checkpoint(t.thesis_id).to_dict() == before
 
 
-def test_pi_failure_leaves_pending_and_halts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_omp_failure_leaves_pending_and_halts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path)
     src = _Src([_ev("ev:1"), _ev("ev:2")])
-    fake = _pi(monkeypatch, fail=True)
+    fake = _omp(monkeypatch, fail=True)
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert res.runs == [] and len(res.triggers_created) == 2
     pending = [x for x in r.load_triggers(t.thesis_id) if x.status == "pending"]
@@ -335,7 +335,7 @@ def test_pi_failure_leaves_pending_and_halts(tmp_path: Path, monkeypatch: pytest
 def test_restart_processes_pending_once_without_dupes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path)
     src = _Src([_ev("ev:1")])
-    bad = _pi(monkeypatch, fail=True)
+    bad = _omp(monkeypatch, fail=True)
     tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert bad.calls == 1
     journals_before = _journal_count(tmp_path, t.slug)
@@ -348,7 +348,7 @@ def test_restart_processes_pending_once_without_dupes(tmp_path: Path, monkeypatc
             "journal_entry": {"entry_id": "journal:t1", "title": "t", "body": "recovered",
                               "known_at": T2}}, run_id)
 
-    monkeypatch.setattr(runner_mod, "run_thesis_pi", _Pi(write=_write))
+    monkeypatch.setattr(runner_mod, "run_thesis_omp", _Omp(write=_write))
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     assert res.triggers_created == []
     assert all(x.status == "processed" for x in r.load_triggers(t.thesis_id))
@@ -357,7 +357,7 @@ def test_restart_processes_pending_once_without_dupes(tmp_path: Path, monkeypatc
 
 def test_paused_and_closed_query_no_sources(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path)
-    fake = _pi(monkeypatch)
+    fake = _omp(monkeypatch)
     r.pause_thesis(t.thesis_id)
     src = _Src([_ev("ev:1")])
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
@@ -379,7 +379,7 @@ def test_two_theses_stay_isolated(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         r.apply_research_result(th.thesis_id, {"watch_add": [{"rule_id": "rule:1", "rule_type": "new_filing",
                              "enabled": True, "support_status": "supported",
                              "support_reason": "", "claim_ids": [cid], "expression_ids": []}]}, "", effective_at=T0)
-    fake = _pi(monkeypatch)
+    fake = _omp(monkeypatch)
     tick(r, a.thesis_id, {"sec_filings": _Src([_ev("ev:only-a")])}, known_at=T2)
     assert len(r.load_triggers(a.thesis_id)) == 1
     assert r.load_triggers(b.thesis_id) == []
@@ -393,7 +393,7 @@ def test_tight_budget_fails_explicitly(tmp_path: Path) -> None:
     ok = build_context(r, t.thesis_id, trig, known_at=T2)
     assert ok.known_at == T2 and isinstance(ok.omitted_ids, list)
 
-def test_large_monitor_checkpoint_not_in_pi_context(tmp_path: Path) -> None:
+def test_large_monitor_checkpoint_not_in_omp_context(tmp_path: Path) -> None:
     r, t = _make(tmp_path)
     r.save_checkpoint(t.thesis_id, {"thesis_id": t.thesis_id, "sources": {},
                                     "recent_hashes": ["a" * 64 for _ in range(1000)]})
@@ -417,7 +417,7 @@ def test_evidence_refs_stay_compact_and_reject_bodies(tmp_path: Path, monkeypatc
             "journal_entry": {"entry_id": "journal:bad", "title": "t", "body": "b",
                               "known_at": T1}}, "run:bad")
 
-    _pi(monkeypatch, write=_bad)
+    _omp(monkeypatch, write=_bad)
     with pytest.raises(ValueError):
         run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert r.load_triggers(t.thesis_id)[0].status == "pending"
@@ -443,7 +443,7 @@ def test_stored_pool_skips_missing_and_future_known_at(tmp_path: Path) -> None:
 
 def test_external_evidence_rule_loads_unsupported_and_never_live(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     r, t = _make(tmp_path, rule="new_external_evidence")
-    fake = _pi(monkeypatch)
+    fake = _omp(monkeypatch)
     src = _Src([_ev("ev:ext", summary="NVDA external note")])
     res = tick(r, t.thesis_id, {"sec_filings": src}, known_at=T2)
     rules = r.load_watch_rules(t.thesis_id)
@@ -528,7 +528,7 @@ def test_refinement_covers_only_new_targets_and_ignores_disabled(tmp_path: Path)
     assert disabled.enabled is False and set(disabled.claim_ids) == {new_cid}
 
 
-def test_live_trigger_pi_reaches_search_web_while_historical_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_live_trigger_omp_reaches_search_web_while_historical_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app import tools as tools_mod
     from app.policy import Capability, RequestContext
 
@@ -553,7 +553,7 @@ def test_live_trigger_pi_reaches_search_web_while_historical_blocked(tmp_path: P
         r.append_journal_entry(tid, {"title": "t", "body": "ok",
                                      "trigger_id": trig_id, "run_id": run_id})
 
-    fake = _pi(monkeypatch, write=_write)
+    fake = _omp(monkeypatch, write=_write)
     out = run_trigger(r, t.thesis_id, trig.trigger_id, known_at=T2)
     assert out.processed and fake.calls == 1
     assert fake.last_as_of is None
@@ -602,7 +602,7 @@ def test_live_tick_uses_current_state_with_cutoff_bounded_evidence(tmp_path: Pat
                                       "trigger_id": live_trig, "run_id": run_id},
                                      "test-model", context=live_ctx)
         assert "error" not in res
-    fake = _pi(monkeypatch, write=_write)
+    fake = _omp(monkeypatch, write=_write)
     res = tick(r, tid, {"sec_filings": src}, known_at=T1)
     assert fake.calls == 1 and len(res.triggers_created) == 1
     assert T1 in src.cutoffs

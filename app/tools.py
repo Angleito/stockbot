@@ -1241,6 +1241,7 @@ TOOLS: list[dict[str, object]] = [
                     "session_id": {"type": "string", "description": "Research session ID."},
                     "kind": {"type": "string", "enum": ["evidence", "freeze", "dossier", "job", "research"], "description": "Resource store to read."},
                     "resource_id": {"type": "string", "description": "Evidence, freeze, dossier, job, or session ID."},
+                    "freeze_id": {"type": "string", "description": "Optional freeze scope: an evidence read must be a member of that freeze's evidence set."},
                 },
                 "required": ["session_id", "kind", "resource_id"],
             },
@@ -5578,6 +5579,39 @@ def _unknown_resource_error(kind: str, resource_id: str, session_id: str) -> dic
         return {"error": f"unknown job_id: {resource_id!r} in session {session_id!r}", "error_type": "unknown_job"}
     return {"error": f"unknown {kind} id: {resource_id!r} in session {session_id!r}", "error_type": "unknown_resource"}
 
+
+def _record_evidence_ids(record: object) -> set[str]:
+    """Non-empty evidence ids a stored freeze or dossier record carries."""
+    if not isinstance(record, Mapping):
+        return set()
+    ids: set[str] = set()
+    for key in ("evidence_ids", "supporting_evidence_ids", "contradicting_evidence_ids"):
+        raw = record.get(key)
+        if isinstance(raw, list):
+            ids.update(v for v in raw if isinstance(v, str) and v)
+    return ids
+
+
+def _freeze_scope_error(kind: str, resource_id: str, record: object, session_id: str,
+                        freeze_id: object, freezes: Mapping[str, object]) -> dict[str, object] | None:
+    """Freeze-scoped read gate: unknown freeze, or evidence/dossier outside its membership, fails closed."""
+    if kind not in ("evidence", "dossier") or not isinstance(freeze_id, str) or not freeze_id:
+        return None
+    freeze = freezes.get(freeze_id)
+    if not isinstance(freeze, Mapping):
+        return _unknown_resource_error("freeze", freeze_id, session_id)
+    frozen = _record_evidence_ids(freeze)
+    if kind == "evidence":
+        if resource_id in frozen:
+            return None
+        return {"error": f"evidence id {resource_id!r} is not a member of freeze {freeze_id!r}",
+                "error_type": "not_in_freeze"}
+    outside = sorted(_record_evidence_ids(record) - frozen)
+    if not outside:
+        return None
+    return {"error": f"dossier id {resource_id!r} cites evidence outside freeze {freeze_id!r}: {', '.join(outside)}",
+            "error_type": "not_in_freeze"}
+
 def _research_read(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
     from app.research.service import ResearchNotFound
 
@@ -5588,11 +5622,16 @@ def _research_read(arguments: dict[str, object], context: RequestContext) -> dic
         return {"error": str(exc), "error_type": "unknown_resource"}
     resource_id = str(arguments.get("resource_id"))
     try:
-        store = _research_repo_for(context).resource_stores(session_id)[kind]
+        stores = _research_repo_for(context).resource_stores(session_id)
     except (ResearchNotFound, KeyError) as e:
         return _research_not_found_error(e)
+    store = stores[kind]
     if resource_id not in store:
         return _unknown_resource_error(kind, resource_id, session_id)
+    scoped = _freeze_scope_error(kind, resource_id, store[resource_id], session_id,
+                                 arguments.get("freeze_id"), stores.get("freeze", {}))
+    if scoped is not None:
+        return scoped
     return {"session_id": session_id, "kind": kind, "resource_id": resource_id, "record": store[resource_id]}
 
 

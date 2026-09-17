@@ -13,7 +13,7 @@ services:
     environment:
       THESIS_ID: ${THESIS_ID:?THESIS_ID required}
       STOCKBOT_DATA_DIR: /data
-      STOCKBOT_PI_PROVIDER: ${STOCKBOT_PI_PROVIDER:-}
-      STOCKBOT_PI_MODEL: ${STOCKBOT_PI_MODEL:-}
+      STOCKBOT_PROVIDER: ${STOCKBOT_PROVIDER:-}
+      STOCKBOT_MODEL: ${STOCKBOT_MODEL:-}
     command: /app/venv/bin/python cli.py thesis monitor ${THESIS_ID:?THESIS_ID required} --interval-seconds ${INTERVAL_SECONDS:-900}
     restart: unless-stopped

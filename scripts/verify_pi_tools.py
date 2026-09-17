@@ -43,7 +43,7 @@ from scripts.verify_tool_registry import (
     tool_schema_name,
 )
 
-EXTENSION = ".pi/extensions/stockbot.ts"
+EXTENSION = ".omp/extensions/stockbot.ts"
 # Duration evidence (2026-09-09 matrix): every recorded tool handler completes
 # in seconds (slowest singles: search_sec_filings 39s, search_sec_relationships
 # 25s; SEC per-filing sweeps ~0.6s each warm). The 180s kills all landed
@@ -1633,8 +1633,8 @@ def _pi_env(db_path: Path, stockbot_store: Path | None) -> dict[str, str]:
 
 
 def _pi_cmd(prompt: str) -> list[str]:
-    """Pi CLI argv: pristine prompt mode with the stockbot extension only."""
-    return ["pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills", "--no-prompt-templates", "--no-context-files", "--extension", EXTENSION, "--", prompt]
+    """OMP CLI argv: pristine prompt mode with the stockbot extension only."""
+    return ["omp", "-p", "--config", ".omp/stockbot.yml", "--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-tools", "--extension", EXTENSION, "--", prompt]
 
 
 def _pi_logs(attempt_dir: Path) -> tuple[Path, Path]:
