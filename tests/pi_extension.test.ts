@@ -602,6 +602,7 @@ import {
 	type YoutubeAnalyticsRequest,
 } from "../.omp/lib/youtube-analytics.ts";
 import {
+	normalizeAccession,
 	advanceOnAgentEnd,
 	pitUnverified,
 	pitViolated,
@@ -2902,6 +2903,19 @@ test("PIT parity mirrors kernel gates", () => {
 	expect(pitViolated("2025-06-30", "garbage")).toBe(false);
 	// Unbounded as_of never violates, for any known_at string.
 	fc.assert(fc.property(fc.string(), (known) => pitViolated("unbounded", known) === false), { seed: 42 });
+});
+test("Accession parity mirrors kernel normalization", () => {
+	expect(normalizeAccession("0000320193-25-000079")).toBe("0000320193-25-000079");
+	expect(normalizeAccession("000032019325000079")).toBe("0000320193-25-000079");
+	for (const bad of ["7768855a3f91", "0000320193-25-00007", "0000320193/25/000079", "", "0000320193-25-000079x", null, undefined, 123]) {
+		expect(normalizeAccession(bad)).toBeNull();
+	}
+	const canonical = normalizeAccession("000032019325000079");
+	expect(canonical && normalizeAccession(canonical)).toBe(canonical);
+	fc.assert(fc.property(fc.string({ maxLength: 24 }), (text) => {
+		const out = normalizeAccession(text);
+		return out === null || /^\d{10}-\d{2}-\d{6}$/.test(out);
+	}), { seed: 42 });
 });
 
 test("committee results record three analyses", async () => {

@@ -308,6 +308,17 @@ export function pitUnverified(asOf: unknown, knownAt: unknown): boolean {
  if (knownAt !== null && knownAt !== undefined) return false;
  return asOfBounded(asOf);
 }
+// Accession parity mirror (kernel stays authoritative): pure mirror of
+// app/research/evidence.py normalize_accession. Export + test only, never
+// called in prod paths. Python RAISES ValueError on non-canonical input;
+// this mirror returns null instead ("no verdict", never "valid"). A TS
+// consumer must treat null as invalid, never as clean.
+const ACCESSION_RE = /^\d{10}-\d{2}-\d{6}$/;
+export function normalizeAccession(value: unknown): string | null {
+ const text0 = typeof value === "string" ? value.trim() : "";
+ const text = /^\d{18}$/.test(text0) ? `${text0.slice(0, 10)}-${text0.slice(10, 12)}-${text0.slice(12)}` : text0;
+ return ACCESSION_RE.test(text) ? text : null;
+}
 
 async function inspect(sessionId: string, dataRoot?: string, asOf?: string): Promise<InspectSnapshot> {
  const res = await rpc("research.session.inspect", { session_id: sessionId }, dataRoot, asOf);
