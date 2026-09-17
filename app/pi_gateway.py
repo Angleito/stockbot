@@ -19,7 +19,7 @@ import logging
 import threading
 import time
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -76,9 +76,15 @@ _CALL_TOOL_FORBIDDEN = frozenset({"call_tool", "browse_tools", "search_tools", "
 # Bounded local thesis lifecycle sinks (sqlite store only; never egress).
 # Private-pattern arg scanning would false-positive on user thesis content,
 # while real exfiltration vectors (search_web, external research) stay scanned.
-_THESIS_LOCAL_TOOLS = frozenset({
-    "thesis_create", "thesis_show", "thesis_refine", "thesis_watch", "thesis_journal",
-})
+_THESIS_LOCAL_TOOLS = frozenset(
+    {
+        "thesis_create",
+        "thesis_show",
+        "thesis_refine",
+        "thesis_watch",
+        "thesis_journal",
+    }
+)
 
 logger = logging.getLogger(__name__)
 
@@ -125,13 +131,25 @@ def _unavailable_data_response(failed: list[tuple[str, dict[str, object]]]) -> s
 
 
 _SOURCE_REF_ID_KEYS = (
-    "accession_no", "accession_number", "accession", "record_id",
-    "document_name", "filing_id",
+    "accession_no",
+    "accession_number",
+    "accession",
+    "record_id",
+    "document_name",
+    "filing_id",
 )
 _SOURCE_REF_URL_KEYS = ("url", "source_url", "source", "filing_url", "document_url", "link")
 _SOURCE_REF_DATE_KEYS = (
-    "known_at", "accepted_at", "acceptanceDatetime", "acceptedDate",
-    "filed_at", "filingDate", "filed", "published_at", "publishedAt", "published",
+    "known_at",
+    "accepted_at",
+    "acceptanceDatetime",
+    "acceptedDate",
+    "filed_at",
+    "filingDate",
+    "filed",
+    "published_at",
+    "publishedAt",
+    "published",
 )
 
 
@@ -225,9 +243,11 @@ def _meta_freshness(result: dict[str, object], source: object) -> tuple[object, 
 
 def _meta_row_count(result: dict[str, object]) -> tuple[int, int | None]:
     returned_count = result.get("returned_count") if isinstance(result.get("returned_count"), int) else None
-    row_count = result.get("row_count") if isinstance(result.get("row_count"), int) else max(
-        (len(v) for k, v in result.items() if isinstance(v, list) and k not in _NON_DATA_LIST_KEYS),
-        default=0)
+    row_count = (
+        result.get("row_count")
+        if isinstance(result.get("row_count"), int)
+        else max((len(v) for k, v in result.items() if isinstance(v, list) and k not in _NON_DATA_LIST_KEYS), default=0)
+    )
     return row_count, returned_count
 
 
@@ -236,7 +256,8 @@ def _meta_truncated(result: dict[str, object], returned_count: int | None) -> bo
     return (
         bool(result.get("truncated"))
         or result.get("may_have_more") is True
-        or (returned_count is not None and isinstance(total, int) and returned_count < total))
+        or (returned_count is not None and isinstance(total, int) and returned_count < total)
+    )
 
 
 def _tool_result_meta(result: object) -> ToolResultMeta:
@@ -250,8 +271,9 @@ def _tool_result_meta(result: object) -> ToolResultMeta:
     as_of = next((result[k] for k in _META_AS_OF_KEYS if result.get(k) is not None), None)
     row_count, returned_count = _meta_row_count(result)
     truncated = _meta_truncated(result, returned_count)
-    return ToolResultMeta(row_count, returned_count, truncated,
-                          str(as_of) if as_of is not None else None, source_names, source_freshness)
+    return ToolResultMeta(
+        row_count, returned_count, truncated, str(as_of) if as_of is not None else None, source_names, source_freshness
+    )
 
 
 @dataclass
@@ -323,8 +345,13 @@ def _args_json(arguments: dict[str, object]) -> str:
     return json.dumps(arguments, sort_keys=True)
 
 
-def _override_context(data_root: str | Path | None = None, as_of: str | None = None):
-    """LOCAL_CONTEXT with data_root overridden; invalid roots fall back."""
+def _override_context(
+    data_root: str | Path | None = None,
+    as_of: str | None = None,
+    research_session_id: str | None = None,
+):
+    """LOCAL_CONTEXT with data_root/as_of/research-session overridden; invalid roots fall back."""
+
     def _with_root(root: Path) -> RequestContext:
         return RequestContext(
             principal_id=LOCAL_CONTEXT.principal_id,
@@ -333,9 +360,11 @@ def _override_context(data_root: str | Path | None = None, as_of: str | None = N
             data_root=root,
             run_limits=LOCAL_CONTEXT.run_limits,
             as_of=as_of,
+            research_session_id=research_session_id,
         )
+
     if data_root is None or not str(data_root):
-        if as_of is None:
+        if as_of is None and research_session_id is None:
             return LOCAL_CONTEXT
         return _with_root(LOCAL_CONTEXT.data_root)
     try:
@@ -345,6 +374,7 @@ def _override_context(data_root: str | Path | None = None, as_of: str | None = N
     if not root.is_absolute():
         return _with_root(LOCAL_CONTEXT.data_root) if as_of is not None else LOCAL_CONTEXT
     return _with_root(root)
+
 
 def execute_pi_tool(
     name: str,
@@ -381,6 +411,7 @@ def execute_pi_tool(
 @dataclass
 class _CallToolUnwrap:
     """Validated call_tool unwrap: inner name or ready-made error outcome."""
+
     inner_name: str | None = None
     inner_args: dict[str, object] | None = None
     error: dict[str, object] | None = None
@@ -389,21 +420,28 @@ class _CallToolUnwrap:
 @dataclass
 class _StagedContext:
     """Immutable request-local research IDs plus the shared store."""
+
     session_id: str | None = None
     job_id: str | None = None
     sid_from_explicit: bool = False
     store: ResearchRepository | None = None
+
+
 def _call_tool_parts(arguments: object) -> tuple[object, object]:
     raw_inner: object = arguments.get("name") if isinstance(arguments, dict) else None
     raw_args: object = arguments.get("arguments") if isinstance(arguments, dict) else None
     empty: dict[str, object] = {}
     return raw_inner, empty if raw_args is None else raw_args
+
+
 def _call_tool_name_error(arguments: object, raw_inner: object) -> dict[str, object] | None:
     if isinstance(raw_inner, str) and raw_inner.strip():
         return None
     invalid_outer = _validate_tool_arguments("call_tool", arguments if isinstance(arguments, dict) else {})
     msg = invalid_outer if invalid_outer is not None else "call_tool: 'name' must be a non-empty string"
     return _invalid_args_error("call_tool", msg)
+
+
 def _call_tool_target_error(arguments: object, inner_name: str, inner_args: object) -> dict[str, object] | None:
     if not isinstance(inner_args, dict):
         invalid_inner = _validate_tool_arguments("call_tool", arguments if isinstance(arguments, dict) else {})
@@ -412,7 +450,8 @@ def _call_tool_target_error(arguments: object, inner_name: str, inner_args: obje
     if inner_name in _CALL_TOOL_FORBIDDEN:
         return _invalid_args_error(
             "call_tool",
-            f"Tool '{inner_name}' cannot be called via call_tool; call browse_tools to find the exact canonical name, then call_tool with a research tool name")
+            f"Tool '{inner_name}' cannot be called via call_tool; call browse_tools to find the exact canonical name, then call_tool with a research tool name",
+        )
     if not any(_tool_function(t).get("name") == inner_name for t in TOOLS):
         return _unknown_tool_error(inner_name)
     return None
@@ -510,9 +549,14 @@ def _explicit_staged_ids(arguments: object) -> tuple[str | None, str | None]:
 
 
 def _captured_staged_ids(
-    active_research_session_id: str | None, active_research_job_id: str | None,
+    active_research_session_id: str | None,
+    active_research_job_id: str | None,
 ) -> tuple[str | None, str | None]:
-    cap_sid = active_research_session_id if isinstance(active_research_session_id, str) and active_research_session_id else None
+    cap_sid = (
+        active_research_session_id
+        if isinstance(active_research_session_id, str) and active_research_session_id
+        else None
+    )
     cap_jid = active_research_job_id if isinstance(active_research_job_id, str) and active_research_job_id else None
     return cap_sid, cap_jid
 
@@ -546,10 +590,11 @@ def _resolve_staged_context(
     store = None
     if isinstance(resolved_sid, str) and resolved_sid:
         from app.research.repository import ResearchRepository as _RR
+
         store = _RR(data_root=_override_context(data_root, as_of).data_root)
     return _StagedContext(
-        session_id=resolved_sid, job_id=resolved_jid,
-        sid_from_explicit=explicit_sid is not None, store=store)
+        session_id=resolved_sid, job_id=resolved_jid, sid_from_explicit=explicit_sid is not None, store=store
+    )
 
 
 def _check_staged_session(name: str, staged: _StagedContext) -> dict[str, object] | None:
@@ -574,7 +619,10 @@ def _check_staged_session(name: str, staged: _StagedContext) -> dict[str, object
 
 
 def _check_permit_and_schema(
-    name: str, arguments: dict[str, object], session: PiSessionContext, args_for_hash: str,
+    name: str,
+    arguments: dict[str, object],
+    session: PiSessionContext,
+    args_for_hash: str,
 ) -> dict[str, object] | None:
     """Gate 1 permit filter + Gate 2 schema validation and arg-bytes cap."""
     if name not in RESEARCH_TOOL_NAMES or not tool_is_permitted(name, LOCAL_CONTEXT):
@@ -603,11 +651,18 @@ def _consume_dispatch_budget(name: str, staged: _StagedContext) -> tuple[bool, d
     if name not in DISPATCH_TOOLS or staged.store is None:
         return False, None
     if not isinstance(staged.job_id, str) or not staged.job_id:
-        return False, {"error": f"Active research job is required for tool '{name}'", "error_type": "invalid_research_context"}
+        return False, {
+            "error": f"Active research job is required for tool '{name}'",
+            "error_type": "invalid_research_context",
+        }
     if not isinstance(staged.session_id, str) or not staged.session_id:
-        return False, {"error": f"Active research session is required for tool '{name}'", "error_type": "invalid_research_context"}
+        return False, {
+            "error": f"Active research session is required for tool '{name}'",
+            "error_type": "invalid_research_context",
+        }
     try:
         from app.research import service as _svc
+
         _svc.authorize_and_consume_dispatch(staged.session_id, staged.job_id, name, repo=staged.store)
     except ValueError as exc:
         return False, _dispatch_value_error(exc)
@@ -618,8 +673,14 @@ def _consume_dispatch_budget(name: str, staged: _StagedContext) -> tuple[bool, d
 
 def _heartbeat_staged_job(name: str, staged: _StagedContext) -> None:
     try:
-        if staged.store is not None and isinstance(staged.job_id, str) and staged.job_id and (name in DISPATCH_TOOLS or name in CONTROL_TOOLS):
+        if (
+            staged.store is not None
+            and isinstance(staged.job_id, str)
+            and staged.job_id
+            and (name in DISPATCH_TOOLS or name in CONTROL_TOOLS)
+        ):
             from app.research import service as _hb_svc
+
             _hb_svc.heartbeat_job(staged.job_id, repo=staged.store)
     except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
         pass
@@ -663,7 +724,10 @@ def _reserve_run_budget(name: str, session: PiSessionContext, dispatch_consumed:
 
 
 def _check_intent_and_egress(
-    name: str, arguments: dict[str, object], session: PiSessionContext, args_for_hash: str,
+    name: str,
+    arguments: dict[str, object],
+    session: PiSessionContext,
+    args_for_hash: str,
 ) -> dict[str, object] | None:
     """Gate 3 intent firewall + Gate 4 search egress / private-pattern args check."""
     with session._lock:
@@ -689,7 +753,10 @@ def _check_intent_and_egress(
 
 
 def _check_egress_or_private(
-    name: str, arguments: dict[str, object], session: PiSessionContext, args_for_hash: str,
+    name: str,
+    arguments: dict[str, object],
+    session: PiSessionContext,
+    args_for_hash: str,
 ) -> dict[str, object] | None:
     if name == "search_web":
         return _check_search_egress(name, arguments, session, args_for_hash)
@@ -707,7 +774,10 @@ def _check_egress_or_private(
 
 
 def _check_search_egress(
-    name: str, arguments: dict[str, object], session: PiSessionContext, args_for_hash: str,
+    name: str,
+    arguments: dict[str, object],
+    session: PiSessionContext,
+    args_for_hash: str,
 ) -> dict[str, object] | None:
     with session._lock:
         decision = authorize_egress("exa", arguments, session.run_security)
@@ -779,7 +849,7 @@ def _record_tool_call_row(
         tool_name=name,
         arguments_json=json.dumps(arguments),
         started_at=t0_iso,
-        completed_at=datetime.now(timezone.utc).isoformat(),
+        completed_at=datetime.now(UTC).isoformat(),
         status=status,
         result_row_count=meta.row_count,
         returned_count=meta.returned_count,
@@ -800,7 +870,9 @@ def _record_tool_call_row(
 
 
 def _resolve_tool_call_id(
-    recorder: RunRecorder | None, run_id: str, tool_call_id: str | None,
+    recorder: RunRecorder | None,
+    run_id: str,
+    tool_call_id: str | None,
 ) -> str:
     if tool_call_id is not None:
         resolved = f"{run_id}:tc:{tool_call_id}"
@@ -824,23 +896,62 @@ def _execute_and_record(
     bridge_queue_ms: float,
     data_root: str | Path | None,
     as_of: str | None,
-) -> tuple[object, str, str, ToolResultMeta, str | None, str | None, bool | None, str | None, float]:
+    research_session_id: str | None,
+) -> tuple[
+    object,
+    str,
+    str,
+    ToolResultMeta,
+    str | None,
+    str | None,
+    bool | None,
+    str | None,
+    float,
+]:
     """Gate 6: run the handler outside the session lock, then record telemetry."""
-    t0_iso = datetime.now(timezone.utc).isoformat()
+    t0_iso = datetime.now(UTC).isoformat()
     handler_t0 = time.perf_counter()
-    result = execute_tool(name, arguments, PI_MODEL, context=_override_context(data_root, as_of))
+    result = execute_tool(
+        name,
+        arguments,
+        PI_MODEL,
+        context=_override_context(data_root, as_of, research_session_id),
+    )
     handler_ms = (time.perf_counter() - handler_t0) * 1000.0
     cache_hit, cache_type = _cache_flags(result)
-    failed, _soft, _denied, status, error_type, error_message = _failure_outcome(result)
+    _failed, _soft, _denied, status, error_type, error_message = _failure_outcome(result)
     meta = _tool_result_meta(result)
     resolved_tc_id = _resolve_tool_call_id(recorder, run_id, tool_call_id)
     _record_tool_call_row(
-        recorder=recorder, run_id=run_id, resolved_tc_id=resolved_tc_id, name=name,
-        arguments=arguments, t0_iso=t0_iso, status=status, meta=meta, result=result,
-        error_type=error_type, error_message=error_message, protocol_id=protocol_id,
-        bridge_queue_ms=bridge_queue_ms, handler_ms=handler_ms,
-        cache_hit=cache_hit, cache_type=cache_type)
-    return result, resolved_tc_id, status, meta, error_type, error_message, cache_hit, cache_type, handler_ms
+        recorder=recorder,
+        run_id=run_id,
+        resolved_tc_id=resolved_tc_id,
+        name=name,
+        arguments=arguments,
+        t0_iso=t0_iso,
+        status=status,
+        meta=meta,
+        result=result,
+        error_type=error_type,
+        error_message=error_message,
+        protocol_id=protocol_id,
+        bridge_queue_ms=bridge_queue_ms,
+        handler_ms=handler_ms,
+        cache_hit=cache_hit,
+        cache_type=cache_type,
+    )
+    return (
+        result,
+        resolved_tc_id,
+        status,
+        meta,
+        error_type,
+        error_message,
+        cache_hit,
+        cache_type,
+        handler_ms,
+    )
+
 
 def _failed_result_response(
     name: str,
@@ -863,9 +974,7 @@ def _ingress_outcome(
     session: PiSessionContext,
 ) -> tuple[str, ContextEnvelope, SafeContext] | dict[str, object]:
     """Gate 5: ingress scan on the rendered evidence; quarantined results withheld."""
-    rendered = render_tool_result(
-        result, max_bytes=LOCAL_CONTEXT.run_limits.max_tool_result_bytes
-    )
+    rendered = render_tool_result(result, max_bytes=LOCAL_CONTEXT.run_limits.max_tool_result_bytes)
     envelope = envelope_for_tool(name, result)
     outcome = prepare_context(envelope, rendered)
     if isinstance(outcome, QuarantinedContext):
@@ -882,10 +991,7 @@ def _ingress_outcome(
             rule_ids=list(outcome.rule_ids),
         )
         return {
-            "error": (
-                "Tool result withheld by Stockbot security gateway. "
-                "No usable evidence was provided."
-            ),
+            "error": ("Tool result withheld by Stockbot security gateway. No usable evidence was provided."),
             "error_type": "ingress_blocked",
             "soft": True,
         }
@@ -953,10 +1059,7 @@ def _record_success_evidence(
 
 
 def _named_tool_list(items: list[object]) -> list[str]:
-    return [
-        m["name"] for m in items
-        if isinstance(m, dict) and isinstance(m.get("name"), str)
-    ]
+    return [m["name"] for m in items if isinstance(m, dict) and isinstance(m.get("name"), str)]
 
 
 def _schema_tool_names(schemas: list[object]) -> list[str]:
@@ -1047,9 +1150,15 @@ def _finalize_success(
     if recorder is not None:
         evidence_id = f"{run_id}:evid:{recorder.next_evidence_seq():04d}"
         _record_success_evidence(
-            recorder=recorder, run_id=run_id, evidence_id=evidence_id,
-            tool_call_id=resolved_tc_id, name=name, meta=meta,
-            final_text=final_text, envelope=envelope)
+            recorder=recorder,
+            run_id=run_id,
+            evidence_id=evidence_id,
+            tool_call_id=resolved_tc_id,
+            name=name,
+            meta=meta,
+            final_text=final_text,
+            envelope=envelope,
+        )
     return {"content": final_text, "meta": _success_meta(name, result, meta, envelope, status)}
 
 
@@ -1075,7 +1184,18 @@ def _dispatch_inner_call(
         return unwrap.error
     inner_name = unwrap.inner_name or ""
     inner_args = unwrap.inner_args or {}
-    return _execute_pi_tool(inner_name, inner_args, session, tool_call_id=tool_call_id, protocol_id=protocol_id, bridge_queue_ms=bridge_queue_ms, data_root=data_root, as_of=as_of, active_research_session_id=active_research_session_id, active_research_job_id=active_research_job_id)
+    return _execute_pi_tool(
+        inner_name,
+        inner_args,
+        session,
+        tool_call_id=tool_call_id,
+        protocol_id=protocol_id,
+        bridge_queue_ms=bridge_queue_ms,
+        data_root=data_root,
+        as_of=as_of,
+        active_research_session_id=active_research_session_id,
+        active_research_job_id=active_research_job_id,
+    )
 
 
 def _recorder_run_id(session: PiSessionContext) -> tuple[RunRecorder | None, str]:
@@ -1107,9 +1227,13 @@ def _run_pre_gates(
     # arguments win, then the captured bridge pair, then session fields.
     # Resolved IDs never enter arguments/recorder/schema/handlers.
     staged = _resolve_staged_context(
-        arguments, session, data_root=data_root, as_of=as_of,
+        arguments,
+        session,
+        data_root=data_root,
+        as_of=as_of,
         active_research_session_id=active_research_session_id,
-        active_research_job_id=active_research_job_id)
+        active_research_job_id=active_research_job_id,
+    )
     # Attached staged session must exist for every target (fail closed);
     # discovery only skips the stage check, never existence.
     staged_error = _check_staged_session(name, staged)
@@ -1153,10 +1277,17 @@ def _execute_pi_tool(
     # Generic dispatch: call_tool validates then tail-calls the inner tool once.
     # The outer wrapper consumes no budget slot and writes no recorder row.
     tail = _dispatch_inner_call(
-        name, arguments, session, tool_call_id=tool_call_id, protocol_id=protocol_id,
-        bridge_queue_ms=bridge_queue_ms, data_root=data_root, as_of=as_of,
+        name,
+        arguments,
+        session,
+        tool_call_id=tool_call_id,
+        protocol_id=protocol_id,
+        bridge_queue_ms=bridge_queue_ms,
+        data_root=data_root,
+        as_of=as_of,
         active_research_session_id=active_research_session_id,
-        active_research_job_id=active_research_job_id)
+        active_research_job_id=active_research_job_id,
+    )
     if tail is not None:
         return tail
     # Single-dispatch company-name support, schema-driven: any tool whose
@@ -1167,12 +1298,17 @@ def _execute_pi_tool(
     if isinstance(arguments, dict):
         arguments = _resolve_company_arguments(name, arguments)
     pre = _run_pre_gates(
-        name, arguments, session, data_root=data_root, as_of=as_of,
+        name,
+        arguments,
+        session,
+        data_root=data_root,
+        as_of=as_of,
         active_research_session_id=active_research_session_id,
-        active_research_job_id=active_research_job_id)
+        active_research_job_id=active_research_job_id,
+    )
     if isinstance(pre, dict):
         return pre
-    staged, args_for_hash, dispatch_consumed = pre
+    staged, args_for_hash, _dispatch_consumed = pre
     recorder, run_id = _recorder_run_id(session)
 
     # Gate 3: intent firewall. No approval callback in this plan, so
@@ -1186,22 +1322,51 @@ def _execute_pi_tool(
     # Handler + rendering run OUTSIDE the session lock so calls overlap.
     # Gates above stay LOCAL_CONTEXT-based; only the final execute_tool
     # context carries the validated data_root override.
-    result, resolved_tc_id, status, meta, _error_type, _error_message, _cache_hit, _cache_type, _handler_ms = _execute_and_record(
-        name, arguments, session, run_id=run_id, recorder=recorder,
-        tool_call_id=tool_call_id, protocol_id=protocol_id,
-        bridge_queue_ms=bridge_queue_ms, data_root=data_root, as_of=as_of)
+    (
+        result,
+        resolved_tc_id,
+        status,
+        meta,
+        _error_type,
+        _error_message,
+        _cache_hit,
+        _cache_type,
+        _handler_ms,
+    ) = _execute_and_record(
+        name,
+        arguments,
+        session,
+        run_id=run_id,
+        recorder=recorder,
+        tool_call_id=tool_call_id,
+        protocol_id=protocol_id,
+        bridge_queue_ms=bridge_queue_ms,
+        data_root=data_root,
+        as_of=as_of,
+        research_session_id=staged.session_id,
+    )
 
     failed_map = _failed_dict(result)
     if failed_map is not None:
         _failed, soft, _denied, _status2, failed_error_type, _msg2 = _failure_outcome(failed_map)
         return _failed_result_response(name, failed_map, failed_error_type, soft)
     if not isinstance(result, dict):
-        return {"error": _unavailable_data_response([(name, {"error": "empty tool result"})]), "error_type": "tool_error"}
+        return {
+            "error": _unavailable_data_response([(name, {"error": "empty tool result"})]),
+            "error_type": "tool_error",
+        }
 
     # Gate 5: ingress scan on the rendered evidence; quarantined or blocked
     # results are withheld from Pi with a fixed placeholder.
     # Gate 7 (success path): DLP over what Pi receives, then record evidence.
     # Session lock covers guard_response + label/budget mutations only.
     return _finalize_success(
-        name, result, session, run_id=run_id, recorder=recorder,
-        resolved_tc_id=resolved_tc_id, status=status, meta=meta)
+        name,
+        result,
+        session,
+        run_id=run_id,
+        recorder=recorder,
+        resolved_tc_id=resolved_tc_id,
+        status=status,
+        meta=meta,
+    )

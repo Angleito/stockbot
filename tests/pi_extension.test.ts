@@ -2,9 +2,9 @@ import type { ExtensionAPI } from "@earendil-works/pi-coding-agent";
 import { expect, test } from "bun:test";
 import type { Subprocess } from "bun";
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
-import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
+import { mkdtempSync, readFileSync, existsSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import stockbotExtension from "../.pi/extensions/stockbot.ts";
 import * as stockbotNS from "../.pi/extensions/stockbot.ts";
 import {
@@ -582,6 +582,7 @@ import {
 	roleSpawnCommand,
 	setResearchBridge,
 	setRoleSpawn,
+	spawnPiRole,
 	startResearch,
 	type RoleSpawn,
 } from "../.pi/lib/research-director.ts";
@@ -2361,9 +2362,10 @@ test("director prompts carry the raw-source item shape and the rich analysis env
 	}, fetchOps));
 	const fetching = await resumeResearch(fetchSID, "run-prompt-fetch");
 	expect(fetching.prompt).toContain("research_add_evidence");
-	// Accession + document name + raw passage: search hits alone are not evidence.
+	// Canonical handle + cited passage: search hits alone are not evidence.
 	expect(fetching.prompt).toContain("source_record_id");
 	expect(fetching.prompt).toContain("document_name");
+	expect(fetching.prompt).toContain("source_handle");
 	expect(fetching.prompt).toContain("matching_passage");
 	expect(fetching.prompt).toContain("claim_kind");
 	expect(fetching.prompt).toContain("absence_observation");
@@ -2529,9 +2531,21 @@ function roleState(sid: string, evidenceIds: string[]): ResumeState {
 	};
 }
 
+// The kernel's research_read rendering per resource: freeze summary, flat
+// observed-fact line, or absence card — the three shapes the index reads.
+function roleReadContent(sid: string, kind: string, rid: string): string {
+	if (kind === "freeze")
+		return `session_id: ${sid}\nkind: freeze\nresource_id: ${rid}\nrecord: freeze_id: ${rid}, wave_id: 1, evidence_ids: ['FREEZE-BODY-${rid}']`;
+	if (rid.includes(":absence:"))
+		return `Absence observation — searched SEC scope only\nSearched scope: search SEARCH-${rid} | query 'absence query ${rid}'\nNo disclosure was located within the searched SEC scope: EVIDENCE-MARKER-${rid}\nEvidence: ${rid}`;
+	return `session_id: ${sid}\nkind: evidence\nresource_id: ${rid}\nrecord: evidence_id: ${rid}, claim_kind: observed_fact, claim_text: EVIDENCE-MARKER-${rid}, content: EVIDENCE-MARKER-${rid}, provenance: {'accession_no': 'ACC-${rid}', 'document_name': 'DOC-${rid}', 'kind': 'sec_source'}`;
+}
+
 // resumeBridge plus the two wire ops the spawn path uses: the research_read
-// passthrough that supplies the frozen evidence text and the analysis record
-// that completes each role job (recorded exactly as the kernel would).
+// passthrough that supplies the frozen dossier text and the analysis record
+// that completes each role job (recorded exactly as the kernel would). Read
+// content mirrors the kernel's rendering, so the role-prompt index can be
+// checked field by field.
 function roleBridge(state: ResumeState, ops: ResumeOp[], records: Json[], gate?: Json): (req: Json) => Promise<Json> {
 	const base = resumeBridge(state, ops, gate);
 	return async (req: Json) => {
@@ -2543,7 +2557,7 @@ function roleBridge(state: ResumeState, ops: ResumeOp[], records: Json[], gate?:
 			ops.push({ op: `tool.invoke:${kind}` });
 			const record = kind === "freeze" ? state.freezes[rid] : kind === "evidence" ? { evidence_id: rid, content: `EVIDENCE-MARKER-${rid}` } : undefined;
 			if (!record) return { error: "unknown_resource" };
-			return { result: { content: `kind: ${kind}\nresource_id: ${rid}\nrecord: ${JSON.stringify(record)}`, meta: { record } } };
+			return { result: { content: roleReadContent(String(state.session.session_id), kind, rid), meta: { record } } };
 		}
 		if (op === "research.analysis.record") {
 			ops.push({ op });
@@ -2564,24 +2578,40 @@ function roleBridge(state: ResumeState, ops: ResumeOp[], records: Json[], gate?:
 	};
 }
 
+// The dossier file the role prompt names (production writes it 0600 into the
+// batch directory and deletes it once the batch settles).
+function dossierPathOf(prompt: string): string {
+	const match = /dossier file (\S+)/.exec(prompt);
+	if (!match) throw new Error("role prompt names no dossier file");
+	return match[1].replace(/\.$/, "");
+}
+
 test("committee roles spawn three fresh contexts in parallel and record each envelope", async () => {
 	const SID = "rs:roles";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
 	const E2 = `${SID}:ev:2`;
+	const E3 = `${SID}:absence:ev:3`;
 	const ops: ResumeOp[] = [];
 	const records: Json[] = [];
-	const state = roleState(SID, [E1, E2]);
+	const state = roleState(SID, [E1, E2, E3]);
 	const order: string[] = [];
 	const prompts: string[] = [];
+	const seen: { dir: string; text: string; mode: number }[] = [];
+	// No role resolves until every role has started: a driver that awaited one
+	// spawn before starting the next would deadlock here, not pass.
+	const allStarted = Promise.withResolvers<void>();
 	setResearchBridge(roleBridge(state, ops, records, AUTHORIZED_GATE));
 	try {
 		const resumed = await withRoleEnv(async () => {
-			setRoleSpawn(async (prompt) => {
+			setRoleSpawn(async (prompt, dir) => {
 				const role = roleOfPrompt(prompt);
 				order.push(`start:${role}`);
 				prompts.push(prompt);
-				await new Promise((resolve) => setTimeout(resolve, 5));
+				const path = dossierPathOf(prompt);
+				seen.push({ dir, text: readFileSync(path, "utf8"), mode: statSync(path).mode & 0o777 });
+				if (order.length === 3) allStarted.resolve();
+				await allStarted.promise;
 				order.push(`end:${role}`);
 				return `Here you go:\n\`\`\`json\n${JSON.stringify(roleEnvelope(role, E1))}\n\`\`\``;
 			});
@@ -2590,13 +2620,31 @@ test("committee roles spawn three fresh contexts in parallel and record each env
 		// Three spawned role processes read the frozen evidence, one per role.
 		expect(prompts.length).toBe(3);
 		expect(prompts.map(roleOfPrompt).sort()).toEqual(["bearbot", "bullbot", "stockbot"]);
-		// The frozen evidence text itself (not just ids) and the question reach each role.
+		// The question, the frozen ids as a compact index, and the dossier path
+		// reach each role — the records themselves never ride the prompt.
+		const dossierPath = dossierPathOf(prompts[0]);
 		for (const prompt of prompts) {
-			expect(prompt).toContain(`EVIDENCE-MARKER-${E1}`);
-			expect(prompt).toContain(`EVIDENCE-MARKER-${E2}`);
+			expect(dossierPathOf(prompt)).toBe(dossierPath);
 			expect(prompt).toContain(F1);
+			expect(prompt).toContain(`- ${E1} | claim_kind: observed_fact | document: DOC-${E1} | accession: ACC-${E1}`);
+			expect(prompt).toContain(`- ${E2} | claim_kind: observed_fact | document: DOC-${E2} | accession: ACC-${E2}`);
+			expect(prompt).toContain(`- ${E3} | claim_kind: absence_observation | search: SEARCH-${E3} | query: absence query ${E3}`);
 			expect(prompt).toContain("Question under research: Will NVDA beat earnings?");
 			expect(prompt).toContain("raw JSON only");
+			expect(prompt).toContain("read is the only tool you have");
+			expect(prompt).not.toContain("EVIDENCE-MARKER");
+			expect(prompt).not.toContain("FREEZE-BODY");
+		}
+		// The dossier carries the freeze summary and every exact frozen record, is
+		// readable only by its owner, and its directory is the role's cwd.
+		expect(seen.length).toBe(3);
+		for (const s of seen) {
+			expect(s.dir).toBe(dirname(dossierPath));
+			expect(s.mode).toBe(0o600);
+			expect(s.text).toContain(`FREEZE-BODY-${F1}`);
+			expect(s.text).toContain(`EVIDENCE-MARKER-${E1}`);
+			expect(s.text).toContain(`EVIDENCE-MARKER-${E2}`);
+			expect(s.text).toContain(`EVIDENCE-MARKER-${E3}`);
 		}
 		// Every spawn starts before any resolves: three contexts run at once.
 		const started = order.map((e, i) => (e.startsWith("start:") ? i : -1)).filter((i) => i >= 0);
@@ -2615,11 +2663,15 @@ test("committee roles spawn three fresh contexts in parallel and record each env
 			expect(analysis.executive_view).toBe(`view-${role}`);
 			expect((analysis.claims as Json[])[0]).toEqual({ text: `claim-${role}`, claim_type: "inference", evidence_ids: [E1] });
 		}
+		// The dossier is gone once the batch settles.
+		expect(existsSync(dossierPath)).toBe(false);
+		expect(existsSync(dirname(dossierPath))).toBe(false);
 		// The trio is closed kernel-side, so this same advance runs the wave gate
 		// and authorizes the next wave: the model is never asked to author a role.
 		expect(resumeTransitions(ops)).toEqual([
 			"research.committee.create",
 			"tool.invoke:freeze",
+			"tool.invoke:evidence",
 			"tool.invoke:evidence",
 			"tool.invoke:evidence",
 			"research.analysis.record",
@@ -2654,7 +2706,7 @@ test("committee roles spawn with pi's own provider defaults when no override is 
 		delete process.env.STOCKBOT_PI_PROVIDER;
 		delete process.env.STOCKBOT_PI_MODEL;
 		// No override: argv carries pi's own defaults (no --provider/--model flags).
-		const argv = roleSpawnCommand("Q?");
+		const argv = roleSpawnCommand();
 		expect(argv).not.toContain("--provider");
 		expect(argv).not.toContain("--model");
 		const resumed = await resumeResearch(SID, "run-roles-unset");
@@ -2672,21 +2724,28 @@ test("committee roles spawn with pi's own provider defaults when no override is 
 });
 
 test("role context spawn failure or unparseable envelope falls back without crashing", async () => {
-	const cases: [string, RoleSpawn, string][] = [
-		["spawn error", async () => {
+	const cases: [string, (prompt: string) => string, string][] = [
+		["spawn error", () => {
 			throw new Error("spawn blew up");
 		}, "spawn blew up"],
-		["prose output", async () => "I could not produce JSON.", "no JSON envelope"],
-		["empty output", async () => "", "no JSON envelope"],
+		["prose output", () => "I could not produce JSON.", "no JSON envelope"],
+		["empty output", () => "", "no JSON envelope"],
 	];
-	for (const [name, seam, reason] of cases) {
+	for (const [name, respond, reason] of cases) {
 		const SID = `rs:roles-fail-${name.replace(/\s+/g, "-")}`;
 		const E1 = `${SID}:ev:1`;
 		const ops: ResumeOp[] = [];
 		const records: Json[] = [];
 		const state = roleState(SID, [E1]);
+		const attempts: { path: string; text: string }[] = [];
 		setResearchBridge(roleBridge(state, ops, records));
-		setRoleSpawn(seam);
+		// Each attempt reads the dossier the prompt names: it exists while the role
+		// context runs and is deleted once the batch settles, success or failure.
+		setRoleSpawn(async (prompt: string) => {
+			const path = dossierPathOf(prompt);
+			attempts.push({ path, text: readFileSync(path, "utf8") });
+			return respond(prompt);
+		});
 		try {
 			const resumed = await withRoleEnv(() => resumeResearch(SID, `run-${SID}`));
 			// The spawn failed, so nothing was recorded and the prompt authors in context.
@@ -2696,6 +2755,11 @@ test("role context spawn failure or unparseable envelope falls back without cras
 			expect(resumed.prompt).toContain(reason);
 			expect(resumed.prompt).toContain("research_add_analysis");
 			for (const role of ["stockbot", "bullbot", "bearbot"]) expect(resumed.prompt).toContain(`"role": "${role}"`);
+			expect(attempts.length).toBe(3);
+			for (const attempt of attempts) {
+				expect(attempt.text).toContain(`EVIDENCE-MARKER-${E1}`);
+				expect(existsSync(attempt.path)).toBe(false);
+			}
 		} finally {
 			setRoleSpawn(unavailableRoleSpawn);
 		}
@@ -2727,41 +2791,108 @@ test("null role seam keeps authoring in context without reading evidence or spaw
 	}
 });
 
-test("role spawn command is the frozen one-shot pi argv", async () => {
+test("role spawn command is the frozen flag-only one-shot pi argv", async () => {
 	const savedProvider = process.env.STOCKBOT_PI_PROVIDER;
 	const savedModel = process.env.STOCKBOT_PI_MODEL;
 	try {
 		delete process.env.STOCKBOT_PI_PROVIDER;
 		delete process.env.STOCKBOT_PI_MODEL;
-		// No override: pi resolves its own provider/model.
-		expect(roleSpawnCommand("Q?")).toEqual([
-			"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-			"--no-prompt-templates", "--no-context-files", "--", "Q?",
+		// No override: pi resolves its own provider/model. The read-only `read`
+		// tool is the role's only tool; no prompt element and no `--` separator
+		// ride argv (stdin carries the prompt).
+		const argv = roleSpawnCommand();
+		expect(argv).toEqual([
+			"pi", "-p", "--no-session", "--tools", "read", "--no-extensions", "--no-skills",
+			"--no-prompt-templates", "--no-context-files",
 		]);
+		expect(argv).not.toContain("--no-builtin-tools");
+		expect(argv).not.toContain("--");
 		await withRoleEnv(async () => {
-			expect(roleSpawnCommand("Q?")).toEqual([
-				"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
+			expect(roleSpawnCommand()).toEqual([
+				"pi", "-p", "--no-session", "--tools", "read", "--no-extensions", "--no-skills",
 				"--no-prompt-templates", "--no-context-files", "--provider", "granite-local",
-				"--model", "test-model", "--", "Q?",
+				"--model", "test-model",
 			]);
 		});
 		// One override emits only its own flag (mirrors pi_runner._pi_cmd): a
 		// configured provider is never dropped because the model env is unset.
 		process.env.STOCKBOT_PI_PROVIDER = "granite-local";
-		expect(roleSpawnCommand("Q?")).toEqual([
-			"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-			"--no-prompt-templates", "--no-context-files", "--provider", "granite-local", "--", "Q?",
+		expect(roleSpawnCommand()).toEqual([
+			"pi", "-p", "--no-session", "--tools", "read", "--no-extensions", "--no-skills",
+			"--no-prompt-templates", "--no-context-files", "--provider", "granite-local",
 		]);
 		delete process.env.STOCKBOT_PI_PROVIDER;
 		process.env.STOCKBOT_PI_MODEL = "test-model";
-		expect(roleSpawnCommand("Q?")).toEqual([
-			"pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-			"--no-prompt-templates", "--no-context-files", "--model", "test-model", "--", "Q?",
+		expect(roleSpawnCommand()).toEqual([
+			"pi", "-p", "--no-session", "--tools", "read", "--no-extensions", "--no-skills",
+			"--no-prompt-templates", "--no-context-files", "--model", "test-model",
 		]);
 	} finally {
 		if (savedProvider === undefined) delete process.env.STOCKBOT_PI_PROVIDER;
 		else process.env.STOCKBOT_PI_PROVIDER = savedProvider;
 		if (savedModel === undefined) delete process.env.STOCKBOT_PI_MODEL;
 		else process.env.STOCKBOT_PI_MODEL = savedModel;
+	}
+});
+
+// The production spawn path, driven by a fake `pi` first on PATH: no model ever
+// runs, while argv, stdin, cwd, and stdout stay the real ones.
+async function withFakePi<T>(script: string, fn: () => Promise<T>): Promise<T> {
+	const dir = mkdtempSync(join(tmpdir(), "pi-fake-"));
+	writeFileSync(join(dir, "pi"), script, { mode: 0o755 });
+	const savedPath = process.env.PATH;
+	process.env.PATH = `${dir}:${savedPath ?? ""}`;
+	try {
+		return await fn();
+	} finally {
+		process.env.PATH = savedPath;
+		rmSync(dir, { recursive: true, force: true });
+	}
+}
+
+test("production role spawn writes the prompt to stdin, never argv", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-role-"));
+	const argvPath = join(dir, "argv.txt");
+	const stdinPath = join(dir, "stdin.txt");
+	const cwdPath = join(dir, "cwd.txt");
+	const savedProbe = { argv: process.env.ROLE_PROBE_ARGV, stdin: process.env.ROLE_PROBE_STDIN, cwd: process.env.ROLE_PROBE_CWD };
+	process.env.ROLE_PROBE_ARGV = argvPath;
+	process.env.ROLE_PROBE_STDIN = stdinPath;
+	process.env.ROLE_PROBE_CWD = cwdPath;
+	try {
+		// The fake pi answers only after stdin reaches EOF, so a spawn that left
+		// stdin open (or never wrote it) yields nothing instead of an answer.
+		const shim = `#!/bin/sh\nprintf '%s\\n' "$@" > "$ROLE_PROBE_ARGV"\npwd > "$ROLE_PROBE_CWD"\ncat > "$ROLE_PROBE_STDIN"\nprintf 'ROLE-STDOUT-ONLY'`;
+		await withFakePi(shim, async () => {
+			const prompt = `Question under research: ${"deep-dossier-line ".repeat(2000)}`;
+			const out = await spawnPiRole(prompt, dir);
+			expect(out).toBe("ROLE-STDOUT-ONLY");
+			// The shim ran as `pi` (nothing else is on that PATH entry), so its
+			// own argv is the production argv minus the binary name.
+			expect(readFileSync(argvPath, "utf8").trim().split("\n")).toEqual(roleSpawnCommand().slice(1));
+			expect(readFileSync(argvPath, "utf8")).not.toContain("Question under research");
+			expect(readFileSync(cwdPath, "utf8").trim()).toBe(dir);
+			expect(readFileSync(stdinPath, "utf8")).toBe(prompt);
+		});
+	} finally {
+		process.env.ROLE_PROBE_ARGV = savedProbe.argv;
+		process.env.ROLE_PROBE_STDIN = savedProbe.stdin;
+		process.env.ROLE_PROBE_CWD = savedProbe.cwd;
+		rmSync(dir, { recursive: true, force: true });
+	}
+});
+
+test("role spawn settles empty when the child never reads the prompt", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "pi-role-deaf-"));
+	try {
+		// A child that exits without reading leaves the queued prompt to fail with
+		// EPIPE: the spawn still settles with the caller's empty-output fallback
+		// instead of crashing the run.
+		await withFakePi("#!/bin/sh\nexit 7\n", async () => {
+			const out = await spawnPiRole(`Question: ${"x".repeat(500_000)}`, dir);
+			expect(out).toBe("");
+		});
+	} finally {
+		rmSync(dir, { recursive: true, force: true });
 	}
 });

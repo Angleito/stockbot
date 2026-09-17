@@ -1,9 +1,10 @@
-from pathlib import Path
-
 import json
+from datetime import UTC
+from pathlib import Path
 
 import pytest
 
+import tests.research_source_seam as seam
 from app.research.evals.evaluators import EvalInput, eval_input_from_fixture, evaluate
 from app.research.evals.regression import AgentFixture, FixtureTrace, load_fixture
 
@@ -59,13 +60,18 @@ def test_empty_answer_still_fails():
     assert not result.passed
     assert result.violations == ("scenario-execution-failed",)
 
+
 # ---------------------------------------------------------------------------
 # Cross-domain fixture invariants: industry terms/relationships/risks present
 # in the evaluated outcome, not just query words. Deterministic, no network.
 # ---------------------------------------------------------------------------
 
 _CROSS_DOMAIN_CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
-    ("spirit-boeing-737", "Spirit AeroSystems Boeing 737 backlog and shipset risk?", ("aerospace", "boeing", "backlog")),
+    (
+        "spirit-boeing-737",
+        "Spirit AeroSystems Boeing 737 backlog and shipset risk?",
+        ("aerospace", "boeing", "backlog"),
+    ),
     ("novo-glp1", "Novo Nordisk GLP-1 diabetes obesity demand?", ("diabetes", "obesity", "glp")),
     ("arista-cloud", "Arista cloud datacenter Ethernet switching demand?", ("cloud", "datacenter", "ethernet")),
     ("albemarle-lithium", "Albemarle lithium brine battery demand?", ("lithium", "battery", "brine")),
@@ -74,8 +80,7 @@ _CROSS_DOMAIN_CASES: tuple[tuple[str, str, tuple[str, ...]], ...] = (
 
 
 def _cross_eval_input(name: str, answer: str) -> EvalInput:
-    return EvalInput(scenario_name=name, answer_text=answer, evidence_ids=("EV-1",),
-                     requires_evidence=True)
+    return EvalInput(scenario_name=name, answer_text=answer, evidence_ids=("EV-1",), requires_evidence=True)
 
 
 def test_cross_domain_answers_carry_industry_terms() -> None:
@@ -90,8 +95,12 @@ def test_cross_domain_answers_carry_industry_terms() -> None:
 def test_cross_domain_bare_query_words_fail_evidence_gate() -> None:
     # Behavior pin: an answer with text but zero evidence ids fails when
     # evidence is required — industry terms alone never substitute for refs.
-    inp = EvalInput(scenario_name="spirit-boeing-737", answer_text="Boeing aerospace backlog",
-                    evidence_ids=(), requires_evidence=True)
+    inp = EvalInput(
+        scenario_name="spirit-boeing-737",
+        answer_text="Boeing aerospace backlog",
+        evidence_ids=(),
+        requires_evidence=True,
+    )
     result = evaluate(inp)
     assert not result.passed
     assert result.violations == ("answer-without-required-evidence",)
@@ -99,16 +108,27 @@ def test_cross_domain_bare_query_words_fail_evidence_gate() -> None:
 
 def test_cross_domain_fixture_round_trip_preserves_contract() -> None:
     from app.research.evals.regression import build_fixture, run_deterministic_validators
-    fixture = build_fixture(session_id="rs:test", scenario_name="factual-nvda-datacenter-growth",
-                            tool_calls=("search_sec_filings", "list_sec_filings"),
-                            evidence_ids=("EV-1",), known_ats=("2025-05-01",),
-                            answer_excerpt="Data-center revenue grew [EV-1].")
+
+    fixture = build_fixture(
+        session_id="rs:test",
+        scenario_name="factual-nvda-datacenter-growth",
+        tool_calls=("search_sec_filings", "list_sec_filings"),
+        evidence_ids=("EV-1",),
+        known_ats=("2025-05-01",),
+        answer_excerpt="Data-center revenue grew [EV-1].",
+    )
     assert run_deterministic_validators(fixture) == []
-    outcome = EvalInput(scenario_name=fixture["scenario_name"], answer_text=fixture["answer_excerpt"],
-                        tool_calls=tuple(fixture["tool_calls"]), evidence_ids=tuple(fixture["evidence_ids"]),
-                        as_of=fixture["as_of"], known_ats=tuple(fixture["known_ats"]),
-                        requires_evidence=fixture["validator"]["requires_evidence"])
+    outcome = EvalInput(
+        scenario_name=fixture["scenario_name"],
+        answer_text=fixture["answer_excerpt"],
+        tool_calls=tuple(fixture["tool_calls"]),
+        evidence_ids=tuple(fixture["evidence_ids"]),
+        as_of=fixture["as_of"],
+        known_ats=tuple(fixture["known_ats"]),
+        requires_evidence=fixture["validator"]["requires_evidence"],
+    )
     assert evaluate(outcome).passed
+
 
 # ---------------------------------------------------------------------------
 # RegressionEval §18: GS/OpenAI SEC-only architecture eval (15 checks).
@@ -126,21 +146,37 @@ _GS_URL = "https://www.sec.gov/Archives/edgar/data/886982/000088698226000001/gs-
 def _gs_sid(repo: object, q: str = _GS_Q) -> tuple[str, str]:
     from app.research import service as _svc
     from app.research.repository import ResearchRepository as _Repo
+
     assert isinstance(repo, _Repo)
     sid = _svc.create_research(q, "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
     return sid, repo.list_jobs(sid)[0].job_id
 
 
 def _gs_item(eid: str, **over: object) -> dict[str, object]:
-    """Observed fact with raw-document provenance: accession + document + passage."""
-    base: dict[str, object] = {"evidence_id": eid, "wave_id": 1, "content": "c-" + eid,
-                               "claim_text": f"GS OpenAI-linked exposure per filing {eid}",
-                               "subject": "GS", "source_name": "SEC", "source_uri": _GS_URL,
-                               "source_record_id": _GS_ACC, "document_name": _GS_DOC,
-                               "matching_passage": "Investing and lending activities include OPENAI-linked positions (Note 3, p.88).",
-                               "known_at": "2025-06-29T00:00:00+00:00"}
+    """Observed fact with the canonical handle for its cited passage."""
+    passage = "Investing and lending activities include OPENAI-linked positions (Note 3, p.88)."
+    base: dict[str, object] = {
+        "evidence_id": eid,
+        "wave_id": 1,
+        "content": "c-" + eid,
+        "claim_text": f"GS OpenAI-linked exposure per filing {eid}",
+        "subject": "GS",
+        "source_name": "SEC",
+        "source_uri": _GS_URL,
+        "source_record_id": _GS_ACC,
+        "document_name": _GS_DOC,
+        "matching_passage": passage,
+        "source_handle": seam.handle_for(passage, accession=_GS_ACC, document=_GS_DOC),
+        "known_at": "2025-06-29T00:00:00+00:00",
+    }
     base.update(over)
     return base
+
+
+@pytest.fixture(autouse=True)
+def _evidence_handle_seam(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Evidence admission in this module reloads through the fake archive, never the network."""
+    seam.install(monkeypatch)
 
 
 # Sufficient coverage now needs the whole structured envelope with empty residuals.
@@ -166,6 +202,7 @@ _GS_COVERAGE: dict[str, object] = {
 def _gs_submit(src: str, eid: str, repo: object) -> None:
     from app.research import service as _svc
     from app.research.repository import ResearchRepository as _Repo
+
     assert isinstance(repo, _Repo)
     _svc.submit_source_result(src, coverage=dict(_GS_COVERAGE), evidence_ids=[eid], repo=repo)
 
@@ -187,10 +224,12 @@ def _gs_envelope(eid: str) -> dict[str, object]:
 
 
 def _gs_run_to_freeze() -> tuple[object, str, str]:
+    import os as _os
     import tempfile as _tf
+
     from app.research import service as _svc
     from app.research.repository import ResearchRepository as _Repo
-    import os as _os
+
     _os.environ["RESEARCH_DB_PATH"] = _tf.mktemp(suffix=".sqlite")
     repo = _Repo()
     sid, src = _gs_sid(repo)
@@ -202,20 +241,24 @@ def _gs_run_to_freeze() -> tuple[object, str, str]:
 
 
 def test_gs_arch_session_created() -> None:
-    import tempfile as _tf
     import os as _os
+    import tempfile as _tf
+
     _os.environ["RESEARCH_DB_PATH"] = _tf.mktemp(suffix=".sqlite")
     from app.research.repository import ResearchRepository as _Repo
+
     repo = _Repo()
     sid, _ = _gs_sid(repo)
     assert repo.get_session(sid).query == _GS_Q  # (1) session created
 
 
 def test_gs_arch_source_job_created() -> None:
-    import tempfile as _tf
     import os as _os
+    import tempfile as _tf
+
     _os.environ["RESEARCH_DB_PATH"] = _tf.mktemp(suffix=".sqlite")
     from app.research.repository import ResearchRepository as _Repo
+
     repo = _Repo()
     _, jid = _gs_sid(repo)
     assert repo.get_job(jid).job_type == "source_agent"  # (2) SEC source job created
@@ -223,19 +266,24 @@ def test_gs_arch_source_job_created() -> None:
 
 def test_gs_arch_resolves_goldman() -> None:
     from app.research.models import resolve_source_policy
+
     assert resolve_source_policy({"research_sources": {"mode": "allowlist", "sources": ["SEC"]}})["allowed"] == ["SEC"]
     from app.research.agents.source_agent import is_sec_tool  # (3) resolves Goldman via SEC tools
+
     assert is_sec_tool("find_sec_entities") or True
 
 
 def test_gs_arch_pins_latest_filings() -> None:
-    from app.research.models import resolve_temporal_scope, select_latest_baseline
     from datetime import datetime as _dt
-    from datetime import timezone as _tz
-    scope = resolve_temporal_scope(query=_GS_Q, now=_dt(2025, 6, 30, tzinfo=_tz.utc))
+
+    from app.research.models import resolve_temporal_scope, select_latest_baseline
+
+    scope = resolve_temporal_scope(query=_GS_Q, now=_dt(2025, 6, 30, tzinfo=UTC))
     assert scope["mode"] == "latest-available"  # (4) pins latest filings
-    base = select_latest_baseline([{"form": "10-K", "known_at": "2025-02-14", "filed_at": "2025-02-14",
-                                    "accession_no": _GS_ACC}], as_of="2025-06-30")
+    base = select_latest_baseline(
+        [{"form": "10-K", "known_at": "2025-02-14", "filed_at": "2025-02-14", "accession_no": _GS_ACC}],
+        as_of="2025-06-30",
+    )
     annual = base["annual_10k"]
     acc = annual.get("accession_no") if isinstance(annual, dict) else getattr(annual, "accession_no", None)
     assert acc == _GS_ACC
@@ -243,6 +291,7 @@ def test_gs_arch_pins_latest_filings() -> None:
 
 def test_gs_arch_direct_plus_indirect_channels() -> None:
     from app.research.agents.source_agent import build_query_families, build_research_context
+
     ctx = build_research_context(_GS_Q, ("GS",))
     blob = str(build_query_families(ctx)).upper()
     assert "GS" in blob  # (5) investigates direct OpenAI + indirect channels
@@ -251,17 +300,23 @@ def test_gs_arch_direct_plus_indirect_channels() -> None:
 
 def test_gs_arch_unbounded_useful_reads() -> None:
     from app.research.models import DEFAULT_BUDGET
-    assert DEFAULT_BUDGET.get("total_tool_budget") is None, ("missing contract (LimitsLoopBudget owns "
+
+    assert DEFAULT_BUDGET.get("total_tool_budget") is None, (
+        "missing contract (LimitsLoopBudget owns "
         "app/research/models.py:default_budget): (6) unbounded useful reads; "
-        f"total_tool_budget must default None, got {DEFAULT_BUDGET.get('total_tool_budget')!r}")
+        f"total_tool_budget must default None, got {DEFAULT_BUDGET.get('total_tool_budget')!r}"
+    )
 
 
 def test_gs_arch_duplicate_prevented_with_telemetry() -> None:
     import app.research.director as _director
+
     normalize = getattr(_director, "normalize_research_action", None)
     loop_cls = getattr(_director, "LoopDetector", None)
-    assert callable(normalize) and loop_cls is not None, ("missing source hook (LimitsLoopBudget owns "
-        "app/research/director.py:normalize_research_action + LoopDetector): (7) duplicate prevented with telemetry")
+    assert callable(normalize) and loop_cls is not None, (
+        "missing source hook (LimitsLoopBudget owns "
+        "app/research/director.py:normalize_research_action + LoopDetector): (7) duplicate prevented with telemetry"
+    )
     loop = loop_cls()
     action = normalize("sec", "get_sec_document", "GS 10-K", "GS", ("10-K",), "2025-06-30", _GS_ACC, _GS_Q)
     assert loop.check(action, "h1", 2).get("duplicate") is False
@@ -270,16 +325,24 @@ def test_gs_arch_duplicate_prevented_with_telemetry() -> None:
 
 def test_gs_arch_raw_preserved() -> None:
     import app.sec.archive as _archive
-    find = (getattr(_archive, "find_archived_document", None) or getattr(_archive, "find_archived", None)
-            or getattr(_archive, "find_sec_document", None) or getattr(_archive, "find", None))
+
+    find = (
+        getattr(_archive, "find_archived_document", None)
+        or getattr(_archive, "find_archived", None)
+        or getattr(_archive, "find_sec_document", None)
+        or getattr(_archive, "find", None)
+    )
     store = getattr(_archive, "archive_sec_document", None)
-    assert callable(find) and callable(store), ("missing source hook (SecViewsBounded owns app/sec/archive.py): "
-                                                "(8) raw preserved immutable")
+    assert callable(find) and callable(store), (
+        "missing source hook (SecViewsBounded owns app/sec/archive.py): (8) raw preserved immutable"
+    )
 
 
 def test_gs_arch_derived_views_linked() -> None:
     import inspect as _inspect
+
     import app.sec.documents as _docs
+
     assert callable(getattr(_docs, "get_sec_document", None)), "(9) derived efficient views linked"
     sig = str(_inspect.signature(_docs.get_sec_document))
     assert "offset" in sig and "max_chars" in sig
@@ -288,6 +351,7 @@ def test_gs_arch_derived_views_linked() -> None:
 def test_gs_arch_one_valid_submit() -> None:
     repo, sid, _ = _gs_run_to_freeze()  # (10) one valid submit
     from app.research.repository import ResearchRepository as _Repo
+
     assert isinstance(repo, _Repo)
     assert repo.get_session(sid).status not in ("completed", "failed", "cancelled")
 
@@ -297,12 +361,11 @@ def test_gs_arch_freeze() -> None:
     assert fid == f"{sid}:1:freeze"
 
 
-def test_gs_arch_same_freeze_committee(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gs_arch_same_freeze_committee(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research import service as _svc
     from app.research.repository import ResearchRepository as _Repo
+
     repo = _Repo()
     sid, src = _gs_sid(repo)
     eid = f"{sid}:ev:1"
@@ -323,9 +386,13 @@ def test_gs_arch_same_freeze_committee(
 
 def test_gs_arch_unknown_stays_unknown() -> None:
     from app.research.evals.evaluators import EvalInput, evaluate  # (13) unknown stays unknown
-    inp = EvalInput(scenario_name="gs-openai-sec-only",
-                    answer_text="OpenAI private loan terms: UNKNOWN (no SEC filing discloses them).",
-                    evidence_ids=("EV-1",), requires_evidence=True)
+
+    inp = EvalInput(
+        scenario_name="gs-openai-sec-only",
+        answer_text="OpenAI private loan terms: UNKNOWN (no SEC filing discloses them).",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+    )
     assert evaluate(inp).passed
 
 
@@ -338,6 +405,7 @@ def test_gs_arch_facts_inference_split() -> None:
         ModelOutputFailure,
         parse_grounded_claims,
     )
+
     assert tuple(CLAIM_TYPES) == ("observed_fact", "inference", "unknown", "contradicted")
     # A cited claim that declares nothing stays inference: a citation never promotes it to fact.
     undeclared = parse_grounded_claims(
@@ -346,50 +414,70 @@ def test_gs_arch_facts_inference_split() -> None:
     assert undeclared[0].claim_type == "inference"
     assert GroundedClaim(text="GS revenue grew", evidence_ids=["EV-1"]).claim_type == "inference"
     declared = parse_grounded_claims(
-        _json.dumps([{"text": "GS 10-K discloses the marks", "claim_type": "observed_fact",
-                      "evidence_ids": ["EV-1"]}]), frozen=["EV-1"])
+        _json.dumps([{"text": "GS 10-K discloses the marks", "claim_type": "observed_fact", "evidence_ids": ["EV-1"]}]),
+        frozen=["EV-1"],
+    )
     assert declared[0].claim_type == "observed_fact"
     unknown = parse_grounded_claims(
         _json.dumps([{"text": "OpenAI private loan terms", "claim_type": "unknown", "evidence_ids": []}]),
-        frozen=["EV-1"])
+        frozen=["EV-1"],
+    )
     assert unknown[0].claim_type == "unknown"  # unknown may cite nothing
     with pytest.raises(ModelOutputFailure):
         parse_grounded_claims(
             _json.dumps([{"text": "GS revenue grew", "claim_type": "fact-ish", "evidence_ids": ["EV-1"]}]),
-            frozen=["EV-1"])
+            frozen=["EV-1"],
+        )
     with pytest.raises(ModelOutputFailure):
         parse_grounded_claims(
             _json.dumps([{"text": "GS revenue grew", "claim_type": "observed_fact", "evidence_ids": []}]),
-            frozen=["EV-1"])
+            frozen=["EV-1"],
+        )
 
 
 def test_gs_arch_claim_type_render_gate() -> None:
     from app.research.evals.evaluators import EvalInput as _In  # inference must not render as fact
-    promoted = _In(scenario_name="gs-openai-sec-only", answer_text="GS marks fell [EV-1].",
-                   evidence_ids=("EV-1",), requires_evidence=True,
-                   claims=(("GS marks fell", "inference", "observed_fact"),))
+
+    promoted = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="GS marks fell [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        claims=(("GS marks fell", "inference", "observed_fact"),),
+    )
     assert "inference-rendered-as-observed-fact" in evaluate(promoted).violations
-    honest = _In(scenario_name="gs-openai-sec-only", answer_text="GS marks fell [EV-1] (inference).",
-                 evidence_ids=("EV-1",), requires_evidence=True,
-                 claims=(("GS marks fell", "inference", "inference"),),
-                 claims_by_type={"observed_fact": 1, "inference": 1, "unknown": 0, "contradicted": 0})
+    honest = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="GS marks fell [EV-1] (inference).",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        claims=(("GS marks fell", "inference", "inference"),),
+        claims_by_type={"observed_fact": 1, "inference": 1, "unknown": 0, "contradicted": 0},
+    )
     assert evaluate(honest).passed
-    untyped = _In(scenario_name="gs-openai-sec-only", answer_text="GS marks fell [EV-1].",
-                  evidence_ids=("EV-1",), requires_evidence=True,
-                  claims=(("GS marks fell", "", ""),))
+    untyped = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="GS marks fell [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        claims=(("GS marks fell", "", ""),),
+    )
     assert "claim-without-type" in evaluate(untyped).violations
-    mistyped = _In(scenario_name="gs-openai-sec-only", answer_text="GS marks fell [EV-1].",
-                   evidence_ids=("EV-1",), requires_evidence=True,
-                   claims_by_type={"fact-ish": 1})
+    mistyped = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="GS marks fell [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        claims_by_type={"fact-ish": 1},
+    )
     assert "claim-type-unknown" in evaluate(mistyped).violations
 
 
-def test_gs_arch_material_claims_trace_to_raw(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_gs_arch_material_claims_trace_to_raw(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     from app.research import service as _svc
     from app.research.repository import ResearchRepository as _Repo
+
     repo = _Repo()
     sid, src = _gs_sid(repo)
     eid = f"{sid}:ev:1"
@@ -399,9 +487,12 @@ def test_gs_arch_material_claims_trace_to_raw(
     for role in ("stockbot", "bullbot", "bearbot"):
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
         _svc.record_committee_analysis(sid, jid, role, _gs_envelope(eid), repo=repo)
-    out = _svc.finalize_session(sid, "GS exposure is filing-backed.",
-                                [{"text": "GS 10-K discloses OpenAI-linked exposure", "claim_type": "observed_fact",
-                                  "evidence_ids": [eid]}], repo=repo)
+    out = _svc.finalize_session(
+        sid,
+        "GS exposure is filing-backed.",
+        [{"text": "GS 10-K discloses OpenAI-linked exposure", "claim_type": "observed_fact", "evidence_ids": [eid]}],
+        repo=repo,
+    )
     assert out["freeze_id"] == fid  # (15) material claims trace to raw
     final = repo.get_session(sid).final_result
     assert isinstance(final, dict)
@@ -429,6 +520,7 @@ def test_gs_arch_material_claims_trace_to_raw(
 # per as_of) is covered. No facts past the fixture cutoff. Offline fakes only.
 # ---------------------------------------------------------------------------
 
+
 def _msft_fixture_answer(channels: str = "Azure commercial revenue receivable", branch: str = "CoreWeave") -> str:
     return (
         f"Microsoft 10-K [EV-1] discloses OpenAI-linked {channels} exposure; "
@@ -436,8 +528,9 @@ def _msft_fixture_answer(channels: str = "Azure commercial revenue receivable", 
     )
 
 
-def _msft_trace(channels: tuple[str, ...], branches: tuple[str, ...],
-                evidence: tuple[str, ...], freeze: str = "rs:msft:1:freeze") -> FixtureTrace:
+def _msft_trace(
+    channels: tuple[str, ...], branches: tuple[str, ...], evidence: tuple[str, ...], freeze: str = "rs:msft:1:freeze"
+) -> FixtureTrace:
     """Correct-run trace: opened filings/documents, raw-document evidence, typed claims."""
     trace: FixtureTrace = {
         "filings_opened": ["0000789019-26-000057"],
@@ -446,10 +539,16 @@ def _msft_trace(channels: tuple[str, ...], branches: tuple[str, ...],
         "raw_evidence_ids": list(evidence),
         "navigation_evidence_ids": ["sec-search:msft:1"],
         "claims": [
-            {"text": "MSFT 10-K discloses the OpenAI investment carrying value",
-             "claim_type": "observed_fact", "rendered_as": "observed_fact"},
-            {"text": "An OpenAI insolvency impairs that carrying value",
-             "claim_type": "inference", "rendered_as": "inference"},
+            {
+                "text": "MSFT 10-K discloses the OpenAI investment carrying value",
+                "claim_type": "observed_fact",
+                "rendered_as": "observed_fact",
+            },
+            {
+                "text": "An OpenAI insolvency impairs that carrying value",
+                "claim_type": "inference",
+                "rendered_as": "inference",
+            },
         ],
         "claims_by_type": {"observed_fact": 1, "inference": 1, "unknown": 0, "contradicted": 0},
         "waves": [freeze],
@@ -493,13 +592,17 @@ def _msft_build(answer_excerpt: str, **over: str | tuple[str, ...]) -> AgentFixt
     assert all(isinstance(e, str) for e in evidence_ids)
     assert all(isinstance(k, str) for k in known_ats)
     fixture: AgentFixture = build_fixture(
-        session_id=session_id, scenario_name=scenario_name,
+        session_id=session_id,
+        scenario_name=scenario_name,
         tool_calls=tuple(t for t in tool_calls if isinstance(t, str)),
         evidence_ids=tuple(e for e in evidence_ids if isinstance(e, str)),
         known_ats=tuple(k for k in known_ats if isinstance(k, str)),
         answer_excerpt=excerpt,
-        trace=_msft_trace(_msft_strs(kwargs, "material_channels"), _msft_strs(kwargs, "branches_covered"),
-                          tuple(e for e in evidence_ids if isinstance(e, str))),
+        trace=_msft_trace(
+            _msft_strs(kwargs, "material_channels"),
+            _msft_strs(kwargs, "branches_covered"),
+            tuple(e for e in evidence_ids if isinstance(e, str)),
+        ),
     )
     return fixture
 
@@ -507,6 +610,7 @@ def _msft_build(answer_excerpt: str, **over: str | tuple[str, ...]) -> AgentFixt
 def _msft_fixture(answer_excerpt: str | None = None, **over: str | tuple[str, ...]) -> tuple[EvalInput, list[str]]:
     from app.research.evals.evaluators import eval_input_from_fixture
     from app.research.evals.regression import run_deterministic_validators
+
     excerpt = answer_excerpt if answer_excerpt is not None else _msft_fixture_answer()
     fixture = _msft_build(excerpt, **over)
     return eval_input_from_fixture(fixture), run_deterministic_validators(fixture)
@@ -520,57 +624,96 @@ def test_msft_openai_passes_with_channel_and_branch() -> None:
 
 def test_msft_openai_fails_without_material_msft_exposure() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    from app.research.evals.regression import run_deterministic_validators, build_fixture
+    from app.research.evals.regression import build_fixture, run_deterministic_validators
+
     outcome, _ = _msft_fixture(answer_excerpt="CoreWeave [EV-2] covers a branch; Microsoft terms UNKNOWN.")
     assert evaluate(outcome).violations == ("msft-openai-no-material-msft-exposure",)
-    bad = build_fixture(session_id="rs:msft", scenario_name="msft-openai-bankruptcy-sec-only",
-                        evidence_ids=("EV-2",),
-                        answer_excerpt="CoreWeave covers a branch; Microsoft terms UNKNOWN.")
+    bad = build_fixture(
+        session_id="rs:msft",
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        evidence_ids=("EV-2",),
+        answer_excerpt="CoreWeave covers a branch; Microsoft terms UNKNOWN.",
+    )
     assert "msft-openai-no-material-msft-exposure" in run_deterministic_validators(bad)
-    direct = _In(scenario_name="msft-openai-bankruptcy-sec-only",
-                 answer_text="Microsoft filing-backed answer with no channel words.",
-                 evidence_ids=("EV-1",), requires_evidence=True,
-                 branches_covered=("coreweave",))
+    direct = _In(
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        answer_text="Microsoft filing-backed answer with no channel words.",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        branches_covered=("coreweave",),
+    )
     assert "msft-openai-no-material-msft-exposure" in evaluate(direct).violations
 
 
 def test_msft_openai_fails_without_non_msft_branch() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    from app.research.evals.regression import run_deterministic_validators, build_fixture
+    from app.research.evals.regression import build_fixture, run_deterministic_validators
+
     outcome, _ = _msft_fixture(answer_excerpt="Microsoft 10-K [EV-1] discloses Azure investment exposure.")
     assert evaluate(outcome).violations == ("msft-openai-no-branch",)
-    bad = build_fixture(session_id="rs:msft", scenario_name="msft-openai-bankruptcy-sec-only",
-                        evidence_ids=("EV-1",),
-                        answer_excerpt="Microsoft 10-K discloses Azure investment exposure.")
+    bad = build_fixture(
+        session_id="rs:msft",
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        evidence_ids=("EV-1",),
+        answer_excerpt="Microsoft 10-K discloses Azure investment exposure.",
+    )
     assert "msft-openai-no-branch" in run_deterministic_validators(bad)
-    direct = _In(scenario_name="msft-openai-bankruptcy-sec-only",
-                 answer_text="Microsoft Azure investment exposure [EV-1].",
-                 evidence_ids=("EV-1",), requires_evidence=True,
-                 material_channels=("azure",))
+    direct = _In(
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        answer_text="Microsoft Azure investment exposure [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        material_channels=("azure",),
+    )
     assert "msft-openai-no-branch" in evaluate(direct).violations
 
 
 def test_msft_openai_channels_cover_each_pair() -> None:
     # Channel and branch coverage are read from the trace when the prose names neither.
-    for channel in ("investment", "ownership", "commercial", "revenue", "receivable", "credit", "azure", "purchase commitment"):
+    for channel in (
+        "investment",
+        "ownership",
+        "commercial",
+        "revenue",
+        "receivable",
+        "credit",
+        "azure",
+        "purchase commitment",
+    ):
         excerpt = "Microsoft 10-K [EV-1] names the OpenAI-linked line; a second filer [EV-2] covers its branch."
-        outcome, violations = _msft_fixture(answer_excerpt=excerpt, material_channels=(channel,),
-                                            branches_covered=("orcl",))
+        outcome, violations = _msft_fixture(
+            answer_excerpt=excerpt, material_channels=(channel,), branches_covered=("orcl",)
+        )
         assert violations == []
         assert evaluate(outcome).passed
 
 
 def test_msft_openai_fixture_round_trip_carries_telemetry() -> None:
-    from app.research.evals.regression import build_fixture, run_deterministic_validators
     from app.research.evals.evaluators import eval_input_from_fixture
+    from app.research.evals.regression import (
+        build_fixture,
+        run_deterministic_validators,
+    )
+
     fixture = build_fixture(
-        session_id="rs:msft-tel", scenario_name="msft-openai-bankruptcy-sec-only",
-        tool_calls=("search_sec_filings",), evidence_ids=("EV-1",),
-        known_ats=("2026-08-01",), answer_excerpt=_msft_fixture_answer(),
-        telemetry={"searches": 3, "queries": ["MSFT OpenAI"], "forms": ["10-K"],
-                   "entities": ["MSFT"], "exhibits": 1, "relationships_found": 2,
-                   "relationships_skipped": 0, "coverage": "partial",
-                   "unresolved": ["OpenAI private terms"], "stop_reason": "complete:wave1"},
+        session_id="rs:msft-tel",
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        tool_calls=("search_sec_filings",),
+        evidence_ids=("EV-1",),
+        known_ats=("2026-08-01",),
+        answer_excerpt=_msft_fixture_answer(),
+        telemetry={
+            "searches": 3,
+            "queries": ["MSFT OpenAI"],
+            "forms": ["10-K"],
+            "entities": ["MSFT"],
+            "exhibits": 1,
+            "relationships_found": 2,
+            "relationships_skipped": 0,
+            "coverage": "partial",
+            "unresolved": ["OpenAI private terms"],
+            "stop_reason": "no_questions",
+        },
         trace=_msft_trace(("azure",), ("coreweave",), ("EV-1",)),
     )
     assert run_deterministic_validators(fixture) == []
@@ -578,7 +721,7 @@ def test_msft_openai_fixture_round_trip_carries_telemetry() -> None:
     assert outcome.searches == 3 and outcome.queries == ("MSFT OpenAI",)
     assert outcome.forms == ("10-K",) and outcome.entities == ("MSFT",)
     assert outcome.exhibits == 1 and outcome.relationships_found == 2
-    assert outcome.unresolved == ("OpenAI private terms",) and outcome.stop_reason == "complete:wave1"
+    assert outcome.unresolved == ("OpenAI private terms",) and outcome.stop_reason == "no_questions"
     assert evaluate(outcome).passed
 
 
@@ -588,34 +731,57 @@ def test_msft_openai_fixture_round_trip_carries_telemetry() -> None:
 # an unexplored high-ranking material relationship blocks "sufficient".
 # ---------------------------------------------------------------------------
 
+
 def test_coverage_amazon_amd_cerebras_without_msft_not_sufficient() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    inp = _In(scenario_name="msft-openai-bankruptcy-sec-only",
-              answer_text="Amazon, AMD and Cerebras branch findings [EV-1].",
-              evidence_ids=("EV-1",), requires_evidence=True,
-              coverage_claim="sufficient", branches_covered=("amzn", "amd", "cerebras"))
+
+    inp = _In(
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        answer_text="Amazon, AMD and Cerebras branch findings [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        coverage_claim="sufficient",
+        branches_covered=("amzn", "amd", "cerebras"),
+    )
     assert "msft-openai-no-material-msft-exposure" in evaluate(inp).violations
 
 
 def test_coverage_major_branches_may_be_sufficient() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    inp = _In(scenario_name="msft-openai-bankruptcy-sec-only",
-              answer_text=_msft_fixture_answer(), evidence_ids=("EV-1", "EV-2"),
-              requires_evidence=True, coverage_claim="sufficient",
-              material_channels=("azure",), branches_covered=("coreweave", "amzn", "amd"))
+
+    inp = _In(
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        answer_text=_msft_fixture_answer(),
+        evidence_ids=("EV-1", "EV-2"),
+        requires_evidence=True,
+        coverage_claim="sufficient",
+        material_channels=("azure",),
+        branches_covered=("coreweave", "amzn", "amd"),
+    )
     assert evaluate(inp).passed
 
 
 def test_coverage_unexplored_high_rank_blocks_sufficient() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    inp = _In(scenario_name="gs-openai-sec-only", answer_text="Findings [EV-1].",
-              evidence_ids=("EV-1",), requires_evidence=True,
-              coverage_claim="sufficient", high_rank_unexplored=True)
+
+    inp = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="Findings [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        coverage_claim="sufficient",
+        high_rank_unexplored=True,
+    )
     result = evaluate(inp)
     assert not result.passed and result.violations == ("coverage-overclaim",)
-    ok = _In(scenario_name="gs-openai-sec-only", answer_text="Findings [EV-1].",
-             evidence_ids=("EV-1",), requires_evidence=True,
-             coverage_claim="sufficient", high_rank_unexplored=False)
+    ok = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="Findings [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        coverage_claim="sufficient",
+        high_rank_unexplored=False,
+    )
     assert evaluate(ok).passed
 
 
@@ -625,6 +791,7 @@ def test_coverage_unexplored_high_rank_blocks_sufficient() -> None:
 # mutate the freeze, claims resolve to frozen evidence, research_requests stay
 # separate from evidence. Offline fakes only.
 # ---------------------------------------------------------------------------
+
 
 def _committee_input(
     committee_freeze_ids: tuple[str, ...] = ("F1", "F1", "F1"),
@@ -637,10 +804,14 @@ def _committee_input(
     requests_separate_from_evidence: bool = True,
 ) -> EvalInput:
     return EvalInput(
-        scenario_name="gs-openai-sec-only", answer_text="Findings [EV-1].",
-        evidence_ids=("EV-1",), requires_evidence=True,
-        committee_freeze_ids=committee_freeze_ids, job_ids=job_ids,
-        job_created_before_run=job_created_before_run, jobs_concurrent=jobs_concurrent,
+        scenario_name="gs-openai-sec-only",
+        answer_text="Findings [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        committee_freeze_ids=committee_freeze_ids,
+        job_ids=job_ids,
+        job_created_before_run=job_created_before_run,
+        jobs_concurrent=jobs_concurrent,
         cross_role_write_rejected=cross_role_write_rejected,
         roles_mutate_freeze=roles_mutate_freeze,
         claims_resolve_to_freeze=claims_resolve_to_freeze,
@@ -664,10 +835,14 @@ def test_committee_job_count_concurrency_registration() -> None:
 
 
 def test_committee_cross_role_freeze_claims_requests() -> None:
-    assert "committee-cross-role-write-allowed" in evaluate(_committee_input(cross_role_write_rejected=False)).violations
+    assert (
+        "committee-cross-role-write-allowed" in evaluate(_committee_input(cross_role_write_rejected=False)).violations
+    )
     assert "committee-mutates-freeze" in evaluate(_committee_input(roles_mutate_freeze=True)).violations
     assert "committee-claims-unresolved" in evaluate(_committee_input(claims_resolve_to_freeze=False)).violations
-    assert "committee-requests-as-evidence" in evaluate(_committee_input(requests_separate_from_evidence=False)).violations
+    assert (
+        "committee-requests-as-evidence" in evaluate(_committee_input(requests_separate_from_evidence=False)).violations
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -675,22 +850,39 @@ def test_committee_cross_role_freeze_claims_requests() -> None:
 # answer in the same turn; a bare "finalized/5 claims" with no answer fails.
 # ---------------------------------------------------------------------------
 
+
 def test_finalize_bare_count_without_answer_fails() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    inp = _In(scenario_name="gs-openai-sec-only", answer_text="finalized 5 claims",
-              evidence_ids=("EV-1",), requires_evidence=True, finalized_claim_count=5,
-              answered=False)
+
+    inp = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="finalized 5 claims",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        finalized_claim_count=5,
+        answered=False,
+    )
     assert "finalized-without-answer" in evaluate(inp).violations
-    blank = _In(scenario_name="gs-openai-sec-only", answer_text="   ",
-                evidence_ids=("EV-1",), requires_evidence=True, finalized_claim_count=5)
+    blank = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="   ",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        finalized_claim_count=5,
+    )
     assert "finalized-without-answer" in evaluate(blank).violations
 
 
 def test_finalize_structured_answer_same_turn_passes() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    inp = _In(scenario_name="gs-openai-sec-only",
-              answer_text="Balanced: grounded [EV-1]. Bull: upside [EV-1]. Bear: risk [EV-1]. Agreed: exposure capped.",
-              evidence_ids=("EV-1",), requires_evidence=True, finalized_claim_count=5)
+
+    inp = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="Balanced: grounded [EV-1]. Bull: upside [EV-1]. Bear: risk [EV-1]. Agreed: exposure capped.",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        finalized_claim_count=5,
+    )
     assert evaluate(inp).passed
 
 
@@ -702,14 +894,18 @@ def test_finalize_structured_answer_same_turn_passes() -> None:
 # miss is an explicit failure.
 # ---------------------------------------------------------------------------
 
-_CANONICAL_TRACE_FIXTURES = ("msft-openai-bankruptcy-sec-only", "gs-openai-sec-only",
-                             "spacex-openai-bankruptcy-sec-only")
+_CANONICAL_TRACE_FIXTURES = (
+    "msft-openai-bankruptcy-sec-only",
+    "gs-openai-sec-only",
+    "spacex-openai-bankruptcy-sec-only",
+)
 _CONTROL_FIXTURE = "msft-openai-bankruptcy-overconfident-control"
 
 
 def _fixture_outcome(name: str) -> tuple[EvalInput, list[str]]:
     from app.research.evals.evaluators import eval_input_from_fixture
     from app.research.evals.regression import load_fixture, run_deterministic_validators
+
     fixture = load_fixture(name)
     return eval_input_from_fixture(fixture), run_deterministic_validators(fixture)
 
@@ -740,17 +936,26 @@ def test_overconfident_control_fixture_fails() -> None:
     assert "answer-without-required-evidence" in result.violations
     # The keyword channel/branch gate is not what stops it: the same prose minus the
     # absence sentence passes with no structural trace required.
-    promoted = control.answer_text.replace("No relationship exists between Microsoft and OpenAI", "OpenAI exposure reviewed")
-    assert evaluate(EvalInput(scenario_name="msft-openai-bankruptcy-sec-only", answer_text=promoted,
-                              evidence_ids=(), requires_evidence=False,
-                              material_channels=("azure", "commercial"),
-                              branches_covered=("coreweave",))).passed
+    promoted = control.answer_text.replace(
+        "No relationship exists between Microsoft and OpenAI", "OpenAI exposure reviewed"
+    )
+    assert evaluate(
+        EvalInput(
+            scenario_name="msft-openai-bankruptcy-sec-only",
+            answer_text=promoted,
+            evidence_ids=(),
+            requires_evidence=False,
+            material_channels=("azure", "commercial"),
+            branches_covered=("coreweave",),
+        )
+    ).passed
 
 
 def test_prose_without_trace_fails_structurally() -> None:
     """Keyword presence alone never carries a pass: canonical prose minus its trace fails."""
     from app.research.evals.evaluators import eval_input_from_fixture
     from app.research.evals.regression import load_fixture
+
     loaded = load_fixture("msft-openai-bankruptcy-sec-only")
     del loaded["trace"]
     outcome = eval_input_from_fixture(loaded)
@@ -760,9 +965,13 @@ def test_prose_without_trace_fails_structurally() -> None:
 
 def _trace_fixture(trace: FixtureTrace, evidence: tuple[str, ...] = ("EV-1",)) -> AgentFixture:
     from app.research.evals.regression import build_fixture
+
     return build_fixture(
-        session_id="rs:trace", scenario_name="msft-openai-bankruptcy-sec-only",
-        tool_calls=("get_sec_document",), evidence_ids=evidence, known_ats=("2026-08-01",),
+        session_id="rs:trace",
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        tool_calls=("get_sec_document",),
+        evidence_ids=evidence,
+        known_ats=("2026-08-01",),
         answer_excerpt="Microsoft 10-K [EV-1] discloses the OpenAI-linked exposure with a CoreWeave branch.",
         trace=trace,
     )
@@ -770,6 +979,7 @@ def _trace_fixture(trace: FixtureTrace, evidence: tuple[str, ...] = ("EV-1",)) -
 
 def test_navigation_ids_never_count_as_raw_evidence() -> None:
     from app.research.evals.evaluators import eval_input_from_fixture
+
     trace = _msft_trace(("azure",), ("coreweave",), ("EV-1",))
     trace["navigation_evidence_ids"] = ["EV-1"]  # the same id is navigation-only here
     assert evaluate(eval_input_from_fixture(_trace_fixture(trace))).violations == ("trace-no-raw-source-evidence",)
@@ -777,6 +987,7 @@ def test_navigation_ids_never_count_as_raw_evidence() -> None:
 
 def test_trace_evidence_ids_must_resolve_to_recorded_evidence() -> None:
     from app.research.evals.evaluators import eval_input_from_fixture
+
     trace = _msft_trace(("azure",), ("coreweave",), ("EV-1",))
     trace["raw_evidence_ids"] = ["EV-1", "rs:ghost:ev:99"]
     assert evaluate(eval_input_from_fixture(_trace_fixture(trace))).violations == ("trace-raw-evidence-unresolved",)
@@ -784,48 +995,94 @@ def test_trace_evidence_ids_must_resolve_to_recorded_evidence() -> None:
 
 def test_trace_requires_documents_and_filings() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    bare = _In(scenario_name="msft-openai-bankruptcy-sec-only", answer_text="Prose names Azure and CoreWeave.",
-               evidence_ids=("EV-1",), requires_evidence=True, requires_trace=True, trace_present=True,
-               documents_opened=("a|b.htm",), raw_evidence_ids=("EV-1",), committee_freeze_ids=("F1",) * 3,
-               roles_completed=("stockbot", "bullbot", "bearbot"))
+
+    bare = _In(
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        answer_text="Prose names Azure and CoreWeave.",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        requires_trace=True,
+        trace_present=True,
+        documents_opened=("a|b.htm",),
+        raw_evidence_ids=("EV-1",),
+        committee_freeze_ids=("F1",) * 3,
+        roles_completed=("stockbot", "bullbot", "bearbot"),
+    )
     assert evaluate(bare).violations == ("trace-no-filings-opened",)
-    no_docs = _In(scenario_name="msft-openai-bankruptcy-sec-only", answer_text="Prose names Azure and CoreWeave.",
-                  evidence_ids=("EV-1",), requires_evidence=True, requires_trace=True, trace_present=True,
-                  filings_opened=("0000789019-26-000057",), raw_evidence_ids=("EV-1",),
-                  committee_freeze_ids=("F1",) * 3, roles_completed=("stockbot", "bullbot", "bearbot"))
+    no_docs = _In(
+        scenario_name="msft-openai-bankruptcy-sec-only",
+        answer_text="Prose names Azure and CoreWeave.",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        requires_trace=True,
+        trace_present=True,
+        filings_opened=("0000789019-26-000057",),
+        raw_evidence_ids=("EV-1",),
+        committee_freeze_ids=("F1",) * 3,
+        roles_completed=("stockbot", "bullbot", "bearbot"),
+    )
     assert evaluate(no_docs).violations == ("trace-no-documents-opened",)
 
 
 def test_overconfident_absence_from_search_miss_fails() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    flagged = _In(scenario_name="spacex-openai-bankruptcy-sec-only", answer_text="Findings [EV-1].",
-                  evidence_ids=("EV-1",), requires_evidence=True,
-                  universal_absence_claims=("SpaceX has no relationship with OpenAI",))
+
+    flagged = _In(
+        scenario_name="spacex-openai-bankruptcy-sec-only",
+        answer_text="Findings [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        universal_absence_claims=("SpaceX has no relationship with OpenAI",),
+    )
     assert evaluate(flagged).violations == ("overconfident-absence",)
-    prose = _In(scenario_name="spacex-openai-bankruptcy-sec-only",
-                answer_text="The search returned nothing, so no relationship exists between SpaceX and OpenAI.",
-                evidence_ids=("EV-1",), requires_evidence=True)
+    prose = _In(
+        scenario_name="spacex-openai-bankruptcy-sec-only",
+        answer_text="The search returned nothing, so no relationship exists between SpaceX and OpenAI.",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+    )
     assert evaluate(prose).violations == ("overconfident-absence",)
-    scoped = _In(scenario_name="spacex-openai-bankruptcy-sec-only",
-                 answer_text="No SpaceX disclosure was located within the searched SEC scope [EV-1].",
-                 evidence_ids=("EV-1",), requires_evidence=True, limitations=("SEC-only policy.",),
-                 coverage_complete=False)
+    scoped = _In(
+        scenario_name="spacex-openai-bankruptcy-sec-only",
+        answer_text="No SpaceX disclosure was located within the searched SEC scope [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        limitations=("SEC-only policy.",),
+        coverage_complete=False,
+    )
     assert evaluate(scoped).passed
 
 
 def test_committee_roles_and_limitations_gates() -> None:
     from app.research.evals.evaluators import EvalInput as _In
-    partial_roles = _In(scenario_name="gs-openai-sec-only", answer_text="Findings [EV-1].",
-                        evidence_ids=("EV-1",), requires_evidence=True,
-                        committee_freeze_ids=("F1", "F2", "F1"), roles_completed=("stockbot", "bullbot"),
-                        coverage_complete=False, limitations=("SEC-only.",))
+
+    partial_roles = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="Findings [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        committee_freeze_ids=("F1", "F2", "F1"),
+        roles_completed=("stockbot", "bullbot"),
+        coverage_complete=False,
+        limitations=("SEC-only.",),
+    )
     assert set(evaluate(partial_roles).violations) == {"committee-different-freeze", "committee-roles-incomplete"}
-    unresolved = _In(scenario_name="gs-openai-sec-only", answer_text="Findings [EV-1].",
-                     evidence_ids=("EV-1",), requires_evidence=True, coverage_complete=False)
+    unresolved = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="Findings [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        coverage_complete=False,
+    )
     assert evaluate(unresolved).violations == ("limitations-missing",)
-    complete = _In(scenario_name="gs-openai-sec-only", answer_text="Findings [EV-1].",
-                   evidence_ids=("EV-1",), requires_evidence=True, coverage_complete=False,
-                   limitations=("SEC-only policy: no disclosure located within the searched scope.",))
+    complete = _In(
+        scenario_name="gs-openai-sec-only",
+        answer_text="Findings [EV-1].",
+        evidence_ids=("EV-1",),
+        requires_evidence=True,
+        coverage_complete=False,
+        limitations=("SEC-only policy: no disclosure located within the searched scope.",),
+    )
     assert evaluate(complete).passed
 
 
@@ -842,13 +1099,19 @@ def test_spacex_fixture_keeps_absence_scoped() -> None:
 def test_fixture_trace_round_trip_and_legacy_fixture_back_compat(tmp_path: Path) -> None:
     from app.research.evals.evaluators import eval_input_from_fixture
     from app.research.evals.regression import build_fixture, load_fixture, save_fixture
+
     trace: FixtureTrace = {
         "filings_opened": ["0000789019-26-000057"],
         "documents_opened": ["0000789019-26-000057|msft-20260630.htm"],
         "passages_opened": ["0000789019-26-000057|msft-20260630.htm|p18"],
         "raw_evidence_ids": ["EV-1"],
-        "claims": [{"text": "MSFT 10-K discloses the investment", "claim_type": "observed_fact",
-                    "rendered_as": "observed_fact"}],
+        "claims": [
+            {
+                "text": "MSFT 10-K discloses the investment",
+                "claim_type": "observed_fact",
+                "rendered_as": "observed_fact",
+            }
+        ],
         "claims_by_type": {"observed_fact": 1},
         "searches": ["sec-search:rt:1"],
         "waves": ["F1"],
@@ -859,11 +1122,20 @@ def test_fixture_trace_round_trip_and_legacy_fixture_back_compat(tmp_path: Path)
         "material_channels": ["azure"],
         "branches_covered": ["coreweave"],
     }
-    save_fixture(build_fixture(session_id="rs:rt", scenario_name="msft-openai-bankruptcy-sec-only",
-                               question="q", as_of="2026-08-10", tool_calls=("get_sec_document",),
-                               evidence_ids=("EV-1",), known_ats=("2026-08-01",),
-                               answer_excerpt="MSFT 10-K [EV-1] discloses the Azure exposure with a CoreWeave branch.",
-                               trace=trace), tmp_path)
+    save_fixture(
+        build_fixture(
+            session_id="rs:rt",
+            scenario_name="msft-openai-bankruptcy-sec-only",
+            question="q",
+            as_of="2026-08-10",
+            tool_calls=("get_sec_document",),
+            evidence_ids=("EV-1",),
+            known_ats=("2026-08-01",),
+            answer_excerpt="MSFT 10-K [EV-1] discloses the Azure exposure with a CoreWeave branch.",
+            trace=trace,
+        ),
+        tmp_path,
+    )
     loaded = load_fixture("msft-openai-bankruptcy-sec-only", tmp_path)
     assert loaded["trace"]["filings_opened"] == ["0000789019-26-000057"]
     assert evaluate(eval_input_from_fixture(loaded)).passed
@@ -887,7 +1159,7 @@ def test_fixture_trace_round_trip_and_legacy_fixture_back_compat(tmp_path: Path)
 )
 def test_malformed_trace_section_fails_loading(tmp_path: Path, trace: object, message: str) -> None:
     """A saved fixture with a mistyped trace section fails loading loudly, never silently."""
-    from app.research.evals.regression import load_fixture, save_fixture
+    from app.research.evals.regression import load_fixture
 
     payload = json.loads(json.dumps(_msft_build(_msft_fixture_answer())))
     payload["trace"] = trace
@@ -904,8 +1176,13 @@ def test_trace_optional_fields_load_with_bool_counts_ignored(tmp_path: Path) -> 
 
     fixture = _msft_build(_msft_fixture_answer())
     fixture["trace"] = {
-        "claims": [{"text": "MSFT 10-K discloses the investment",
-                    "claim_type": "observed_fact", "rendered_as": "observed_fact"}],
+        "claims": [
+            {
+                "text": "MSFT 10-K discloses the investment",
+                "claim_type": "observed_fact",
+                "rendered_as": "observed_fact",
+            }
+        ],
         "claims_by_type": {"observed_fact": True, "inference": 2},
         "coverage_complete": True,
     }
@@ -920,7 +1197,10 @@ def test_trace_optional_fields_load_with_bool_counts_ignored(tmp_path: Path) -> 
 @pytest.mark.parametrize(
     ("name", "expected"),
     [
-        ("spacex-openai-bankruptcy-sec-only-live-run", {"trace-no-documents-opened", "claim-without-type", "overconfident-absence"}),
+        (
+            "spacex-openai-bankruptcy-sec-only-live-run",
+            {"trace-no-documents-opened", "claim-without-type", "overconfident-absence"},
+        ),
         ("gs-openai-sec-only-live-run", {"trace-no-documents-opened", "claim-without-type", "overconfident-absence"}),
     ],
 )

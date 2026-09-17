@@ -6,10 +6,11 @@ Covers uncovered-line branches verbatim: every test below hits a line that was
 DA=0 in coverage-python.lcov (validators, fixture load errors, eval store,
 wave coercions, ingest/journal/freeze/model guards, committee/final merges).
 """
+
 from __future__ import annotations
 
 import json
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -62,7 +63,7 @@ from app.research.synthesis.committee import compute_disagreement
 from app.research.synthesis.final import synthesize_final
 from evals.pi_harness import _is_ordered_subsequence, check_case
 
-ASOF = datetime(2025, 6, 30, tzinfo=timezone.utc)
+ASOF = datetime(2025, 6, 30, tzinfo=UTC)
 
 
 def _mk_fixture(**over: object) -> AgentFixture:
@@ -148,27 +149,60 @@ def _mk_fixture(**over: object) -> AgentFixture:
 def _mk_ev(eid: str = "EV-1", sid: str = "rs:t", wave: int = 1, known: datetime | None = None) -> Evidence:
     content = "c-" + eid
     return Evidence(
-        evidence_id=eid, session_id=sid, wave_id=wave, source_type="sec",
-        source_name="SEC", source_uri="https://sec.gov/x", source_record_id="r",
-        subject="NVDA", claim_text="c", content=content,
+        evidence_id=eid,
+        session_id=sid,
+        wave_id=wave,
+        source_type="sec",
+        source_name="SEC",
+        source_uri="https://sec.gov/x",
+        source_record_id="r",
+        subject="NVDA",
+        claim_text="c",
+        content=content,
         content_hash=evidence_content_hash(content),
-        known_at=known if known is not None else datetime(2025, 6, 1, tzinfo=timezone.utc),
-        retrieved_at=datetime(2025, 6, 1, tzinfo=timezone.utc),
-        job_id="J-1", agent_id="s-A",
+        known_at=known if known is not None else datetime(2025, 6, 1, tzinfo=UTC),
+        retrieved_at=datetime(2025, 6, 1, tzinfo=UTC),
+        job_id="J-1",
+        agent_id="s-A",
     )
 
 
 def _trio(sid: str = "rs:t"):
-    stock = StockbotAnalysis(session_id=sid, wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                             as_of="2025-06-30", question="q", answer="a", base_case="base")
-    bull = BullAnalysis(session_id=sid, wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                        as_of="2025-06-30", question="q", stance="bull", bull_case="up")
-    bear = BearAnalysis(session_id=sid, wave_id=1, freeze_id="F1", evidence_ids=["EV-1"],
-                        as_of="2025-06-30", question="q", stance="bear", bear_case="down")
+    stock = StockbotAnalysis(
+        session_id=sid,
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="2025-06-30",
+        question="q",
+        answer="a",
+        base_case="base",
+    )
+    bull = BullAnalysis(
+        session_id=sid,
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="2025-06-30",
+        question="q",
+        stance="bull",
+        bull_case="up",
+    )
+    bear = BearAnalysis(
+        session_id=sid,
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="2025-06-30",
+        question="q",
+        stance="bear",
+        bear_case="down",
+    )
     return stock, bull, bear
 
 
 # --- regression validators: each decision path ---
+
 
 def test_validator_pit_future_crossing():
     fx = _mk_fixture(known_ats=["2025-07-01"])
@@ -189,6 +223,8 @@ def test_validator_requires_evidence_missing():
 def test_validator_over_budget():
     fx = _mk_fixture(budget_used=10, budget_cap=5)
     assert run_deterministic_validators(fx) == ["budget-violation"]
+    # A cap a run was actually given still reaches the evaluator (no cap configured = unlimited).
+    assert evaluate(_ev.eval_input_from_fixture(fx)).violations == ("budget-violation",)
 
 
 def test_validator_budget_none_passes():
@@ -222,9 +258,7 @@ def test_validator_timeout_missing_marker():
 
 def test_validator_timeout_closure_passes(tmp_path: Path):
     fx = _mk_fixture(scenario_name="timeout-model-call-failed-resume")
-    fx["answer_excerpt"] = (
-        "LiveModelError session=failed job=failed model.failed wave.stopped running_jobs=0"
-    )
+    fx["answer_excerpt"] = "LiveModelError session=failed job=failed model.failed wave.stopped running_jobs=0"
     assert run_deterministic_validators(fx) == []
     path = _reg.save_fixture(fx, tmp_path)
     assert _reg.load_fixture("timeout-model-call-failed-resume", tmp_path)["session_id"] == "rs:t"
@@ -233,11 +267,12 @@ def test_validator_timeout_closure_passes(tmp_path: Path):
 
 def test_validator_promote_and_list(tmp_path: Path):
     assert _reg.list_fixtures(tmp_path) == []
-    _reg.promote_to_fixture(session_id="rs:x", scenario_name="pit-knowable-by-2025-06-30",
-                            fixtures_dir=tmp_path)
+    _reg.promote_to_fixture(session_id="rs:x", scenario_name="pit-knowable-by-2025-06-30", fixtures_dir=tmp_path)
     assert _reg.list_fixtures(tmp_path) == ["pit-knowable-by-2025-06-30"]
-    assert _reg.build_fixture(session_id="rs:x", scenario_name="pit-knowable-by-2025-06-30",
-                              question="qq")["question"] == "qq"
+    assert (
+        _reg.build_fixture(session_id="rs:x", scenario_name="pit-knowable-by-2025-06-30", question="qq")["question"]
+        == "qq"
+    )
 
 
 def test_fixture_load_errors(tmp_path: Path):
@@ -247,8 +282,9 @@ def test_fixture_load_errors(tmp_path: Path):
     (tmp_path / "bad2.json").write_text(json.dumps({"validator": {}}), encoding="utf-8")
     with pytest.raises(ValueError):
         _reg.load_fixture("bad2", tmp_path)
-    (tmp_path / "bad3.json").write_text(json.dumps({"a": 1, "validator": {"requires_evidence": True}}),
-                                        encoding="utf-8")
+    (tmp_path / "bad3.json").write_text(
+        json.dumps({"a": 1, "validator": {"requires_evidence": True}}), encoding="utf-8"
+    )
     with pytest.raises(ValueError):
         _reg.load_fixture("bad3", tmp_path)
     with pytest.raises(ValueError):
@@ -278,36 +314,43 @@ def test_inspect_session_paths(tmp_path: Path):
 
 # --- evaluators: validator branches (auth/risk/SEC-parsing-adjacent: PIT/provenance/routing) ---
 
+
 def test_eval_future_crossing_branch():
     bad = EvalInput(scenario_name="s", answer_text="", as_of="2025-06-30", known_ats=("2025-07-01",))
     assert "future-crossing-as_of" in evaluate(bad).violations
     ok = EvalInput(scenario_name="s", answer_text="", as_of=None, known_ats=("2025-07-01",))
     assert "future-crossing-as_of" not in evaluate(ok).violations
 
+
 def test_compare_experiments_delta(tmp_path: Path):
     failing = EvalInput(scenario_name="a", answer_text="", failed_count=1)
     passing = EvalInput(scenario_name="a", answer_text="", evidence_ids=("EV-1",))
     before = _ev.run_eval_suite(model="m", outcomes=[failing], data_root=tmp_path)
     after = _ev.run_eval_suite(model="m", outcomes=[passing], data_root=tmp_path)
-    summary = _ev.compare_experiments(before_run_id=before.eval_run_id,
-                                      after_run_id=after.eval_run_id, data_root=tmp_path)
+    summary = _ev.compare_experiments(
+        before_run_id=before.eval_run_id, after_run_id=after.eval_run_id, data_root=tmp_path
+    )
     assert summary.delta_passed == 1 and summary.improved == ("a",)
-    back = _ev.compare_experiments(before_run_id=after.eval_run_id,
-                                   after_run_id=before.eval_run_id, data_root=tmp_path)
+    back = _ev.compare_experiments(before_run_id=after.eval_run_id, after_run_id=before.eval_run_id, data_root=tmp_path)
     assert back.regressed == ("a",) and back.delta_passed == -1
 
 
 def test_eval_fabricated_private_untraced():
-    inp = EvalInput(scenario_name="s", answer_text="", has_fabricated_id=True,
-                    has_fabricated_source=True, has_private_leak=True, claims_untraced=2)
+    inp = EvalInput(
+        scenario_name="s",
+        answer_text="",
+        has_fabricated_id=True,
+        has_fabricated_source=True,
+        has_private_leak=True,
+        claims_untraced=2,
+    )
     v = evaluate(inp).violations
     assert "fabricated-evidence-id" in v and "fabricated-source" in v
     assert "private-data-leak" in v and "untraceable-dossier-claim" in v
 
 
 def test_eval_completeness_zero_floor():
-    inp = EvalInput(scenario_name="s", answer_text="", requires_evidence=True,
-                    evidence_ids=(), claims_untraced=3)
+    inp = EvalInput(scenario_name="s", answer_text="", requires_evidence=True, evidence_ids=(), claims_untraced=3)
     assert evaluate(inp).metrics.completeness == 0.0
 
 
@@ -315,10 +358,16 @@ def test_eval_suite_persists_and_reads(tmp_path: Path):
     from app.config import (
         get_data_root,  # noqa: F401  (ensures data-root override path exists)
     )
-    summary = _ev.run_eval_suite(model="m", provider="p", outcomes=[
-        EvalInput(scenario_name="a", answer_text="x", evidence_ids=("EV-1",)),
-        EvalInput(scenario_name="b", answer_text="", failed_count=1),
-    ], data_root=tmp_path)
+
+    summary = _ev.run_eval_suite(
+        model="m",
+        provider="p",
+        outcomes=[
+            EvalInput(scenario_name="a", answer_text="x", evidence_ids=("EV-1",)),
+            EvalInput(scenario_name="b", answer_text="", failed_count=1),
+        ],
+        data_root=tmp_path,
+    )
     assert summary.scenario_count == 2 and summary.failed_count == 1
     row = _ev.get_eval_run(summary.eval_run_id, tmp_path)
     assert row is not None and row.model == "m"
@@ -330,16 +379,13 @@ def test_eval_suite_persists_and_reads(tmp_path: Path):
 
 
 def test_compare_experiments_noop_guard(tmp_path: Path):
-    run = _ev.run_eval_suite(model="m", outcomes=[EvalInput(scenario_name="z", answer_text="")],
-                             data_root=tmp_path)
-    same = _ev.compare_experiments(before_run_id=run.eval_run_id, after_run_id=run.eval_run_id,
-                                   data_root=tmp_path)
+    run = _ev.run_eval_suite(model="m", outcomes=[EvalInput(scenario_name="z", answer_text="")], data_root=tmp_path)
+    same = _ev.compare_experiments(before_run_id=run.eval_run_id, after_run_id=run.eval_run_id, data_root=tmp_path)
     assert same.delta_passed == 0 and same.improved == () and same.regressed == ()
 
 
 def test_outcomes_fixtures_and_eval_input(tmp_path: Path):
-    _reg.promote_to_fixture(session_id="rs:o", scenario_name="pit-knowable-by-2025-06-30",
-                            fixtures_dir=tmp_path)
+    _reg.promote_to_fixture(session_id="rs:o", scenario_name="pit-knowable-by-2025-06-30", fixtures_dir=tmp_path)
     outs = _ev.outcomes_from_fixtures(["pit-knowable-by-2025-06-30"], tmp_path)
     assert len(outs) == 1 and outs[0].scenario_name == "pit-knowable-by-2025-06-30"
     (tmp_path / "pit-knowable-by-2025-06-30.json").write_text("{}", encoding="utf-8")
@@ -357,6 +403,7 @@ def test_outcomes_fixtures_and_eval_input(tmp_path: Path):
 
 # --- traces: wave coercions + payload + header compat ---
 
+
 def test_trace_wave_branches():
     assert _tr._coerce_wave(2) == 2
     assert _tr._coerce_wave("3") == 3
@@ -367,7 +414,7 @@ def test_trace_wave_branches():
     assert _tr._coerce_str_wave(" 4 ") == 4
     assert _tr._coerce_str_wave("x") is None
     assert _tr._payload_from_json('{"a": 1, "b": [1]}') == {"a": 1, "b": "[1]"}
-    assert _tr._payload_from_json('[1]') == {}
+    assert _tr._payload_from_json("[1]") == {}
     assert _tr._as_int(2.7) == 2 and _tr._as_int("x") == 0
     assert _tr._as_opt_float("x") is None and _tr._as_opt_str(5) == "5"
     assert _tr._as_str(7) == "7" and _tr._now().endswith("+00:00")
@@ -379,21 +426,32 @@ def test_trace_header_legacy_row(tmp_path: Path):
     assert h.provider == "fake" and h.model == "m"
     new = ("tr:2", "rs:l", 1, "prov", "m", "v1", "mvp-1", "sha", "2025-01-01", None, None, None, "open")
     assert _tr._header_new(new).provider == "prov"
-    rec = _tr.create_trace(session_id="rs:l", wave_id="2", git_sha="s", data_root=tmp_path,
-                           job_parent="J-1")
+    rec = _tr.create_trace(session_id="rs:l", wave_id="2", git_sha="s", data_root=tmp_path, job_parent="J-1")
     assert rec.wave_id == 2
     assert _tr.get_trace(rec.trace_id, tmp_path) is not None
     assert _tr.get_trace("tr:missing", tmp_path) is None
     assert _tr.get_trace_events(rec.trace_id, tmp_path)[0].payload["job_parent"] == "J-1"
     assert _tr.list_traces("rs:l", tmp_path) != []
-    hdr = TraceHeader(trace_id="t", session_id="s", wave_id=1, provider="p", model="m",
-                      prompt_version="v", harness_version="h", git_sha="g",
-                      started_at="s", completed_at=None, duration_ms=None,
-                      conclusion=None, status="open")
+    hdr = TraceHeader(
+        trace_id="t",
+        session_id="s",
+        wave_id=1,
+        provider="p",
+        model="m",
+        prompt_version="v",
+        harness_version="h",
+        git_sha="g",
+        started_at="s",
+        completed_at=None,
+        duration_ms=None,
+        conclusion=None,
+        status="open",
+    )
     assert hdr.wave_id == 1
 
 
 # --- evidence ingest: provenance/PIT routing + error fallbacks ---
+
 
 def test_ingest_ok_and_provenance_fail():
     led = EvidenceLedger()
@@ -409,38 +467,75 @@ def test_ingest_ok_and_provenance_fail():
 def test_ingest_pit_branches():
     assert ingest_evidence(EvidenceLedger(), _mk_ev("EV-u"), as_of=None).evidence_id == "EV-u"
     noknown = Evidence(
-        evidence_id="EV-nk", session_id="rs:t", wave_id=1, source_type="sec", source_name="SEC",
-        source_uri="https://sec.gov/x", subject="NVDA", claim_text="c", content="c-EV-nk",
-        content_hash=evidence_content_hash("c-EV-nk"), retrieved_at=ASOF, job_id="J-1")
+        evidence_id="EV-nk",
+        session_id="rs:t",
+        wave_id=1,
+        source_type="sec",
+        source_name="SEC",
+        source_uri="https://sec.gov/x",
+        subject="NVDA",
+        claim_text="c",
+        content="c-EV-nk",
+        content_hash=evidence_content_hash("c-EV-nk"),
+        retrieved_at=ASOF,
+        job_id="J-1",
+    )
     with pytest.raises(EvidenceRejectedError) as e1:
         ingest_evidence(EvidenceLedger(), noknown, as_of=ASOF)
     assert e1.value.reason == "PIT_UNVERIFIED"
     with pytest.raises(EvidenceRejectedError) as e2:
-        ingest_evidence(EvidenceLedger(),
-                        _mk_ev("EV-f", known=datetime(2025, 7, 1, tzinfo=timezone.utc)), as_of=ASOF)
+        ingest_evidence(EvidenceLedger(), _mk_ev("EV-f", known=datetime(2025, 7, 1, tzinfo=UTC)), as_of=ASOF)
     assert e2.value.reason == "PIT_VIOLATION"
     seen: list[str] = []
     bad_prov = _mk_ev("EV-r")
     object.__setattr__(bad_prov, "source_name", "")
     with pytest.raises(EvidenceRejectedError):
-        ingest_evidence(EvidenceLedger(), bad_prov, as_of=ASOF,
-                        on_reject=lambda *a: (_ for _ in ()).throw(RuntimeError("boom")))
+        ingest_evidence(
+            EvidenceLedger(), bad_prov, as_of=ASOF, on_reject=lambda *a: (_ for _ in ()).throw(RuntimeError("boom"))
+        )
     with pytest.raises(EvidenceRejectedError):
-        ingest_evidence(EvidenceLedger(), _mk_ev("EV-r2", sid=""), as_of=ASOF,
-                        on_reject=lambda t, p: seen.append(t))
+        ingest_evidence(EvidenceLedger(), _mk_ev("EV-r2", sid=""), as_of=ASOF, on_reject=lambda t, p: seen.append(t))
     assert seen == ["evidence.rejected"]
     with pytest.raises(EvidenceIntegrityError):
-        Evidence(evidence_id="x", session_id="s", wave_id=0, source_type="t", source_name="n",
-                 subject="s", claim_text="c", content="c", content_hash=evidence_content_hash("c"),
-                 retrieved_at=ASOF)
+        Evidence(
+            evidence_id="x",
+            session_id="s",
+            wave_id=0,
+            source_type="t",
+            source_name="n",
+            subject="s",
+            claim_text="c",
+            content="c",
+            content_hash=evidence_content_hash("c"),
+            retrieved_at=ASOF,
+        )
     with pytest.raises(EvidenceIntegrityError):
-        Evidence(evidence_id="x", session_id="s", wave_id=1, source_type="t", source_name="n",
-                 subject="s", claim_text="c", content="c", content_hash="bad",
-                 retrieved_at=ASOF)
+        Evidence(
+            evidence_id="x",
+            session_id="s",
+            wave_id=1,
+            source_type="t",
+            source_name="n",
+            subject="s",
+            claim_text="c",
+            content="c",
+            content_hash="bad",
+            retrieved_at=ASOF,
+        )
     with pytest.raises(EvidenceIntegrityError):
-        Evidence(evidence_id="x", session_id="s", wave_id=1, source_type="t", source_name="n",
-                 subject="s", claim_text="c", content="c", content_hash=evidence_content_hash("c"),
-                 retrieved_at=ASOF, confidence=2.0)
+        Evidence(
+            evidence_id="x",
+            session_id="s",
+            wave_id=1,
+            source_type="t",
+            source_name="n",
+            subject="s",
+            claim_text="c",
+            content="c",
+            content_hash=evidence_content_hash("c"),
+            retrieved_at=ASOF,
+            confidence=2.0,
+        )
     led = EvidenceLedger()
     led.append(_mk_ev("EV-a"))
     with pytest.raises(EvidenceIntegrityError):
@@ -449,13 +544,14 @@ def test_ingest_pit_branches():
         led.supersede(_mk_ev("EV-b"))
     with pytest.raises(EvidenceNotFoundError):
         led.get("missing")
-    b = _mk_ev("EV-b", known=datetime(2025, 6, 2, tzinfo=timezone.utc))
+    b = _mk_ev("EV-b", known=datetime(2025, 6, 2, tzinfo=UTC))
     object.__setattr__(b, "superseded_by", "EV-a")
     led.supersede(b)
     assert led.current("EV-a").evidence_id == "EV-b"
     assert "EV-a" in led and len(led) == 2 and led.ids() == ("EV-a", "EV-b")
     assert led.list_session("rs:t")[0].evidence_id == "EV-a"
     from app.research.evidence import evidence_from_dict, evidence_to_dict
+
     d = evidence_to_dict(_mk_ev("EV-z"))
     assert evidence_from_dict(d).evidence_id == "EV-z"
     with pytest.raises(EvidenceIntegrityError):
@@ -476,6 +572,7 @@ def test_ingest_pit_branches():
 
 # --- freeze: membership/PIT/parse branches ---
 
+
 def test_freeze_branches():
     led = EvidenceLedger()
     e1 = ingest_evidence(led, _mk_ev("EV-1"), as_of=ASOF)
@@ -489,48 +586,65 @@ def test_freeze_branches():
         create_freeze(freeze_id="F", session_id="rs:t", wave_id=1, records=[e1, e1])
     with pytest.raises(FreezeIntegrityError):
         create_freeze(freeze_id="F", session_id="rs:t", wave_id=1, records=[e1], as_of="bad")
-    future = _mk_ev("EV-f", known=datetime(2025, 8, 1, tzinfo=timezone.utc))
+    future = _mk_ev("EV-f", known=datetime(2025, 8, 1, tzinfo=UTC))
     with pytest.raises(FreezeIntegrityError):
         create_freeze(freeze_id="F", session_id="rs:t", wave_id=1, records=[future], as_of=ASOF)
-    noknown = Evidence(evidence_id="EV-n", session_id="rs:t", wave_id=1, source_type="sec",
-                       source_name="SEC", source_uri="https://sec.gov/x", subject="NVDA",
-                       claim_text="c", content="c-EV-n",
-                       content_hash=evidence_content_hash("c-EV-n"), retrieved_at=ASOF, job_id="J-1")
+    noknown = Evidence(
+        evidence_id="EV-n",
+        session_id="rs:t",
+        wave_id=1,
+        source_type="sec",
+        source_name="SEC",
+        source_uri="https://sec.gov/x",
+        subject="NVDA",
+        claim_text="c",
+        content="c-EV-n",
+        content_hash=evidence_content_hash("c-EV-n"),
+        retrieved_at=ASOF,
+        job_id="J-1",
+    )
     with pytest.raises(FreezeIntegrityError):
         create_freeze(freeze_id="F", session_id="rs:t", wave_id=1, records=[noknown], as_of=ASOF)
     with pytest.raises(FreezeIntegrityError):
-        EvidenceFreeze(freeze_id="", session_id="s", wave_id=1, created_at=ASOF,
-                       as_of=None, evidence_ids=(), content_hash="h")
+        EvidenceFreeze(
+            freeze_id="", session_id="s", wave_id=1, created_at=ASOF, as_of=None, evidence_ids=(), content_hash="h"
+        )
     with pytest.raises(FreezeIntegrityError):
-        EvidenceFreeze(freeze_id="f", session_id="", wave_id=1, created_at=ASOF,
-                       as_of=None, evidence_ids=(), content_hash="h")
+        EvidenceFreeze(
+            freeze_id="f", session_id="", wave_id=1, created_at=ASOF, as_of=None, evidence_ids=(), content_hash="h"
+        )
     with pytest.raises(FreezeIntegrityError):
-        EvidenceFreeze(freeze_id="f", session_id="s", wave_id=0, created_at=ASOF,
-                       as_of=None, evidence_ids=(), content_hash="h")
+        EvidenceFreeze(
+            freeze_id="f", session_id="s", wave_id=0, created_at=ASOF, as_of=None, evidence_ids=(), content_hash="h"
+        )
     with pytest.raises(FreezeIntegrityError):
-        EvidenceFreeze(freeze_id="f", session_id="s", wave_id=1, created_at=ASOF,
-                       as_of=None, evidence_ids=(), content_hash="")
+        EvidenceFreeze(
+            freeze_id="f", session_id="s", wave_id=1, created_at=ASOF, as_of=None, evidence_ids=(), content_hash=""
+        )
     from app.research.freeze import freeze_to_dict, verify_freeze
+
     assert freeze_to_dict(f)["freeze_id"] == "F1"
     assert freeze_from_dict(freeze_to_dict(f)).freeze_id == "F1"
     with pytest.raises(FreezeIntegrityError):
         verify_freeze(f, [])
-    other = _mk_ev("EV-9", known=datetime(2025, 6, 1, tzinfo=timezone.utc))
+    other = _mk_ev("EV-9", known=datetime(2025, 6, 1, tzinfo=UTC))
     with pytest.raises(FreezeIntegrityError):
         verify_freeze(f, [other])
-    bad_cases: list[dict[str, object]] = [{}, {"freeze_id": "", "session_id": "s", "content_hash": "h", "wave_id": 1},
-                {"freeze_id": "f", "session_id": "", "content_hash": "h", "wave_id": 1},
-                {"freeze_id": "f", "session_id": "s", "content_hash": "", "wave_id": 1},
-                {"freeze_id": "f", "session_id": "s", "content_hash": "h", "wave_id": 0,
-                 "evidence_ids": [1]},
-                {"freeze_id": "f", "session_id": "s", "content_hash": "h", "wave_id": 1,
-                 "created_at": 5}]
+    bad_cases: list[dict[str, object]] = [
+        {},
+        {"freeze_id": "", "session_id": "s", "content_hash": "h", "wave_id": 1},
+        {"freeze_id": "f", "session_id": "", "content_hash": "h", "wave_id": 1},
+        {"freeze_id": "f", "session_id": "s", "content_hash": "", "wave_id": 1},
+        {"freeze_id": "f", "session_id": "s", "content_hash": "h", "wave_id": 0, "evidence_ids": [1]},
+        {"freeze_id": "f", "session_id": "s", "content_hash": "h", "wave_id": 1, "created_at": 5},
+    ]
     for bad in bad_cases:
         with pytest.raises(FreezeIntegrityError):
             freeze_from_dict(bad)
 
 
 # --- journal/session/models guards ---
+
 
 def test_journal_branches():
     sid = "rs:j1"
@@ -550,8 +664,9 @@ def test_journal_branches():
     other = _journal.append_event("rs:other", "t", "a", "i", {})
     with pytest.raises(ValueError):
         _journal.hydrate(sid, [other])
-    bad_seq = JournalEvent(event_id="x", session_id=sid, sequence=9, event_type="t",
-                           timestamp=ASOF, actor_type="a", actor_id="i")
+    bad_seq = JournalEvent(
+        event_id="x", session_id=sid, sequence=9, event_type="t", timestamp=ASOF, actor_type="a", actor_id="i"
+    )
     with pytest.raises(ValueError):
         _journal.hydrate(sid, [bad_seq])
     p = _journal.rejection_payload("EV-1", "R", "2025-01-01", "2025-06-30")
@@ -603,15 +718,12 @@ def test_model_guards():
     assert pit_unverified("unbounded", None) is False
     assert pit_unverified(ASOF, None) is True
     assert pit_violated(None, ASOF) is False
-    base = {"session_id": "s", "created_at": ASOF, "updated_at": ASOF, "query": "q",
-            "objective": "o"}
+    base = {"session_id": "s", "created_at": ASOF, "updated_at": ASOF, "query": "q", "objective": "o"}
     rs = ResearchSession(**base)
     with pytest.raises(ValueError):
-        ResearchSession(session_id="", created_at=ASOF, updated_at=ASOF,
-                        query="q", objective="o").validate()
+        ResearchSession(session_id="", created_at=ASOF, updated_at=ASOF, query="q", objective="o").validate()
     with pytest.raises(ValueError):
-        ResearchSession(session_id="s", created_at=ASOF, updated_at=ASOF,
-                        query="", objective="o").validate()
+        ResearchSession(session_id="s", created_at=ASOF, updated_at=ASOF, query="", objective="o").validate()
     with pytest.raises(ValueError):
         ResearchSession(**{**base, "current_wave": True}).validate()
     with pytest.raises(ValueError):
@@ -628,17 +740,33 @@ def test_model_guards():
         ResearchSession.from_dict({**d, "committee_runs": {}})
     with pytest.raises(ValueError):
         ResearchSession.from_dict({**d, "current_wave": True})
-    job = Job(job_id="j", session_id="s", wave_id=1, parent_job_id=None, job_type=JobType.SCOUT.value,
-              owner="o", status=JobStatus.QUEUED.value)
+    job = Job(
+        job_id="j",
+        session_id="s",
+        wave_id=1,
+        parent_job_id=None,
+        job_type=JobType.SCOUT.value,
+        owner="o",
+        status=JobStatus.QUEUED.value,
+    )
     with pytest.raises(ValueError):
-        Job(job_id="", session_id="s", wave_id=1, parent_job_id=None,
-            job_type=JobType.SCOUT.value, owner="o").validate()
+        Job(
+            job_id="", session_id="s", wave_id=1, parent_job_id=None, job_type=JobType.SCOUT.value, owner="o"
+        ).validate()
     with pytest.raises(ValueError):
-        Job(job_id="j", session_id="s", wave_id=0, parent_job_id=None,
-            job_type=JobType.SCOUT.value, owner="o").validate()
+        Job(
+            job_id="j", session_id="s", wave_id=0, parent_job_id=None, job_type=JobType.SCOUT.value, owner="o"
+        ).validate()
     with pytest.raises(ValueError):
-        Job(job_id="j", session_id="s", wave_id=1, parent_job_id=None,
-            job_type=JobType.SCOUT.value, owner="", child_budget=-1).validate()
+        Job(
+            job_id="j",
+            session_id="s",
+            wave_id=1,
+            parent_job_id=None,
+            job_type=JobType.SCOUT.value,
+            owner="",
+            child_budget=-1,
+        ).validate()
     jd = job.to_dict()
     assert Job.from_dict(jd).job_id == "j"
     with pytest.raises(ValueError):
@@ -648,21 +776,33 @@ def test_model_guards():
     with pytest.raises(ValueError):
         Job.from_dict({**jd, "child_budget": True})
     with pytest.raises(ValueError):
-        JournalEvent(event_id="", session_id="s", sequence=1, event_type="t",
-                     timestamp=ASOF, actor_type="a", actor_id="i").validate()
+        JournalEvent(
+            event_id="", session_id="s", sequence=1, event_type="t", timestamp=ASOF, actor_type="a", actor_id="i"
+        ).validate()
     with pytest.raises(ValueError):
-        JournalEvent(event_id="e", session_id="s", sequence=0, event_type="t",
-                     timestamp=ASOF, actor_type="a", actor_id="i").validate()
+        JournalEvent(
+            event_id="e", session_id="s", sequence=0, event_type="t", timestamp=ASOF, actor_type="a", actor_id="i"
+        ).validate()
     with pytest.raises(ValueError):
-        JournalEvent(event_id="e", session_id="s", sequence=1, event_type="",
-                     timestamp=ASOF, actor_type="a", actor_id="").validate()
+        JournalEvent(
+            event_id="e", session_id="s", sequence=1, event_type="", timestamp=ASOF, actor_type="a", actor_id=""
+        ).validate()
     with pytest.raises(ValueError):
         JournalEvent.from_dict({})
     with pytest.raises(ValueError):
-        JournalEvent.from_dict({"event_id": "e", "session_id": "s", "sequence": True,
-                                "event_type": "t", "timestamp": ASOF.isoformat(),
-                                "actor_type": "a", "actor_id": "i"})
+        JournalEvent.from_dict(
+            {
+                "event_id": "e",
+                "session_id": "s",
+                "sequence": True,
+                "event_type": "t",
+                "timestamp": ASOF.isoformat(),
+                "actor_type": "a",
+                "actor_id": "i",
+            }
+        )
     from app.research.models import Failure
+
     with pytest.raises(ValueError):
         Failure(category="nope", message="m").validate()
     with pytest.raises(ValueError):
@@ -673,6 +813,7 @@ def test_model_guards():
 
 # --- committee/final merges: routing + disagreement paths ---
 
+
 def test_committee_branches():
     stock, bull, bear = _trio()
     stock.claims.append(GroundedClaim(text="shared", evidence_ids=["EV-1"]))
@@ -680,12 +821,24 @@ def test_committee_branches():
     bear.claims.append(GroundedClaim(text="shared", evidence_ids=["EV-1"]))
     bull.claims.append(GroundedClaim(text="bull-only", evidence_ids=["EV-2"]))
     bear.claims.append(GroundedClaim(text="bear-only", evidence_ids=["EV-3"]))
-    bull.research_requests.append(ResearchRequest(question="q1", why_material="w",
-                                                 requested_source_domain="sec",
-                                                 expected_gain="g", requesting_agents=["bull"]))
-    bear.research_requests.append(ResearchRequest(question="q1", why_material="w",
-                                                 requested_source_domain="sec",
-                                                 expected_gain="g", requesting_agents=["bear"]))
+    bull.research_requests.append(
+        ResearchRequest(
+            question="q1",
+            why_material="w",
+            requested_source_domain="sec",
+            expected_gain="g",
+            requesting_agents=["bull"],
+        )
+    )
+    bear.research_requests.append(
+        ResearchRequest(
+            question="q1",
+            why_material="w",
+            requested_source_domain="sec",
+            expected_gain="g",
+            requesting_agents=["bear"],
+        )
+    )
     out = compute_disagreement(stock, bull, bear)
     assert any("all three cite EV-1" in a for a in out.agreement)
     assert any("bull-only" in d for d in out.disagreement)
@@ -693,6 +846,7 @@ def test_committee_branches():
     assert out.requested_research[0].requesting_agents == ["bull", "bear"]
     assert out.wave_id == 1
     from app.research.synthesis.committee import _coerce_wave_id
+
     assert _coerce_wave_id("2") == 2
     for bad in ("x", ""):
         with pytest.raises(ValueError):
@@ -713,36 +867,64 @@ def test_final_branches():
     bull.what_would_change.append("c1")
     bear.what_would_change.append("c1")
     disagreement = compute_disagreement(stock, bull, bear)
-    final = synthesize_final("q", session_id="rs:t", wave_id="1", freeze_id="F1",
-                             as_of="2025-06-30", stock=stock, bull=bull, bear=bear,
-                             disagreement=disagreement)
+    final = synthesize_final(
+        "q",
+        session_id="rs:t",
+        wave_id="1",
+        freeze_id="F1",
+        as_of="2025-06-30",
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=disagreement,
+    )
     assert final.claims[0].evidence_ids == ["EV-1", "EV-2"]
     assert final.unknowns == ["u1"] and final.what_would_change == ["c1"]
-    override = synthesize_final("q", session_id="rs:t", wave_id=1, freeze_id="F1",
-                                as_of="2025-06-30", stock=stock, bull=bull, bear=bear,
-                                disagreement=disagreement, model="draft")
+    override = synthesize_final(
+        "q",
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        as_of="2025-06-30",
+        stock=stock,
+        bull=bull,
+        bear=bear,
+        disagreement=disagreement,
+        model="draft",
+    )
     assert override.answer == "draft"
 
 
 # --- pi_harness: routing/decision branches ---
 
+
 def test_harness_checks():
     assert _is_ordered_subsequence(["a", "c"], ["a", "b", "c"])
     assert not _is_ordered_subsequence(["c", "a"], ["a", "b", "c"])
-    case = {"expected_behavior": {"expected_tools": ["t1"], "required_tools": ["t1"],
-                                  "required_tool_sequence": ["t1", "t2"],
-                                  "forbidden_tools": ["bad"],
-                                  "forbidden_tool_args": {"t1": ["secret"]},
-                                  "must_contain": ["hello"], "must_not_contain": ["bye"]}}
-    ok, _ = check_case(case, [{"name": "t1", "arguments": {}}, {"name": "t2", "arguments": {}}],
-                       '{"out": "hello world"}')
+    case = {
+        "expected_behavior": {
+            "expected_tools": ["t1"],
+            "required_tools": ["t1"],
+            "required_tool_sequence": ["t1", "t2"],
+            "forbidden_tools": ["bad"],
+            "forbidden_tool_args": {"t1": ["secret"]},
+            "must_contain": ["hello"],
+            "must_not_contain": ["bye"],
+        }
+    }
+    ok, _ = check_case(
+        case, [{"name": "t1", "arguments": {}}, {"name": "t2", "arguments": {}}], '{"out": "hello world"}'
+    )
     assert ok
     bad, msg = check_case(case, [{"name": "t1", "arguments": {"secret": 1}}], '{"out": "nope"}')
     assert not bad and "forbidden_args" in msg
     empty, msg2 = check_case({"expected_behavior": {}}, [], "{}")
     assert not empty and "empty_assertions" in msg2
-    seq_bad, _ = check_case({"expected_behavior": {"required_tool_sequence": ["t2", "t1"]}},
-                            [{"name": "t1", "arguments": {}}, {"name": "t2", "arguments": {}}], "{}")
+    seq_bad, _ = check_case(
+        {"expected_behavior": {"required_tool_sequence": ["t2", "t1"]}},
+        [{"name": "t1", "arguments": {}}, {"name": "t2", "arguments": {}}],
+        "{}",
+    )
     assert not seq_bad
 
 
@@ -750,6 +932,7 @@ def test_harness_bridge_io(monkeypatch: pytest.MonkeyPatch) -> None:
     import json as _json
 
     import evals.pi_harness as _h
+
     sent: list[str] = []
 
     class _FakeStdout:
@@ -762,7 +945,7 @@ def test_harness_bridge_io(monkeypatch: pytest.MonkeyPatch) -> None:
             sent.append(text)
 
         def flush(self) -> None:
-        # ponytail: no-op flush for the fake pipe; real Popen flushes.
+            # ponytail: no-op flush for the fake pipe; real Popen flushes.
             return None
 
         def close(self) -> None:
@@ -802,9 +985,12 @@ def test_harness_main_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caps
     import json as _json
 
     import evals.pi_harness as _h
-    case = {"id": 11, "question": "q?",
-            "expected_behavior": {"expected_tools": ["get_short_interest"],
-                                  "must_contain": ["ok"]}}
+
+    case = {
+        "id": 11,
+        "question": "q?",
+        "expected_behavior": {"expected_tools": ["get_short_interest"], "must_contain": ["ok"]},
+    }
     evals_dir = tmp_path / "evals"
     evals_dir.mkdir()
     (evals_dir / "eval_set.json").write_text(_json.dumps([case]), encoding="utf-8")
@@ -848,17 +1034,36 @@ def test_opt_telemetry_none_absent_and_valid_round_trip() -> None:
     from app.research.evals.regression import ResearchTelemetry
 
     assert _reg._opt_telemetry({}) is None
-    tel: ResearchTelemetry = {"searches": 2, "queries": ["q1", "q2"], "forms": ["10-K"],
-                              "entities": ["MSFT"], "coverage": "partial", "stop_reason": "complete:wave1"}
-    fixture = _reg.build_fixture(session_id="rs:tel", scenario_name="pit-knowable-by-2025-06-30",
-                                 tool_calls=("search_sec_filings",), evidence_ids=("EV-1",),
-                                 known_ats=("2025-05-01",), answer_excerpt="x",
-                                 telemetry=tel)
-    raw: dict[str, object] = {"telemetry": dict(tel), "format": "f", "scenario_name": "s",
-                              "family": "pit", "session_id": "rs:t", "question": "q",
-                              "tool_calls": [], "evidence_ids": [], "known_ats": [],
-                              "answer_excerpt": "x",
-                              "validator": {"requires_evidence": False}}
+    tel: ResearchTelemetry = {
+        "searches": 2,
+        "queries": ["q1", "q2"],
+        "forms": ["10-K"],
+        "entities": ["MSFT"],
+        "coverage": "partial",
+        "stop_reason": "no_questions",
+    }
+    _reg.build_fixture(
+        session_id="rs:tel",
+        scenario_name="pit-knowable-by-2025-06-30",
+        tool_calls=("search_sec_filings",),
+        evidence_ids=("EV-1",),
+        known_ats=("2025-05-01",),
+        answer_excerpt="x",
+        telemetry=tel,
+    )
+    raw: dict[str, object] = {
+        "telemetry": dict(tel),
+        "format": "f",
+        "scenario_name": "s",
+        "family": "pit",
+        "session_id": "rs:t",
+        "question": "q",
+        "tool_calls": [],
+        "evidence_ids": [],
+        "known_ats": [],
+        "answer_excerpt": "x",
+        "validator": {"requires_evidence": False},
+    }
     out = _reg._opt_telemetry(raw)
     assert out is not None and out["queries"] == ["q1", "q2"] and out["searches"] == 2
 

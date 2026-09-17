@@ -3,7 +3,9 @@
 Workflow it drives: build the material branch map -> search SEC (navigation
 only, never evidence) -> open filings -> raw-document findings -> continue
 with materially new searches -> structured coverage submit. No maximum number
-of searches, filing/document/exhibit reads, or waves.
+of searches, filing/document/exhibit reads, or waves, and no count cap on a
+material set: every materially distinct planned query is dispatched to its role
+(normalized dedupe is the only bound).
 
 Fake-model sketch (no live calls): fake ``dispatch`` + fake ``model`` into
 ``decompose_question`` / ``assemble_dossier``; assert non-SEC tools are
@@ -28,38 +30,40 @@ from .scout import (
 
 # SEC-only allowlist: discovery wrappers + SEC/financial-statement tools.
 # Domain guard also consults TOOL_DOMAINS (portfolio_read always denied).
-SEC_TOOLS: frozenset[str] = frozenset({
-    "browse_tools",
-    "search_tools",
-    "describe_tool",
-    "list_tool_domains",
-    "call_tool",
-    "find_sec_entities",
-    "list_sec_filings",
-    "get_sec_filing",
-    "list_sec_documents",
-    "get_sec_document",
-    "search_sec_filings",
-    "search_sec_relationships",
-    "get_sec_search_coverage",
-    "diff_sec_filings",
-    "get_material_events",
-    "get_beneficial_ownership",
-    "get_ownership_changes",
-    "get_insider_activity",
-    "get_planned_insider_sales",
-    "get_offering_history",
-    "get_dilution_profile",
-    "get_governance_events",
-    "get_transaction_status",
-    "get_financial_statements",
-    "get_xbrl_facts",
-    "get_obligations",
-    "get_valuation_metrics",
-    "get_fundamentals",
-    "diff_risk_factors",
-    "get_recent_ownership_filings",
-})
+SEC_TOOLS: frozenset[str] = frozenset(
+    {
+        "browse_tools",
+        "search_tools",
+        "describe_tool",
+        "list_tool_domains",
+        "call_tool",
+        "find_sec_entities",
+        "list_sec_filings",
+        "get_sec_filing",
+        "list_sec_documents",
+        "get_sec_document",
+        "search_sec_filings",
+        "search_sec_relationships",
+        "get_sec_search_coverage",
+        "diff_sec_filings",
+        "get_material_events",
+        "get_beneficial_ownership",
+        "get_ownership_changes",
+        "get_insider_activity",
+        "get_planned_insider_sales",
+        "get_offering_history",
+        "get_dilution_profile",
+        "get_governance_events",
+        "get_transaction_status",
+        "get_financial_statements",
+        "get_xbrl_facts",
+        "get_obligations",
+        "get_valuation_metrics",
+        "get_fundamentals",
+        "diff_risk_factors",
+        "get_recent_ownership_filings",
+    }
+)
 
 
 def is_sec_tool(name: str) -> bool:
@@ -109,21 +113,109 @@ class SourceDossier:
         self.wave_id = _coerce_wave(self.wave_id)
 
 
-_CONTEXT_KEYS = ("primary_entities", "related_entities", "industries", "products",
-                 "technologies", "relationships", "concepts", "risks", "catalysts")
+_CONTEXT_KEYS = (
+    "primary_entities",
+    "related_entities",
+    "industries",
+    "products",
+    "technologies",
+    "relationships",
+    "concepts",
+    "risks",
+    "catalysts",
+)
 
-_STOPWORDS = frozenset({
-    "what", "when", "where", "which", "who", "whom", "whose", "how", "why",
-    "is", "are", "was", "were", "be", "been", "being", "do", "does", "did",
-    "has", "have", "had", "having", "the", "a", "an", "of", "to", "for",
-    "in", "on", "at", "by", "with", "from", "as", "and", "or", "nor",
-    "but", "if", "then", "than", "so", "such", "any", "all", "each",
-    "its", "it", "their", "his", "her", "this", "that", "these", "those",
-    "there", "here", "about", "into", "over", "under", "between", "among",
-    "through", "during", "latest", "current", "recent", "new", "tell", "me",
-    "please", "show", "give", "find", "list", "describe", "explain",
-    "s", "t", "d", "ll", "m", "re", "ve",
-})
+_STOPWORDS = frozenset(
+    {
+        "what",
+        "when",
+        "where",
+        "which",
+        "who",
+        "whom",
+        "whose",
+        "how",
+        "why",
+        "is",
+        "are",
+        "was",
+        "were",
+        "be",
+        "been",
+        "being",
+        "do",
+        "does",
+        "did",
+        "has",
+        "have",
+        "had",
+        "having",
+        "the",
+        "a",
+        "an",
+        "of",
+        "to",
+        "for",
+        "in",
+        "on",
+        "at",
+        "by",
+        "with",
+        "from",
+        "as",
+        "and",
+        "or",
+        "nor",
+        "but",
+        "if",
+        "then",
+        "than",
+        "so",
+        "such",
+        "any",
+        "all",
+        "each",
+        "its",
+        "it",
+        "their",
+        "his",
+        "her",
+        "this",
+        "that",
+        "these",
+        "those",
+        "there",
+        "here",
+        "about",
+        "into",
+        "over",
+        "under",
+        "between",
+        "among",
+        "through",
+        "during",
+        "latest",
+        "current",
+        "recent",
+        "new",
+        "tell",
+        "me",
+        "please",
+        "show",
+        "give",
+        "find",
+        "list",
+        "describe",
+        "explain",
+        "s",
+        "t",
+        "d",
+        "ll",
+        "m",
+        "re",
+        "ve",
+    }
+)
 
 _CAP_PHRASE_RE = re.compile(r"[A-Z][A-Za-z0-9&.\-]*(?:\s+[A-Z][A-Za-z0-9&.\-]*)*")
 _WORD_RE = re.compile(r"[A-Za-z0-9]+(?:'[A-Za-z0-9]+)?")
@@ -150,7 +242,7 @@ def _dedupe_keep(items: Sequence[object]) -> list[str]:
 def _strip_possessive(text: str) -> str:
     """Drop a trailing 's so entity mentions match ticker scope."""
     low = text.lower()
-    if low.endswith("'s") or low.endswith("\u2019s"):
+    if low.endswith(("'s", "’s")):
         return text[:-2].strip()
     return text
 
@@ -158,15 +250,23 @@ def _strip_possessive(text: str) -> str:
 def _keep_phrase(cleaned: str) -> bool:
     """Entity-mention rule: multi-word phrase or 2+ letter name, never all stopwords."""
     words = [w.strip(".,") for w in cleaned.split()]
-    return (len(cleaned) >= 2 and any(ch.isalpha() for ch in cleaned)
-            and not (words and all(w.lower() in _STOPWORDS for w in words))
-            and not (len(words) == 1 and len(words[0]) < 2))
+    return (
+        len(cleaned) >= 2
+        and any(ch.isalpha() for ch in cleaned)
+        and not (words and all(w.lower() in _STOPWORDS for w in words))
+        and not (len(words) == 1 and len(words[0]) < 2)
+    )
 
 
 def _capitalized_phrases(question: str) -> list[str]:
     """Generic entity mentions: multi-word phrases or 2+ letter names."""
-    return _dedupe_keep([cleaned for match in _CAP_PHRASE_RE.findall(question or "")
-                         if _keep_phrase(cleaned := " ".join(_strip_possessive(match).split()))])
+    return _dedupe_keep(
+        [
+            cleaned
+            for match in _CAP_PHRASE_RE.findall(question or "")
+            if _keep_phrase(cleaned := " ".join(_strip_possessive(match).split()))
+        ]
+    )
 
 
 def _keyword_kept(word: str, excluded: set[str]) -> bool:
@@ -177,8 +277,9 @@ def _keyword_kept(word: str, excluded: set[str]) -> bool:
 def _keywords(question: str, exclude: Sequence[str]) -> list[str]:
     """Distinctive lowercase terms outside ticker scope (concepts/catalysts)."""
     excluded = {normalize_query(e) for e in exclude if isinstance(e, str)}
-    return _dedupe_keep([word for match in _WORD_RE.findall((question or "").lower())
-                         if _keyword_kept(word := match.strip(), excluded)])
+    return _dedupe_keep(
+        [word for match in _WORD_RE.findall((question or "").lower()) if _keyword_kept(word := match.strip(), excluded)]
+    )
 
 
 def _deterministic_context(question: str, tickers: Sequence[str]) -> dict[str, object]:
@@ -187,12 +288,12 @@ def _deterministic_context(question: str, tickers: Sequence[str]) -> dict[str, o
     scoped_set = {s.upper() for s in scoped}
     return {
         "primary_entities": list(scoped),
-        "related_entities": [p for p in _capitalized_phrases(question or "") if p.upper() not in scoped_set][:8],
+        "related_entities": [p for p in _capitalized_phrases(question or "") if p.upper() not in scoped_set],
         "industries": [],
         "products": [],
         "technologies": [],
         "relationships": [],
-        "concepts": _keywords(question, scoped)[:8],
+        "concepts": _keywords(question, scoped),
         "risks": [],
         "catalysts": [],
     }
@@ -256,12 +357,15 @@ def _coerce_relationships(value: object) -> list[dict[str, str]]:
             continue
         seen.add(key)
         out.append(triple)
-    return out[:12]
+    return out
+
 
 def _merge_relationships(current_raw: object, decoded_val: object) -> list[dict[str, str]]:
     """Union decoded relationship triples into the base list, normalized-key deduped."""
     extra = _coerce_relationships(decoded_val)
-    existing: list[dict[str, str]] = [r for r in current_raw if isinstance(r, dict)] if isinstance(current_raw, list) else []
+    existing: list[dict[str, str]] = (
+        [r for r in current_raw if isinstance(r, dict)] if isinstance(current_raw, list) else []
+    )
     seen = {_rel_key(r) for r in existing}
     for rel in extra:
         key = _rel_key(rel)
@@ -272,9 +376,9 @@ def _merge_relationships(current_raw: object, decoded_val: object) -> list[dict[
 
 
 def _merge_str_key(current_raw: object, decoded_val: object) -> list[str]:
-    """Union one decoded string-list key into the base list, deduped and capped."""
+    """Union one decoded string-list key into the base list, deduped."""
     current = current_raw if isinstance(current_raw, list) else []
-    return _dedupe_keep([*current, *_coerce_str_list(decoded_val)])[:12]
+    return _dedupe_keep([*current, *_coerce_str_list(decoded_val)])
 
 
 def _merge_context(base: dict[str, object], decoded: object) -> dict[str, object]:
@@ -306,11 +410,11 @@ def build_research_context(
         return base
     try:
         decoded: object = json.loads(model(_context_prompt(question, tickers)))
-    except Exception:
+    except Exception:  # noqa: BLE001 - model output degrades to the deterministic context, never raises
         return base
     try:
         return _merge_context(base, decoded)
-    except Exception:
+    except Exception:  # noqa: BLE001 - model output degrades to the deterministic context, never raises
         return base
 
 
@@ -324,7 +428,9 @@ def _entity_pairs(primaries: list[str], related: list[str]) -> list[tuple[str, s
     return [(a, b) for a in primaries for b in related if normalize_query(a) != normalize_query(b)]
 
 
-def _add_entity_groups(groups: dict[str, list[str]], primaries: list[str], related: list[str], relationships: list[dict[str, str]]) -> None:
+def _add_entity_groups(
+    groups: dict[str, list[str]], primaries: list[str], related: list[str], relationships: list[dict[str, str]]
+) -> None:
     """Families A/B/E: named entities, pairs, and triple exposures."""
     groups["a"].extend([*primaries, *related])
     pairs = _entity_pairs(primaries, related)
@@ -333,21 +439,28 @@ def _add_entity_groups(groups: dict[str, list[str]], primaries: list[str], relat
     groups["e"].extend(f"{a} exposure {b}" for a, b in pairs)
 
 
-def _add_topic_groups(groups: dict[str, list[str]], industries: list[str], products: list[str], technologies: list[str], risks: list[str], primaries: list[str]) -> None:
+def _add_topic_groups(
+    groups: dict[str, list[str]],
+    industries: list[str],
+    products: list[str],
+    technologies: list[str],
+    risks: list[str],
+    primaries: list[str],
+) -> None:
     """Families C/D/F: industry, demand, and risk queries."""
-    for industry in industries[:6]:
+    for industry in industries:
         groups["c"].extend([industry, f"{industry} risk factors"])
-    for term in [*products[:6], *technologies[:6]]:
+    for term in [*products, *technologies]:
         groups["d"].append(term if "demand" in term.lower() else f"{term} demand")
-    groups["f"].extend(risks[:6])
+    groups["f"].extend(risks)
     for a in primaries:
         groups["f"].append(f"{a} risk factors")
-        groups["f"].extend(f"{a} {risk}" for risk in risks[:4])
+        groups["f"].extend(f"{a} {risk}" for risk in risks)
 
 
 def _add_related_groups(groups: dict[str, list[str]], related: list[str]) -> None:
     """Related-issuer role anchors for non-scope candidates."""
-    for entity in related[:6]:
+    for entity in related:
         groups["related"].extend(f"{entity} {role}" for role in _RELATED_ROLES)
 
 
@@ -359,15 +472,21 @@ def _add_counterparty_groups(groups: dict[str, list[str]], related: list[str], p
     get opened. Built first in the global dedupe so the bare names survive it.
     """
     scoped = {normalize_query(p) for p in primaries}
-    entities = [e for e in related if normalize_query(e) not in scoped][:6]
+    entities = [e for e in related if normalize_query(e) not in scoped]
     groups["cp"].extend(entities)
     for suffix in _COUNTERPARTY_SUFFIXES:
         groups["cp"].extend(f"{entity} {suffix}" for entity in entities)
 
 
-def _add_supplement_groups(groups: dict[str, list[str]], concepts: list[str], products: list[str], technologies: list[str], catalysts: list[str]) -> None:
+def _add_supplement_groups(
+    groups: dict[str, list[str]],
+    concepts: list[str],
+    products: list[str],
+    technologies: list[str],
+    catalysts: list[str],
+) -> None:
     """Conceptual supplements: bare terms plus filing/risk-factor mentions."""
-    for term in _dedupe_keep([*concepts, *products, *technologies, *catalysts])[:5]:
+    for term in _dedupe_keep([*concepts, *products, *technologies, *catalysts]):
         groups["supp_bare"].append(term)
         groups["supp_filing"].extend(f"{term} {suffix}" for suffix in _SUPP_FILING_SUFFIXES)
         groups["supp_risk"].append(f"{term} risk factor")
@@ -377,9 +496,9 @@ def _dedupe_groups(groups: dict[str, list[str]]) -> dict[str, list[str]]:
     """Global normalized dedupe across families, first family wins."""
     seen: set[str] = set()
     deduped: dict[str, list[str]] = {}
-    for key in groups:
+    for key, queries in groups.items():
         unique: list[str] = []
-        for query in groups[key]:
+        for query in queries:
             norm = normalize_query(query)
             if norm and norm not in seen:
                 seen.add(norm)
@@ -395,21 +514,44 @@ def _grouped_queries(context: Mapping[str, object]) -> dict[str, list[str]]:
     the global dedupe against the scoped anchor families.
     """
     source: Mapping[str, object] = context if isinstance(context, Mapping) else {}
-    lists = {k: _coerce_str_list(source.get(k)) for k in
-             ("primary_entities", "related_entities", "industries", "products",
-              "technologies", "concepts", "risks", "catalysts")}
-    groups: dict[str, list[str]] = {"cp": [], "a": [], "b": [], "c": [], "d": [],
-                                    "e": [], "f": [], "related": [], "supp_bare": [],
-                                    "supp_filing": [], "supp_risk": []}
+    lists = {
+        k: _coerce_str_list(source.get(k))
+        for k in (
+            "primary_entities",
+            "related_entities",
+            "industries",
+            "products",
+            "technologies",
+            "concepts",
+            "risks",
+            "catalysts",
+        )
+    }
+    groups: dict[str, list[str]] = {
+        "cp": [],
+        "a": [],
+        "b": [],
+        "c": [],
+        "d": [],
+        "e": [],
+        "f": [],
+        "related": [],
+        "supp_bare": [],
+        "supp_filing": [],
+        "supp_risk": [],
+    }
     _add_counterparty_groups(groups, lists["related_entities"], lists["primary_entities"])
-    _add_entity_groups(groups, lists["primary_entities"], lists["related_entities"],
-                       _coerce_relationships(source.get("relationships")))
-    _add_topic_groups(groups, lists["industries"], lists["products"],
-                      lists["technologies"], lists["risks"], lists["primary_entities"])
+    _add_entity_groups(
+        groups, lists["primary_entities"], lists["related_entities"], _coerce_relationships(source.get("relationships"))
+    )
+    _add_topic_groups(
+        groups, lists["industries"], lists["products"], lists["technologies"], lists["risks"], lists["primary_entities"]
+    )
     _add_related_groups(groups, lists["related_entities"])
-    _add_supplement_groups(groups, lists["concepts"], lists["products"],
-                           lists["technologies"], lists["catalysts"])
+    _add_supplement_groups(groups, lists["concepts"], lists["products"], lists["technologies"], lists["catalysts"])
     return _dedupe_groups(groups)
+
+
 _ROLE_FAMILIES: dict[str, tuple[str, ...]] = {
     "filings": ("a", "b", "related", "supp_filing", "cp"),
     "financials": ("c", "d", "supp_bare"),
@@ -453,43 +595,42 @@ def _cap_candidates(text: str, seen: set[str]) -> list[str]:
 
 def _word_candidates(text: str, seen: set[str]) -> list[str]:
     """Distinctive lowercase words from one finding not already asked."""
-    return [w for w in _WORD_RE.findall(text.lower())
-            if len(w) > 5 and w.isalpha() and w not in _STOPWORDS and normalize_query(w) not in seen]
+    return [
+        w
+        for w in _WORD_RE.findall(text.lower())
+        if len(w) > 5 and w.isalpha() and w not in _STOPWORDS and normalize_query(w) not in seen
+    ]
 
 
 def _finding_candidates(finding_texts: Sequence[str] | None, seen: set[str]) -> list[str]:
-    """Phrase + word candidates from findings, capped at eight."""
+    """Phrase + word candidates from findings, in passage order."""
     candidates: list[str] = []
-    for text in (finding_texts or []):
+    for text in finding_texts or []:
         if not isinstance(text, str):
             continue
         candidates.extend(_cap_candidates(text, seen))
         candidates.extend(_word_candidates(text, seen))
-        if len(candidates) >= 8:
-            break
     return candidates
 
 
 def _context_candidates(context: Mapping[str, object] | None, seen: set[str]) -> list[str]:
-    """Top context terms (related/concepts/products/technologies) not already asked."""
+    """Context terms (related/concepts/products/technologies) not already asked."""
     if not isinstance(context, Mapping):
         return []
     out: list[str] = []
     for key in ("related_entities", "concepts", "products", "technologies"):
-        out.extend(v for v in _coerce_str_list(context.get(key))[:4] if normalize_query(v) not in seen)
+        out.extend(v for v in _coerce_str_list(context.get(key)) if normalize_query(v) not in seen)
     return out
 
 
-def _take_new(candidates: Sequence[str], seen: set[str], limit: int = 5) -> list[str]:
-    """First unseen normalized candidates, stripped, up to limit."""
+def _take_new(candidates: Sequence[str], seen: set[str]) -> list[str]:
+    """Unseen normalized candidates, stripped, in order (dedupe is the only bound)."""
     out: list[str] = []
     for candidate in candidates:
         key = normalize_query(candidate)
         if key and key not in seen:
             seen.add(key)
             out.append(candidate.strip())
-        if len(out) >= limit:
-            break
     return out
 
 
@@ -518,7 +659,10 @@ def expansion_stop(
     if repeats_yield_nothing and not new_queries:
         return True, "repeats yield nothing new"
     if not new_queries:
-        return True, "no new material queries; baseline reviewed" if baseline_reviewed else "remainder non-SEC-answerable"
+        return (
+            True,
+            "no new material queries; baseline reviewed" if baseline_reviewed else "remainder non-SEC-answerable",
+        )
     return False, "continue"
 
 
@@ -538,19 +682,37 @@ def _discover_sec_tools(dispatch: Callable[[str, dict[str, object]], dict[str, o
     return discovered
 
 
-def _role_assignments(question: str, session_id: str, as_of: str, tickers: Sequence[str], context: dict[str, object], groups: dict[str, list[str]], baseline: list[str]) -> list[ScoutAssignment]:
-    """One assignment per role with its top-two family queries."""
+def _role_assignments(
+    question: str,
+    session_id: str,
+    as_of: str,
+    tickers: Sequence[str],
+    context: dict[str, object],
+    groups: dict[str, list[str]],
+    baseline: list[str],
+) -> list[ScoutAssignment]:
+    """One assignment per role with every planned query of its families (dedupe only)."""
     scoped = [t for t in (tickers or []) if isinstance(t, str)]
     roles: tuple[ScoutRole, ScoutRole, ScoutRole] = ("filings", "financials", "risk")
     assignments: list[ScoutAssignment] = []
     for role in roles:
-        queries = [q for family in _ROLE_FAMILIES[role] for q in groups.get(family, [])[:2]]
+        queries = [q for family in _ROLE_FAMILIES[role] for q in groups.get(family, [])]
         context_copy = {k: (list(v) if isinstance(v, list) else v) for k, v in context.items()}
         unscoped: list[str] = list(groups.get("cp", [])) if role == "filings" else []
-        assignments.append(ScoutAssignment(assignment_id=f"scout-{role}", session_id=session_id, as_of=as_of,
-                                           role=role, question=question, tickers=list(scoped),
-                                           context=context_copy, queries=list(queries),
-                                           unscoped_queries=unscoped, baseline=list(baseline)))
+        assignments.append(
+            ScoutAssignment(
+                assignment_id=f"scout-{role}",
+                session_id=session_id,
+                as_of=as_of,
+                role=role,
+                question=question,
+                tickers=list(scoped),
+                context=context_copy,
+                queries=list(queries),
+                unscoped_queries=unscoped,
+                baseline=list(baseline),
+            )
+        )
     return assignments
 
 
@@ -566,11 +728,14 @@ def decompose_question(
     """Catalog discovery + generic context into three role assignments with queries."""
     _ = _discover_sec_tools(dispatch)  # hint only; assignments below carry context queries.
     context = build_research_context(question, tickers, model)
-    return _role_assignments(question, session_id, as_of, tickers, context,
-                             _grouped_queries(context), _baseline_queries(tickers, context))
+    return _role_assignments(
+        question, session_id, as_of, tickers, context, _grouped_queries(context), _baseline_queries(tickers, context)
+    )
 
 
-def _check_claim_refs(claim: GroundedClaim, known_set: set[str], session_id: str, journal: Callable[[str, dict[str, object]], None] | None) -> None:
+def _check_claim_refs(
+    claim: GroundedClaim, known_set: set[str], session_id: str, journal: Callable[[str, dict[str, object]], None] | None
+) -> None:
     """Fail-closed ref check: non-empty text, cited, freeze-contained ids."""
     if not claim.text.strip():
         raise ModelOutputFailure("each claim needs non-empty text")
@@ -587,11 +752,18 @@ def _merge_claim(findings: list[GroundedClaim], claim: GroundedClaim) -> None:
     """Append new claim text or merge duplicates: union ids, least assertive type."""
     prior = next((c for c in findings if c.text == claim.text), None)
     if prior is None:
-        findings.append(GroundedClaim(text=claim.text, claim_type=claim.claim_type, evidence_ids=list(dict.fromkeys(claim.evidence_ids))))
+        findings.append(
+            GroundedClaim(
+                text=claim.text, claim_type=claim.claim_type, evidence_ids=list(dict.fromkeys(claim.evidence_ids))
+            )
+        )
     else:
         merged_ids = list(dict.fromkeys([*prior.evidence_ids, *claim.evidence_ids]))
         merged_type = conservative_claim_type([prior.claim_type, claim.claim_type])
-        findings[findings.index(prior)] = GroundedClaim(text=prior.text, claim_type=merged_type, evidence_ids=merged_ids)
+        findings[findings.index(prior)] = GroundedClaim(
+            text=prior.text, claim_type=merged_type, evidence_ids=merged_ids
+        )
+
 
 def assemble_dossier(
     *,
@@ -605,7 +777,7 @@ def assemble_dossier(
 ) -> SourceDossier:
     """Merge scout outputs into one validated dossier (wave_id stored as int)."""
     wave = _coerce_wave(wave_id)
-    known_set = set(e for e in known_evidence_ids if isinstance(e, str) and e)
+    known_set = {e for e in known_evidence_ids if isinstance(e, str) and e}
     findings: list[GroundedClaim] = []
     unknowns: list[str] = []
     limitations: list[str] = []
@@ -627,6 +799,8 @@ def assemble_dossier(
         limitations=list(dict.fromkeys(limitations)),
         coverage_notes=coverage_notes,
     )
+
+
 __all__ = [
     "SEC_TOOLS",
     "SourceDossier",

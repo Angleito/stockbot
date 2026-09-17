@@ -11,8 +11,6 @@ from collections.abc import Mapping
 from dataclasses import asdict, dataclass, field
 from typing import Literal
 
-from .cusip import normalize_cusip as normalize_cusip
-
 
 # Duck-typed PIT boundary: storage mapping rows and attribute records
 # (dataclasses, namespaces) share no nominal type, so object is honest here.
@@ -22,14 +20,13 @@ def pit_of(record: object) -> tuple[str | None, str | None]:
     Returns (value, basis). (None, None) when the record carries no timestamp;
     callers with an as_of bound must exclude such records and record a gap.
     """
-    mapping: Mapping[str, object] | None = (
-        record if isinstance(record, dict) else None
-    )
+    mapping: Mapping[str, object] | None = record if isinstance(record, dict) else None
 
     def get(name: str) -> object:
         if mapping is not None:
             return mapping.get(name)
         return getattr(record, name, None)
+
     for basis in ("known_at", "accepted_at", "filed_at"):
         try:
             value = get(basis)
@@ -89,6 +86,14 @@ class FilingDocument:
 
 @dataclass(frozen=True)
 class SECSearchRequest:
+    """One SEC discovery/search request.
+
+    ``exhaustive`` drains every applicable route; ``max_results=None`` (how a
+    research-session dispatch leaves it) makes retrieval undrained, so only the
+    caller's packet (display) bound applies. A bounded lookup keeps
+    ``max_results`` as its per-source probe and returned-packet bound.
+    """
+
     query: str | None = None
     ticker: str | None = None
     cik: str | None = None
@@ -198,6 +203,7 @@ class SearchAttempt:
 @dataclass(frozen=True)
 class MatchingPassage:
     """One query hit within a document: which document, which query, score."""
+
     document: str | None = None
     query: str = ""
     score: float = 0.0
@@ -209,6 +215,7 @@ class MatchingPassage:
 @dataclass(frozen=True)
 class DocumentMatch:
     """One filing grouped with its matching passages."""
+
     accession: str = ""
     matching_passages: tuple[MatchingPassage, ...] = field(default_factory=tuple)
 
@@ -219,6 +226,7 @@ class DocumentMatch:
 @dataclass(frozen=True)
 class SearchRun:
     """One executed query: provenance for positives, citation for negatives."""
+
     id: str = ""
     source: str = ""
     query: str = ""
@@ -249,6 +257,7 @@ class SearchCoverage:
 
     def to_dict(self) -> dict[str, object]:
         return asdict(self)
+
 
 @dataclass(frozen=True)
 class SECSearchResult:
@@ -286,42 +295,44 @@ class CurrentReportEvent:
         return d
 
 
-EVENT_TYPES = frozenset({
-    "earnings",
-    "guidance_change",
-    "material_agreement",
-    "debt_issuance",
-    "default",
-    "bankruptcy",
-    "restructuring",
-    "impairment",
-    "acquisition",
-    "asset_sale",
-    "cybersecurity_incident",
-    "delisting_notice",
-    "equity_issuance",
-    "auditor_change",
-    "restatement",
-    "management_change",
-    "change_of_control",
-    "large_holder_entry",
-    "large_holder_exit",
-    "activist_change",
-    "insider_purchase",
-    "insider_sale",
-    "planned_insider_sale",
-    "shelf_registration",
-    "offering",
-    "atm_program",
-    "convertible_warrant_issuance",
-    "institutional_entry",
-    "institutional_exit",
-    "proxy_fight",
-    "shareholder_vote",
-    "tender_offer",
-    "merger",
-    "going_private",
-})
+EVENT_TYPES = frozenset(
+    {
+        "earnings",
+        "guidance_change",
+        "material_agreement",
+        "debt_issuance",
+        "default",
+        "bankruptcy",
+        "restructuring",
+        "impairment",
+        "acquisition",
+        "asset_sale",
+        "cybersecurity_incident",
+        "delisting_notice",
+        "equity_issuance",
+        "auditor_change",
+        "restatement",
+        "management_change",
+        "change_of_control",
+        "large_holder_entry",
+        "large_holder_exit",
+        "activist_change",
+        "insider_purchase",
+        "insider_sale",
+        "planned_insider_sale",
+        "shelf_registration",
+        "offering",
+        "atm_program",
+        "convertible_warrant_issuance",
+        "institutional_entry",
+        "institutional_exit",
+        "proxy_fight",
+        "shareholder_vote",
+        "tender_offer",
+        "merger",
+        "going_private",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -543,18 +554,20 @@ class Offering:
         return d
 
 
-GOVERNANCE_EVENT_TYPES = frozenset({
-    "annual_meeting",
-    "special_meeting",
-    "information_statement",
-    "proxy_contest",
-    "director_election",
-    "say_on_pay",
-    "equity_plan",
-    "auditor_ratification",
-    "shareholder_proposal",
-    "merger_vote",
-})
+GOVERNANCE_EVENT_TYPES = frozenset(
+    {
+        "annual_meeting",
+        "special_meeting",
+        "information_statement",
+        "proxy_contest",
+        "director_election",
+        "say_on_pay",
+        "equity_plan",
+        "auditor_ratification",
+        "shareholder_proposal",
+        "merger_vote",
+    }
+)
 
 
 @dataclass(frozen=True)
@@ -661,8 +674,7 @@ class Transaction:
     extraction_method: str | None = None
 
     def __post_init__(self):
-        object.__setattr__(self, "source_accessions",
-                           tuple(self.source_accessions or ()))
+        object.__setattr__(self, "source_accessions", tuple(self.source_accessions or ()))
 
     def to_dict(self) -> dict[str, object]:
         d = asdict(self)

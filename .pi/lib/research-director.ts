@@ -18,6 +18,9 @@
  */
 
 import { spawn } from "node:child_process";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 
 type Json = Record<string, unknown>;
 export type BridgeCall = (req: Json) => Promise<Json>;
@@ -275,20 +278,22 @@ async function inspect(sessionId: string, dataRoot?: string, asOf?: string): Pro
  return out;
 }
 // Evidence item shape. SEC search hits are navigation artifacts: a fact counts
-// only when the opened document carries its accession, its name, and a raw
-// passage. claim_kind routes the two supported kinds.
+// only when the citation carries the canonical source_handle get_sec_document
+// returned for the window that was read, plus the passage being cited. The
+// kernel reloads that window and stores the archive's bytes. claim_kind routes
+// the two supported kinds.
 const ITEM_SHAPE =
  `"item": {"content": "<observed fact>", "claim_text": "<single claim>", "subject": "<ticker>", "source_name": "<publisher, e.g. SEC>", ` +
  `"source_uri": "<canonical document URL>", "source_record_id": "<SEC accession, e.g. 0000320193-24-000123>", "document_name": "<filing or exhibit you opened>", ` +
- `"matching_passage": "<raw passage quoted from that document>", "known_at": "<ISO-8601 timestamp>", "claim_kind": "observed_fact"}`;
+ `"source_handle": <the source_handle get_sec_document returned for that window>, "matching_passage": "<passage quoted from that window>", "known_at": "<ISO-8601 timestamp>", "claim_kind": "observed_fact"}`;
 // One source workflow for every wave: navigation-only search, raw-document
 // evidence, no limits, coverage submitted structurally.
 const SOURCE_WORKFLOW =
  `Work it as a branch map: name the material branches this question needs, search SEC for each, open the filings behind every hit, read the documents/exhibits/passages, and record only raw-document-backed evidence. ` +
  `There is no maximum number of searches, filing reads, document reads, exhibit reads, or waves: keep going while the work is materially useful; the only waste is an exact repeat that adds nothing. ` +
  `Search results are navigation artifacts, never evidence: opening the document is what makes a finding citable. ` +
- `An observed_fact needs source_record_id (the SEC accession), document_name, and a raw passage (matching_passage, or passage/section) — anything less fails closed. ` +
- `An absence_observation instead needs claim_kind "absence_observation" with search_id, query, and the searched coverage (forms, dates, partitions, entities, docs, gaps, pagination_complete, complete), and must not carry an accession. ` +
+ `Open the filing with get_sec_document and cite what it returned: an observed_fact needs that call's canonical source_handle plus the passage you are citing (matching_passage, or passage/section) — the kernel reloads the window itself, so a hit or a handle-less citation fails ERR_RAW_SOURCE_REQUIRED and a passage the window does not contain fails ERR_PASSAGE_NOT_IN_SOURCE. ` +
+ `An absence_observation instead needs claim_kind "absence_observation" with search_id, query, and the searched coverage (forms, dates, partitions, entities, docs, gaps, pagination_complete, complete), and must not carry an accession: it is recorded as a session coverage artifact (what the search did and did not reach), never as citable evidence, and no filing can prove it. ` +
  `Track entities, forms, exhibits, branches covered/remaining, and the questions still open as you go: sufficiency is coverage of what you checked, never a whole-question answer. `;
 
 function sourceSteps(sessionId: string, jobId: string, asOf?: string): string {
@@ -389,7 +394,7 @@ const ROLE_RULES =
  `every follow_up is a question string of 12-500 characters ending in "?". ` +
  `Argue only what the evidence supports: no fabricated optimism, no fabricated pessimism, and mark what the evidence cannot settle as unknown. `;
 
-export type RoleSpawn = (prompt: string) => Promise<string>;
+export type RoleSpawn = (prompt: string, dir: string) => Promise<string>;
 // Production default: the one-shot `pi` process (flag-less unless the env
 // override is configured). Tests and embedders set `null`, which declares fresh
 // role contexts unavailable — a null seam never spawns anything.
@@ -399,22 +404,29 @@ export function setRoleSpawn(fn: RoleSpawn | null): void {
 }
 // One model call plus process start-up; mirrors the verify harness's 300s run cap.
 const ROLE_SPAWN_TIMEOUT_MS = 300_000;
+// The role's cwd is the batch directory holding the frozen dossier. Roles are
+// spawned with the read tool only (no write/edit/bash/network tools), which is
+// strictly less privilege than the in-context authoring path they replace; pi's
+// read tool is not path-confined, so the prompt names the dossier as the only
+// material and cwd keeps it the default relative path.
+const DOSSIER_FILE = "frozen-dossier.txt";
 
-/** Frozen per-role CLI argv; pi resolves the provider/model when no override is set. */
-export function roleSpawnCommand(prompt: string): string[] {
+/** Frozen per-role CLI argv; flag-only, never the prompt (stdin carries it); pi resolves the provider/model when no override is set. */
+export function roleSpawnCommand(): string[] {
  const provider = (process.env.STOCKBOT_PI_PROVIDER ?? "").trim();
  const model = (process.env.STOCKBOT_PI_MODEL ?? "").trim();
  const flags = [...(provider ? ["--provider", provider] : []), ...(model ? ["--model", model] : [])];
  return [
-  "pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-  "--no-prompt-templates", "--no-context-files", ...flags, "--", prompt,
+  "pi", "-p", "--no-session", "--tools", "read", "--no-extensions", "--no-skills",
+  "--no-prompt-templates", "--no-context-files", ...flags,
  ];
 }
 
-// One-shot role process: stdout only, killed on timeout, "" on any failure (the
-// caller falls back to in-context authoring, so nothing throws past it).
-function spawnPiRole(prompt: string): Promise<string> {
- const argv = roleSpawnCommand(prompt);
+// One-shot role process: prompt on stdin (a deep dossier can exceed the argv
+// limit), stdout only, killed on timeout, "" on any failure (the caller falls
+// back to in-context authoring, so nothing throws past it).
+export function spawnPiRole(prompt: string, dir: string): Promise<string> {
+ const argv = roleSpawnCommand();
  return new Promise<string>((resolve) => {
   let settled = false;
   let timer: ReturnType<typeof setTimeout>;
@@ -424,8 +436,13 @@ function spawnPiRole(prompt: string): Promise<string> {
    clearTimeout(timer);
    resolve(out);
   };
-  const child = spawn(argv[0], argv.slice(1), { stdio: ["ignore", "pipe", "ignore"] });
+  const child = spawn(argv[0], argv.slice(1), { stdio: ["pipe", "pipe", "ignore"], cwd: dir });
   let out = "";
+  // Close stdin immediately: pi takes the piped text as its prompt, and a child
+  // that exits early closes the pipe under us (EPIPE is not this promise's
+  // failure — stdout stays the only signal).
+  child.stdin?.on("error", () => { });
+  child.stdin?.end(prompt);
   timer = setTimeout(() => {
    try {
     child.kill("SIGKILL");
@@ -442,20 +459,39 @@ function spawnPiRole(prompt: string): Promise<string> {
  });
 }
 
-function rolePrompt(role: string, question: string, freezeId: string, allowedIds: string, evidenceText: string): string {
+function rolePrompt(role: string, question: string, freezeId: string, dossierPath: string, index: string, allowedIds: string): string {
  return (
   `${ROLE_ORDERS[role] ?? `You are the ${role} analyst on this committee.`}\n` +
   `Question under research: ${question}\n` +
-  `Frozen evidence ${freezeId} is reproduced below in full; it is your only material and you have no tools.\n${evidenceText}\n` +
+  `Frozen evidence ${freezeId} is in the dossier file ${dossierPath}. Read that file now with the read tool and use nothing else: it is the only material for this role and read is the only tool you have.\n` +
+  `Evidence index (frozen id, claim kind, filing or search identity):\n${index}\n` +
   `${ROLE_RULES}Cite only these frozen evidence ids: ${allowedIds}. ` +
   `Respond with raw JSON only — no prose, no code fences — in exactly this shape: ${ANALYSIS_ENVELOPE}`
  );
 }
 
-// Frozen evidence text for one freeze, read with the same verb the in-context
-// prompt names (research_read over the bridge), so a role sees exactly what the
-// kernel froze. Any unreadable record fails the whole read (no partial evidence).
-async function frozenEvidenceText(sessionId: string, freezeId: string, ids: string[], dataRoot?: string, asOf?: string): Promise<string> {
+// One dossier index line per frozen id: the id, its claim kind, and the filing
+// document or search identity the kernel's research_read rendering carries as
+// flat `key: value` fields. Anything the rendering does not show (truncated or
+// legacy records) is omitted, never invented.
+function evidenceIndexLine(id: string, rendered: string): string {
+ const absence = /^Absence observation/.test(rendered);
+ const kind = /claim_kind: ([a-z_]+)/.exec(rendered)?.[1] ?? (absence ? "absence_observation" : "");
+ const document = /'?document_name'?: '([^']*)'/.exec(rendered)?.[1] ?? /Searched scope: search (\S+)/.exec(rendered)?.[1] ?? "";
+ const reference = /'?accession_no'?: '([^']*)'/.exec(rendered)?.[1] ?? /query '([^']*)'/.exec(rendered)?.[1] ?? "";
+ const parts = [id];
+ if (kind) parts.push(`claim_kind: ${kind}`);
+ if (document) parts.push(`${absence ? "search" : "document"}: ${document}`);
+ if (reference) parts.push(`${absence ? "query" : "accession"}: ${reference}`);
+ return `- ${parts.join(" | ")}`;
+}
+
+// Frozen dossier for one freeze: the freeze summary plus every frozen evidence
+// record exactly as research_read renders it, and the compact index the role
+// prompt carries. Read with the same verb the in-context prompt names, so a
+// role sees exactly what the kernel froze. Any unreadable record fails the
+// whole read (no partial dossier).
+async function frozenDossier(sessionId: string, freezeId: string, ids: string[], dataRoot?: string, asOf?: string): Promise<{ text: string; index: string }> {
  const readText = async (kind: string, resourceId: string): Promise<string> => {
   const res = await rpc("tool.invoke", { name: "research_read", arguments: { session_id: sessionId, kind, resource_id: resourceId } }, dataRoot, asOf);
   return str(res.content).trim();
@@ -464,7 +500,10 @@ async function frozenEvidenceText(sessionId: string, freezeId: string, ids: stri
  if (!freezeText) throw new Error(`freeze ${freezeId} unreadable`);
  const evidence = await Promise.all(ids.map((id) => readText("evidence", id)));
  if (evidence.some((text) => text.length === 0)) throw new Error("frozen evidence unreadable");
- return [freezeText, ...evidence].join("\n\n");
+ return {
+  text: [freezeText, ...evidence].join("\n\n"),
+  index: ids.map((id, i) => evidenceIndexLine(id, evidence[i])).join("\n"),
+ };
 }
 
 // Model text at a trust boundary: take the JSON object and let the kernel
@@ -489,15 +528,24 @@ async function authorTrioInFreshContexts(
  const spawnRole = roleSpawn;
  if (!spawnRole) return "Role contexts unavailable (role spawns are disabled); author in this context. ";
  try {
-  const evidenceText = await frozenEvidenceText(sessionId, freezeId, allowedIds, dataRoot, asOf);
-  const jobs = roles.map((job) => ({ job, prompt: rolePrompt(str(job.job_type), question, freezeId, allowedIds.join(", "), evidenceText) }));
-  // Every role process starts before any is awaited: three contexts, one wall clock.
-  const envelopes = (await Promise.all(jobs.map((j) => spawnRole(j.prompt)))).map((text) => parseRoleEnvelope(text));
-  await Promise.all(
-   jobs.map((j, i) =>
-    rpc("research.analysis.record", { session_id: sessionId, job_id: str(j.job.job_id), role: str(j.job.job_type), analysis: envelopes[i] }, dataRoot, asOf),
-   ),
-  );
+  const dossier = await frozenDossier(sessionId, freezeId, allowedIds, dataRoot, asOf);
+  // One private dossier file per batch; the roles read it as their only material.
+  const dir = mkdtempSync(join(tmpdir(), "stockbot-roles-"));
+  try {
+   const dossierPath = join(dir, DOSSIER_FILE);
+   writeFileSync(dossierPath, dossier.text, { mode: 0o600 });
+   const jobs = roles.map((job) => ({ job, prompt: rolePrompt(str(job.job_type), question, freezeId, dossierPath, dossier.index, allowedIds.join(", ")) }));
+   // Every role process starts before any is awaited: three contexts, one wall clock.
+   const envelopes = (await Promise.all(jobs.map((j) => spawnRole(j.prompt, dir)))).map((text) => parseRoleEnvelope(text));
+   await Promise.all(
+    jobs.map((j, i) =>
+     rpc("research.analysis.record", { session_id: sessionId, job_id: str(j.job.job_id), role: str(j.job.job_type), analysis: envelopes[i] }, dataRoot, asOf),
+    ),
+   );
+  } finally {
+   // The dossier goes away once the batch settles, success or failure.
+   rmSync(dir, { recursive: true, force: true });
+  }
   return null;
  } catch (err) {
   return `Role contexts unavailable (${err instanceof Error ? err.message : String(err)}); author in this context. `;

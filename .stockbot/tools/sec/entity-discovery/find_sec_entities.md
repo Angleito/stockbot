@@ -38,5 +38,5 @@ None
 ## Optional arguments
 
 - `as_of` (string): Point-in-time date YYYY-MM-DD; former names apply only within their known/valid interval.
-- `exhaustive` (boolean): Fan out over all entity routes (default false; non-exhaustive).
-- `limit` (integer): Max candidates to return (default 20); higher values probe deeper.
+- `exhaustive` (boolean): true searches every entity route (the default when dispatched inside a research session); false requests the quick bounded lookup (default outside a research session).
+- `limit` (integer): Bounded lookups return at most this many candidates (default 20); exhaustive lookups return every candidate found across routes (local source cap 50) and limit only bounds the display packet.

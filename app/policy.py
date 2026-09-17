@@ -25,8 +25,8 @@ class RunLimits:
     """
 
     max_tool_calls: int | None = None
-    max_runtime: float | None = None     # seconds
-    max_tool_result_bytes: int = 64 * 1024   # == tool_render.MAX_TOOL_MESSAGE_BYTES
+    max_runtime: float | None = None  # seconds
+    max_tool_result_bytes: int = 64 * 1024  # == tool_render.MAX_TOOL_MESSAGE_BYTES
     # Context-window guard, not a research count: evidence text packed into one
     # run context stays bounded; retrieval itself is unlimited (ledger + paged reads).
     max_evidence_tokens: int | None = 48_000
@@ -34,7 +34,7 @@ class RunLimits:
 
 @dataclass(frozen=True)
 class ToolPolicy:
-    allowed_tools: frozenset[str] | None = None    # None -> capability-derived registry
+    allowed_tools: frozenset[str] | None = None  # None -> capability-derived registry
     max_arguments_bytes: int = 8 * 1024
     deny_unpermitted: bool = True
 
@@ -48,6 +48,7 @@ class RequestContext:
     as_of: str | None = None
     run_limits: RunLimits = RunLimits()
     source_policy: dict[str, object] | None = None
+    research_session_id: str | None = None  # set on research-bound dispatches; None outside a session
 
 
 def scoped_context(context: RequestContext, source_policy: dict[str, object] | None) -> RequestContext:
@@ -60,7 +61,9 @@ def scoped_context(context: RequestContext, source_policy: dict[str, object] | N
         as_of=context.as_of,
         run_limits=context.run_limits,
         source_policy=dict(source_policy) if isinstance(source_policy, dict) else None,
+        research_session_id=context.research_session_id,
     )
+
 
 def context_allows_tool(context: RequestContext, name: str) -> bool:
     """Kernel gate: capability permit + source_policy allowlist (denied wins).
@@ -98,4 +101,3 @@ LOCAL_BROKER_CONTEXT = RequestContext(
     principal_id="local-broker",
     capabilities=frozenset({Capability.RESEARCH, Capability.BROKER_MARKET_READ, Capability.PORTFOLIO_READ}),
 )
-

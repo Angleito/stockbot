@@ -1,7 +1,7 @@
 {
   "answer_excerpt": "GS's 10-K [rs:gs-openai-2026-08-14:ev:1] discloses OpenAI-linked exposure inside its investing-and-lending marks and the fund/private-credit branch [rs:gs-openai-2026-08-14:ev:2] carries it through fund-level marks. A bankruptcy would force marks down and lift counterparty-credit provisions (inference). No disclosure of OpenAI's private loan covenants was located within the searched SEC scope (SEC-only limitation).",
   "as_of": null,
-  "budget_cap": 60,
+  "budget_cap": null,
   "budget_used": 22,
   "evidence_ids": [
     "rs:gs-openai-2026-08-14:ev:1",
@@ -37,7 +37,7 @@
     "relationships_found": 2,
     "relationships_skipped": 0,
     "searches": 2,
-    "stop_reason": "complete:wave1",
+    "stop_reason": "no_questions",
     "unresolved": [
       "OpenAI private loan covenants"
     ]

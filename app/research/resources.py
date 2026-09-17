@@ -1,4 +1,4 @@
-"""Canonical resource URI reader: evidence:// research:// job:// dossier:// freeze://."""
+"""Canonical resource URI reader: evidence:// research:// job:// dossier:// freeze:// coverage://."""
 
 from __future__ import annotations
 
@@ -12,7 +12,7 @@ __all__ = [
     "read_resource",
 ]
 
-KNOWN_RESOURCE_NAMESPACES = frozenset({"evidence", "research", "job", "dossier", "freeze"})
+KNOWN_RESOURCE_NAMESPACES = frozenset({"evidence", "research", "job", "dossier", "freeze", "coverage"})
 
 
 class ResourceError(ValueError):
@@ -47,10 +47,13 @@ def read_resource(
     dossiers: Mapping[str, object] | None = None,
     jobs: Mapping[str, object] | None = None,
     sessions: Mapping[str, object] | None = None,
+    coverage: Mapping[str, object] | None = None,
 ) -> object:
     """Resolve one URI against injected id->record stores (no I/O, no sibling imports).
 
     ``research://<session_id>`` ignores any ``/section`` suffix and returns the session.
+    ``coverage://<artifact_id>`` reads a session's search-coverage artifact (absence
+    observation): inspection only, never a raw-document citation.
     """
     namespace, key = parse_resource_uri(uri)
     stores: dict[str, Mapping[str, object] | None] = {
@@ -59,6 +62,7 @@ def read_resource(
         "dossier": dossiers,
         "job": jobs,
         "research": sessions,
+        "coverage": coverage,
     }
     store = stores[namespace]
     if store is None:
