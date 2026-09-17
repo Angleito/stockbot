@@ -10,7 +10,7 @@ from pathlib import Path
 
 import pytest
 
-import app.valuation as valuation
+from app import valuation
 from app.domain.market import ids
 from app.normalization import (
     DIVIDEND_PER_SHARE_CONCEPT,
@@ -35,23 +35,29 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _seed_ticker(tmp_path: Path, cik: int, ticker: str) -> None:
     datasets = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}},
-        retrieved_at=RETRIEVED_AT, content_hash=f"tickers-{cik}",
+        retrieved_at=RETRIEVED_AT,
+        content_hash=f"tickers-{cik}",
     )
     for name, rows in datasets.items():
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
 
 
 def _div_fact(val: float, start: str, end: str, fy: int, fp: str, filed: str, accn: str) -> dict[str, object]:
-    return {"start": start, "end": end, "val": val, "accn": accn,
-            "fy": fy, "fp": fp, "filed": filed}
+    return {"start": start, "end": end, "val": val, "accn": accn, "fy": fy, "fp": fp, "filed": filed}
 
 
 def _seed_dividends(tmp_path: Path, cik: int, facts: list[dict[str, object]]) -> None:
-    payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {
-        "us-gaap": {DIVIDEND_PER_SHARE_CONCEPT: {"units": {"USD/shares": list(facts)}}},
-    }}
+    payload = {
+        "cik": cik,
+        "entityName": f"CIK{cik}",
+        "facts": {
+            "us-gaap": {DIVIDEND_PER_SHARE_CONCEPT: {"units": {"USD/shares": list(facts)}}},
+        },
+    }
     datasets = normalize_sec_company_facts(
-        payload, retrieved_at=RETRIEVED_AT, content_hash=f"div-facts-{cik}",
+        payload,
+        retrieved_at=RETRIEVED_AT,
+        content_hash=f"div-facts-{cik}",
         source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
         source_record_id=f"cik{cik:010d}",
     )
@@ -62,12 +68,16 @@ def _seed_dividends(tmp_path: Path, cik: int, facts: list[dict[str, object]]) ->
 def _seed_quarters(tmp_path: Path) -> None:
     """Four contiguous quarters (TTM 2.10) so the store path serves events."""
     _seed_ticker(tmp_path, KO_CIK, "KO")
-    _seed_dividends(tmp_path, KO_CIK, [
-        _div_fact(0.51, "2025-07-01", "2025-09-30", 2025, "Q3", "2025-10-28", "q3"),
-        _div_fact(0.51, "2025-10-01", "2025-12-31", 2025, "Q4", "2026-02-10", "q4"),
-        _div_fact(0.54, "2026-01-01", "2026-03-31", 2026, "Q1", "2026-04-28", "q1"),
-        _div_fact(0.54, "2026-04-01", "2026-06-30", 2026, "Q2", "2026-07-28", "q2"),
-    ])
+    _seed_dividends(
+        tmp_path,
+        KO_CIK,
+        [
+            _div_fact(0.51, "2025-07-01", "2025-09-30", 2025, "Q3", "2025-10-28", "q3"),
+            _div_fact(0.51, "2025-10-01", "2025-12-31", 2025, "Q4", "2026-02-10", "q4"),
+            _div_fact(0.54, "2026-01-01", "2026-03-31", 2026, "Q1", "2026-04-28", "q1"),
+            _div_fact(0.54, "2026-04-01", "2026-06-30", 2026, "Q2", "2026-07-28", "q2"),
+        ],
+    )
 
 
 def _event(
@@ -118,18 +128,24 @@ def _seed_events(tmp_path: Path, rows: list[dict[str, object]]) -> None:
 def _fail_on_price(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(ticker: str) -> dict[str, object]:
         raise AssertionError("historical dividend query must not call Yahoo")
+
     monkeypatch.setattr(valuation, "get_live_quote", _boom)
 
 
 def test_upcoming_vs_paid_split(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
-    _seed_events(store, [
-        _event(KO_CIK, "ev-paid", 0.51, decl="2026-06-15", record="2026-06-30",
-               pay="2026-07-01", accn="0000000001"),
-        _event(KO_CIK, "ev-next", 0.54, decl="2026-08-01", record="2026-08-29",
-               pay="2026-09-15", accn="0000000002"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK, "ev-paid", 0.51, decl="2026-06-15", record="2026-06-30", pay="2026-07-01", accn="0000000001"
+            ),
+            _event(
+                KO_CIK, "ev-next", 0.54, decl="2026-08-01", record="2026-08-29", pay="2026-09-15", accn="0000000002"
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     next_declared = result["next_declared_dividend"]
     assert isinstance(next_declared, dict)
@@ -137,14 +153,16 @@ def test_upcoming_vs_paid_split(store: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert isinstance(past, list)
     annual = result["annual_history"]
     assert isinstance(annual, list)
-    assert result["last_dividend"] == {
-        "amount_per_share": 0.51, "payment_date": "2026-07-01", "type": "regular"}
+    assert result["last_dividend"] == {"amount_per_share": 0.51, "payment_date": "2026-07-01", "type": "regular"}
     assert result["next_declared_dividend"] == {
-        "amount_per_share": 0.54, "declaration_date": "2026-08-01",
-        "record_date": "2026-08-29", "payment_date": "2026-09-15",
+        "amount_per_share": 0.54,
+        "declaration_date": "2026-08-01",
+        "record_date": "2026-08-29",
+        "payment_date": "2026-09-15",
         "status": "upcoming",
         "source_url": next_declared["source_url"],
-        "accession": "0000000002"}
+        "accession": "0000000002",
+    }
     assert [e["payment_date"] for e in past] == ["2026-07-01"]
     assert result["events_coverage"] == "structured_only"
     assert result["row_count"] == len(annual)
@@ -153,10 +171,21 @@ def test_upcoming_vs_paid_split(store: Path, monkeypatch: pytest.MonkeyPatch) ->
 def test_future_declaration_invisible_at_earlier_as_of(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
-    _seed_events(store, [
-        _event(KO_CIK, "ev-future", 0.54, decl="2026-08-20", record="2026-09-15",
-               pay="2026-10-01", known="2026-09-01T00:00:00Z", accn="0000000003"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK,
+                "ev-future",
+                0.54,
+                decl="2026-08-20",
+                record="2026-09-15",
+                pay="2026-10-01",
+                known="2026-09-01T00:00:00Z",
+                accn="0000000003",
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-08-15")
     assert result["next_declared_dividend"] is None
     assert result["last_dividend"] is None
@@ -168,12 +197,31 @@ def test_duplicate_accessions_dedup_to_one(store: Path, monkeypatch: pytest.Monk
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
     event_id = ids.sec_dividend_event_id(KO_CIK, 0.54, "2026-08-29", "2026-09-15", "regular")
-    _seed_events(store, [
-        _event(KO_CIK, event_id, 0.54, decl="2026-08-01", record="2026-08-29",
-               pay="2026-09-15", known="2026-08-01T00:00:00Z", accn="0000000004"),
-        _event(KO_CIK, event_id, 0.54, decl="2026-08-01", record="2026-08-29",
-               pay="2026-09-15", known="2026-08-02T00:00:00Z", accn="0000000005"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK,
+                event_id,
+                0.54,
+                decl="2026-08-01",
+                record="2026-08-29",
+                pay="2026-09-15",
+                known="2026-08-01T00:00:00Z",
+                accn="0000000004",
+            ),
+            _event(
+                KO_CIK,
+                event_id,
+                0.54,
+                decl="2026-08-01",
+                record="2026-08-29",
+                pay="2026-09-15",
+                known="2026-08-02T00:00:00Z",
+                accn="0000000005",
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["past_events"] == []
     next_declared = result["next_declared_dividend"]
@@ -187,12 +235,31 @@ def test_amended_amount_supersedes_via_latest_known_at(store: Path, monkeypatch:
     old_id = ids.sec_dividend_event_id(KO_CIK, 0.50, "2026-08-29", "2026-09-15", "regular")
     new_id = ids.sec_dividend_event_id(KO_CIK, 0.54, "2026-08-29", "2026-09-15", "regular")
     assert old_id != new_id
-    _seed_events(store, [
-        _event(KO_CIK, old_id, 0.50, decl="2026-07-15", record="2026-08-29",
-               pay="2026-09-15", known="2026-07-20T00:00:00Z", accn="0000000006"),
-        _event(KO_CIK, new_id, 0.54, decl="2026-08-01", record="2026-08-29",
-               pay="2026-09-15", known="2026-08-02T00:00:00Z", accn="0000000007"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK,
+                old_id,
+                0.50,
+                decl="2026-07-15",
+                record="2026-08-29",
+                pay="2026-09-15",
+                known="2026-07-20T00:00:00Z",
+                accn="0000000006",
+            ),
+            _event(
+                KO_CIK,
+                new_id,
+                0.54,
+                decl="2026-08-01",
+                record="2026-08-29",
+                pay="2026-09-15",
+                known="2026-08-02T00:00:00Z",
+                accn="0000000007",
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     next_declared = result["next_declared_dividend"]
     assert isinstance(next_declared, dict)
@@ -203,12 +270,15 @@ def test_amended_amount_supersedes_via_latest_known_at(store: Path, monkeypatch:
 def test_incomplete_event_excluded_from_last_next(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
-    _seed_events(store, [
-        _event(KO_CIK, "ev-full", 0.54, decl="2026-08-01", record="2026-08-29",
-               pay="2026-09-15", accn="0000000008"),
-        _event(KO_CIK, "ev-partial", 0.54, decl="2026-08-01", record=None,
-               pay=None, accn="0000000009"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK, "ev-full", 0.54, decl="2026-08-01", record="2026-08-29", pay="2026-09-15", accn="0000000008"
+            ),
+            _event(KO_CIK, "ev-partial", 0.54, decl="2026-08-01", record=None, pay=None, accn="0000000009"),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     next_declared = result["next_declared_dividend"]
     assert isinstance(next_declared, dict)
@@ -223,18 +293,26 @@ def test_incomplete_event_excluded_from_last_next(store: Path, monkeypatch: pyte
 def test_restated_q1_still_wins_ttm_while_events_classify(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
-    _seed_dividends(store, KO_CIK, [
-        _div_fact(0.50, "2025-01-01", "2025-03-31", 2025, "Q1", "2025-04-29", "k1"),
-        _div_fact(0.51, "2025-01-01", "2025-03-31", 2025, "Q1", "2025-05-06", "k2"),
-        _div_fact(0.51, "2025-04-01", "2025-06-30", 2025, "Q2", "2025-07-29", "k4"),
-        _div_fact(0.51, "2025-07-01", "2025-09-30", 2025, "Q3", "2025-10-28", "k6"),
-        _div_fact(0.51, "2025-10-01", "2025-12-31", 2025, "Q4", "2026-02-10", "k7"),
-        _div_fact(0.54, "2026-01-01", "2026-03-31", 2026, "Q1", "2026-04-28", "k8"),
-    ])
-    _seed_events(store, [
-        _event(KO_CIK, "ev-ko-next", 0.53, decl="2026-07-20", record="2026-08-29",
-               pay="2026-09-15", accn="0000000010"),
-    ])
+    _seed_dividends(
+        store,
+        KO_CIK,
+        [
+            _div_fact(0.50, "2025-01-01", "2025-03-31", 2025, "Q1", "2025-04-29", "k1"),
+            _div_fact(0.51, "2025-01-01", "2025-03-31", 2025, "Q1", "2025-05-06", "k2"),
+            _div_fact(0.51, "2025-04-01", "2025-06-30", 2025, "Q2", "2025-07-29", "k4"),
+            _div_fact(0.51, "2025-07-01", "2025-09-30", 2025, "Q3", "2025-10-28", "k6"),
+            _div_fact(0.51, "2025-10-01", "2025-12-31", 2025, "Q4", "2026-02-10", "k7"),
+            _div_fact(0.54, "2026-01-01", "2026-03-31", 2026, "Q1", "2026-04-28", "k8"),
+        ],
+    )
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK, "ev-ko-next", 0.53, decl="2026-07-20", record="2026-08-29", pay="2026-09-15", accn="0000000010"
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["ttm_dividend_per_share"] == 2.07
     assert result["dividend_status"] == "paying"
@@ -243,15 +321,21 @@ def test_restated_q1_still_wins_ttm_while_events_classify(store: Path, monkeypat
     assert next_declared["amount_per_share"] == 0.53
     assert result["last_dividend"] is None
 
+
 def test_upcoming_excluded_from_past(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
-    _seed_events(store, [
-        _event(KO_CIK, "ev-paid-2", 0.51, decl="2026-06-15", record="2026-06-30",
-               pay="2026-07-01", accn="0000000011"),
-        _event(KO_CIK, "ev-up-2", 0.54, decl="2026-08-01", record="2026-08-29",
-               pay="2026-09-15", accn="0000000012"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK, "ev-paid-2", 0.51, decl="2026-06-15", record="2026-06-30", pay="2026-07-01", accn="0000000011"
+            ),
+            _event(
+                KO_CIK, "ev-up-2", 0.54, decl="2026-08-01", record="2026-08-29", pay="2026-09-15", accn="0000000012"
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     past = result["past_events"]
     assert isinstance(past, list)
@@ -264,12 +348,31 @@ def test_amendment_canonicalizes_to_latest(store: Path, monkeypatch: pytest.Monk
     _seed_quarters(store)
     old_id = ids.sec_dividend_event_id(KO_CIK, 0.50, "2026-06-30", "2026-07-01", "regular")
     new_id = ids.sec_dividend_event_id(KO_CIK, 0.54, "2026-06-30", "2026-07-01", "regular")
-    _seed_events(store, [
-        _event(KO_CIK, old_id, 0.50, decl="2026-06-15", record="2026-06-30",
-               pay="2026-07-01", known="2026-08-01T00:00:00Z", accn="0000000013"),
-        _event(KO_CIK, new_id, 0.54, decl="2026-06-15", record="2026-06-30",
-               pay="2026-07-01", known="2026-08-05T00:00:00Z", accn="0000000014"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK,
+                old_id,
+                0.50,
+                decl="2026-06-15",
+                record="2026-06-30",
+                pay="2026-07-01",
+                known="2026-08-01T00:00:00Z",
+                accn="0000000013",
+            ),
+            _event(
+                KO_CIK,
+                new_id,
+                0.54,
+                decl="2026-06-15",
+                record="2026-06-30",
+                pay="2026-07-01",
+                known="2026-08-05T00:00:00Z",
+                accn="0000000014",
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     last = result["last_dividend"]
     assert isinstance(last, dict)
@@ -283,10 +386,14 @@ def test_amendment_canonicalizes_to_latest(store: Path, monkeypatch: pytest.Monk
 def test_event_only_surfaces_without_aggregate(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
-    _seed_events(store, [
-        _event(KO_CIK, "ev-only", 0.51, decl="2026-06-15", record="2026-06-30",
-               pay="2026-07-01", accn="0000000015"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK, "ev-only", 0.51, decl="2026-06-15", record="2026-06-30", pay="2026-07-01", accn="0000000015"
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["data_source"] == "store"
     assert result["dividend_status"] == "unknown"
@@ -300,11 +407,15 @@ def test_event_only_surfaces_without_aggregate(store: Path, monkeypatch: pytest.
 def test_analysis_wired_through_store(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
-    _seed_events(store, [
-        _event(KO_CIK, f"ev-q{i}", 0.50, record=f"2025-0{i+1}-15" if i < 9 else None,
-               pay=pay, accn=f"000000002{i}")
-        for i, pay in enumerate(["2025-04-15", "2025-07-15", "2025-10-15", "2026-01-15", "2026-04-15"])
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK, f"ev-q{i}", 0.50, record=f"2025-0{i + 1}-15" if i < 9 else None, pay=pay, accn=f"000000002{i}"
+            )
+            for i, pay in enumerate(["2025-04-15", "2025-07-15", "2025-10-15", "2026-01-15", "2026-04-15"])
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
     assert result["payment_cadence"] == "quarterly"
     assert result["growth_basis"] == "total_aggregates"
@@ -314,28 +425,70 @@ def test_analysis_wired_through_store(store: Path, monkeypatch: pytest.MonkeyPat
 def test_coverage_matrix(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
-    _seed_events(store, [
-        _event(KO_CIK, "ev-text", 0.51, decl="2026-06-15", record="2026-06-30",
-               pay="2026-07-01", accn="0000000030", source_type="filing_text"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK,
+                "ev-text",
+                0.51,
+                decl="2026-06-15",
+                record="2026-06-30",
+                pay="2026-07-01",
+                accn="0000000030",
+                source_type="filing_text",
+            ),
+        ],
+    )
     assert sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["events_coverage"] == "text_only"
-    _seed_events(store, [
-        _event(KO_CIK, "ev-xbrl", 0.54, decl="2026-06-15", record="2026-06-29",
-               pay="2026-07-01", accn="0000000031", source_type="structured_xbrl"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK,
+                "ev-xbrl",
+                0.54,
+                decl="2026-06-15",
+                record="2026-06-29",
+                pay="2026-07-01",
+                accn="0000000031",
+                source_type="structured_xbrl",
+            ),
+        ],
+    )
     assert sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["events_coverage"] == "structured_and_text"
+
 
 def test_cross_source_duplicate_merges_to_one_payment(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
-    _seed_events(store, [
-        _event(KO_CIK, "ev-xbrl-dup", 0.54, decl="2026-08-01", record="2026-08-29",
-               pay="2026-09-15", accn="0000000040", source_type="structured_xbrl",
-               dtype="unknown"),
-        _event(KO_CIK, "ev-text-dup", 0.54, decl="2026-08-01", record="2026-08-29",
-               pay="2026-09-15", accn="0000000041", source_type="filing_text",
-               dtype="regular"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK,
+                "ev-xbrl-dup",
+                0.54,
+                decl="2026-08-01",
+                record="2026-08-29",
+                pay="2026-09-15",
+                accn="0000000040",
+                source_type="structured_xbrl",
+                dtype="unknown",
+            ),
+            _event(
+                KO_CIK,
+                "ev-text-dup",
+                0.54,
+                decl="2026-08-01",
+                record="2026-08-29",
+                pay="2026-09-15",
+                accn="0000000041",
+                source_type="filing_text",
+                dtype="regular",
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-09-20")
     past = result["past_events"]
     assert isinstance(past, list)
@@ -345,20 +498,48 @@ def test_cross_source_duplicate_merges_to_one_payment(store: Path, monkeypatch: 
     assert result["regular_paid_per_share"] == 0.54
     assert result["events_coverage"] == "structured_and_text"
 
+
 def test_unknown_matches_special_by_amount_not_first_bucket(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
-    _seed_events(store, [
-        _event(KO_CIK, "ev-reg", 0.50, decl="2026-08-01", record="2026-09-01",
-               pay="2026-09-15", accn="0000000050", source_type="filing_text",
-               dtype="regular"),
-        _event(KO_CIK, "ev-spec", 2.00, decl="2026-08-01", record="2026-09-01",
-               pay="2026-09-15", accn="0000000051", source_type="filing_text",
-               dtype="special"),
-        _event(KO_CIK, "ev-xbrl-unk", 2.00, decl="2026-08-01", record="2026-09-01",
-               pay="2026-09-15", accn="0000000052", source_type="structured_xbrl",
-               dtype="unknown"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK,
+                "ev-reg",
+                0.50,
+                decl="2026-08-01",
+                record="2026-09-01",
+                pay="2026-09-15",
+                accn="0000000050",
+                source_type="filing_text",
+                dtype="regular",
+            ),
+            _event(
+                KO_CIK,
+                "ev-spec",
+                2.00,
+                decl="2026-08-01",
+                record="2026-09-01",
+                pay="2026-09-15",
+                accn="0000000051",
+                source_type="filing_text",
+                dtype="special",
+            ),
+            _event(
+                KO_CIK,
+                "ev-xbrl-unk",
+                2.00,
+                decl="2026-08-01",
+                record="2026-09-01",
+                pay="2026-09-15",
+                accn="0000000052",
+                source_type="structured_xbrl",
+                dtype="unknown",
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-09-20")
     past = result["past_events"]
     assert isinstance(past, list)
@@ -371,17 +552,47 @@ def test_unknown_matches_special_by_amount_not_first_bucket(store: Path, monkeyp
 def test_unknown_amount_match_ignores_row_order(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_quarters(store)
-    _seed_events(store, [
-        _event(KO_CIK, "ev-xbrl-unk", 2.00, decl="2026-08-01", record="2026-09-01",
-               pay="2026-09-15", known="2026-08-06T00:00:00Z", accn="0000000052",
-               source_type="structured_xbrl", dtype="unknown"),
-        _event(KO_CIK, "ev-spec", 2.00, decl="2026-08-01", record="2026-09-01",
-               pay="2026-09-15", known="2026-08-02T00:00:00Z", accn="0000000051",
-               source_type="filing_text", dtype="special"),
-        _event(KO_CIK, "ev-reg", 0.50, decl="2026-08-01", record="2026-09-01",
-               pay="2026-09-15", known="2026-08-04T00:00:00Z", accn="0000000050",
-               source_type="filing_text", dtype="regular"),
-    ])
+    _seed_events(
+        store,
+        [
+            _event(
+                KO_CIK,
+                "ev-xbrl-unk",
+                2.00,
+                decl="2026-08-01",
+                record="2026-09-01",
+                pay="2026-09-15",
+                known="2026-08-06T00:00:00Z",
+                accn="0000000052",
+                source_type="structured_xbrl",
+                dtype="unknown",
+            ),
+            _event(
+                KO_CIK,
+                "ev-spec",
+                2.00,
+                decl="2026-08-01",
+                record="2026-09-01",
+                pay="2026-09-15",
+                known="2026-08-02T00:00:00Z",
+                accn="0000000051",
+                source_type="filing_text",
+                dtype="special",
+            ),
+            _event(
+                KO_CIK,
+                "ev-reg",
+                0.50,
+                decl="2026-08-01",
+                record="2026-09-01",
+                pay="2026-09-15",
+                known="2026-08-04T00:00:00Z",
+                accn="0000000050",
+                source_type="filing_text",
+                dtype="regular",
+            ),
+        ],
+    )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-09-20")
     past = result["past_events"]
     assert isinstance(past, list)
@@ -401,33 +612,29 @@ from app.services import dividend_analysis as _lifecycle
 
 
 def _paid(payment_date: str, amount: float, dtype: str = "regular") -> dict[str, object]:
-    return {"payment_date": payment_date, "amount_per_share": amount,
-            "dividend_type": dtype}
+    return {"payment_date": payment_date, "amount_per_share": amount, "dividend_type": dtype}
 
 
 def _series(amounts: list[float], start: str, step_days: int) -> list[dict[str, object]]:
     day = _dt.date.fromisoformat(start)
-    return [_paid((day + _dt.timedelta(days=i * step_days)).isoformat(), amount)
-            for i, amount in enumerate(amounts)]
+    return [_paid((day + _dt.timedelta(days=i * step_days)).isoformat(), amount) for i, amount in enumerate(amounts)]
 
 
 def test_lifecycle_quarterly_cadence_high_confidence() -> None:
-    result = _lifecycle.analyze_dividends(
-        paid_events=_series([0.50] * 5, "2025-01-15", 91), as_of="2026-02-01")
+    result = _lifecycle.analyze_dividends(paid_events=_series([0.50] * 5, "2025-01-15", 91), as_of="2026-02-01")
     assert result["payment_cadence"] == "quarterly"
     assert result["cadence_confidence"] == "high"
     assert result["cadence_basis"] == "payment_dates"
 
 
 def test_lifecycle_monthly_cadence_high_confidence() -> None:
-    result = _lifecycle.analyze_dividends(
-        paid_events=_series([0.10] * 5, "2026-01-15", 30), as_of="2026-06-01")
+    result = _lifecycle.analyze_dividends(paid_events=_series([0.10] * 5, "2026-01-15", 30), as_of="2026-06-01")
     assert result["payment_cadence"] == "monthly"
     assert result["cadence_confidence"] == "high"
 
+
 def test_lifecycle_two_intervals_is_medium_confidence() -> None:
-    result = _lifecycle.analyze_dividends(
-        paid_events=_series([0.50] * 3, "2025-01-15", 91), as_of="2025-08-01")
+    result = _lifecycle.analyze_dividends(paid_events=_series([0.50] * 3, "2025-01-15", 91), as_of="2025-08-01")
     assert result["payment_cadence"] == "quarterly"
     assert result["cadence_confidence"] == "medium"
 
@@ -436,8 +643,7 @@ def test_lifecycle_sparse_payments_are_unknown_cadence() -> None:
     one = _lifecycle.analyze_dividends(paid_events=[_paid("2025-01-15", 0.50)])
     assert one["payment_cadence"] == "unknown"
     assert one["cadence_confidence"] is None
-    two = _lifecycle.analyze_dividends(
-        paid_events=[_paid("2025-01-15", 0.50), _paid("2025-04-16", 0.50)])
+    two = _lifecycle.analyze_dividends(paid_events=[_paid("2025-01-15", 0.50), _paid("2025-04-16", 0.50)])
     assert two["payment_cadence"] == "unknown"
     assert two["cadence_confidence"] is None
 
@@ -453,21 +659,23 @@ def test_lifecycle_increase() -> None:
 def test_lifecycle_cut() -> None:
     paid = _series([0.54, 0.54, 0.54, 0.40], "2025-01-15", 91)
     result = _lifecycle.analyze_dividends(paid_events=paid, as_of="2025-11-01")
-    assert result["cut"] == {"pct": round((0.40 - 0.54) / 0.54, 4), "prior": 0.54,
-                             "new": 0.40, "date": paid[-1]["payment_date"]}
+    assert result["cut"] == {
+        "pct": round((0.40 - 0.54) / 0.54, 4),
+        "prior": 0.54,
+        "new": 0.40,
+        "date": paid[-1]["payment_date"],
+    }
     assert result["increase"] is None
 
 
 def test_lifecycle_freeze_quarterly() -> None:
-    result = _lifecycle.analyze_dividends(
-        paid_events=_series([0.54] * 4, "2025-01-15", 91), as_of="2025-11-01")
+    result = _lifecycle.analyze_dividends(paid_events=_series([0.54] * 4, "2025-01-15", 91), as_of="2025-11-01")
     assert result["freeze"] == {"amount": 0.54, "count": 4}
     assert result["increase"] is None and result["cut"] is None
 
 
 def test_lifecycle_freeze_semiannual_needs_two() -> None:
-    result = _lifecycle.analyze_dividends(
-        paid_events=_series([0.80] * 3, "2025-01-15", 182), as_of="2026-07-20")
+    result = _lifecycle.analyze_dividends(paid_events=_series([0.80] * 3, "2025-01-15", 182), as_of="2026-07-20")
     assert result["payment_cadence"] == "semiannual"
     assert result["cadence_confidence"] == "medium"
     assert result["freeze"] == {"amount": 0.80, "count": 3}
@@ -506,30 +714,37 @@ def test_lifecycle_reinstatement_after_gap() -> None:
 
 def test_lifecycle_growth_trend() -> None:
     paid = [_paid("2025-01-15", 0.50)]
-    assert _lifecycle.analyze_dividends(
-        paid_events=paid, growth={"growth_1y": 0.02, "growth_5y_cagr": 0.08}
-    )["growth_trend"] == "decelerating"
-    assert _lifecycle.analyze_dividends(
-        paid_events=paid, growth={"growth_1y": 0.12, "growth_5y_cagr": 0.08}
-    )["growth_trend"] == "accelerating"
-    assert _lifecycle.analyze_dividends(
-        paid_events=paid, growth={"growth_1y": 0.08, "growth_5y_cagr": 0.08}
-    )["growth_trend"] == "stable_or_unknown"
+    assert (
+        _lifecycle.analyze_dividends(paid_events=paid, growth={"growth_1y": 0.02, "growth_5y_cagr": 0.08})[
+            "growth_trend"
+        ]
+        == "decelerating"
+    )
+    assert (
+        _lifecycle.analyze_dividends(paid_events=paid, growth={"growth_1y": 0.12, "growth_5y_cagr": 0.08})[
+            "growth_trend"
+        ]
+        == "accelerating"
+    )
+    assert (
+        _lifecycle.analyze_dividends(paid_events=paid, growth={"growth_1y": 0.08, "growth_5y_cagr": 0.08})[
+            "growth_trend"
+        ]
+        == "stable_or_unknown"
+    )
     assert _lifecycle.analyze_dividends(paid_events=paid)["growth_trend"] == "stable_or_unknown"
     assert _lifecycle.analyze_dividends(paid_events=paid)["growth_basis"] == "total_aggregates"
 
 
 def test_lifecycle_regular_basis_growth_needs_five_consecutive_years() -> None:
-    five_years = [p for year in range(2021, 2026)
-                  for p in _series([0.50] * 4, f"{year}-01-15", 91)]
+    five_years = [p for year in range(2021, 2026) for p in _series([0.50] * 4, f"{year}-01-15", 91)]
     full = _lifecycle.analyze_dividends(paid_events=five_years, as_of="2026-02-01")
     assert full["growth_basis"] == "total_aggregates"
     assert full["regular_basis_growth"] is not None
     growth = full["regular_basis_growth"]
     assert isinstance(growth, dict)
     assert growth["growth_1y"] == 0.0
-    four_years = [p for year in range(2022, 2026)
-                  for p in _series([0.50] * 4, f"{year}-01-15", 91)]
+    four_years = [p for year in range(2022, 2026) for p in _series([0.50] * 4, f"{year}-01-15", 91)]
     short = _lifecycle.analyze_dividends(paid_events=four_years, as_of="2026-02-01")
     assert short["regular_basis_growth"] is None
     assert short["growth_basis"] == "total_aggregates"

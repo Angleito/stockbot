@@ -16,8 +16,7 @@ def list_sec_filings(
     """Lazy seam: tests monkeypatch this name; real path imports on call."""
     from .filings import list_sec_filings as _real
 
-    return _real(ticker_or_cik, forms=forms, start_date=start_date,
-                 end_date=end_date, as_of=as_of, limit=limit)
+    return _real(ticker_or_cik, forms=forms, start_date=start_date, end_date=end_date, as_of=as_of, limit=limit)
 
 
 def reporting_regime(
@@ -27,11 +26,9 @@ def reporting_regime(
 ) -> dict[str, object]:
     try:
         filings = list_sec_filings(ticker_or_cik, limit=100, as_of=as_of)
-        forms = sorted({getattr(f, "form", "") for f in filings
-                        if getattr(f, "form", "")})
+        forms = sorted({getattr(f, "form", "") for f in filings if getattr(f, "form", "")})
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return {"ticker": str(ticker_or_cik), "regime": "unknown",
-                "evidence_forms": []}
+        return {"ticker": str(ticker_or_cik), "regime": "unknown", "evidence_forms": []}
     if any(f in ("40-F", "40-F/A") for f in forms):
         regime = "foreign-40F"
     elif any(f in ("20-F", "20-F/A") for f in forms):
@@ -40,5 +37,4 @@ def reporting_regime(
         regime = "domestic"
     else:
         regime = "unknown"
-    return {"ticker": str(ticker_or_cik), "regime": regime,
-            "evidence_forms": forms}
+    return {"ticker": str(ticker_or_cik), "regime": regime, "evidence_forms": forms}

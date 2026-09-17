@@ -14,7 +14,7 @@ import re
 import sqlite3
 import threading
 from collections.abc import Iterable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, date, datetime
 from pathlib import Path
 from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
@@ -49,7 +49,7 @@ _AS_OF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def _utcnow() -> str:
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _validate_date(value: object, field: str) -> str:
@@ -57,7 +57,7 @@ def _validate_date(value: object, field: str) -> str:
     if not _AS_OF_RE.match(text):
         raise ValueError(f"{field} must be YYYY-MM-DD, got {value!r}")
     try:
-        datetime.strptime(text, "%Y-%m-%d")
+        date.fromisoformat(text)
     except ValueError:
         raise ValueError(f"{field} must be YYYY-MM-DD, got {value!r}") from None
     return text
@@ -83,7 +83,8 @@ def _filing_identity(filing: Filing) -> dict[str, object]:
 
 
 def _filing_linkage(
-    filing: Filing, amendment_of: str | None,
+    filing: Filing,
+    amendment_of: str | None,
 ) -> dict[str, object]:
     """Filing dates/documents/amendment linkage as parquet columns."""
     return {
@@ -113,6 +114,7 @@ def _filing_provenance(
         "parser_version": PARSER_VERSION,
     }
 
+
 def store_filing(
     filing: Filing,
     *,
@@ -127,8 +129,7 @@ def store_filing(
     row: dict[str, object] = {
         **_filing_identity(filing),
         **_filing_linkage(filing, amendment_of),
-        **_filing_provenance(
-            canonical, raw_submission_path, raw_primary_path, retrieved_at),
+        **_filing_provenance(canonical, raw_submission_path, raw_primary_path, retrieved_at),
     }
     parquet_root = Path(root) / "parquet" if root is not None else None
     return parquet.write_rows("sec_filings", [row], root=parquet_root)
@@ -171,6 +172,7 @@ def _filings_date_where(
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
         params.append(param)
+
 
 def query_filings(
     *,
@@ -224,8 +226,7 @@ def _list_or_none(value: object) -> list[object] | None:
     if value is None:
         return None
     if not isinstance(value, Iterable):
-        raise TypeError(
-            f"expected an iterable or None, got {type(value).__name__}")
+        raise TypeError(f"expected an iterable or None, got {type(value).__name__}")
     return list(value)
 
 
@@ -238,8 +239,7 @@ def _party_urls(
     """Filing-party URL/path/name overrides with input fallbacks."""
     return {
         "source_url": source_url or d.get("source_url"),
-        "raw_archive_path": str(raw_archive_path)
-        if raw_archive_path is not None else d.get("raw_archive_path"),
+        "raw_archive_path": str(raw_archive_path) if raw_archive_path is not None else d.get("raw_archive_path"),
         "document_name": document_name or d.get("document_name"),
     }
 
@@ -274,8 +274,7 @@ def _pass_through(dataset: str, row: Mapping[str, object], root: Path | str | No
     d["known_at"] = d.get("known_at") or now
     d["parser_version"] = d.get("parser_version") or PARSER_VERSION
     if not d.get("content_hash"):
-        d["content_hash"] = raw_archive.content_hash(
-            json.dumps(d, sort_keys=True, default=str).encode("utf-8"))
+        d["content_hash"] = raw_archive.content_hash(json.dumps(d, sort_keys=True, default=str).encode("utf-8"))
     return parquet.write_rows(dataset, [d], root=_parquet_root(root))
 
 
@@ -308,6 +307,7 @@ def _party_provenance(
         **_party_hash(d, now),
     }
 
+
 def _party_row(
     d: dict[str, object],
     now: str,
@@ -323,12 +323,11 @@ def _party_row(
     }
 
 
-
 def _hash_party_row(row: dict[str, object], d: dict[str, object]) -> None:
     """Fill a missing party content hash from the canonical input dict."""
     if not row["content_hash"]:
-        row["content_hash"] = raw_archive.content_hash(
-            json.dumps(d, sort_keys=True, default=str).encode("utf-8"))
+        row["content_hash"] = raw_archive.content_hash(json.dumps(d, sort_keys=True, default=str).encode("utf-8"))
+
 
 def store_filing_party(
     party: FilingParty | Mapping[str, object],
@@ -364,8 +363,7 @@ def query_parties(
     _cik_where("cik", cik, where, params)
     _simple_where("role", role, where, params)
     _asof_where(as_of, "known_at", where, params)
-    return _ordered_query(
-        "filing_parties", where, params, "ORDER BY known_at DESC", limit, root)
+    return _ordered_query("filing_parties", where, params, "ORDER BY known_at DESC", limit, root)
 
 
 def _document_row(
@@ -388,33 +386,40 @@ def _document_row(
     text_value: str = payload.decode("utf-8", errors="replace")
     content_value: str = raw_archive.content_hash(payload)
     known_value: str = known_at or filed_at or now
-    return {
-        "doc_id": doc_id,
-        "content_hash": content_value,
-        "accession": accession,
-        "document_name": document_name,
-        "text": text_value,
-        "source_url": source_url,
-        "raw_archive_path": str(raw_archive_path)
-        if raw_archive_path is not None else None,
-        "source_content_hash": source_content_hash,
-        "source_representation": source_representation,
-        "location": location,
-        "file_type": file_type,
-        "filed_at": filed_at,
-        "known_at": known_value,
-        "retrieved_at": now,
-        "parser_version": PARSER_VERSION,
-    }, text_value, content_value, known_value
+    return (
+        {
+            "doc_id": doc_id,
+            "content_hash": content_value,
+            "accession": accession,
+            "document_name": document_name,
+            "text": text_value,
+            "source_url": source_url,
+            "raw_archive_path": str(raw_archive_path) if raw_archive_path is not None else None,
+            "source_content_hash": source_content_hash,
+            "source_representation": source_representation,
+            "location": location,
+            "file_type": file_type,
+            "filed_at": filed_at,
+            "known_at": known_value,
+            "retrieved_at": now,
+            "parser_version": PARSER_VERSION,
+        },
+        text_value,
+        content_value,
+        known_value,
+    )
 
 
 def _dividend_filing_cik(
-    accession: str, root: Path | str | None,
+    accession: str,
+    root: Path | str | None,
 ) -> dict[str, object] | None:
     """Filing row (filer_cik, filed_at) for dividend attribution; None when unusable."""
     filings = duckdb.query(
         "SELECT filer_cik, filed_at FROM sec_filings WHERE accession = ? LIMIT 1",
-        [accession], data_root=_duckdb_root(root))
+        [accession],
+        data_root=_duckdb_root(root),
+    )
     if not filings or not filings[0].get("filer_cik"):
         return None
     return filings[0]
@@ -435,14 +440,20 @@ def _persist_text_dividends(
     raw_filed: object = filing.get("filed_at") or filed_at
     filed = str(raw_filed) if raw_filed is not None else known_value
     events = normalization._extract_dividend_events_from_text(
-        text_value, cik=cik, entity_id=ids.sec_entity_id(cik),
-        security_id=ids.sec_security_id(cik), accession=accession,
-        filed_at=filed, source_url=source_url,
-        content_hash=content_value)
+        text_value,
+        cik=cik,
+        entity_id=ids.sec_entity_id(cik),
+        security_id=ids.sec_security_id(cik),
+        accession=accession,
+        filed_at=filed,
+        source_url=source_url,
+        content_hash=content_value,
+    )
     for event in events:
         event["known_at"] = known_value
     if events:
         parquet.write_rows("dividend_events", events, root=_parquet_root(root))
+
 
 def _extract_text_dividends(
     accession: str | None,
@@ -460,9 +471,7 @@ def _extract_text_dividends(
         filing = _dividend_filing_cik(accession, root)
         if filing is None:
             return
-        _persist_text_dividends(
-            filing, accession, source_url, text_value, content_value,
-            filed_at, known_value, root)
+        _persist_text_dividends(filing, accession, source_url, text_value, content_value, filed_at, known_value, root)
     except Exception as exc:  # never fail the text store  # noqa: BLE001 - dividend text persistence is best-effort, failure keeps the filing record
         logging.getLogger(__name__).debug("dividend text extraction skipped: %s", exc)
 
@@ -486,13 +495,22 @@ def store_document_text(
 ) -> int:
     now = retrieved_at or _utcnow()
     row, text_value, content_value, known_value = _document_row(
-        doc_id, text, now, accession, document_name, source_url,
-        raw_archive_path, source_content_hash, source_representation,
-        location, file_type, filed_at, known_at)
+        doc_id,
+        text,
+        now,
+        accession,
+        document_name,
+        source_url,
+        raw_archive_path,
+        source_content_hash,
+        source_representation,
+        location,
+        file_type,
+        filed_at,
+        known_at,
+    )
     written = parquet.write_rows("document_text", [row], root=_parquet_root(root))
-    _extract_text_dividends(
-        accession, source_url, text_value, content_value, filed_at,
-        known_value, root)
+    _extract_text_dividends(accession, source_url, text_value, content_value, filed_at, known_value, root)
     return written
 
 
@@ -513,14 +531,14 @@ def query_document_text(
     _simple_where("document_name", document_name, where, params)
     _asof_where(as_of, "known_at", where, params)
     return _ordered_query(
-        "document_text", where, params,
-        "ORDER BY known_at DESC, retrieved_at DESC, content_hash DESC",
-        limit, root)
+        "document_text", where, params, "ORDER BY known_at DESC, retrieved_at DESC, content_hash DESC", limit, root
+    )
 
 
 @runtime_checkable
 class _DuckDBConnection(Protocol):
     """Structural seam: DuckDB connection or execute/fetch test double."""
+
     @property
     def description(self) -> object: ...
     def execute(self, query: str, parameters: object = None) -> _DuckDBConnection: ...
@@ -532,6 +550,7 @@ class _DuckDBConnection(Protocol):
 @runtime_checkable
 class _FTSRowsConnection(Protocol):
     """Minimal seam for BM25 row mapping: execute/fetchall/description only."""
+
     @property
     def description(self) -> object: ...
     def execute(self, query: str, parameters: object = None) -> _FTSRowsConnection: ...
@@ -553,9 +572,7 @@ def _load_fts_extension(conn: object) -> None:
         conn.execute("INSTALL fts")
         conn.execute("LOAD fts")
     except Exception as exc:
-        raise RuntimeError(
-            f"local-text source failed: FTS extension unavailable: {exc}"
-        ) from exc
+        raise RuntimeError(f"local-text source failed: FTS extension unavailable: {exc}") from exc
 
 
 def _materialize_fts_count(conn: _DuckDBConnection) -> int:
@@ -565,21 +582,21 @@ def _materialize_fts_count(conn: _DuckDBConnection) -> int:
         "SELECT (doc_id || '#' || content_hash) AS fts_id, "
         "doc_id, content_hash, text FROM document_text"
     )
-    count_row = conn.execute(
-        f"SELECT COUNT(*) FROM {FTS_TABLE}").fetchone()
+    count_row = conn.execute(f"SELECT COUNT(*) FROM {FTS_TABLE}").fetchone()
     if not isinstance(count_row, (tuple, list)) or not count_row:
-        raise RuntimeError(
-            "local-text source failed: FTS count unavailable")
+        raise RuntimeError("local-text source failed: FTS count unavailable")
     count = count_row[0]
     if isinstance(count, bool) or not isinstance(count, (int, float, str)):
         raise RuntimeError(  # noqa: TRY004 - local-text source failure is always RuntimeError, count shape included
-            "local-text source failed: FTS count unavailable")
+            "local-text source failed: FTS count unavailable"
+        )
     conn.execute(
         f"PRAGMA create_fts_index('{FTS_TABLE}', '{FTS_ID}', 'text', "
         "stemmer='porter', stopwords='english', "
         "strip_accents=1, lower=1, overwrite=1)"
     )
     return int(count)
+
 
 def rebuild_fts(root: Path | str | None = None) -> int:
     """Materialize ``document_text`` into the warehouse + native FTS index.
@@ -612,21 +629,24 @@ def _fts_sql(
         f"FROM {FTS_TABLE}) sub "
         "JOIN document_text d ON d.doc_id = sub.doc_id "
         "AND d.content_hash = sub.content_hash "
-        "WHERE " + " AND ".join(where) +
-        " ORDER BY score DESC LIMIT {limit}"
+        "WHERE " + " AND ".join(where) + " ORDER BY score DESC LIMIT {limit}"
     )
     return sql, params
 
 
 def _fts_rows(
-    conn: _FTSRowsConnection, sql: str, params: list[str | None], limit: int,
+    conn: _FTSRowsConnection,
+    sql: str,
+    params: list[str | None],
+    limit: int,
 ) -> list[dict[str, object]]:
     """Run BM25 SQL and map rows to dicts; raises when unusable."""
     rows = conn.execute(sql.format(limit=limit), params).fetchall()
     description = conn.description
     if not isinstance(description, (tuple, list)):
         raise RuntimeError(  # noqa: TRY004 - local-text source failure is always RuntimeError, description shape included
-            "local-text source failed: FTS description unavailable")
+            "local-text source failed: FTS description unavailable"
+        )
     columns = [desc[0] for desc in description if isinstance(desc, (tuple, list)) and desc]
     return [dict(zip(columns, row)) for row in rows if isinstance(row, (tuple, list))]
 
@@ -657,7 +677,8 @@ def _validate_search_query(query: str) -> str:
 
 
 def _fallback_text_where(
-    text: str, literal: bool,
+    text: str,
+    literal: bool,
 ) -> tuple[list[str], list[str | None]]:
     """Substring fallback WHERE: exact phrase when literal, AND-tokens otherwise."""
     if literal:
@@ -670,7 +691,10 @@ def _fallback_text_where(
 
 
 def _try_fts_search(
-    text: str, literal: bool, limit: int, as_of: str | None,
+    text: str,
+    literal: bool,
+    limit: int,
+    as_of: str | None,
     root: Path | str | None,
 ) -> list[dict[str, object]] | None:
     """BM25 token search; None when literal mode or the FTS path fails."""
@@ -680,6 +704,7 @@ def _try_fts_search(
         return _fts_search(text, limit=limit, as_of=as_of, root=root)
     except Exception:  # noqa: BLE001 - FTS search degrades to no local-text results, never raises
         return None
+
 
 def search_document_text(
     query: str,
@@ -703,8 +728,7 @@ def search_document_text(
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
         where.append(clause)
         params.append(param)
-    sql = ("SELECT * FROM document_text WHERE " + " AND ".join(where) +
-           f" LIMIT {limit}")
+    sql = "SELECT * FROM document_text WHERE " + " AND ".join(where) + f" LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
 
@@ -741,11 +765,13 @@ def _ledger_hit_id(search_id: str, d: dict[str, object]) -> str:
     return raw_archive.content_hash(
         f"{search_id}\n{d.get('attempt_id')}\n{d.get('query')}\n"
         f"{d.get('accession_no') or d.get('accession')}\n"
-        f"{d.get('matched_document')}".encode())[:16]
+        f"{d.get('matched_document')}".encode()
+    )[:16]
 
 
 def _hit_identity(
-    d: dict[str, object], search_id: str,
+    d: dict[str, object],
+    search_id: str,
 ) -> dict[str, object]:
     """Text-hit identity (IDs, query, accession) with deterministic hit ID."""
     return {
@@ -767,6 +793,7 @@ def _relevance_reasons(value: object) -> list[str]:
         return [r for r in value if isinstance(r, str)]
     return []
 
+
 def _hit_document(d: dict[str, object]) -> dict[str, object]:
     """Text-hit document match (form, filed, document, type, items, geo)."""
     return {
@@ -780,8 +807,7 @@ def _hit_document(d: dict[str, object]) -> dict[str, object]:
         "location": d.get("location"),
         "state": d.get("state"),
         "inc_state": d.get("inc_state"),
-        "issuer_cik": (str(d.get("issuer_cik"))
-                       if d.get("issuer_cik") is not None else None),
+        "issuer_cik": (str(d.get("issuer_cik")) if d.get("issuer_cik") is not None else None),
         "relevance_reason_json": _json(_relevance_reasons(d.get("relevance_reason"))),
         "snippet": d.get("snippet"),
         "resource_uri": d.get("resource_uri"),
@@ -807,13 +833,16 @@ def _hit_ledger_provenance(d: dict[str, object], now: str) -> dict[str, object]:
         "raw_archive_path": d.get("raw_archive_path"),
     }
 
+
 def _hit_scoring(d: dict[str, object], now: str) -> dict[str, object]:
     """Text-hit score/paging/provenance."""
     return {**_hit_score_page(d), **_hit_ledger_provenance(d, now)}
 
+
 def _hit_match(d: dict[str, object], now: str) -> dict[str, object]:
     """Text-hit match detail (form, document, score, paging, provenance)."""
     return {**_hit_document(d), **_hit_scoring(d, now)}
+
 
 def _hit_row(
     hit: SECTextHit | Mapping[str, object],
@@ -833,10 +862,8 @@ def store_attempt(
 ) -> int:
     """Append one search-attempt ledger row."""
     d = _as_dict(attempt)
-    row = _attempt_row(
-        attempt, str(d.get("search_id") or ""), retrieved_at or _utcnow())
-    return parquet.write_rows(
-        "sec_search_attempts", [row], root=_parquet_root(root))
+    row = _attempt_row(attempt, str(d.get("search_id") or ""), retrieved_at or _utcnow())
+    return parquet.write_rows("sec_search_attempts", [row], root=_parquet_root(root))
 
 
 def store_hit(
@@ -847,8 +874,7 @@ def store_hit(
 ) -> int:
     """Append one text-hit ledger row."""
     d = _as_dict(hit)
-    row = _hit_row(
-        hit, str(d.get("search_id") or ""), retrieved_at or _utcnow())
+    row = _hit_row(hit, str(d.get("search_id") or ""), retrieved_at or _utcnow())
     return parquet.write_rows("sec_text_hits", [row], root=_parquet_root(root))
 
 
@@ -886,9 +912,9 @@ def _ledger_search_row(
         "pages": pages,
         "date_coverage": date_coverage,
         "forms_covered_json": _json(list(forms_covered)),
-        "pending_jobs_json": _json(_list_or_none(
-            pending_backfill_jobs or req.get("pending_backfill_jobs") or ()
-        ) or []),
+        "pending_jobs_json": _json(
+            _list_or_none(pending_backfill_jobs or req.get("pending_backfill_jobs") or ()) or []
+        ),
         "warnings_json": _json(list(warnings)),
         "errors_json": _json(list(errors)),
         "evidence_packet_ids_json": _json(list(evidence_packet_ids)),
@@ -900,6 +926,7 @@ def _ledger_search_row(
         "known_at": now,
         "parser_version": PARSER_VERSION,
     }
+
 
 def persist_search_ledger(
     *,
@@ -941,10 +968,22 @@ def persist_search_ledger(
     attempt_list = list(attempts)
     hit_list = list(text_hits)
     search_row = _ledger_search_row(
-        search_id, req, now, coverage_status, sources_attempted,
-        sources_completed, sources_failed, results_reported,
-        results_retrieved, pages, date_coverage, forms_covered,
-        pending_backfill_jobs, warnings, errors, evidence_packet_ids,
+        search_id,
+        req,
+        now,
+        coverage_status,
+        sources_attempted,
+        sources_completed,
+        sources_failed,
+        results_reported,
+        results_retrieved,
+        pages,
+        date_coverage,
+        forms_covered,
+        pending_backfill_jobs,
+        warnings,
+        errors,
+        evidence_packet_ids,
         {
             "entities": len(tuple(entities)),
             "filings": len(tuple(filings)),
@@ -952,35 +991,42 @@ def persist_search_ledger(
             "text_hits": len(hit_list),
             "attempts": len(attempt_list),
         },
-        pagination_complete, source_exhausted)
-    attempt_rows = [
-        _attempt_row(attempt, search_id, now) for attempt in attempt_list]
+        pagination_complete,
+        source_exhausted,
+    )
+    attempt_rows = [_attempt_row(attempt, search_id, now) for attempt in attempt_list]
     hit_rows = [_hit_row(hit, search_id, now) for hit in hit_list]
     proot = _parquet_root(root)
     return {
         "searches": parquet.write_rows("sec_searches", [search_row], root=proot),
-        "attempts": parquet.write_rows(
-            "sec_search_attempts", attempt_rows, root=proot),
+        "attempts": parquet.write_rows("sec_search_attempts", attempt_rows, root=proot),
         "hits": parquet.write_rows("sec_text_hits", hit_rows, root=proot),
     }
 
 
 def query_search(
-    search_id: str, *, root: Path | str | None = None,
+    search_id: str,
+    *,
+    root: Path | str | None = None,
 ) -> dict[str, object] | None:
     """One persisted search-ledger row, or None."""
-    rows = duckdb.query("SELECT * FROM sec_searches WHERE search_id = ? LIMIT 1",
-                        [search_id], data_root=_duckdb_root(root))
+    rows = duckdb.query(
+        "SELECT * FROM sec_searches WHERE search_id = ? LIMIT 1", [search_id], data_root=_duckdb_root(root)
+    )
     return rows[0] if rows else None
 
 
 def query_attempts(
-    search_id: str, *, root: Path | str | None = None,
+    search_id: str,
+    *,
+    root: Path | str | None = None,
 ) -> list[dict[str, object]]:
     """All persisted attempt rows for one search, in attempt order."""
     return duckdb.query(
         "SELECT * FROM sec_search_attempts WHERE search_id = ? ORDER BY attempt_id",
-        [search_id], data_root=_duckdb_root(root))
+        [search_id],
+        data_root=_duckdb_root(root),
+    )
 
 
 def _hits_filter(search_id: str, forms: Iterable[str] | None) -> tuple[str, list[object]]:
@@ -995,7 +1041,10 @@ def _hits_filter(search_id: str, forms: Iterable[str] | None) -> tuple[str, list
 
 
 def query_hits(
-    search_id: str, *, offset: int = 0, limit: int | None = None,
+    search_id: str,
+    *,
+    offset: int = 0,
+    limit: int | None = None,
     forms: Iterable[str] | None = None,
     root: Path | str | None = None,
 ) -> list[dict[str, object]]:
@@ -1006,8 +1055,7 @@ def query_hits(
     keeps paging stable across equal scores.
     """
     where, params = _hits_filter(search_id, forms)
-    sql = (f"SELECT * FROM sec_text_hits WHERE {where} "
-           "ORDER BY score DESC, hit_id")
+    sql = f"SELECT * FROM sec_text_hits WHERE {where} ORDER BY score DESC, hit_id"
     if limit is not None:
         sql += " LIMIT ? OFFSET ?"
         params.extend([limit, offset])
@@ -1018,14 +1066,14 @@ def query_hits(
 
 
 def query_hits_count(
-    search_id: str, *, forms: Iterable[str] | None = None,
+    search_id: str,
+    *,
+    forms: Iterable[str] | None = None,
     root: Path | str | None = None,
 ) -> int:
     """Persisted text-hit rows for one search under the same filter."""
     where, params = _hits_filter(search_id, forms)
-    rows = duckdb.query(
-        f"SELECT count(*) AS n FROM sec_text_hits WHERE {where}",
-        params, data_root=_duckdb_root(root))
+    rows = duckdb.query(f"SELECT count(*) AS n FROM sec_text_hits WHERE {where}", params, data_root=_duckdb_root(root))
     count = rows[0].get("n") if rows else None
     return count if isinstance(count, int) else 0
 
@@ -1059,8 +1107,7 @@ def store_coverage(
         "known_at": known_at or now,
         "retrieved_at": now,
     }
-    return parquet.write_rows(
-        "sec_ingestion_coverage", [row], root=_parquet_root(root))
+    return parquet.write_rows("sec_ingestion_coverage", [row], root=_parquet_root(root))
 
 
 def query_coverage(
@@ -1077,9 +1124,7 @@ def query_coverage(
     _simple_where("source", source, where, params)
     _simple_where("form", form, where, params)
     _simple_where("date_partition", date_partition, where, params)
-    return _ordered_query(
-        "sec_ingestion_coverage", where, params,
-        "ORDER BY coverage_date DESC", limit, root)
+    return _ordered_query("sec_ingestion_coverage", where, params, "ORDER BY coverage_date DESC", limit, root)
 
 
 def store_checkpoint(
@@ -1114,14 +1159,12 @@ def store_checkpoint(
         "error": error,
         "totals_json": _json(totals),
     }
-    return parquet.write_rows(
-        "ingestion_checkpoints", [row], root=_parquet_root(root))
+    return parquet.write_rows("ingestion_checkpoints", [row], root=_parquet_root(root))
 
 
 def _checkpoint_order(row: dict[str, object]) -> tuple[str, str]:
     """Newest-finishing checkpoint sorts last (resume keeps the latest)."""
-    return (str(row.get("finished_at") or ""),
-            str(row.get("started_at") or ""))
+    return (str(row.get("finished_at") or ""), str(row.get("started_at") or ""))
 
 
 def get_checkpoint(
@@ -1137,9 +1180,10 @@ def get_checkpoint(
     row) means the accession/partition is retried.
     """
     rows = duckdb.query(
-        "SELECT * FROM ingestion_checkpoints "
-        "WHERE pipeline = ? AND source = ? AND key = ?",
-        [pipeline, source, key], data_root=_duckdb_root(root))
+        "SELECT * FROM ingestion_checkpoints WHERE pipeline = ? AND source = ? AND key = ?",
+        [pipeline, source, key],
+        data_root=_duckdb_root(root),
+    )
     if not rows:
         return None
     rows.sort(key=_checkpoint_order)
@@ -1164,10 +1208,19 @@ def advance_checkpoint(
     prior = get_checkpoint(pipeline, source, key, root=root)
     started = str((prior or {}).get("started_at") or now)
     return store_checkpoint(
-        pipeline, source, key, "complete",
-        payload_hash=payload_hash, record_count=record_count,
-        last_key=last_key, totals=totals, parser_version=parser_version,
-        started_at=started, finished_at=now, root=root)
+        pipeline,
+        source,
+        key,
+        "complete",
+        payload_hash=payload_hash,
+        record_count=record_count,
+        last_key=last_key,
+        totals=totals,
+        parser_version=parser_version,
+        started_at=started,
+        finished_at=now,
+        root=root,
+    )
 
 
 def _row_dict(value: Mapping[str, object] | _HasToDict) -> dict[str, object]:
@@ -1179,8 +1232,7 @@ def _row_dict(value: Mapping[str, object] | _HasToDict) -> dict[str, object]:
         pass
     if not value:
         return {}
-    raise TypeError(
-        f"cannot build a row dict from {type(value).__name__}")
+    raise TypeError(f"cannot build a row dict from {type(value).__name__}")
 
 
 def _encode_power_part(label: str, value: object) -> str | None:
@@ -1200,15 +1252,15 @@ def _beneficial_row(d: dict[str, object]) -> dict[str, object]:
     filer_name = d.get("filer_name") or d.get("reporter_name")
     return {**_beneficial_identity(d, filer_name), **_beneficial_detail(d)}
 
+
 def _beneficial_economics(d: dict[str, object]) -> dict[str, object]:
     """Beneficial-ownership economics with power/purpose fallbacks."""
     return {
         "shares": d.get("shares"),
         "percent": d.get("percent"),
-        "voting_power": d.get("voting_power") or _encode_power(
-            d.get("sole_voting"), d.get("shared_voting")),
-        "dispositive_power": d.get("dispositive_power") or _encode_power(
-            d.get("sole_dispositive"), d.get("shared_dispositive")),
+        "voting_power": d.get("voting_power") or _encode_power(d.get("sole_voting"), d.get("shared_voting")),
+        "dispositive_power": d.get("dispositive_power")
+        or _encode_power(d.get("sole_dispositive"), d.get("shared_dispositive")),
         "purpose": d.get("purpose") or d.get("purpose_text"),
         "form": d.get("form"),
     }
@@ -1245,7 +1297,6 @@ def _beneficial_detail(d: dict[str, object]) -> dict[str, object]:
     return {**_beneficial_economics(d), **_beneficial_provenance(d)}
 
 
-
 def _holding_source_row(d: dict[str, object]) -> int:
     """13F 1-based source row; raises unless a positive integer."""
     try:
@@ -1258,7 +1309,8 @@ def _holding_source_row(d: dict[str, object]) -> int:
 
 
 def _holding_sid(
-    cusip_norm: str | None, isin_norm: str | None,
+    cusip_norm: str | None,
+    isin_norm: str | None,
 ) -> str | None:
     """Canonical CUSIP/ISIN security ID; None when neither normalizes."""
     if cusip_norm:
@@ -1267,10 +1319,13 @@ def _holding_sid(
 
 
 def _holding_filing(
-    d: dict[str, object], source_row: int, canonical_sid: str | None,
+    d: dict[str, object],
+    source_row: int,
+    canonical_sid: str | None,
 ) -> dict[str, object]:
     """13F holding filing keys (accession, manager, source row, holding ID)."""
     from .models import institutional_holding_id
+
     accession = d.get("accession") or d.get("accession_no")
     return {
         "accession": accession,
@@ -1284,7 +1339,9 @@ def _holding_filing(
 
 
 def _holding_security(
-    d: dict[str, object], cusip_norm: str | None, isin_norm: str | None,
+    d: dict[str, object],
+    cusip_norm: str | None,
+    isin_norm: str | None,
 ) -> dict[str, object]:
     """13F holding issuer/security keys."""
     return {
@@ -1296,8 +1353,11 @@ def _holding_security(
         "isin": isin_norm,
     }
 
+
 def _holding_identity(
-    d: dict[str, object], cusip_norm: str | None, isin_norm: str | None,
+    d: dict[str, object],
+    cusip_norm: str | None,
+    isin_norm: str | None,
     source_row: int,
 ) -> dict[str, object]:
     """13F holding identity (accession, manager, issuer, security IDs)."""
@@ -1326,8 +1386,11 @@ def _holding_detail(d: dict[str, object]) -> dict[str, object]:
         "parser_version": d.get("parser_version") or PARSER_VERSION,
     }
 
+
 def _holding_row(
-    d: dict[str, object], cusip_norm: str | None, isin_norm: str | None,
+    d: dict[str, object],
+    cusip_norm: str | None,
+    isin_norm: str | None,
     source_row: int,
 ) -> dict[str, object]:
     """13F holding input dict to a parquet row (canonical security ID included)."""
@@ -1336,12 +1399,15 @@ def _holding_row(
         **_holding_detail(d),
     }
 
+
 def _encode_power(sole: object, shared: object) -> str | None:
     parts = [
-        part for part in (
+        part
+        for part in (
             _encode_power_part("sole", sole),
             _encode_power_part("shared", shared),
-        ) if part is not None
+        )
+        if part is not None
     ]
     return " ".join(parts) or None
 
@@ -1353,8 +1419,7 @@ def store_beneficial_ownership(
 ) -> int:
     """Typed writer: accepts ``BeneficialOwnership`` or a column row."""
     d = _row_dict(row)
-    return _pass_through(
-        "sec_beneficial_ownership", _beneficial_row(d), root)
+    return _pass_through("sec_beneficial_ownership", _beneficial_row(d), root)
 
 
 def query_beneficial_ownership(
@@ -1375,9 +1440,7 @@ def query_beneficial_ownership(
     _cik_where("filer_cik", owner, where, params)
     _simple_where("accession", accession, where, params)
     _asof_where(as_of, "known_at", where, params)
-    return _ordered_query(
-        "sec_beneficial_ownership", where, params,
-        "ORDER BY known_at DESC", limit, root)
+    return _ordered_query("sec_beneficial_ownership", where, params, "ORDER BY known_at DESC", limit, root)
 
 
 def store_13f_holding(
@@ -1388,13 +1451,17 @@ def store_13f_holding(
     """Typed writer: accepts ``InstitutionalHolding`` or a column row."""
     d = _row_dict(row)
     source_row = _holding_source_row(d)
-    return _pass_through("sec_13f_holdings", _holding_row(
-        d, normalize_cusip(d.get("cusip")), normalize_isin(d.get("isin")),
-        source_row), root)
+    return _pass_through(
+        "sec_13f_holdings",
+        _holding_row(d, normalize_cusip(d.get("cusip")), normalize_isin(d.get("isin")), source_row),
+        root,
+    )
 
 
 def _cusip_where(
-    cusip: str, where: list[str], params: list[str | None],
+    cusip: str,
+    where: list[str],
+    params: list[str | None],
 ) -> None:
     """CUSIP equality plus dashed-legacy regexp arm; invalid binds no-match."""
     cusip_norm = normalize_cusip(cusip)
@@ -1404,26 +1471,27 @@ def _cusip_where(
         params.append(None)
         return
     # regexp arm keeps pre-fix dashed rows resolvable (no migration).
-    where.append(
-        "(cusip = ?"
-        " OR UPPER(regexp_replace(cusip, '[^A-Za-z0-9]+', '', 'g')) = ?)")
+    where.append("(cusip = ? OR UPPER(regexp_replace(cusip, '[^A-Za-z0-9]+', '', 'g')) = ?)")
     params.extend([cusip_norm, cusip_norm])
 
 
 def _cusip_arms(
-    cusip_norm: str | None, arms: list[str], vals: list[str | None],
+    cusip_norm: str | None,
+    arms: list[str],
+    vals: list[str | None],
 ) -> None:
     """CUSIP equality + legacy-regexp arms when the value normalizes."""
     if cusip_norm is not None:
         arms.append("cusip = ?")
         vals.append(cusip_norm)
-        arms.append(
-            "UPPER(regexp_replace(cusip, '[^A-Za-z0-9]+', '', 'g')) = ?")
+        arms.append("UPPER(regexp_replace(cusip, '[^A-Za-z0-9]+', '', 'g')) = ?")
         vals.append(cusip_norm)
 
 
 def _security_colon_arms(
-    raw: str, arms: list[str], vals: list[str | None],
+    raw: str,
+    arms: list[str],
+    vals: list[str | None],
 ) -> None:
     """Prefixed ``security`` (CUSIP:/ISIN:) to CUSIP/ISIN/security_id arms."""
     _, _, suffix = raw.partition(":")
@@ -1437,7 +1505,10 @@ def _security_colon_arms(
 
 
 def _security_bare_arms(
-    raw: str, security: str, arms: list[str], vals: list[str | None],
+    raw: str,
+    security: str,
+    arms: list[str],
+    vals: list[str | None],
 ) -> None:
     """Bare ``security`` to CUSIP/ISIN arms plus the security_id IN list."""
     sec_cusip = normalize_cusip(security)
@@ -1456,7 +1527,9 @@ def _security_bare_arms(
 
 
 def _security_where(
-    security: str, where: list[str], params: list[str | None],
+    security: str,
+    where: list[str],
+    params: list[str | None],
 ) -> None:
     """``security`` (CUSIP, ISIN, or security_id) to one OR-group clause."""
     raw = security.strip().upper()
@@ -1468,6 +1541,7 @@ def _security_where(
         _security_bare_arms(raw, security, arms, vals)
     where.append("(" + " OR ".join(arms) + ")")
     params.extend(vals)
+
 
 def _holdings_identity_where(
     manager_cik: int | str | None,
@@ -1504,6 +1578,7 @@ def _holdings_security_where(
         params.append(normalize_isin(isin))
     if security is not None:
         _security_where(security, where, params)
+
 
 def query_13f_holdings(
     *,
@@ -1557,10 +1632,11 @@ def _valid_period(period: str | None) -> str | None:
     if period is None:
         return None
     try:
-        datetime.strptime(period, "%Y-%m-%d")
+        date.fromisoformat(period)
     except Exception:  # noqa: BLE001 - malformed period validates to None, never raises
         return None
     return period
+
 
 def _issuer_period(report_period: str | None) -> str | None:
     """Report period as YYYY-MM-DD; None when missing or malformed."""
@@ -1568,20 +1644,25 @@ def _issuer_period(report_period: str | None) -> str | None:
 
 
 def _query_current_issuer_names(
-    target: str, root: Path | str | None,
+    target: str,
+    root: Path | str | None,
 ) -> list[dict[str, object]]:
     """Current-name exact matches (trimmed, case-insensitive); [] on failure."""
     try:
         return duckdb.query(
             "SELECT DISTINCT entity_id, name, known_at, retrieved_at FROM entities "
             "WHERE LOWER(TRIM(name)) = LOWER(TRIM(?))",
-            [target], data_root=_duckdb_root(root))
+            [target],
+            data_root=_duckdb_root(root),
+        )
     except Exception:  # noqa: BLE001 - issuer lookup degrades to no candidates on storage failure
         return []
 
 
 def _query_former_issuer_names(
-    target: str, period: str | None, root: Path | str | None,
+    target: str,
+    period: str | None,
+    root: Path | str | None,
 ) -> list[dict[str, object]]:
     """Former-name matches valid at the period; [] without period or on failure."""
     if period is None:
@@ -1594,7 +1675,9 @@ def _query_former_issuer_names(
             "AND LOWER(TRIM(a.alias_value)) = LOWER(TRIM(?)) "
             "AND (a.valid_from IS NULL OR substr(a.valid_from, 1, 10) <= ?) "
             "AND (a.valid_to IS NULL OR ? < substr(a.valid_to, 1, 10))",
-            [target, period, period], data_root=_duckdb_root(root))
+            [target, period, period],
+            data_root=_duckdb_root(root),
+        )
     except Exception:  # noqa: BLE001 - alias lookup degrades to no candidates on storage failure
         return []
 
@@ -1605,6 +1688,7 @@ def _issuer_row_eid(row: dict[str, object]) -> str:
         return str(row.get("entity_id") or "").strip()
     except Exception:  # noqa: BLE001 - untrusted row entity_id coerces to empty, never raises
         return ""
+
 
 def _dedupe_issuer_rows(
     rows: list[dict[str, object]],
@@ -1617,7 +1701,10 @@ def _dedupe_issuer_rows(
             seen[eid] = row
     return list(seen.values())
 
-def query_13f_issuer_candidates(issuer_name: str, *, report_period: str | None, holding_known_at: str | None, root: Path | str | None = None) -> list[dict[str, object]]:
+
+def query_13f_issuer_candidates(
+    issuer_name: str, *, report_period: str | None, holding_known_at: str | None, root: Path | str | None = None
+) -> list[dict[str, object]]:
     """Exact current/former-name issuer candidates for one 13F issuer string."""
     target = _issuer_target(issuer_name)
     if not target:
@@ -1686,7 +1773,10 @@ def _issuer_holdings_sql(holding_asof: str, alias_asof: str) -> str:
 
 
 def _issuer_holdings_params(
-    as_of_val: str | None, eid: str, limit: int | None, sql: str,
+    as_of_val: str | None,
+    eid: str,
+    limit: int | None,
+    sql: str,
 ) -> tuple[str, list[str | None]]:
     """Bind PIT/entity params and append the limit clause."""
     params: list[str | None] = []
@@ -1699,15 +1789,15 @@ def _issuer_holdings_params(
     return sql, params
 
 
-
-def query_13f_holdings_for_issuer(entity_id: str, *, as_of: str | None = None, limit: int = 200, root: Path | str | None = None) -> list[dict[str, object]]:
+def query_13f_holdings_for_issuer(
+    entity_id: str, *, as_of: str | None = None, limit: int = 200, root: Path | str | None = None
+) -> list[dict[str, object]]:
     """Governed issuer -> holdings via exact CUSIP/ISIN alias mapping (PIT)."""
     eid = (entity_id or "").strip()
     if not eid:
         return []
     as_of_val, holding_asof, alias_asof = _issuer_holdings_asof(as_of)
-    sql, params = _issuer_holdings_params(
-        as_of_val, eid, limit, _issuer_holdings_sql(holding_asof, alias_asof))
+    sql, params = _issuer_holdings_params(as_of_val, eid, limit, _issuer_holdings_sql(holding_asof, alias_asof))
     rows = duckdb.query(sql, params, data_root=_duckdb_root(root))
     for row in rows:
         try:
@@ -1734,6 +1824,7 @@ def _insider_person(d: dict[str, object]) -> dict[str, object]:
         "owner_cik": str(d.get("owner_cik") or d.get("insider_cik") or "").strip() or None,
         "owner_name": d.get("owner_name") or d.get("insider_name"),
     }
+
 
 def _insider_identity(d: dict[str, object]) -> dict[str, object]:
     """Insider filing identity (accession, issuer, owner) with fallbacks."""
@@ -1775,10 +1866,11 @@ def _insider_provenance(d: dict[str, object]) -> dict[str, object]:
         "parser_version": d.get("parser_version") or PARSER_VERSION,
     }
 
+
 def _insider_detail(d: dict[str, object]) -> dict[str, object]:
     """Insider role/security/economics with holdings and provenance fallbacks."""
-    return {
-        **_insider_roles(d), **_insider_economics(d), **_insider_provenance(d)}
+    return {**_insider_roles(d), **_insider_economics(d), **_insider_provenance(d)}
+
 
 def _insider_row(d: dict[str, object]) -> dict[str, object]:
     """Insider-transaction input dict to a parquet row (owner fallbacks included)."""
@@ -1818,6 +1910,7 @@ def _offering_provenance(d: dict[str, object]) -> dict[str, object]:
         "parser_version": d.get("parser_version") or PARSER_VERSION,
     }
 
+
 def _offering_detail(d: dict[str, object]) -> dict[str, object]:
     """Offering security economics and provenance with amount fallbacks."""
     return {**_offering_economics(d), **_offering_provenance(d)}
@@ -1835,8 +1928,7 @@ def store_insider_transaction(
 ) -> int:
     """Typed writer: accepts ``InsiderTransaction`` or a column row."""
     d = _row_dict(row)
-    return _pass_through(
-        "sec_insider_transactions", _insider_row(d), root)
+    return _pass_through("sec_insider_transactions", _insider_row(d), root)
 
 
 def query_insider_transactions(
@@ -1857,9 +1949,7 @@ def query_insider_transactions(
     _simple_where("accession", accession, where, params)
     _simple_where("form", form, where, params)
     _asof_where(as_of, "known_at", where, params)
-    return _ordered_query(
-        "sec_insider_transactions", where, params,
-        "ORDER BY known_at DESC", limit, root)
+    return _ordered_query("sec_insider_transactions", where, params, "ORDER BY known_at DESC", limit, root)
 
 
 def store_offering(
@@ -1877,13 +1967,15 @@ def store_offering(
 
 
 def _registrant_cik_where(
-    registrant_cik: int | str, where: list[str], params: list[str | None],
+    registrant_cik: int | str,
+    where: list[str],
+    params: list[str | None],
 ) -> None:
     """Registrant CIK clause: canonical bare plus 10-digit padded legacy form."""
     # ponytail: canonical bare CIK plus SEC 10-digit padding match legacy rows
     try:
         _canon = str(int(str(registrant_cik).strip()))
-    except (TypeError, ValueError, AttributeError):
+    except TypeError, ValueError, AttributeError:
         _canon = None
     if _canon is not None:
         where.append("(registrant_cik = ? OR registrant_cik = ?)")
@@ -1922,7 +2014,6 @@ def _transaction_acquirer(d: dict[str, object]) -> dict[str, object]:
     }
 
 
-
 def _strip_cik(value: object) -> str | None:
     """CIK-ish value to stripped text; None when missing."""
     return str(value).strip() if value is not None else None
@@ -1949,6 +2040,7 @@ def _transaction_parties(d: dict[str, object]) -> dict[str, object]:
         **_transaction_subject(d),
         **_transaction_acquirer(d),
     }
+
 
 def _transaction_dates(d: dict[str, object]) -> dict[str, object]:
     """Transaction status/dates with announced_at and unknown fallbacks."""
@@ -2027,6 +2119,7 @@ def _ordered_query(
     sql += f" {order} LIMIT {limit}"
     return duckdb.query(sql, params, data_root=_duckdb_root(root))
 
+
 def query_offerings(
     *,
     registrant: str | None = None,
@@ -2048,8 +2141,8 @@ def query_offerings(
     _simple_where("accession", accession, where, params)
     _simple_where("form", form, where, params)
     _asof_where(as_of, "known_at", where, params)
-    return _ordered_query(
-        "sec_offerings", where, params, "ORDER BY known_at DESC", limit, root)
+    return _ordered_query("sec_offerings", where, params, "ORDER BY known_at DESC", limit, root)
+
 
 def store_transaction(
     row: Transaction | Mapping[str, object],
@@ -2061,8 +2154,7 @@ def store_transaction(
     Subject/target come only from structured/explicit evidence upstream;
     status stays ``unknown`` without closing evidence.
     """
-    return _pass_through(
-        "sec_transactions", _transaction_row(_row_dict(row)), root)
+    return _pass_through("sec_transactions", _transaction_row(_row_dict(row)), root)
 
 
 def query_transactions(
@@ -2085,8 +2177,7 @@ def query_transactions(
     _cik_where("filer_cik", filer_cik, where, params)
     _simple_where("accession", accession, where, params)
     _asof_where(as_of, "known_at", where, params)
-    return _ordered_query(
-        "sec_transactions", where, params, "ORDER BY known_at DESC", limit, root)
+    return _ordered_query("sec_transactions", where, params, "ORDER BY known_at DESC", limit, root)
 
 
 def store_relationship_evidence(
@@ -2146,6 +2237,7 @@ def _require_eval_field(d: dict[str, object], field: str) -> None:
     if not str(d.get(field) or "").strip():
         raise ValueError(f"evaluation requires {field}")
 
+
 def store_relationship_type_evaluation(
     row: Mapping[str, object],
     *,
@@ -2165,7 +2257,8 @@ def store_relationship_type_evaluation(
 
 
 def query_relationship_type_evaluations(
-    relationship_type: str | None = None, *,
+    relationship_type: str | None = None,
+    *,
     limit: int = 200,
     root: Path | str | None = None,
 ) -> list[dict[str, object]]:
@@ -2174,24 +2267,22 @@ def query_relationship_type_evaluations(
     params: list[str | None] = []
     _simple_where("relationship_type", relationship_type, where, params)
     return _ordered_query(
-        "relationship_type_evaluations", where, params,
-        "ORDER BY window_end DESC, retrieved_at DESC", limit, root)
+        "relationship_type_evaluations", where, params, "ORDER BY window_end DESC, retrieved_at DESC", limit, root
+    )
 
 
 def _evaluation_order(row: dict[str, object]) -> tuple[str, str, str]:
     """Newest evaluation (retrieved, window, id) sorts last."""
-    return (str(row.get("retrieved_at") or ""),
-            str(row.get("window_end") or ""),
-            str(row.get("evaluation_id") or ""))
+    return (str(row.get("retrieved_at") or ""), str(row.get("window_end") or ""), str(row.get("evaluation_id") or ""))
 
 
 def latest_type_state(
-    relationship_type: str, *,
+    relationship_type: str,
+    *,
     root: Path | str | None = None,
 ) -> tuple[str, dict[str, object] | None]:
     """Latest ``(state, row)`` for one type; ``unevaluated`` when no history."""
-    rows = query_relationship_type_evaluations(
-        relationship_type, limit=500, root=root)
+    rows = query_relationship_type_evaluations(relationship_type, limit=500, root=root)
     if not rows:
         return "unevaluated", None
     rows = sorted(rows, key=_evaluation_order)
@@ -2218,8 +2309,10 @@ def _evidence_counter_where(
     if not include_counterevidence:
         where.append("(is_counterevidence IS NULL OR is_counterevidence = FALSE)")
 
+
 def query_relationship_evidence(
-    relationship_id: str | None = None, *,
+    relationship_id: str | None = None,
+    *,
     entity_id: str | None = None,
     relationship_type: str | None = None,
     as_of: str | None = None,
@@ -2235,13 +2328,12 @@ def query_relationship_evidence(
     _simple_where("relationship_type", relationship_type, where, params)
     _evidence_counter_where(include_counterevidence, where)
     _asof_where(as_of, "known_at", where, params)
-    return _ordered_query(
-        "relationship_evidence", where, params,
-        "ORDER BY known_at ASC", limit, root)
+    return _ordered_query("relationship_evidence", where, params, "ORDER BY known_at ASC", limit, root)
 
 
 def query_relationship_revisions(
-    relationship_id: str | None = None, *,
+    relationship_id: str | None = None,
+    *,
     as_of: str | None = None,
     limit: int = 200,
     root: Path | str | None = None,
@@ -2251,9 +2343,7 @@ def query_relationship_revisions(
     params: list[str | None] = []
     _simple_where("relationship_id", relationship_id, where, params)
     _asof_where(as_of, "recorded_at", where, params)
-    return _ordered_query(
-        "relationship_revisions", where, params,
-        "ORDER BY recorded_at ASC", limit, root)
+    return _ordered_query("relationship_revisions", where, params, "ORDER BY recorded_at ASC", limit, root)
 
 
 # --- Phase 5: durable backfill queue (mutable SQLite; history stays Parquet) ---
@@ -2270,7 +2360,6 @@ def _jobs_db_path(root: Path | str | None = None) -> Path:
     if base.name == "parquet":
         base = base.parent
     return base / "sec_backfill.sqlite"
-
 
 
 def ensure_jobs_table(root: Path | str | None = None) -> Path:
@@ -2300,12 +2389,12 @@ def ensure_jobs_table(root: Path | str | None = None) -> Path:
     return path
 
 
-def _backfill_job_id(source: str, form: str, start_date: str,
-                     end_date: str, parser_version: str,
-                     family: str | None = None) -> str:
+def _backfill_job_id(
+    source: str, form: str, start_date: str, end_date: str, parser_version: str, family: str | None = None
+) -> str:
     digest = hashlib.sha256(
-        f"{source}\n{form}\n{family or ''}\n{start_date}\n{end_date}\n"
-        f"{parser_version}".encode()).hexdigest()[:16]
+        f"{source}\n{form}\n{family or ''}\n{start_date}\n{end_date}\n{parser_version}".encode()
+    ).hexdigest()[:16]
     return f"job:{digest}"
 
 
@@ -2319,12 +2408,10 @@ def _backfill_alias_values(
     form_value: object = form if form is not None else aliases.get("form_")
     start_value: object = start_date
     if start_value is None:
-        start_value = aliases.get("from_date", aliases.get("from_",
-                                  aliases.get("start", aliases.get("from"))))
+        start_value = aliases.get("from_date", aliases.get("from_", aliases.get("start", aliases.get("from"))))
     end_value: object = end_date
     if end_value is None:
-        end_value = aliases.get("to_date", aliases.get("to_",
-                                aliases.get("end", aliases.get("to"))))
+        end_value = aliases.get("to_date", aliases.get("to_", aliases.get("end", aliases.get("to"))))
     return form_value, start_value, end_value
 
 
@@ -2345,16 +2432,24 @@ def _require_backfill_dates(start_value: object, end_value: object) -> None:
     if start_value is None or end_value is None:
         raise ValueError("start/end dates are required (YYYY-MM-DD); no all-history default")
 
+
 def _require_backfill_fields(
-    source: str, form_value: object, start_value: object, end_value: object,
+    source: str,
+    form_value: object,
+    start_value: object,
+    end_value: object,
 ) -> None:
     """Required source/form/dates; raises naming the missing field."""
     _require_backfill_source(source)
     _require_backfill_form(form_value)
     _require_backfill_dates(start_value, end_value)
 
+
 def _validate_backfill_range(
-    source: str, form_value: object, start_value: object, end_value: object,
+    source: str,
+    form_value: object,
+    start_value: object,
+    end_value: object,
 ) -> tuple[str, str]:
     """Required source/form/dates to a validated (start, end) date pair."""
     _require_backfill_fields(source, form_value, start_value, end_value)
@@ -2366,8 +2461,14 @@ def _validate_backfill_range(
 
 
 def _insert_backfill_job(
-    job_id: str, source: str, form_value: object, family: str | None,
-    start: str, end: str, parser_version: str, batch_size: int,
+    job_id: str,
+    source: str,
+    form_value: object,
+    family: str | None,
+    start: str,
+    end: str,
+    parser_version: str,
+    batch_size: int,
     root: Path | str | None,
 ) -> None:
     """Idempotent queued insert for one deterministic job ID."""
@@ -2381,46 +2482,66 @@ def _insert_backfill_job(
                 "(id, source, form, family, start_date, end_date, "
                 "parser_version, status, batch_size, created_at) "
                 "VALUES (?, ?, ?, ?, ?, ?, ?, 'queued', ?, ?)",
-                (job_id, source, str(form_value),
-                 family if family is not None else None,
-                 start, end, parser_version, batch_size or 50, now),
+                (
+                    job_id,
+                    source,
+                    str(form_value),
+                    family if family is not None else None,
+                    start,
+                    end,
+                    parser_version,
+                    batch_size or 50,
+                    now,
+                ),
             )
             conn.commit()
         finally:
             conn.close()
 
-def enqueue_backfill_job(source: str, form: str | None = None,
-                         start_date: str | None = None,
-                         end_date: str | None = None,
-                         parser_version: str = PARSER_VERSION, *,
-                         family: str | None = None,
-                         batch_size: int = 50,
-                         root: Path | str | None = None,
-                         **aliases: object) -> str:
+
+def enqueue_backfill_job(
+    source: str,
+    form: str | None = None,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    parser_version: str = PARSER_VERSION,
+    *,
+    family: str | None = None,
+    batch_size: int = 50,
+    root: Path | str | None = None,
+    **aliases: object,
+) -> str:
     """Idempotent queue insert; reruns return the same deterministic ID."""
-    form_value, start_value, end_value = _backfill_alias_values(
-        form, start_date, end_date, aliases)
+    form_value, start_value, end_value = _backfill_alias_values(form, start_date, end_date, aliases)
     if parser_version == PARSER_VERSION and aliases.get("parser") is not None:
         parser_version = str(aliases["parser"])
-    start, end = _validate_backfill_range(
-        source, form_value, start_value, end_value)
-    job_id = _backfill_job_id(
-        source, str(form_value), start, end, parser_version, family)
-    _insert_backfill_job(
-        job_id, source, form_value, family, start, end, parser_version,
-        batch_size, root)
+    start, end = _validate_backfill_range(source, form_value, start_value, end_value)
+    job_id = _backfill_job_id(source, str(form_value), start, end, parser_version, family)
+    _insert_backfill_job(job_id, source, form_value, family, start, end, parser_version, batch_size, root)
     return job_id
 
 
 def _row_to_job(row: tuple[object, ...]) -> dict[str, object]:
-    keys = ("id", "source", "form", "family", "start_date", "end_date",
-            "parser_version", "status", "batch_size", "created_at",
-            "started_at", "finished_at", "last_key", "error")
+    keys = (
+        "id",
+        "source",
+        "form",
+        "family",
+        "start_date",
+        "end_date",
+        "parser_version",
+        "status",
+        "batch_size",
+        "created_at",
+        "started_at",
+        "finished_at",
+        "last_key",
+        "error",
+    )
     return dict(zip(keys, row))
 
 
-def get_job(job_id: str, *,
-            root: Path | str | None = None) -> dict[str, object] | None:
+def get_job(job_id: str, *, root: Path | str | None = None) -> dict[str, object] | None:
     """One job row by ID, or None."""
     path = ensure_jobs_table(root)
     conn = sqlite3.connect(str(path), timeout=30)
@@ -2429,21 +2550,24 @@ def get_job(job_id: str, *,
             f"SELECT id, source, form, family, start_date, end_date, "
             f"parser_version, status, batch_size, created_at, started_at, "
             f"finished_at, last_key, error FROM {_JOBS_TABLE} WHERE id = ?",
-            (job_id,))
+            (job_id,),
+        )
         row = cur.fetchone()
     finally:
         conn.close()
     return _row_to_job(row) if row else None
 
 
-def list_jobs(*, status: str | None = None,
-              root: Path | str | None = None,
-              limit: int = 200) -> list[dict[str, object]]:
+def list_jobs(
+    *, status: str | None = None, root: Path | str | None = None, limit: int = 200
+) -> list[dict[str, object]]:
     """Jobs oldest first, optionally filtered by status."""
     path = ensure_jobs_table(root)
-    sql = (f"SELECT id, source, form, family, start_date, end_date, "
-           f"parser_version, status, batch_size, created_at, started_at, "
-           f"finished_at, last_key, error FROM {_JOBS_TABLE}")
+    sql = (
+        f"SELECT id, source, form, family, start_date, end_date, "
+        f"parser_version, status, batch_size, created_at, started_at, "
+        f"finished_at, last_key, error FROM {_JOBS_TABLE}"
+    )
     params: list[str | None] = []
     if status is not None:
         sql += " WHERE status = ?"
@@ -2457,8 +2581,7 @@ def list_jobs(*, status: str | None = None,
     return [_row_to_job(r) for r in rows]
 
 
-def claim_job(job_id: str | None = None, *,
-              root: Path | str | None = None) -> dict[str, object] | None:
+def claim_job(job_id: str | None = None, *, root: Path | str | None = None) -> dict[str, object] | None:
     """Lease one job as ``running``.
 
     Auto-claim takes the oldest ``queued`` job only: a ``failed`` job stays
@@ -2476,14 +2599,15 @@ def claim_job(job_id: str | None = None, *,
                     f"UPDATE {_JOBS_TABLE} SET status='running', "
                     "started_at=?, finished_at=NULL, error=NULL WHERE id = ? "
                     "AND status IN ('queued', 'failed')",
-                    (now, job_id))
+                    (now, job_id),
+                )
                 conn.commit()
                 if cur.rowcount == 0:
                     return None
             else:
                 cur = conn.execute(
-                    f"SELECT id FROM {_JOBS_TABLE} WHERE status = 'queued' "
-                    "ORDER BY created_at ASC LIMIT 1")
+                    f"SELECT id FROM {_JOBS_TABLE} WHERE status = 'queued' ORDER BY created_at ASC LIMIT 1"
+                )
                 found = cur.fetchone()
                 if not found:
                     return None
@@ -2491,7 +2615,8 @@ def claim_job(job_id: str | None = None, *,
                     f"UPDATE {_JOBS_TABLE} SET status='running', "
                     "started_at=?, finished_at=NULL, error=NULL WHERE id = ? "
                     "AND status = 'queued'",
-                    (now, found[0]))
+                    (now, found[0]),
+                )
                 conn.commit()
                 if cur.rowcount == 0:
                     return None
@@ -2500,8 +2625,10 @@ def claim_job(job_id: str | None = None, *,
             conn.close()
     return get_job(str(job_id), root=root)
 
-def complete_job(job_id: str, *, last_key: str | None = None,
-                 root: Path | str | None = None) -> dict[str, object] | None:
+
+def complete_job(
+    job_id: str, *, last_key: str | None = None, root: Path | str | None = None
+) -> dict[str, object] | None:
     """Mark a leased job ``complete``."""
     path = ensure_jobs_table(root)
     with _JOBS_LOCK:
@@ -2509,23 +2636,22 @@ def complete_job(job_id: str, *, last_key: str | None = None,
         try:
             if last_key is not None:
                 conn.execute(
-                    f"UPDATE {_JOBS_TABLE} SET status='complete', "
-                    "finished_at=?, last_key=? WHERE id = ?",
-                    (_utcnow(), last_key, job_id))
+                    f"UPDATE {_JOBS_TABLE} SET status='complete', finished_at=?, last_key=? WHERE id = ?",
+                    (_utcnow(), last_key, job_id),
+                )
             else:
                 conn.execute(
-                    f"UPDATE {_JOBS_TABLE} SET status='complete', "
-                    "finished_at=? WHERE id = ?",
-                    (_utcnow(), job_id))
+                    f"UPDATE {_JOBS_TABLE} SET status='complete', finished_at=? WHERE id = ?", (_utcnow(), job_id)
+                )
             conn.commit()
         finally:
             conn.close()
     return get_job(job_id, root=root)
 
 
-def fail_job(job_id: str, error: object = "", *,
-             last_key: str | None = None,
-             root: Path | str | None = None) -> dict[str, object] | None:
+def fail_job(
+    job_id: str, error: object = "", *, last_key: str | None = None, root: Path | str | None = None
+) -> dict[str, object] | None:
     """Mark a leased job ``failed``; the accession/partition is retried."""
     path = ensure_jobs_table(root)
     with _JOBS_LOCK:
@@ -2533,59 +2659,53 @@ def fail_job(job_id: str, error: object = "", *,
         try:
             if last_key is not None:
                 conn.execute(
-                    f"UPDATE {_JOBS_TABLE} SET status='failed', "
-                    "finished_at=?, last_key=?, error=? WHERE id = ?",
-                    (_utcnow(), last_key, str(error), job_id))
+                    f"UPDATE {_JOBS_TABLE} SET status='failed', finished_at=?, last_key=?, error=? WHERE id = ?",
+                    (_utcnow(), last_key, str(error), job_id),
+                )
             else:
                 conn.execute(
-                    f"UPDATE {_JOBS_TABLE} SET status='failed', "
-                    "finished_at=?, error=? WHERE id = ?",
-                    (_utcnow(), str(error), job_id))
+                    f"UPDATE {_JOBS_TABLE} SET status='failed', finished_at=?, error=? WHERE id = ?",
+                    (_utcnow(), str(error), job_id),
+                )
             conn.commit()
         finally:
             conn.close()
     return get_job(job_id, root=root)
 
 
-def requeue_job(job_id: str, *,
-                root: Path | str | None = None) -> dict[str, object] | None:
+def requeue_job(job_id: str, *, root: Path | str | None = None) -> dict[str, object] | None:
     """Return a ``failed``/``complete`` job to ``queued`` for resume."""
     path = ensure_jobs_table(root)
     with _JOBS_LOCK:
         conn = sqlite3.connect(str(path), timeout=30)
         try:
             conn.execute(
-                f"UPDATE {_JOBS_TABLE} SET status='queued', started_at=NULL, "
-                "finished_at=NULL, error=NULL WHERE id = ?",
-                (job_id,))
+                f"UPDATE {_JOBS_TABLE} SET status='queued', started_at=NULL, finished_at=NULL, error=NULL WHERE id = ?",
+                (job_id,),
+            )
             conn.commit()
         finally:
             conn.close()
     return get_job(job_id, root=root)
 
 
-def recover_stale_jobs(*,
-                       root: Path | str | None = None) -> int:
+def recover_stale_jobs(*, root: Path | str | None = None) -> int:
     """Recover interrupted ``running`` leases to ``queued``; returns count."""
     path = ensure_jobs_table(root)
     with _JOBS_LOCK:
         conn = sqlite3.connect(str(path), timeout=30)
         try:
-            cur = conn.execute(
-                f"UPDATE {_JOBS_TABLE} SET status='queued', started_at=NULL "
-                "WHERE status='running'")
+            cur = conn.execute(f"UPDATE {_JOBS_TABLE} SET status='queued', started_at=NULL WHERE status='running'")
             conn.commit()
             return cur.rowcount or 0
         finally:
             conn.close()
 
 
-def is_partition_covered(source: str, form: str, date_partition: str, *,
-                         root: Path | str | None = None) -> bool:
+def is_partition_covered(source: str, form: str, date_partition: str, *, root: Path | str | None = None) -> bool:
     """True when a ``complete`` coverage row exists for the partition."""
     try:
-        rows = query_coverage(source=source, form=form,
-                              date_partition=date_partition, root=root)
+        rows = query_coverage(source=source, form=form, date_partition=date_partition, root=root)
     except Exception:  # noqa: BLE001 - coverage probe returns False on storage failure
         return False
     return any(str(r.get("status") or "").lower() == "complete" for r in rows)

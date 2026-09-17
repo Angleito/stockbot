@@ -16,10 +16,9 @@ import os
 import shutil
 import tempfile
 import time
-from collections.abc import Generator, Mapping
+from collections.abc import Generator, Mapping, Sequence
 from pathlib import Path
 from types import ModuleType
-from typing import Sequence
 
 try:
     import fcntl  # Linux-only; short-interest locking is explicitly Linux-only.
@@ -66,6 +65,7 @@ def _is_legacy_settlement_stamped(row: dict[str, object]) -> bool:
         return False
     return str(row.get("parser_version") or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION
 
+
 def _parser_version_values(parquet_root: Path) -> list[object] | None:
     """All parser_version values, or None when the table is unreadable."""
     try:
@@ -89,6 +89,7 @@ def _short_interest_has_legacy_v1(parquet_root: Path) -> bool:
     if values is None:
         return True
     return any(str(v or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION for v in values)
+
 
 SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
 SEC_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
@@ -135,9 +136,9 @@ def _sec_get(url: str) -> bytes:
         raw = resp.headers.get("Retry-After")
         try:
             retry_after = int(raw) if raw is not None else None
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             retry_after = None
-        delay = retry_after if retry_after is not None else _SEC_BACKOFF_BASE * 2 ** attempt
+        delay = retry_after if retry_after is not None else _SEC_BACKOFF_BASE * 2**attempt
         time.sleep(min(delay, _SEC_BACKOFF_CAP))
     assert resp is not None
     resp.raise_for_status()
@@ -159,7 +160,7 @@ def _parse_ticker_ciks(payload_json: object) -> dict[str, int]:
             continue
         try:
             cik = int(cik_raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         ticker_ciks[ticker] = cik
     return ticker_ciks
@@ -172,15 +173,17 @@ def refresh_sec_tickers(*, data_root: Path | None = None) -> dict[str, object]:
     payload = _sec_get(url)
     content_hash = raw_archive.content_hash(payload)
     raw_archive.archive(
-        "sec", "company_tickers", "company_tickers", payload,
-        url=url, retrieved_at=now, root=data_root / "raw",
+        "sec",
+        "company_tickers",
+        "company_tickers",
+        payload,
+        url=url,
+        retrieved_at=now,
+        root=data_root / "raw",
     )
     payload_json = json.loads(payload)
     datasets = normalize_sec_tickers(payload_json, retrieved_at=now, content_hash=content_hash)
-    written = sum(
-        parquet.write_rows(name, rows, root=data_root / "parquet")
-        for name, rows in datasets.items()
-    )
+    written = sum(parquet.write_rows(name, rows, root=data_root / "parquet") for name, rows in datasets.items())
     ticker_ciks = _parse_ticker_ciks(payload_json)
     return {
         "source": "sec:company_tickers",
@@ -192,18 +195,23 @@ def refresh_sec_tickers(*, data_root: Path | None = None) -> dict[str, object]:
 
 
 def _normalize_and_write_company_facts(
-    cik: int, payload: bytes, *, retrieved_at: str, url: str, data_root: Path,
+    cik: int,
+    payload: bytes,
+    *,
+    retrieved_at: str,
+    url: str,
+    data_root: Path,
 ) -> int:
     """Shared normalize -> Parquet step behind refresh and archive replay."""
     content_hash = raw_archive.content_hash(payload)
     datasets = normalize_sec_company_facts(
-        json.loads(payload), retrieved_at=retrieved_at, content_hash=content_hash,
-        source_url=url, source_record_id=f"cik{cik:010d}",
+        json.loads(payload),
+        retrieved_at=retrieved_at,
+        content_hash=content_hash,
+        source_url=url,
+        source_record_id=f"cik{cik:010d}",
     )
-    return sum(
-        parquet.write_rows(name, rows, root=data_root / "parquet")
-        for name, rows in datasets.items()
-    )
+    return sum(parquet.write_rows(name, rows, root=data_root / "parquet") for name, rows in datasets.items())
 
 
 def refresh_sec_company_facts(cik: int, *, data_root: Path | None = None) -> dict[str, object]:
@@ -213,11 +221,20 @@ def refresh_sec_company_facts(cik: int, *, data_root: Path | None = None) -> dic
     payload = _sec_get(url)
     content_hash = raw_archive.content_hash(payload)
     raw_archive.archive(
-        "sec", f"cik{cik:010d}", "companyfacts", payload,
-        url=url, retrieved_at=now, root=data_root / "raw",
+        "sec",
+        f"cik{cik:010d}",
+        "companyfacts",
+        payload,
+        url=url,
+        retrieved_at=now,
+        root=data_root / "raw",
     )
     written = _normalize_and_write_company_facts(
-        cik, payload, retrieved_at=now, url=url, data_root=data_root,
+        cik,
+        payload,
+        retrieved_at=now,
+        url=url,
+        data_root=data_root,
     )
     return {
         "source": "sec:companyfacts",
@@ -251,16 +268,20 @@ def replay_sec_facts_from_archive(*, data_root: Path | None = None) -> dict[str,
                 try:
                     cik = int(cik_dir.name.removeprefix("cik"))
                     written_rows += _normalize_and_write_company_facts(
-                        cik, record.payload_path.read_bytes(),
-                        retrieved_at=record.retrieved_at, url=record.url,
+                        cik,
+                        record.payload_path.read_bytes(),
+                        retrieved_at=record.retrieved_at,
+                        url=record.url,
                         data_root=data_root,
                     )
                 except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-                    failed.append({
-                        "cik": cik_dir.name,
-                        "sha256": record.sha256,
-                        "error": f"{type(exc).__name__}: {exc}",
-                    })
+                    failed.append(
+                        {
+                            "cik": cik_dir.name,
+                            "sha256": record.sha256,
+                            "error": f"{type(exc).__name__}: {exc}",
+                        }
+                    )
     return {
         "source": "sec",
         "kind": "companyfacts",
@@ -276,11 +297,13 @@ def _finra_page_request(settlement_date: str, offset: int, fields: tuple[str, ..
         "limit": finra_client.MAX_LIMIT,
         "offset": offset,
         "fields": list(fields),
-        "compareFilters": [{
-            "compareType": "EQUAL",
-            "fieldName": "settlementDate",
-            "fieldValue": settlement_date,
-        }],
+        "compareFilters": [
+            {
+                "compareType": "EQUAL",
+                "fieldName": "settlementDate",
+                "fieldValue": settlement_date,
+            }
+        ],
     }
 
 
@@ -297,14 +320,18 @@ def _finra_check_page_total(headers: Mapping[str, object], total: int | None) ->
 
 def _finra_extend_snapshot(all_rows: list[dict[str, object]], rows: object, total: int) -> int:
     """Append one page of dict rows; returns the page size for the offset."""
-    page_rows: list[dict[str, object]] = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    page_rows: list[dict[str, object]] = (
+        [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    )
     if not page_rows and len(all_rows) < total:
         raise ValueError("FINRA pagination ended before the complete short-interest snapshot was retrieved.")
     all_rows.extend(page_rows)
     return len(page_rows)
 
 
-def _fetch_finra_snapshot(settlement_date: str, name: str, url: str, fields: tuple[str, ...], data_root: Path) -> list[dict[str, object]]:
+def _fetch_finra_snapshot(
+    settlement_date: str, name: str, url: str, fields: tuple[str, ...], data_root: Path
+) -> list[dict[str, object]]:
     """Page the full FINRA snapshot, archiving every raw page (write-once dedup)."""
     all_rows: list[dict[str, object]] = []
     total: int | None = None
@@ -314,8 +341,12 @@ def _fetch_finra_snapshot(settlement_date: str, name: str, url: str, fields: tup
         payload = _finra_page_request(settlement_date, offset, fields)
         content, rows, headers = finra_client.ingestion_post_query("otcMarket", name, payload)
         raw_archive.archive(
-            "finra", "data_page", f"otcMarket/consolidatedShortInterest:{settlement_date}:offset{offset}",
-            content, url=url, metadata={"payload": payload, "headers": headers},
+            "finra",
+            "data_page",
+            f"otcMarket/consolidatedShortInterest:{settlement_date}:offset{offset}",
+            content,
+            url=url,
+            metadata={"payload": payload, "headers": headers},
             root=data_root / "raw",
         )
         total = _finra_check_page_total(headers, total)
@@ -327,35 +358,41 @@ def _fetch_finra_snapshot(settlement_date: str, name: str, url: str, fields: tup
     return all_rows
 
 
-def _write_finra_snapshot(all_rows: list[dict[str, object]], settlement_date: str, snapshot_hash: str, url: str, data_root: Path) -> tuple[int, int, str]:
+def _write_finra_snapshot(
+    all_rows: list[dict[str, object]], settlement_date: str, snapshot_hash: str, url: str, data_root: Path
+) -> tuple[int, int, str]:
     """Normalize + write one snapshot; backfill legacy known_at under the lock."""
     retrieved_at = _utc_now()
     with _finra_short_interest_lock(data_root / "parquet"):
         datasets = normalize_finra_short_interest(
-            all_rows, settlement_date=settlement_date, retrieved_at=retrieved_at,
-            content_hash=snapshot_hash, source_url=url,
+            all_rows,
+            settlement_date=settlement_date,
+            retrieved_at=retrieved_at,
+            content_hash=snapshot_hash,
+            source_url=url,
             source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
         )
-        written = sum(
-            parquet.write_rows(name, rows, root=data_root / "parquet")
-            for name, rows in datasets.items()
-        )
+        written = sum(parquet.write_rows(name, rows, root=data_root / "parquet") for name, rows in datasets.items())
         backfilled_raw = _backfill_finra_known_at_locked(data_root)["rewritten"]
         backfilled = int(backfilled_raw) if isinstance(backfilled_raw, int) else 0
     return written, backfilled, retrieved_at
+
 
 def refresh_finra_short_interest(settlement_date: str, *, data_root: Path | None = None) -> dict[str, object]:
     data_root = Path(data_root) if data_root else get_data_root()
     name = "consolidatedShortInterest" + ("Mock" if finra_use_mock() else "")
     url = f"{finra_client.FINRA_API_BASE}/data/group/otcMarket/name/{name}"
     fields = (
-        "symbolCode", "issueName", "settlementDate", "currentShortPositionQuantity",
-        "previousShortPositionQuantity", "averageDailyVolumeQuantity", "daysToCoverQuantity",
+        "symbolCode",
+        "issueName",
+        "settlementDate",
+        "currentShortPositionQuantity",
+        "previousShortPositionQuantity",
+        "averageDailyVolumeQuantity",
+        "daysToCoverQuantity",
     )
     all_rows = _fetch_finra_snapshot(settlement_date, name, url, fields, data_root)
-    snapshot_hash = hashlib.sha256(
-        json.dumps(all_rows, sort_keys=True, separators=(",", ":")).encode()
-    ).hexdigest()
+    snapshot_hash = hashlib.sha256(json.dumps(all_rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
     written, backfilled, retrieved_at = _write_finra_snapshot(all_rows, settlement_date, snapshot_hash, url, data_root)
     return {
         "source": "finra:consolidatedShortInterest",
@@ -406,19 +443,21 @@ def _assert_no_stamped_leftovers(staged: list[object]) -> None:
 
 
 def _resolve_enrichment_ciks(
-    tickers: Sequence[str], ciks: Sequence[int], ticker_ciks_raw: object,
+    tickers: Sequence[str],
+    ciks: Sequence[int],
+    ticker_ciks_raw: object,
 ) -> tuple[list[str], dict[str, int], list[str], list[int]]:
     """(requested tickers, ticker->cik, unresolved, enrich ciks)."""
     requested = list(dict.fromkeys(t.strip().upper() for t in tickers if t and t.strip()))
     ticker_ciks = _normalize_ticker_ciks(ticker_ciks_raw)
     unresolved = [t for t in requested if t not in ticker_ciks]
-    enrich_ciks = list(dict.fromkeys(
-        [*ciks, *(ticker_ciks[t] for t in requested if t in ticker_ciks)]
-    ))
+    enrich_ciks = list(dict.fromkeys([*ciks, *(ticker_ciks[t] for t in requested if t in ticker_ciks)]))
     return requested, ticker_ciks, unresolved, enrich_ciks
 
 
-def _enrich_cik_facts(enrich_ciks: Sequence[int], cik_to_ticker: dict[int, str], data_root: Path) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+def _enrich_cik_facts(
+    enrich_ciks: Sequence[int], cik_to_ticker: dict[int, str], data_root: Path
+) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     """SEC facts per CIK; failures reported per CIK, never blocking siblings."""
     sec_facts: list[dict[str, object]] = []
     failed_enrichments: list[dict[str, object]] = []
@@ -426,11 +465,13 @@ def _enrich_cik_facts(enrich_ciks: Sequence[int], cik_to_ticker: dict[int, str],
         try:
             sec_facts.append(refresh_sec_company_facts(cik, data_root=data_root))
         except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-            failed_enrichments.append({
-                "ticker": cik_to_ticker.get(cik),
-                "cik": cik,
-                "error": f"{type(exc).__name__}: {exc}",
-            })
+            failed_enrichments.append(
+                {
+                    "ticker": cik_to_ticker.get(cik),
+                    "cik": cik,
+                    "error": f"{type(exc).__name__}: {exc}",
+                }
+            )
     return sec_facts, failed_enrichments
 
 
@@ -453,8 +494,7 @@ def prepare_short_interest_data(
     """
     data_root = Path(data_root) if data_root else get_data_root()
     sec_tickers = refresh_sec_tickers(data_root=data_root)
-    _, ticker_ciks, unresolved, enrich_ciks = _resolve_enrichment_ciks(
-        tickers, ciks, sec_tickers["ticker_ciks"])
+    _, ticker_ciks, unresolved, enrich_ciks = _resolve_enrichment_ciks(tickers, ciks, sec_tickers["ticker_ciks"])
     finra = refresh_finra_short_interest(settlement_date, data_root=data_root)
     cik_to_ticker = {cik: ticker for ticker, cik in ticker_ciks.items()}
     sec_facts, failed_enrichments = _enrich_cik_facts(enrich_ciks, cik_to_ticker, data_root)
@@ -467,6 +507,7 @@ def prepare_short_interest_data(
         "unresolved_tickers": unresolved,
         "failed_enrichments": failed_enrichments,
     }
+
 
 def backfill_finra_known_at(*, data_root: Path | None = None) -> dict[str, object]:
     """Rewrite legacy v1 settlement-stamped FINRA ``known_at`` to ``retrieved_at``.
@@ -509,20 +550,18 @@ def _merge_fixed_rows(rows: list[object], fixed: list[dict[str, object]]) -> lis
     return list(by_id.values())
 
 
-def _validate_staged_backfill(staged: list[object], corrected: list[dict[str, object]], fixed: list[dict[str, object]]) -> None:
+def _validate_staged_backfill(
+    staged: list[object], corrected: list[dict[str, object]], fixed: list[dict[str, object]]
+) -> None:
     """Staged copy must hold every fixed row with known_at == retrieved_at + v2."""
     if len(staged) != len(corrected):
-        raise RuntimeError(
-            f"backfill validation failed: staged row count {len(staged)} != {len(corrected)}"
-        )
+        raise RuntimeError(f"backfill validation failed: staged row count {len(staged)} != {len(corrected)}")
     staged_by_id = {str(r.get("row_id")): r for r in staged if isinstance(r, dict)}
     for row in fixed:
         row_id = str(row.get("row_id"))
         staged_row = _assert_fixed_row_present(staged_by_id, row_id)
         _assert_fixed_row_stamped(staged_row, row_id)
     _assert_no_stamped_leftovers(staged)
-
-
 
 
 def _backfill_finra_known_at_locked(data_root: Path) -> dict[str, object]:

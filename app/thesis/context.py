@@ -31,6 +31,7 @@ class ContextBudgetExceeded(ValueError):
 def _tokens(text: str) -> int:
     return len(text) // 4
 
+
 def _journal_mtime(path: Path) -> float:
     """Sort key: journal file modification time (newest first with reverse=True)."""
     return path.stat().st_mtime
@@ -83,9 +84,11 @@ def _pit_visible(value: str, cutoff: str) -> bool:
         return False
     return _le(value, cutoff)
 
+
 @dataclass
 class _PacketParts:
     """Mandatory packet inputs: thesis/state/watch/questions/trigger + memories."""
+
     packet: dict[str, JSONValue]
     memories: list[dict[str, JSONValue]]
     visible_memories: list[dict[str, JSONValue]]
@@ -115,8 +118,7 @@ def _live_memories(thesis_dir: Path) -> list[dict[str, JSONValue]]:
     return [dict(m) for m in out if isinstance(m, dict)]
 
 
-def _live_packet(repository: ThesisRepository, tid: str, thesis_dir: Path,
-                 tdict: dict[str, JSONValue]) -> _PacketParts:
+def _live_packet(repository: ThesisRepository, tid: str, thesis_dir: Path, tdict: dict[str, JSONValue]) -> _PacketParts:
     """Live packet: current thesis/state/questions/rules plus all memories."""
     thesis_dict = repository.load_thesis(tid).to_dict()
     state = dict(repository.load_state(tid).to_dict())
@@ -130,8 +132,7 @@ def _live_packet(repository: ThesisRepository, tid: str, thesis_dir: Path,
         "questions": list[JSONValue](questions),
         "trigger": tdict,
     }
-    return _PacketParts(packet=packet, memories=memories,
-                        visible_memories=list(memories), pit_omitted=[])
+    return _PacketParts(packet=packet, memories=memories, visible_memories=list(memories), pit_omitted=[])
 
 
 def _snapshot_questions(snapshot: ThesisStateSnapshot, thesis_dir: Path) -> list[dict[str, JSONValue]]:
@@ -174,7 +175,9 @@ def _snapshot_memories(snapshot: ThesisStateSnapshot, thesis_dir: Path) -> list[
     return out
 
 
-def _pit_memories(memories: list[dict[str, JSONValue]], data_cutoff: str) -> tuple[list[dict[str, JSONValue]], list[str]]:
+def _pit_memories(
+    memories: list[dict[str, JSONValue]], data_cutoff: str
+) -> tuple[list[dict[str, JSONValue]], list[str]]:
     """PIT-visible memories by created_at; undated/unparseable fail closed."""
     visible: list[dict[str, JSONValue]] = []
     omitted: list[str] = []
@@ -188,8 +191,9 @@ def _pit_memories(memories: list[dict[str, JSONValue]], data_cutoff: str) -> tup
     return visible, omitted
 
 
-def _snapshot_packet(repository: ThesisRepository, tid: str, thesis_dir: Path,
-                     tdict: dict[str, JSONValue], data_cutoff: str) -> _PacketParts:
+def _snapshot_packet(
+    repository: ThesisRepository, tid: str, thesis_dir: Path, tdict: dict[str, JSONValue], data_cutoff: str
+) -> _PacketParts:
     """Snapshot packet at the cutoff: thesis+trigger+state+watch+questions only."""
     snapshot = repository.load_state_as_of(tid, data_cutoff)
     state = dict(snapshot.state)
@@ -204,8 +208,7 @@ def _snapshot_packet(repository: ThesisRepository, tid: str, thesis_dir: Path,
         "questions": list[JSONValue](questions),
         "trigger": tdict,
     }
-    return _PacketParts(packet=packet, memories=memories,
-                        visible_memories=visible, pit_omitted=omitted)
+    return _PacketParts(packet=packet, memories=memories, visible_memories=visible, pit_omitted=omitted)
 
 
 def _check_budget(packet: dict[str, JSONValue], max_tokens: int) -> int:
@@ -213,12 +216,9 @@ def _check_budget(packet: dict[str, JSONValue], max_tokens: int) -> int:
     mandatory = _tokens(json.dumps(packet, sort_keys=True))
     if mandatory <= max_tokens:
         return mandatory
-    breakdown = ", ".join(
-        f"{k}~{_tokens(json.dumps(v, sort_keys=True))}" for k, v in packet.items()
-    )
+    breakdown = ", ".join(f"{k}~{_tokens(json.dumps(v, sort_keys=True))}" for k, v in packet.items())
     raise ContextBudgetExceeded(
-        f"<context>: mandatory packet ~{mandatory} tokens exceeds budget of {max_tokens}"
-        f" ({breakdown})"
+        f"<context>: mandatory packet ~{mandatory} tokens exceeds budget of {max_tokens} ({breakdown})"
     )
 
 
@@ -230,11 +230,13 @@ def _evidence_order_key(trigger_refs: set[str]) -> Callable[[dict[str, JSONValue
         dt = _as_dt(str(e.get("known_at") or ""))
         ts = dt.timestamp() if dt is not None else float("-inf")
         return (0 if e.get("canonical_ref") in trigger_refs else 1, -ts, str(e.get("evidence_id") or ""))
+
     return _ev_key
 
 
-def _load_evidence(repository: ThesisRepository, tid: str, thesis_dir: Path,
-                   tdict: dict[str, JSONValue], data_cutoff: str) -> list[dict[str, JSONValue]]:
+def _load_evidence(
+    repository: ThesisRepository, tid: str, thesis_dir: Path, tdict: dict[str, JSONValue], data_cutoff: str
+) -> list[dict[str, JSONValue]]:
     """PIT-visible evidence refs, trigger refs first then newest-first."""
     _crefs = tdict.get("canonical_refs")
     trigger_refs: set[str] = {c for c in _crefs if isinstance(c, str)} if isinstance(_crefs, list) else set()
@@ -252,8 +254,9 @@ def _load_evidence(repository: ThesisRepository, tid: str, thesis_dir: Path,
     return ordered
 
 
-def _fit_evidence(ordered: list[dict[str, JSONValue]], omitted: list[str],
-                  used: int, max_tokens: int) -> tuple[list[dict[str, JSONValue]], list[str], int, list[str]]:
+def _fit_evidence(
+    ordered: list[dict[str, JSONValue]], omitted: list[str], used: int, max_tokens: int
+) -> tuple[list[dict[str, JSONValue]], list[str], int, list[str]]:
     """Evidence fitting the remaining budget; returns (evidence, included, used, omitted)."""
     evidence: list[dict[str, JSONValue]] = []
     included: list[str] = []
@@ -270,9 +273,13 @@ def _fit_evidence(ordered: list[dict[str, JSONValue]], omitted: list[str],
     return evidence, included, used, omitted
 
 
-def _trim_memories(packet: dict[str, JSONValue], visible: list[dict[str, JSONValue]],
-                   evidence_tokens: int, max_tokens: int,
-                   omitted: list[str]) -> tuple[list[dict[str, JSONValue]], list[str]]:
+def _trim_memories(
+    packet: dict[str, JSONValue],
+    visible: list[dict[str, JSONValue]],
+    evidence_tokens: int,
+    max_tokens: int,
+    omitted: list[str],
+) -> tuple[list[dict[str, JSONValue]], list[str]]:
     """Oldest-first memory trim until packet + evidence fit; returns (kept, included)."""
     kept = list(visible)
     while kept and _packet_tokens(packet, kept) + evidence_tokens > max_tokens:
@@ -324,8 +331,9 @@ def _journal_files(thesis_dir: Path) -> list[Path]:
     )
 
 
-def _collect_one_journal(f: Path, head: str, live: bool, data_cutoff: str, used: int,
-                         max_tokens: int, omitted: list[str]) -> tuple[dict[str, JSONValue] | None, int]:
+def _collect_one_journal(
+    f: Path, head: str, live: bool, data_cutoff: str, used: int, max_tokens: int, omitted: list[str]
+) -> tuple[dict[str, JSONValue] | None, int]:
     """One journal file: (excerpt, used) or (None, used) when skipped."""
     if not _journal_visible(head, live, data_cutoff):
         omitted.append(f.stem)  # missing, unparseable, or future-known: never visible
@@ -336,9 +344,9 @@ def _collect_one_journal(f: Path, head: str, live: bool, data_cutoff: str, used:
     return {"journal": f.stem, "excerpt": head}, used + _tokens(head)
 
 
-def _collect_journals(thesis_dir: Path, live: bool, data_cutoff: str, used: int,
-                      max_tokens: int, omitted: list[str],
-                      included: list[str]) -> tuple[list[dict[str, JSONValue]], int]:
+def _collect_journals(
+    thesis_dir: Path, live: bool, data_cutoff: str, used: int, max_tokens: int, omitted: list[str], included: list[str]
+) -> tuple[list[dict[str, JSONValue]], int]:
     """Newest-first journal excerpts while budget remains."""
     excerpts: list[dict[str, JSONValue]] = []
     for f in _journal_files(thesis_dir):
@@ -353,10 +361,15 @@ def _collect_journals(thesis_dir: Path, live: bool, data_cutoff: str, used: int,
     return excerpts, used
 
 
-def _finalize_packet(packet: dict[str, JSONValue], ordered: list[dict[str, JSONValue]],
-                     evidence: list[dict[str, JSONValue]], memories: list[dict[str, JSONValue]],
-                     kept: list[dict[str, JSONValue]], journals_omitted: int,
-                     excerpts: list[dict[str, JSONValue]]) -> None:
+def _finalize_packet(
+    packet: dict[str, JSONValue],
+    ordered: list[dict[str, JSONValue]],
+    evidence: list[dict[str, JSONValue]],
+    memories: list[dict[str, JSONValue]],
+    kept: list[dict[str, JSONValue]],
+    journals_omitted: int,
+    excerpts: list[dict[str, JSONValue]],
+) -> None:
     """Omitted counts for evidence/memories/journals."""
     _ = excerpts
     packet["omitted_counts"] = {
@@ -401,9 +414,7 @@ def _build_context(
     journal_total = len(list(journal_dir.glob("*.md"))) if journal_dir.is_dir() else 0
     excerpts, used = _collect_journals(thesis_dir, live, data_cutoff, used, max_tokens, omitted, included)
     _finalize_packet(packet, ordered, evidence, parts.memories, kept, journal_total - len(excerpts), excerpts)
-    total = _tokens(
-        json.dumps({"packet": packet, "evidence": evidence, "journals": excerpts}, sort_keys=True)
-    )
+    total = _tokens(json.dumps({"packet": packet, "evidence": evidence, "journals": excerpts}, sort_keys=True))
     return ResearchContext(
         thesis_packet=packet,
         evidence_refs=evidence,
@@ -441,6 +452,7 @@ def build_live_context(
     if not isinstance(data_cutoff, str) or not data_cutoff:
         raise ValueError("<context>: 'data_cutoff' must be a non-empty ISO string")
     from app.thesis.monitor import _as_dt  # local: monitor -> runner -> context
+
     if _as_dt(data_cutoff) is None:
         raise ValueError(f"<context>: bad data_cutoff {data_cutoff!r}")
     return _build_context(repository, thesis_id, trigger, data_cutoff=data_cutoff, max_tokens=max_tokens, live=True)

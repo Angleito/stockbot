@@ -15,7 +15,7 @@ import os
 import re
 import tempfile
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from typing import TypedDict
 
@@ -61,6 +61,7 @@ def _table_allowed(table: str) -> bool:
     if table in ALLOWED_TABLES:
         return True
     return isinstance(table, str) and table.startswith(_GSOD_PREFIX)
+
 
 TEMPLATES: dict[str, dict[str, object]] = {
     "trends_us_top": {
@@ -228,6 +229,7 @@ class LedgerCorrupt(Exception):
 
 class _JobEntry(TypedDict, total=False):
     """One ledger job record: reservation ints stay ints, outcomes stay explicit."""
+
     template: str
     month: str
     day: str
@@ -245,6 +247,7 @@ class _JobEntry(TypedDict, total=False):
 
 class _Ledger(TypedDict):
     """Local accounting state: idempotent job records plus 3-bucket counters."""
+
     jobs: dict[str, _JobEntry]
     months: dict[str, int]
     days: dict[str, int]
@@ -257,12 +260,12 @@ def bq_enabled() -> bool:
 
 def _utc_month() -> str:
     """Current UTC month bucket (module-level seam for cross-month tests)."""
-    return datetime.now(timezone.utc).strftime("%Y-%m")
+    return datetime.now(UTC).strftime("%Y-%m")
 
 
 def _utc_day() -> str:
     """Current UTC day bucket for the daily reservation ledger."""
-    return datetime.now(timezone.utc).strftime("%Y-%m-%d")
+    return datetime.now(UTC).strftime("%Y-%m-%d")
 
 
 # Compat names for pre-existing callers; job IDs still derive from the exact
@@ -406,6 +409,7 @@ def _ledger_path(data_root: Path | str | None = None) -> Path:
         base = Path(data_root)
     else:
         from ._lazy_config import get_data_root_or_cwd
+
         base = get_data_root_or_cwd()
     return base / "google_data" / "bq_ledger.json"
 
@@ -435,7 +439,7 @@ def _ledger_locked(data_root: Path | str | None = None):
         raise _LedgerBusy("ledger locking unavailable on this platform") from None
     path = _ledger_path(data_root)
     path.parent.mkdir(parents=True, exist_ok=True)
-    fh = open(path.parent / "bq_ledger.lock", "a+b")  # noqa: PTH123, SIM115
+    fh = open(path.parent / "bq_ledger.lock", "a+b")  # noqa: SIM115 - flock handle must stay open for the whole critical section
     try:
         try:
             _fcntl.flock(fh.fileno(), _fcntl.LOCK_EX | _fcntl.LOCK_NB)
@@ -475,7 +479,7 @@ def _save_ledger(path: Path, ledger: _Ledger) -> None:
 
 def _job_id(template: str, params: dict[str, object]) -> str:
     canonical = json.dumps(params, sort_keys=True, separators=(",", ":"), default=str)
-    return hashlib.sha256(f"{template}:{canonical}".encode("utf-8")).hexdigest()
+    return hashlib.sha256(f"{template}:{canonical}".encode()).hexdigest()
 
 
 def _err(message: str, error_type: str, **extra: object) -> dict[str, object]:
@@ -580,8 +584,7 @@ def _census_suffix_table(params: dict[str, object]) -> str:
     """Validated census ACS table for the {table_suffix} template path."""
     suffix = params.get("table_suffix", "county_2020_5yr")
     if suffix not in _ACS_SUFFIXES:
-        raise ValueError(
-            f"unknown census table: {suffix!r} (available: {sorted(_ACS_SUFFIXES)})")
+        raise ValueError(f"unknown census table: {suffix!r} (available: {sorted(_ACS_SUFFIXES)})")
     return f"bigquery-public-data.census_bureau_acs.{suffix}"
 
 
@@ -606,8 +609,7 @@ def _normalize_column_list(cols_raw: object) -> list[object]:
         return [cols_raw]
     if isinstance(cols_raw, (list, tuple)):
         return list(cols_raw)
-    raise ValueError(
-        f"unknown census columns: {cols_raw!r} (available: {sorted(_ACS_COLUMNS)})")
+    raise ValueError(f"unknown census columns: {cols_raw!r} (available: {sorted(_ACS_COLUMNS)})")
 
 
 def _invalid_columns(cols: list[object]) -> list[object]:
@@ -620,13 +622,11 @@ def _columns_clause(params: dict[str, object]) -> str:
     cols = _normalize_column_list(params.get("columns", ["total_pop"]))
     bad = _invalid_columns(cols)
     if not cols or bad:
-        raise ValueError(
-            f"unknown census columns: {(bad or cols)!r} (available: {sorted(_ACS_COLUMNS)})")
+        raise ValueError(f"unknown census columns: {(bad or cols)!r} (available: {sorted(_ACS_COLUMNS)})")
     return ", ".join(str(c) for c in cols)
 
 
-def _format_map(sql_template: str, params: dict[str, object],
-                table: str) -> dict[str, object]:
+def _format_map(sql_template: str, params: dict[str, object], table: str) -> dict[str, object]:
     """{limit}/{table}/{table_suffix}/{columns} mapping for the template."""
     fmt: dict[str, object] = {"limit": params["limit"], "table": table}
     if "{table_suffix}" in sql_template:
@@ -685,9 +685,9 @@ def _real_submit(
         maximum_bytes_billed=cap,
         query_parameters=_query_parameters(_bq, params),
     )
-    job = getattr(client, "query")(  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
-        sql, job_config=job_config, job_id=f"stockbot_{job_id[:56]}", location="US"
-    )
+    job = getattr(  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
+        client, "query"
+    )(sql, job_config=job_config, job_id=f"stockbot_{job_id[:56]}", location="US")
     rows = [dict(r) for r in getattr(job, "result")(max_results=max_rows)]  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
     return {
         "job_id": job_id,
@@ -697,8 +697,9 @@ def _real_submit(
     }
 
 
-def _check_template(template: str, params: dict[str, object]) -> tuple[dict[str, object] | None,
-                                                                      dict[str, object], str]:
+def _check_template(
+    template: str, params: dict[str, object]
+) -> tuple[dict[str, object] | None, dict[str, object], str]:
     """(error, spec, table) for the checked-in template and its effective table."""
     spec = TEMPLATES.get(template)
     if spec is None:
@@ -720,8 +721,13 @@ def _check_project() -> tuple[dict[str, object] | None, str, int, int, int]:
     """(error, project, per-query cap, monthly limit, daily limit)."""
     project = get_google_cloud_project()
     if not bq_enabled() or not project:
-        return (_err("BigQuery disabled (need GOOGLE_DATA_ENABLED + GOOGLE_CLOUD_PROJECT)",
-                     "source_unavailable"), "", 0, 0, 0)
+        return (
+            _err("BigQuery disabled (need GOOGLE_DATA_ENABLED + GOOGLE_CLOUD_PROJECT)", "source_unavailable"),
+            "",
+            0,
+            0,
+            0,
+        )
     per_query_cap = get_bq_max_bytes_per_query()
     monthly_limit = get_bq_monthly_bytes_limit()
     daily_limit = get_bq_daily_bytes_limit()
@@ -737,34 +743,42 @@ def _clamp_rows(params: dict[str, object], spec: dict[str, object]) -> tuple[dic
     try:
         raw_limit: object = params.get("limit", max_rows)
         limit = int(raw_limit) if isinstance(raw_limit, (int, str, float)) else max_rows
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         limit = max_rows
     params["limit"] = max(1, min(limit, max_rows))
     return params, max_rows
 
 
-def _cached_done(jobs: dict[str, _JobEntry], jid: str,
-                 template: str) -> dict[str, object] | None:
+def _cached_done(jobs: dict[str, _JobEntry], jid: str, template: str) -> dict[str, object] | None:
     """Cached ok payload for done jobs; no rows, never treated as no evidence."""
     existing = jobs.get(jid)
     if isinstance(existing, dict) and existing.get("status") == "done":
-        return {"status": "ok", "source": SOURCE, "job_id": jid, "template": template,
-                "rows": [], "total_bytes_billed": existing.get("actual_bytes", 0),
-                "cached": True}
+        return {
+            "status": "ok",
+            "source": SOURCE,
+            "job_id": jid,
+            "template": template,
+            "rows": [],
+            "total_bytes_billed": existing.get("actual_bytes", 0),
+            "cached": True,
+        }
     return None
 
 
-def _make_client(client_factory: Callable[[], object] | None,
-                 project: str) -> tuple[dict[str, object] | None, object, bool | None]:
+def _make_client(
+    client_factory: Callable[[], object] | None, project: str
+) -> tuple[dict[str, object] | None, object, bool | None]:
     """(error, client, billing-disabled flag) honoring the fake seam."""
     if client_factory is not None:
         client = client_factory()
         # ponytail: minimal fakes (dry_run/submit only) skip the network
         # billing check; production (no factory) always verifies via API.
-        if (not hasattr(client, "billing_enabled")
-                and not hasattr(client, "get_billing_info")
-                and not isinstance(client, dict)
-                and getattr(client, "_credentials", None) is None):
+        if (
+            not hasattr(client, "billing_enabled")
+            and not hasattr(client, "get_billing_info")
+            and not isinstance(client, dict)
+            and getattr(client, "_credentials", None) is None
+        ):
             return None, client, True
         return None, client, _billing_state(client, project)
     try:
@@ -780,14 +794,17 @@ def _billing_error(billing: bool | None) -> dict[str, object] | None:
     """Refusal error unless billing is verified disabled."""
     if billing is True:
         return None
-    return _err("billing is enabled for this project; refusing"
-                if billing is False
-                else "could not verify billing disabled; refusing",
-                "billing_enabled" if billing is False else "billing_unknown")
+    return _err(
+        "billing is enabled for this project; refusing"
+        if billing is False
+        else "could not verify billing disabled; refusing",
+        "billing_enabled" if billing is False else "billing_unknown",
+    )
 
 
-def _dry_run(client: object, spec: dict[str, object], params: dict[str, object],
-             table: str, cap: int) -> tuple[dict[str, object] | None, int]:
+def _dry_run(
+    client: object, spec: dict[str, object], params: dict[str, object], table: str, cap: int
+) -> tuple[dict[str, object] | None, int]:
     """(error, estimate) via fake dry_run or a real bounded dry-run."""
     try:
         if hasattr(client, "dry_run"):
@@ -803,14 +820,23 @@ def _dry_run(client: object, spec: dict[str, object], params: dict[str, object],
 def _cap_error(estimate: int, cap: int) -> dict[str, object] | None:
     """Per-query cap error, else None."""
     if estimate > cap:
-        return _err(f"estimated {estimate} bytes exceeds per-query cap {cap} "
-                    "(BIGQUERY_QUERY_TOO_LARGE)", "cost_limit_exceeded")
+        return _err(
+            f"estimated {estimate} bytes exceeds per-query cap {cap} (BIGQUERY_QUERY_TOO_LARGE)", "cost_limit_exceeded"
+        )
     return None
 
 
-def _reserve_budget(ledger: _Ledger, jid: str, template: str, table: str,
-                    month: str, day: str, estimate: int,
-                    monthly_limit: int, daily_limit: int) -> tuple[dict[str, object] | None, int, bool]:
+def _reserve_budget(
+    ledger: _Ledger,
+    jid: str,
+    template: str,
+    table: str,
+    month: str,
+    day: str,
+    estimate: int,
+    monthly_limit: int,
+    daily_limit: int,
+) -> tuple[dict[str, object] | None, int, bool]:
     """(error, reserve, resumed): reservation recorded unless a pending job resumes."""
     jobs, months, days = ledger["jobs"], ledger["months"], ledger["days"]
     existing = jobs.get(jid)
@@ -818,25 +844,50 @@ def _reserve_budget(ledger: _Ledger, jid: str, template: str, table: str,
         resumed = int(existing.get("max_bytes", estimate) or estimate)
         return None, max(estimate, resumed), True
     if months.get(month, 0) + estimate > monthly_limit:
-        return (_err("monthly BigQuery byte limit would be exceeded (BIGQUERY_FREE_LIMIT_REACHED)",
-                     "monthly_limit_exceeded"), 0, False)
+        return (
+            _err(
+                "monthly BigQuery byte limit would be exceeded (BIGQUERY_FREE_LIMIT_REACHED)", "monthly_limit_exceeded"
+            ),
+            0,
+            False,
+        )
     if days.get(day, 0) + estimate > daily_limit:
-        return (_err("daily BigQuery byte limit would be exceeded (BIGQUERY_FREE_LIMIT_REACHED)",
-                     "daily_limit_exceeded"), 0, False)
+        return (
+            _err("daily BigQuery byte limit would be exceeded (BIGQUERY_FREE_LIMIT_REACHED)", "daily_limit_exceeded"),
+            0,
+            False,
+        )
     months[month] = months.get(month, 0) + estimate
     days[day] = days.get(day, 0) + estimate
-    jobs[jid] = {"template": template, "month": month, "day": day, "max_bytes": estimate,
-                 "status": "pending", "actual_bytes": None, "source": SOURCE,
-                 "dataset": table.split(".")[1] if "." in table else "", "table": table,
-                 "executed_at": datetime.now(timezone.utc).isoformat(),
-                 "bytes_processed": None, "cache_hit": False, "success": False}
+    jobs[jid] = {
+        "template": template,
+        "month": month,
+        "day": day,
+        "max_bytes": estimate,
+        "status": "pending",
+        "actual_bytes": None,
+        "source": SOURCE,
+        "dataset": table.split(".")[1] if "." in table else "",
+        "table": table,
+        "executed_at": datetime.now(UTC).isoformat(),
+        "bytes_processed": None,
+        "cache_hit": False,
+        "success": False,
+    }
     _prune_buckets(ledger)
     return None, estimate, False
 
 
-def _execute(client: object, spec: dict[str, object], params: dict[str, object],
-             table: str, entry: _JobEntry, reserve: int,
-             jid: str, max_rows: int) -> tuple[dict[str, object] | None, dict[str, object]]:
+def _execute(
+    client: object,
+    spec: dict[str, object],
+    params: dict[str, object],
+    table: str,
+    entry: _JobEntry,
+    reserve: int,
+    jid: str,
+    max_rows: int,
+) -> tuple[dict[str, object] | None, dict[str, object]]:
     """(error, result): submit via fake or real client; unknown outcomes keep reservation."""
     try:
         if hasattr(client, "submit"):
@@ -844,8 +895,10 @@ def _execute(client: object, spec: dict[str, object], params: dict[str, object],
         sql_text, bq_params = _render_sql(spec, params, table)
         return None, _real_submit(client, sql_text, bq_params, reserve, jid, max_rows)
     except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return (_err(f"submit failed with unknown outcome; reservation retained: {e}",
-                     "source_unavailable", job_id=jid), {})
+        return (
+            _err(f"submit failed with unknown outcome; reservation retained: {e}", "source_unavailable", job_id=jid),
+            {},
+        )
 
 
 def _actual_bytes(result: dict[str, object], entry: _JobEntry) -> int:
@@ -855,7 +908,7 @@ def _actual_bytes(result: dict[str, object], entry: _JobEntry) -> int:
         if not isinstance(billed_raw, (int, str, float)):
             raise ValueError(f"non-numeric bytes billed: {billed_raw!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         return int(billed_raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return int(entry["max_bytes"] or 0)
 
 
@@ -887,25 +940,31 @@ def _settle_failed(path: Path, ledger: _Ledger, entry: _JobEntry) -> None:
     _save_ledger(path, ledger)
 
 
-def _settle(path: Path, ledger: _Ledger, template: str, jid: str,
-            entry: _JobEntry, result: dict[str, object]) -> dict[str, object]:
+def _settle(
+    path: Path, ledger: _Ledger, template: str, jid: str, entry: _JobEntry, result: dict[str, object]
+) -> dict[str, object]:
     """Persist the terminal outcome and return the fixed-shape payload."""
     state = str(result.get("state", "")).upper()
     if state == "DONE":
         actual = _actual_bytes(result, entry)
         _settle_done(path, ledger, entry, actual)
-        return {"status": "ok", "source": SOURCE, "job_id": jid, "template": template,
-                "rows": result.get("rows", []), "total_bytes_billed": actual}
+        return {
+            "status": "ok",
+            "source": SOURCE,
+            "job_id": jid,
+            "template": template,
+            "rows": result.get("rows", []),
+            "total_bytes_billed": actual,
+        }
     if state in ("FAILED", "ERROR", "CANCELLED"):
         _settle_failed(path, ledger, entry)
         return _err(f"query {state.lower()}", "source_unavailable", job_id=jid)
     return {"status": "unknown", "source": SOURCE, "job_id": jid, "template": template}
 
 
-def _prepare(template: str, params: dict[str, object],
-             data_root: Path | str | None) -> tuple[dict[str, object] | None, dict[str, object],
-                                                   dict[str, object], str, str, int, int, int,
-                                                   int, str, str, str]:
+def _prepare(
+    template: str, params: dict[str, object], data_root: Path | str | None
+) -> tuple[dict[str, object] | None, dict[str, object], dict[str, object], str, str, int, int, int, int, str, str, str]:
     """(error, spec, params, table, project, caps..., max_rows, jid, month, day)."""
     params = dict(params or {})
     tmpl_err, spec, table = _check_template(template, params)
@@ -916,14 +975,39 @@ def _prepare(template: str, params: dict[str, object],
         return proj_err, {}, params, "", "", 0, 0, 0, 0, "", "", ""
     params, max_rows = _clamp_rows(params, spec)
     jid = _job_id(template, params)
-    return None, spec, params, table, project, per_query_cap, monthly_limit, daily_limit, max_rows, jid, _utc_month(), _utc_day()
+    return (
+        None,
+        spec,
+        params,
+        table,
+        project,
+        per_query_cap,
+        monthly_limit,
+        daily_limit,
+        max_rows,
+        jid,
+        _utc_month(),
+        _utc_day(),
+    )
 
 
-def _run_locked(path: Path, ledger: _Ledger, template: str, spec: dict[str, object],
-                params: dict[str, object], table: str, project: str, per_query_cap: int,
-                monthly_limit: int, daily_limit: int, max_rows: int, jid: str,
-                month: str, day: str,
-                client_factory: Callable[[], object] | None) -> dict[str, object]:
+def _run_locked(
+    path: Path,
+    ledger: _Ledger,
+    template: str,
+    spec: dict[str, object],
+    params: dict[str, object],
+    table: str,
+    project: str,
+    per_query_cap: int,
+    monthly_limit: int,
+    daily_limit: int,
+    max_rows: int,
+    jid: str,
+    month: str,
+    day: str,
+    client_factory: Callable[[], object] | None,
+) -> dict[str, object]:
     """Ledger-held execution: cache check, billing gate, dry-run, reserve, submit, settle."""
     cached = _cached_done(ledger["jobs"], jid, template)
     if cached is not None:
@@ -940,8 +1024,9 @@ def _run_locked(path: Path, ledger: _Ledger, template: str, spec: dict[str, obje
     cap_err = _cap_error(estimate, per_query_cap)
     if cap_err is not None:
         return cap_err
-    reserve_err, reserve, resumed = _reserve_budget(ledger, jid, template, table, month, day,
-                                                  estimate, monthly_limit, daily_limit)
+    reserve_err, reserve, resumed = _reserve_budget(
+        ledger, jid, template, table, month, day, estimate, monthly_limit, daily_limit
+    )
     if reserve_err is not None:
         return reserve_err
     if not resumed:
@@ -954,7 +1039,9 @@ def _run_locked(path: Path, ledger: _Ledger, template: str, spec: dict[str, obje
 
 
 def submit_template(
-    template: str, params: dict[str, object], client_factory: Callable[[], object] | None = None,
+    template: str,
+    params: dict[str, object],
+    client_factory: Callable[[], object] | None = None,
     data_root: Path | str | None = None,
 ) -> dict[str, object]:
     """Run one checked-in template; bounded, ledger-backed, billing-gated.
@@ -966,8 +1053,9 @@ def submit_template(
     a minimal fake (neither present) skips the network billing check.
     Raises LedgerCorrupt on unreadable accounting state.
     """
-    prep_err, spec, params, table, project, per_query_cap, monthly_limit, daily_limit, max_rows, jid, month, day = _prepare(
-        template, params, data_root)
+    prep_err, spec, params, table, project, per_query_cap, monthly_limit, daily_limit, max_rows, jid, month, day = (
+        _prepare(template, params, data_root)
+    )
     if prep_err is not None:
         return prep_err
     try:
@@ -976,6 +1064,20 @@ def submit_template(
         return _err(str(e), "source_unavailable")
     with locker as path:
         ledger = _load_ledger(path)  # raises LedgerCorrupt: refuse, never reset
-        return _run_locked(path, ledger, template, spec, params, table, project,
-                           per_query_cap, monthly_limit, daily_limit, max_rows,
-                           jid, month, day, client_factory)
+        return _run_locked(
+            path,
+            ledger,
+            template,
+            spec,
+            params,
+            table,
+            project,
+            per_query_cap,
+            monthly_limit,
+            daily_limit,
+            max_rows,
+            jid,
+            month,
+            day,
+            client_factory,
+        )

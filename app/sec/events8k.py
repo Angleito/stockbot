@@ -50,10 +50,10 @@ class EightKReport(Protocol):
 
     def __getitem__(self, name: str) -> object: ...
 
+
 def _normalize_key(key: object) -> str | None:
     s = str(key).lower().strip()
-    if s.startswith("item"):
-        s = s[4:]
+    s = s.removeprefix("item")
     return _NORM.get(re.sub(r"[\s._\-]+", "", s))
 
 
@@ -122,7 +122,7 @@ def _item_texts_of(report: EightKReport, names: list[str]) -> dict[str, object]:
     for name in names:
         try:
             text = report[name]
-        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
         if text:
             items[name] = text
@@ -135,6 +135,4 @@ def extract_8k_events(
     *,
     event_date: str | date | None = None,
 ) -> list[CurrentReportEvent]:
-    return parse_8k_events(
-        accession_no, _item_texts_of(report, _item_names_of(report)),
-        event_date=event_date)
+    return parse_8k_events(accession_no, _item_texts_of(report, _item_names_of(report)), event_date=event_date)

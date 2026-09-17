@@ -13,7 +13,7 @@ Coverage under test:
 """
 
 import json
-from datetime import datetime, timezone, tzinfo
+from datetime import UTC, datetime, tzinfo
 from decimal import Decimal
 from pathlib import Path
 from typing import override
@@ -36,9 +36,9 @@ from app.storage import parquet
 
 FIXTURES = Path(__file__).parent / "fixtures" / "robinhood"
 
-NOW = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+NOW = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 SNAPSHOT_ID = "portfolio:robinhood:2026-08-25T12:00:00+00:00"
-QUOTE_TIME = datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc)
+QUOTE_TIME = datetime(2026, 8, 25, 15, 0, tzinfo=UTC)
 
 
 @pytest.fixture
@@ -53,18 +53,43 @@ def _fixture(name: str):
 def _inline_positions(account_number: str) -> dict[str, object]:
     positions = {
         "100000001": [
-            {"id": "pos-2", "instrument_id": "instr-aapl", "symbol": "AAPL", "quantity": "0.5",
-             "average_buy_price": "150.25"},
-            {"id": "pos-3", "instrument_id": "instr-tsla", "symbol": "TSLA", "quantity": "0",
-             "average_buy_price": "200.00"},
-            {"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING", "quantity": "10",
-             "average_buy_price": "95.50"},
+            {
+                "id": "pos-2",
+                "instrument_id": "instr-aapl",
+                "symbol": "AAPL",
+                "quantity": "0.5",
+                "average_buy_price": "150.25",
+            },
+            {
+                "id": "pos-3",
+                "instrument_id": "instr-tsla",
+                "symbol": "TSLA",
+                "quantity": "0",
+                "average_buy_price": "200.00",
+            },
+            {
+                "id": "pos-1",
+                "instrument_id": "instr-wing",
+                "symbol": "WING",
+                "quantity": "10",
+                "average_buy_price": "95.50",
+            },
         ],
         "100000002": [
-            {"id": "pos-5", "instrument_id": "instr-msft", "symbol": "MSFT", "quantity": "5",
-             "average_buy_price": "400.00"},
-            {"id": "pos-6", "instrument_id": "instr-wing-2", "symbol": "WING", "quantity": "1",
-             "average_buy_price": "100.00"},
+            {
+                "id": "pos-5",
+                "instrument_id": "instr-msft",
+                "symbol": "MSFT",
+                "quantity": "5",
+                "average_buy_price": "400.00",
+            },
+            {
+                "id": "pos-6",
+                "instrument_id": "instr-wing-2",
+                "symbol": "WING",
+                "quantity": "1",
+                "average_buy_price": "100.00",
+            },
         ],
     }
     return {"data": {"positions": positions.get(account_number, [])}}
@@ -72,20 +97,48 @@ def _inline_positions(account_number: str) -> dict[str, object]:
 
 def _inline_balance(account_number: str) -> dict[str, object]:
     cash = {"100000001": "1234.56", "100000002": "2000.00"}[account_number]
-    return {"data": {"cash": cash, "buying_power": {"buying_power": "2500.00"} }}
+    return {"data": {"cash": cash, "buying_power": {"buying_power": "2500.00"}}}
 
 
 def _inline_quotes():
-    return {"data": {"results": [
-        {"quote": {"symbol": "WING", "last_trade_price": "116.84", "bid_price": "116.83",
-                   "ask_price": "116.85", "venue_last_trade_time": "2026-08-25T15:00:00Z"}},
-        {"quote": {"symbol": "AAPL", "last_trade_price": "160.00", "bid_price": "159.90",
-                   "ask_price": "160.10", "venue_last_trade_time": "2026-08-25T15:00:00Z"}},
-        {"quote": {"symbol": "TSLA", "last_trade_price": "250.00",
-                   "venue_last_trade_time": "2026-08-25T15:00:00Z"}},
-        {"quote": {"symbol": "MSFT", "last_trade_price": "405.00",
-                   "venue_last_trade_time": "2026-08-25T15:00:00Z"}},
-    ]}}
+    return {
+        "data": {
+            "results": [
+                {
+                    "quote": {
+                        "symbol": "WING",
+                        "last_trade_price": "116.84",
+                        "bid_price": "116.83",
+                        "ask_price": "116.85",
+                        "venue_last_trade_time": "2026-08-25T15:00:00Z",
+                    }
+                },
+                {
+                    "quote": {
+                        "symbol": "AAPL",
+                        "last_trade_price": "160.00",
+                        "bid_price": "159.90",
+                        "ask_price": "160.10",
+                        "venue_last_trade_time": "2026-08-25T15:00:00Z",
+                    }
+                },
+                {
+                    "quote": {
+                        "symbol": "TSLA",
+                        "last_trade_price": "250.00",
+                        "venue_last_trade_time": "2026-08-25T15:00:00Z",
+                    }
+                },
+                {
+                    "quote": {
+                        "symbol": "MSFT",
+                        "last_trade_price": "405.00",
+                        "venue_last_trade_time": "2026-08-25T15:00:00Z",
+                    }
+                },
+            ]
+        }
+    }
 
 
 class FakeClient:
@@ -147,42 +200,62 @@ def _alias_row(**overrides: object) -> dict[str, object]:
 
 
 def _seed_wing_alias(data_root: Path) -> None:
-    parquet.write_rows("entities", [{
-        "entity_id": "sec:cik:0000320193",
-        "name": "Wing Stop Inc",
-        "entity_type": "company",
-        "source": "sec",
-        "known_at": "2026-01-01T00:00:00Z",
-        "retrieved_at": "2026-01-01T00:00:00Z",
-        "content_hash": "entity-wing",
-        "parser_version": "test",
-    }], root=data_root / "parquet")
-    parquet.write_rows("entity_aliases", [{
-        "alias_type": "ticker",
-        "alias_value": "WING",
-        "entity_id": "sec:cik:0000320193",
-        "security_id": "sec:equity:0000320193",
-        "source": "sec",
-        "valid_from": "2026-01-01",
-        "known_at": "2026-01-01T00:00:00Z",
-        "retrieved_at": "2026-01-01T00:00:00Z",
-        "content_hash": "alias-wing",
-        "parser_version": "test",
-    }], root=data_root / "parquet")
-    parquet.write_rows("securities", [{
-        "security_id": "sec:equity:0000320193",
-        "entity_id": "sec:cik:0000320193",
-        "security_type": "equity-common",
-        "ticker": "WING",
-        "source": "sec",
-        "known_at": "2026-01-01T00:00:00Z",
-        "retrieved_at": "2026-01-01T00:00:00Z",
-        "content_hash": "security-wing",
-        "parser_version": "test",
-    }], root=data_root / "parquet")
+    parquet.write_rows(
+        "entities",
+        [
+            {
+                "entity_id": "sec:cik:0000320193",
+                "name": "Wing Stop Inc",
+                "entity_type": "company",
+                "source": "sec",
+                "known_at": "2026-01-01T00:00:00Z",
+                "retrieved_at": "2026-01-01T00:00:00Z",
+                "content_hash": "entity-wing",
+                "parser_version": "test",
+            }
+        ],
+        root=data_root / "parquet",
+    )
+    parquet.write_rows(
+        "entity_aliases",
+        [
+            {
+                "alias_type": "ticker",
+                "alias_value": "WING",
+                "entity_id": "sec:cik:0000320193",
+                "security_id": "sec:equity:0000320193",
+                "source": "sec",
+                "valid_from": "2026-01-01",
+                "known_at": "2026-01-01T00:00:00Z",
+                "retrieved_at": "2026-01-01T00:00:00Z",
+                "content_hash": "alias-wing",
+                "parser_version": "test",
+            }
+        ],
+        root=data_root / "parquet",
+    )
+    parquet.write_rows(
+        "securities",
+        [
+            {
+                "security_id": "sec:equity:0000320193",
+                "entity_id": "sec:cik:0000320193",
+                "security_type": "equity-common",
+                "ticker": "WING",
+                "source": "sec",
+                "known_at": "2026-01-01T00:00:00Z",
+                "retrieved_at": "2026-01-01T00:00:00Z",
+                "content_hash": "security-wing",
+                "parser_version": "test",
+            }
+        ],
+        root=data_root / "parquet",
+    )
 
 
-def _run_sync(data_root: Path, payloads: dict[str, object] | None = None) -> tuple[FakeClient, RobinhoodPortfolioProvider, PortfolioSnapshot]:
+def _run_sync(
+    data_root: Path, payloads: dict[str, object] | None = None
+) -> tuple[FakeClient, RobinhoodPortfolioProvider, PortfolioSnapshot]:
     client = FakeClient(payloads or _happy_payloads())
     provider = RobinhoodPortfolioProvider(client)
     snapshot = sync_robinhood_portfolio(provider, data_root=data_root, now=NOW)
@@ -263,7 +336,7 @@ def test_zero_quantity_position_is_valued_at_zero(data_root: Path) -> None:
 
 def test_snapshot_and_positions_are_persisted_once(data_root: Path) -> None:
     _seed_wing_alias(data_root)
-    client, _, _ = _run_sync(data_root)
+    _client, _, _ = _run_sync(data_root)
     snapshots = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
     positions = parquet.read_table("portfolio_positions", root=data_root / "parquet")
     assert snapshots.num_rows == 1
@@ -289,7 +362,10 @@ def _assert_position_close(actual: Position, expected: Position) -> None:
     assert actual.price_type == expected.price_type
     assert actual.quote_retrieved_at == expected.quote_retrieved_at
     for field in (
-        "quantity", "average_cost", "market_price", "market_value",
+        "quantity",
+        "average_cost",
+        "market_price",
+        "market_value",
         "unrealized_gain",
     ):
         # Money and quantity are stored at their exact scale (quantity *
@@ -321,7 +397,6 @@ def test_read_latest_snapshot_round_trips(data_root: Path) -> None:
     for actual, expected in zip(restored.positions, snapshot.positions):
         _assert_position_close(actual, expected)
         assert actual.retrieved_at == restored.created_at
-
 
 
 def test_read_latest_snapshot_none_when_empty(data_root: Path) -> None:
@@ -420,22 +495,40 @@ def test_decimal_round_trip_is_exact(data_root: Path) -> None:
     (actual,) = restored.positions
     (expected,) = snapshot.positions
     for field in (
-        "quantity", "average_cost", "market_price", "market_value",
-        "unrealized_gain", "unrealized_gain_pct", "portfolio_weight",
+        "quantity",
+        "average_cost",
+        "market_price",
+        "market_value",
+        "unrealized_gain",
+        "unrealized_gain_pct",
+        "portfolio_weight",
     ):
         assert getattr(actual, field) == getattr(expected, field)
 
 
 def test_missing_quote_price_degrades_snapshot_but_persists(data_root: Path) -> None:
     payloads = _happy_payloads()
+
     def _wing_only(args: dict[str, object]) -> dict[str, object]:
         account = args["account_number"]
         assert isinstance(account, str)
         if account == "100000001":
-            return {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
-                                     "quantity": "10", "average_buy_price": "95.50"}]}}
+            return {
+                "data": {
+                    "positions": [
+                        {
+                            "id": "pos-1",
+                            "instrument_id": "instr-wing",
+                            "symbol": "WING",
+                            "quantity": "10",
+                            "average_buy_price": "95.50",
+                        }
+                    ]
+                }
+            }
         empty: list[dict[str, object]] = []
         return {"data": {"positions": empty}}
+
     payloads["get_equity_positions"] = _wing_only
     payloads["get_equity_quotes"] = {
         "data": {"results": [{"quote": {"symbol": "WING", "venue_last_trade_time": "2026-08-25T15:00:00Z"}}]}
@@ -464,20 +557,54 @@ def test_missing_quote_price_degrades_snapshot_but_persists(data_root: Path) -> 
     assert restored.invested_value is None
     assert restored.positions[0].market_price is None
 
+
 def test_partial_pricing_nils_total_and_weights(data_root: Path) -> None:
     payloads = _happy_payloads()
+
     def _two_accounts(args: dict[str, object]) -> dict[str, object]:
         account = args["account_number"]
         assert isinstance(account, str)
         if account == "100000001":
-            return {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
-                                     "quantity": "10", "average_buy_price": "95.50"}]}}
-        return {"data": {"positions": [{"id": "pos-5", "instrument_id": "instr-aapl", "symbol": "AAPL",
-                                  "quantity": "5", "average_buy_price": "150.25"}]}}
+            return {
+                "data": {
+                    "positions": [
+                        {
+                            "id": "pos-1",
+                            "instrument_id": "instr-wing",
+                            "symbol": "WING",
+                            "quantity": "10",
+                            "average_buy_price": "95.50",
+                        }
+                    ]
+                }
+            }
+        return {
+            "data": {
+                "positions": [
+                    {
+                        "id": "pos-5",
+                        "instrument_id": "instr-aapl",
+                        "symbol": "AAPL",
+                        "quantity": "5",
+                        "average_buy_price": "150.25",
+                    }
+                ]
+            }
+        }
+
     payloads["get_equity_positions"] = _two_accounts
     payloads["get_equity_quotes"] = {
-        "data": {"results": [{"quote": {"symbol": "WING", "last_trade_price": "116.84",
-                                       "venue_last_trade_time": "2026-08-25T15:00:00Z"}}]}
+        "data": {
+            "results": [
+                {
+                    "quote": {
+                        "symbol": "WING",
+                        "last_trade_price": "116.84",
+                        "venue_last_trade_time": "2026-08-25T15:00:00Z",
+                    }
+                }
+            ]
+        }
     }
     _, _, snapshot = _run_sync(data_root, payloads)
     assert snapshot.invested_value == Decimal("1168.40")
@@ -488,18 +615,51 @@ def test_partial_pricing_nils_total_and_weights(data_root: Path) -> None:
 
 def test_zero_quantity_unpriced_does_not_block_completeness(data_root: Path) -> None:
     payloads = _happy_payloads()
+
     def _zero_wing(args: dict[str, object]) -> dict[str, object]:
         account = args["account_number"]
         assert isinstance(account, str)
         if account == "100000001":
-            return {"data": {"positions": [{"id": "pos-1", "instrument_id": "instr-wing", "symbol": "WING",
-                                     "quantity": "0", "average_buy_price": "95.50"}]}}
-        return {"data": {"positions": [{"id": "pos-5", "instrument_id": "instr-aapl", "symbol": "AAPL",
-                                  "quantity": "5", "average_buy_price": "150.25"}]}}
+            return {
+                "data": {
+                    "positions": [
+                        {
+                            "id": "pos-1",
+                            "instrument_id": "instr-wing",
+                            "symbol": "WING",
+                            "quantity": "0",
+                            "average_buy_price": "95.50",
+                        }
+                    ]
+                }
+            }
+        return {
+            "data": {
+                "positions": [
+                    {
+                        "id": "pos-5",
+                        "instrument_id": "instr-aapl",
+                        "symbol": "AAPL",
+                        "quantity": "5",
+                        "average_buy_price": "150.25",
+                    }
+                ]
+            }
+        }
+
     payloads["get_equity_positions"] = _zero_wing
     payloads["get_equity_quotes"] = {
-        "data": {"results": [{"quote": {"symbol": "AAPL", "last_trade_price": "160.00",
-                                       "venue_last_trade_time": "2026-08-25T15:00:00Z"}}]}
+        "data": {
+            "results": [
+                {
+                    "quote": {
+                        "symbol": "AAPL",
+                        "last_trade_price": "160.00",
+                        "venue_last_trade_time": "2026-08-25T15:00:00Z",
+                    }
+                }
+            ]
+        }
     }
     _, _, snapshot = _run_sync(data_root, payloads)
     assert snapshot.invested_value == Decimal("800.00")
@@ -541,12 +701,8 @@ def test_persisted_rows_contain_no_oauth_data(data_root: Path, monkeypatch: pyte
     for name, rows in captured:
         for row in rows:
             for key, value in row.items():
-                assert not any(part in key.lower() for part in forbidden), (
-                    f"{name}.{key} is a forbidden column"
-                )
-                assert not any(part in str(value).lower() for part in forbidden), (
-                    f"{name}.{key} carries forbidden data"
-                )
+                assert not any(part in key.lower() for part in forbidden), f"{name}.{key} is a forbidden column"
+                assert not any(part in str(value).lower() for part in forbidden), f"{name}.{key} carries forbidden data"
 
 
 def test_persisted_rows_never_contain_raw_account_ids(data_root: Path) -> None:
@@ -579,24 +735,30 @@ def test_sync_without_explicit_now_uses_utc_now(data_root: Path, monkeypatch: py
 
         @classmethod
         @override
-        def now(cls, tz: tzinfo | None = None) -> "FrozenClock":
+        def now(cls, tz: tzinfo | None = None) -> FrozenClock:
             FrozenClock.calls += 1
-            return FrozenClock(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+            return FrozenClock(2026, 8, 25, 12, 0, tzinfo=UTC)
 
         @classmethod
         @override
-        def fromisoformat(cls, date_string: str, /) -> "FrozenClock":
+        def fromisoformat(cls, date_string: str, /) -> FrozenClock:
             parsed = datetime.fromisoformat(date_string)
-            return cls(parsed.year, parsed.month, parsed.day, parsed.hour, parsed.minute,
-                       parsed.second, parsed.microsecond, tzinfo=parsed.tzinfo)
+            return cls(
+                parsed.year,
+                parsed.month,
+                parsed.day,
+                parsed.hour,
+                parsed.minute,
+                parsed.second,
+                parsed.microsecond,
+                tzinfo=parsed.tzinfo,
+            )
 
-    import app.services.portfolio_sync as portfolio_sync
+    from app.services import portfolio_sync
 
     monkeypatch.setattr(portfolio_sync, "datetime", FrozenClock)
     client = FakeClient(_happy_payloads())
-    snapshot = sync_robinhood_portfolio(
-        RobinhoodPortfolioProvider(client), data_root=data_root
-    )
+    snapshot = sync_robinhood_portfolio(RobinhoodPortfolioProvider(client), data_root=data_root)
     assert snapshot.created_at == NOW
     assert snapshot.snapshot_id == SNAPSHOT_ID
 
@@ -607,16 +769,31 @@ def test_sync_without_explicit_now_uses_utc_now(data_root: Path, monkeypatch: py
 
 
 def test_resolve_security_alias_learned_after_as_of_unresolved(data_root: Path) -> None:
-    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
-    parquet.write_rows("entity_aliases", [
-        _alias_row(known_at="2026-08-26T00:00:00Z", retrieved_at="2026-08-26T00:00:00Z", content_hash="learned-later"),
-    ], root=data_root / "parquet")
+    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
+    parquet.write_rows(
+        "entity_aliases",
+        [
+            _alias_row(
+                known_at="2026-08-26T00:00:00Z", retrieved_at="2026-08-26T00:00:00Z", content_hash="learned-later"
+            ),
+        ],
+        root=data_root / "parquet",
+    )
     late = resolve_security("WING", as_of=as_of, data_root=data_root)
     assert late.resolved is False
     assert late.resolution_method == "unresolved"
-    parquet.write_rows("entity_aliases", [
-        _alias_row(known_at="2026-08-25T00:00:00Z", retrieved_at="2026-08-25T00:00:00Z", source="control", content_hash="knowable"),
-    ], root=data_root / "parquet")
+    parquet.write_rows(
+        "entity_aliases",
+        [
+            _alias_row(
+                known_at="2026-08-25T00:00:00Z",
+                retrieved_at="2026-08-25T00:00:00Z",
+                source="control",
+                content_hash="knowable",
+            ),
+        ],
+        root=data_root / "parquet",
+    )
     known = resolve_security("WING", as_of=as_of, data_root=data_root)
     assert known.resolved is True
     assert known.resolution_method == "entity_alias"
@@ -624,31 +801,53 @@ def test_resolve_security_alias_learned_after_as_of_unresolved(data_root: Path) 
 
 
 def test_resolve_security_expired_alias_unresolved(data_root: Path) -> None:
-    parquet.write_rows("entity_aliases", [
-        _alias_row(valid_from="2026-01-01", valid_to="2026-08-24", known_at="2026-08-01T00:00:00Z", retrieved_at="2026-08-01T00:00:00Z", content_hash="expired"),
-        _alias_row(valid_from="2026-01-01", valid_to="2026-08-25", known_at="2026-08-02T00:00:00Z", retrieved_at="2026-08-02T00:00:00Z", source="control", content_hash="boundary"),
-    ], root=data_root / "parquet")
-    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+    parquet.write_rows(
+        "entity_aliases",
+        [
+            _alias_row(
+                valid_from="2026-01-01",
+                valid_to="2026-08-24",
+                known_at="2026-08-01T00:00:00Z",
+                retrieved_at="2026-08-01T00:00:00Z",
+                content_hash="expired",
+            ),
+            _alias_row(
+                valid_from="2026-01-01",
+                valid_to="2026-08-25",
+                known_at="2026-08-02T00:00:00Z",
+                retrieved_at="2026-08-02T00:00:00Z",
+                source="control",
+                content_hash="boundary",
+            ),
+        ],
+        root=data_root / "parquet",
+    )
+    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
     expired = resolve_security("WING", as_of=as_of, data_root=data_root)
     assert expired.resolved is False
     assert expired.resolution_method == "unresolved"
     # Half-open boundary: a date-only valid_to is midnight, so
     # valid_to="2026-08-25" is already expired at 00:00 on the 25th.
-    boundary = resolve_security(
-        "WING", as_of=datetime(2026, 8, 25, 0, 0, tzinfo=timezone.utc), data_root=data_root
-    )
+    boundary = resolve_security("WING", as_of=datetime(2026, 8, 25, 0, 0, tzinfo=UTC), data_root=data_root)
     assert boundary.resolved is False
     assert boundary.resolution_method == "unresolved"
 
 
 def test_resolve_security_ambiguous_ticker(data_root: Path) -> None:
-    parquet.write_rows("entity_aliases", [
-        _alias_row(entity_id="sec:cik:0000320193", security_id="sec:equity:0000320193", content_hash="alias-a"),
-        _alias_row(entity_id="sec:cik:0000999999", security_id="sec:equity:0000999999", source="control", content_hash="alias-b"),
-    ], root=data_root / "parquet")
-    resolution = resolve_security(
-        "WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root
+    parquet.write_rows(
+        "entity_aliases",
+        [
+            _alias_row(entity_id="sec:cik:0000320193", security_id="sec:equity:0000320193", content_hash="alias-a"),
+            _alias_row(
+                entity_id="sec:cik:0000999999",
+                security_id="sec:equity:0000999999",
+                source="control",
+                content_hash="alias-b",
+            ),
+        ],
+        root=data_root / "parquet",
     )
+    resolution = resolve_security("WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is False
     assert resolution.resolution_method == "ambiguous"
     assert resolution.entity_id is None
@@ -656,13 +855,26 @@ def test_resolve_security_ambiguous_ticker(data_root: Path) -> None:
 
 
 def test_resolve_security_same_entity_multiple_rows_resolves(data_root: Path) -> None:
-    parquet.write_rows("entity_aliases", [
-        _alias_row(security_id=None, known_at="2026-08-01T00:00:00Z", retrieved_at="2026-08-01T00:00:00Z", content_hash="older"),
-        _alias_row(security_id="sec:equity:0000320193", known_at="2026-08-02T00:00:00Z", retrieved_at="2026-08-02T00:00:00Z", source="control", content_hash="newer"),
-    ], root=data_root / "parquet")
-    resolution = resolve_security(
-        "WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root
+    parquet.write_rows(
+        "entity_aliases",
+        [
+            _alias_row(
+                security_id=None,
+                known_at="2026-08-01T00:00:00Z",
+                retrieved_at="2026-08-01T00:00:00Z",
+                content_hash="older",
+            ),
+            _alias_row(
+                security_id="sec:equity:0000320193",
+                known_at="2026-08-02T00:00:00Z",
+                retrieved_at="2026-08-02T00:00:00Z",
+                source="control",
+                content_hash="newer",
+            ),
+        ],
+        root=data_root / "parquet",
     )
+    resolution = resolve_security("WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is True
     assert resolution.resolution_method == "entity_alias"
     assert resolution.entity_id == "sec:cik:0000320193"
@@ -676,7 +888,7 @@ def test_build_position_passes_asset_type() -> None:
         ticker="WING",
         quantity=Decimal(10),
         average_cost=Decimal("95.50"),
-        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=timezone.utc),
+        retrieved_at=datetime(2026, 8, 25, 15, 0, tzinfo=UTC),
         source="robinhood_mcp",
         asset_type="option",
     )
@@ -830,18 +1042,41 @@ class TestProvider:
         assert {account.account_type for account in accounts} == {"individual"}
 
     def test_get_accounts_falls_back_to_content_text_json(self):
-        payload = {"content": [{"type": "text", "text": json.dumps({
-            "data": {"accounts": [{"account_number": "c-1", "type": "margin",
-                                   "brokerage_account_type": "individual", "state": "active"}]}
-        })}]}
+        payload = {
+            "content": [
+                {
+                    "type": "text",
+                    "text": json.dumps(
+                        {
+                            "data": {
+                                "accounts": [
+                                    {
+                                        "account_number": "c-1",
+                                        "type": "margin",
+                                        "brokerage_account_type": "individual",
+                                        "state": "active",
+                                    }
+                                ]
+                            }
+                        }
+                    ),
+                }
+            ]
+        }
         client = FakeClient({"get_accounts": payload})
         accounts = RobinhoodPortfolioProvider(client).get_accounts()
         assert [account.account_id for account in accounts] == ["c-1"]
 
     def test_get_positions_normalizes_rows(self):
-        client = FakeClient({"get_equity_positions": {"positions": [
-            {"id": "p", "account_id": "acc-1", "ticker": "wing", "quantity": "0.5"},
-        ]}})
+        client = FakeClient(
+            {
+                "get_equity_positions": {
+                    "positions": [
+                        {"id": "p", "account_id": "acc-1", "ticker": "wing", "quantity": "0.5"},
+                    ]
+                }
+            }
+        )
         positions = RobinhoodPortfolioProvider(client).get_positions("acc-1")
         assert positions[0].ticker == "WING"
         assert positions[0].account_id == "acc-1"
@@ -855,9 +1090,7 @@ class TestProvider:
         assert balance.account_id == "acc-1"
 
     def test_get_cash_balance_unwraps_nested_buying_power(self):
-        client = FakeClient({"get_portfolio": {
-            "data": {"cash": "100.00", "buying_power": {"buying_power": "250.00"}}
-        }})
+        client = FakeClient({"get_portfolio": {"data": {"cash": "100.00", "buying_power": {"buying_power": "250.00"}}}})
         balance = RobinhoodPortfolioProvider(client).get_cash_balance("acc-1")
         assert balance.cash == Decimal("100.00")
         assert balance.buying_power == Decimal("250.00")
@@ -865,11 +1098,17 @@ class TestProvider:
         assert client.calls == [("get_portfolio", {"account_number": "acc-1"})]
 
     def test_get_equity_quotes_merges_aliases_and_skips_missing_ticker(self):
-        client = FakeClient({"get_equity_quotes": {"results": [
-            {"symbol": "wing", "last": "116.84", "bid_price": "116.83", "askPrice": "116.85"},
-            {"ticker": "AAPL", "price": "160.00"},
-            {"last": "10.00"},
-        ]}})
+        client = FakeClient(
+            {
+                "get_equity_quotes": {
+                    "results": [
+                        {"symbol": "wing", "last": "116.84", "bid_price": "116.83", "askPrice": "116.85"},
+                        {"ticker": "AAPL", "price": "160.00"},
+                        {"last": "10.00"},
+                    ]
+                }
+            }
+        )
         quotes = RobinhoodPortfolioProvider(client).get_equity_quotes(["wing", "AAPL"])
         assert list(quotes) == ["WING", "AAPL"]
         assert quotes["WING"].last == Decimal("116.84")
@@ -879,13 +1118,25 @@ class TestProvider:
         assert client.calls == [("get_equity_quotes", {"symbols": ["WING", "AAPL"]})]
 
     def test_get_equity_quotes_digs_into_result_quote_objects(self):
-        client = FakeClient({"get_equity_quotes": {
-            "data": {"results": [
-                {"quote": {"symbol": "WING", "last_trade_price": "116.84",
-                           "bid_price": "116.83", "ask_price": "116.85",
-                           "venue_last_trade_time": "2026-08-25T15:00:00Z"}},
-            ]}
-        }})
+        client = FakeClient(
+            {
+                "get_equity_quotes": {
+                    "data": {
+                        "results": [
+                            {
+                                "quote": {
+                                    "symbol": "WING",
+                                    "last_trade_price": "116.84",
+                                    "bid_price": "116.83",
+                                    "ask_price": "116.85",
+                                    "venue_last_trade_time": "2026-08-25T15:00:00Z",
+                                }
+                            },
+                        ]
+                    }
+                }
+            }
+        )
         quotes = RobinhoodPortfolioProvider(client).get_equity_quotes(["WING"])
         assert quotes["WING"].last == Decimal("116.84")
         assert quotes["WING"].bid == Decimal("116.83")
@@ -893,9 +1144,13 @@ class TestProvider:
         assert quotes["WING"].retrieved_at == QUOTE_TIME
 
     def test_get_equity_quotes_accepts_bare_list(self):
-        client = FakeClient({"get_equity_quotes": [
-            {"symbol": "WING", "last": "116.84"},
-        ]})
+        client = FakeClient(
+            {
+                "get_equity_quotes": [
+                    {"symbol": "WING", "last": "116.84"},
+                ]
+            }
+        )
         quotes = RobinhoodPortfolioProvider(client).get_equity_quotes(["WING"])
         assert quotes["WING"].last == Decimal("116.84")
 

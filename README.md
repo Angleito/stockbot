@@ -52,6 +52,7 @@ security gates over the stdio bridge. `cli.py` remains for admin tasks only
 ```bash
 bun run test
 bun run typecheck
+bun run lint
 bun run test-collect
 # Fresh-environment verification (offline):
 bun run verify

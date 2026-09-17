@@ -23,9 +23,7 @@ import pytest
 from app import finra_client
 from app.tool_render import render_tool_result
 
-_HAS_CREDS = bool(os.getenv("FINRA_CLIENT_ID")) and bool(
-    os.getenv("FINRA_CLIENT_SECRET")
-)
+_HAS_CREDS = bool(os.getenv("FINRA_CLIENT_ID")) and bool(os.getenv("FINRA_CLIENT_SECRET"))
 _SMOKE_ENABLED = os.getenv("RUN_FINRA_PRODUCTION_SMOKE") == "1"
 
 pytestmark = [

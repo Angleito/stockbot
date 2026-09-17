@@ -10,8 +10,7 @@ from app.sec.foreign import reporting_regime
 
 
 def _filings(*forms: str) -> list[SimpleNamespace]:
-    return [SimpleNamespace(form=f, accession_no=f"a{i}")
-            for i, f in enumerate(forms)]
+    return [SimpleNamespace(form=f, accession_no=f"a{i}") for i, f in enumerate(forms)]
 
 
 def test_20f_history_is_foreign_20f(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -72,8 +71,7 @@ def test_generic_remainder_passes_through(monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr("app.sec.filings.get_company", _fake_get_company)
     import app.sec.filings as filings_mod
 
-    forms = ["20-F", "6-K", "40-F", "F-3", "25", "15-12B", "D",
-             "SD", "CORRESP", "UPLOAD"]
+    forms = ["20-F", "6-K", "40-F", "F-3", "25", "15-12B", "D", "SD", "CORRESP", "UPLOAD"]
     for form in forms:
         assert filings_mod.list_sec_filings("AAA", forms=[form]) == []
     assert received == [[f] for f in forms]

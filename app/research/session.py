@@ -21,8 +21,8 @@ from .models import (
 )
 
 __all__ = [
-    "TRANSITIONS",
     "TERMINAL_STATUSES",
+    "TRANSITIONS",
     "can_transition",
     "create_session",
     "get_session",

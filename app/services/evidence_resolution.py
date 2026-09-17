@@ -37,9 +37,7 @@ def resolve_subject(
     return SecurityResolution(None, None, (ticker or name or "").strip(), False, "unresolved")
 
 
-def warehouse_aliases_fn(
-    as_of: datetime, data_root: Path | None = None
-) -> Callable[[str], Sequence[TickerAlias]]:
+def warehouse_aliases_fn(as_of: datetime, data_root: Path | None = None) -> Callable[[str], Sequence[TickerAlias]]:
     """Aliases lookup bound to an as-of instant (PIT visibility)."""
     from app.storage import duckdb
 
@@ -65,6 +63,7 @@ def _matching_ids(rows: list[dict[str, object]], value_key: str, id_key: str, lo
             out.add(str(row[id_key]))
     return out
 
+
 def _entity_table_ids(lowered: str, data_root: Path | None = None) -> set[str]:
     from app.storage import duckdb
 
@@ -74,6 +73,7 @@ def _entity_table_ids(lowered: str, data_root: Path | None = None) -> set[str]:
         return set()
     return _matching_ids(rows, "name", "entity_id", lowered)
 
+
 def _entity_alias_ids(lowered: str, data_root: Path | None = None) -> set[str]:
     from app.storage import duckdb
 
@@ -82,6 +82,7 @@ def _entity_alias_ids(lowered: str, data_root: Path | None = None) -> set[str]:
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return set()
     return _matching_ids(rows, "alias_value", "entity_id", lowered)
+
 
 def _entity_ids_for_name(lowered: str, data_root: Path | None = None) -> set[str]:
     """Entity ids matching entities.name or entity_aliases.alias_value exactly."""
@@ -96,17 +97,22 @@ def _entity_query_rows(sql: str, eid: str, data_root: Path | None = None) -> lis
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return []
 
+
 def _security_tickers(sec: list[dict[str, object]]) -> set[str]:
     return {str(r["ticker"]).strip().upper() for r in sec if r.get("ticker")}
+
 
 def _alias_tickers(als: list[dict[str, object]]) -> set[str]:
     return {str(r["alias_value"]).strip().upper() for r in als if r.get("alias_value")}
 
+
 def _tickers_for_entity(eid: str, data_root: Path | None = None) -> set[str]:
     sec = _entity_query_rows("SELECT ticker FROM securities WHERE entity_id = ?", eid, data_root)
     als = _entity_query_rows(
-        "SELECT alias_value FROM entity_aliases WHERE entity_id = ? AND alias_type = 'ticker'", eid, data_root)
+        "SELECT alias_value FROM entity_aliases WHERE entity_id = ? AND alias_type = 'ticker'", eid, data_root
+    )
     return _security_tickers(sec) | _alias_tickers(als)
+
 
 def _tickers_for_entities(entity_ids: set[str], data_root: Path | None = None) -> set[str]:
     """Distinct tickers for entities via securities + ticker aliases."""
@@ -116,9 +122,7 @@ def _tickers_for_entities(entity_ids: set[str], data_root: Path | None = None) -
     return tickers
 
 
-def warehouse_name_to_ticker(
-    name: str, data_root: Path | None = None
-) -> str | None:
+def warehouse_name_to_ticker(name: str, data_root: Path | None = None) -> str | None:
     """Exact case-insensitive name → ticker; None on 0 or 2+ tickers.
 
     Matches warehouse ``entities.name`` and ``entity_aliases.alias_value``,

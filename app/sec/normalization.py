@@ -4,7 +4,7 @@ best-effort: any failure yields None, never an invented value."""
 from __future__ import annotations
 
 from collections.abc import Callable
-from typing import TYPE_CHECKING, TypeVar
+from typing import TYPE_CHECKING
 
 from .models import Filing, FilingDocument
 
@@ -13,10 +13,8 @@ if TYPE_CHECKING:
     from edgar import Attachment as EdgarAttachment
     from edgar import Filing as EdgarFiling
 
-_T = TypeVar("_T")
 
-
-def _best(fn: Callable[[], _T], default: _T | None = None) -> _T | None:
+def _best[T](fn: Callable[[], T], default: T | None = None) -> T | None:
     try:
         return fn()
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
@@ -49,8 +47,7 @@ def _accepted_at(filing: EdgarFiling) -> str | None:
         return direct
     header = _best(lambda: getattr(filing, "header", None))
     if header is not None:
-        found = _first_present_attr(
-            header, ("acceptance_datetime", "accepted_at", "acceptance_time"))
+        found = _first_present_attr(header, ("acceptance_datetime", "accepted_at", "acceptance_time"))
         if found is not None:
             return found
     sgml_method = getattr(filing, "sgml", None)

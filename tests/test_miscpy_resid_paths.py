@@ -14,6 +14,7 @@ from __future__ import annotations
 
 import dataclasses
 from pathlib import Path
+from typing import ClassVar
 
 import pandas as pd
 import pytest
@@ -70,7 +71,8 @@ def _research_repo(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
 
 
 def test_miscpy_resource_stores_skips_missing_freeze_and_non_str_dossier(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.research import service as svc
 
@@ -95,17 +97,26 @@ def _evidence_record(sid: str, eid: str, wave: int, content: str = "nvda demand 
 
     now = "2025-06-30T00:00:00+00:00"
     return {
-        "evidence_id": eid, "session_id": sid, "wave_id": wave,
-        "source_type": "filing", "source_name": "sec",
-        "subject": "NVDA", "claim_text": "c", "content": content,
+        "evidence_id": eid,
+        "session_id": sid,
+        "wave_id": wave,
+        "source_type": "filing",
+        "source_name": "sec",
+        "subject": "NVDA",
+        "claim_text": "c",
+        "content": content,
         "content_hash": evidence_content_hash(content),
-        "retrieved_at": now, "known_at": now,
-        "source_uri": "sec://x", "job_id": "j1", "agent_id": "a1",
+        "retrieved_at": now,
+        "known_at": now,
+        "source_uri": "sec://x",
+        "job_id": "j1",
+        "agent_id": "a1",
     }
 
 
 def test_miscpy_freeze_wave_records_open_source_jobs(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     from app.research import jobs as _jobs
     from app.research import service as svc
@@ -117,7 +128,7 @@ def test_miscpy_freeze_wave_records_open_source_jobs(
     with pytest.raises(ValueError, match="still open"):
         svc._freeze_wave_records(repo, sid, 1)
     # completing it unblocks the happy path
-    running = [j for j in repo.list_jobs(sid) if j.status == "running"][0]
+    running = next(j for j in repo.list_jobs(sid) if j.status == "running")
     repo.save_job(_jobs.complete_job(running, result={"ok": True}))
     assert len(svc._freeze_wave_records(repo, sid, 1)) == 1
     assert svc._freeze_wave_records(repo, sid, 0) == []
@@ -147,6 +158,7 @@ def test_miscpy_metadata_methods_prefers_catalog_or_live():
 
 # -- edgar _fundamentals_dividends: no-facts / empty-div / quarterly arms --
 
+
 class _DivCache:
     def __init__(self) -> None:
         self.store: dict[str, object] = {}
@@ -157,6 +169,7 @@ class _DivCache:
     def set(self, key: str, value: object) -> None:
         self.store[key] = value
 
+
 class _DivFacts:
     def __init__(self, frame: pd.DataFrame) -> None:
         self._frame = frame
@@ -166,7 +179,7 @@ class _DivFacts:
 
 
 class _DivCompany:
-    rows: list[dict[str, object]] = []
+    rows: ClassVar[list[dict[str, object]]] = []
     none_facts: bool = False
 
     def __init__(self, ticker: str) -> None:
@@ -179,15 +192,26 @@ class _DivCompany:
 
 
 def _q_row(value: float, start: str, end: str, fy: int = 2025, fp: str = "Q1") -> dict[str, object]:
-    return {"concept": "us-gaap:CommonStockDividendsPerShareDeclared",
-            "value": value, "period_start": start, "period_end": end,
-            "fiscal_period": fp, "fiscal_year": fy}
+    return {
+        "concept": "us-gaap:CommonStockDividendsPerShareDeclared",
+        "value": value,
+        "period_start": start,
+        "period_end": end,
+        "fiscal_period": fp,
+        "fiscal_year": fy,
+    }
 
 
 def _fy_row(value: float, year: int) -> dict[str, object]:
-    return {"concept": "us-gaap:CommonStockDividendsPerShareDeclared",
-            "value": value, "period_start": f"{year}-01-01", "period_end": f"{year}-12-31",
-            "fiscal_period": "FY", "fiscal_year": year}
+    return {
+        "concept": "us-gaap:CommonStockDividendsPerShareDeclared",
+        "value": value,
+        "period_start": f"{year}-01-01",
+        "period_end": f"{year}-12-31",
+        "fiscal_period": "FY",
+        "fiscal_year": year,
+    }
+
 
 def test_miscpy_fundamentals_dividends_no_facts_and_empty(monkeypatch: pytest.MonkeyPatch) -> None:
     from app import edgar_client
@@ -198,9 +222,20 @@ def test_miscpy_fundamentals_dividends_no_facts_and_empty(monkeypatch: pytest.Mo
     monkeypatch.setattr(_DivCompany, "none_facts", True)
     assert "error" in edgar_client.get_fundamentals("KO", "dividends")  # 564-565
     monkeypatch.setattr(_DivCompany, "none_facts", False)
-    monkeypatch.setattr(_DivCompany, "rows", [{"concept": "us-gaap:Other", "value": 1.0,
-                           "period_start": "2025-01-01", "period_end": "2025-03-31",
-                           "fiscal_period": "Q1", "fiscal_year": 2025}])
+    monkeypatch.setattr(
+        _DivCompany,
+        "rows",
+        [
+            {
+                "concept": "us-gaap:Other",
+                "value": 1.0,
+                "period_start": "2025-01-01",
+                "period_end": "2025-03-31",
+                "fiscal_period": "Q1",
+                "fiscal_year": 2025,
+            }
+        ],
+    )
     out = edgar_client.get_fundamentals("KO", "dividends", include_dividend_price=False)  # 570-571
     assert out["dividend_status"] == "insufficient_data"
 
@@ -210,11 +245,13 @@ def test_miscpy_fundamentals_dividends_quarterly_and_fy_only(monkeypatch: pytest
 
     monkeypatch.setattr(edgar_client, "Company", _DivCompany)
     monkeypatch.setattr(edgar_client, "cache", _DivCache())
-    rows = [_q_row(0.50, "2025-07-01", "2025-09-30", 2025, "Q3"),
-            _q_row(0.50, "2025-10-01", "2025-12-31", 2025, "Q4"),
-            _q_row(0.50, "2026-01-01", "2026-03-31", 2026, "Q1"),
-            _q_row(0.50, "2026-04-01", "2026-06-30", 2026, "Q2"),
-            _fy_row(2.00, 2025)]
+    rows = [
+        _q_row(0.50, "2025-07-01", "2025-09-30", 2025, "Q3"),
+        _q_row(0.50, "2025-10-01", "2025-12-31", 2025, "Q4"),
+        _q_row(0.50, "2026-01-01", "2026-03-31", 2026, "Q1"),
+        _q_row(0.50, "2026-04-01", "2026-06-30", 2026, "Q2"),
+        _fy_row(2.00, 2025),
+    ]
     monkeypatch.setattr(_DivCompany, "rows", rows)
     out = edgar_client.get_fundamentals("KO", "dividends", include_dividend_price=False)  # 577-581
     assert out["ttm_dividend_per_share"] == 2.0
@@ -238,8 +275,7 @@ def test_miscpy_thesis_show_live_branch(tmp_path: Path) -> None:
     from app.tools import _show_live, execute_tool
 
     repo = ThesisRepository(tmp_path / "thesis")
-    thesis = repo.create_thesis("NVDA thesis", scope="NVDA",
-                                claims=["NVDA demand grows"], effective_at=T0)
+    thesis = repo.create_thesis("NVDA thesis", scope="NVDA", claims=["NVDA demand grows"], effective_at=T0)
     tid = thesis.thesis_id
     packet = _show_live(repo, thesis, tid)  # direct: covers 4890-4891 defs
     assert packet["thesis_id"] == tid and packet["slug"] == thesis.slug

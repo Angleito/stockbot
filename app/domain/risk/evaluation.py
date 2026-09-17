@@ -36,10 +36,10 @@ class EvaluationIssue:
 @dataclass(frozen=True)
 class RiskEvaluation:
     breaches: tuple[RiskBreach, ...]
-    sector_exposures: dict[str, Decimal]   # sector name -> summed weight; includes "unknown_sector"
-    issues: tuple[EvaluationIssue, ...]    # structured non-evaluable reasons
+    sector_exposures: dict[str, Decimal]  # sector name -> summed weight; includes "unknown_sector"
+    issues: tuple[EvaluationIssue, ...]  # structured non-evaluable reasons
     snapshot_id: str
-    created_at: datetime                   # = snapshot.created_at (deterministic)
+    created_at: datetime  # = snapshot.created_at (deterministic)
 
 
 def _excess(operator: str, actual: Decimal, threshold: Decimal) -> Decimal:
@@ -56,37 +56,42 @@ def _sector_amounts(limit: RiskLimit, sector_exposures: dict[str, Decimal]) -> t
 
 def _sector_breach(limit: RiskLimit, known: Decimal) -> RiskBreach:
     """One sector breach row (existing boundary)."""
-    return RiskBreach(metric="sector_exposure", target=limit.target,
-                      severity=limit.severity, actual=known,
-                      limit=limit.threshold,
-                      excess=_excess(limit.operator, known, limit.threshold),
-                      unit=limit.unit)
+    return RiskBreach(
+        metric="sector_exposure",
+        target=limit.target,
+        severity=limit.severity,
+        actual=known,
+        limit=limit.threshold,
+        excess=_excess(limit.operator, known, limit.threshold),
+        unit=limit.unit,
+    )
 
 
-def _evaluate_sector_cap(limit: RiskLimit, known: Decimal, unknown: Decimal,
-                         breaches: list[RiskBreach], issues: list[EvaluationIssue]) -> None:
+def _evaluate_sector_cap(
+    limit: RiskLimit, known: Decimal, unknown: Decimal, breaches: list[RiskBreach], issues: list[EvaluationIssue]
+) -> None:
     """The <= sector arm (existing boundary)."""
     if known > limit.threshold:
         breaches.append(_sector_breach(limit, known))
     elif unknown > 0:
-        issues.append(EvaluationIssue("unknown_sector_exposure", "sector_exposure",
-                                      target=limit.target))
+        issues.append(EvaluationIssue("unknown_sector_exposure", "sector_exposure", target=limit.target))
 
 
-def _evaluate_sector_floor(limit: RiskLimit, known: Decimal, unknown: Decimal,
-                           breaches: list[RiskBreach], issues: list[EvaluationIssue]) -> None:
+def _evaluate_sector_floor(
+    limit: RiskLimit, known: Decimal, unknown: Decimal, breaches: list[RiskBreach], issues: list[EvaluationIssue]
+) -> None:
     """The >= sector arm (existing boundary)."""
     if known >= limit.threshold:
         return
     if unknown > 0:
-        issues.append(EvaluationIssue("unknown_sector_exposure", "sector_exposure",
-                                      target=limit.target))
+        issues.append(EvaluationIssue("unknown_sector_exposure", "sector_exposure", target=limit.target))
     else:
         breaches.append(_sector_breach(limit, known))
 
 
-def _evaluate_sector_limit(limit: RiskLimit, sector_exposures: dict[str, Decimal],
-                           breaches: list[RiskBreach], issues: list[EvaluationIssue]) -> None:
+def _evaluate_sector_limit(
+    limit: RiskLimit, sector_exposures: dict[str, Decimal], breaches: list[RiskBreach], issues: list[EvaluationIssue]
+) -> None:
     """Sector exposure dispatch (existing boundary)."""
     known, unknown = _sector_amounts(limit, sector_exposures)
     if limit.operator == "<=":
@@ -95,16 +100,21 @@ def _evaluate_sector_limit(limit: RiskLimit, sector_exposures: dict[str, Decimal
         _evaluate_sector_floor(limit, known, unknown, breaches, issues)
 
 
-def _evaluate_weight_limit(limit: RiskLimit, snapshot: PortfolioSnapshot,
-                           breaches: list[RiskBreach], issues: list[EvaluationIssue]) -> None:
+def _evaluate_weight_limit(
+    limit: RiskLimit, snapshot: PortfolioSnapshot, breaches: list[RiskBreach], issues: list[EvaluationIssue]
+) -> None:
     """Single-position weight arm (existing boundary)."""
     for position in snapshot.positions:
         weight = position.portfolio_weight
         if weight is None:
-            issues.append(EvaluationIssue(
-                "position_weight_unavailable", "single_position_weight",
-                ticker=position.ticker, position_id=position.position_id,
-            ))
+            issues.append(
+                EvaluationIssue(
+                    "position_weight_unavailable",
+                    "single_position_weight",
+                    ticker=position.ticker,
+                    position_id=position.position_id,
+                )
+            )
             continue
         if not _OPS[limit.operator](weight, limit.threshold):
             breaches.append(
@@ -121,8 +131,7 @@ def _evaluate_weight_limit(limit: RiskLimit, snapshot: PortfolioSnapshot,
             )
 
 
-def _cash_actual(limit: RiskLimit, snapshot: PortfolioSnapshot,
-                 issues: list[EvaluationIssue]) -> Decimal | None:
+def _cash_actual(limit: RiskLimit, snapshot: PortfolioSnapshot, issues: list[EvaluationIssue]) -> Decimal | None:
     """Cash amount or ratio with non-evaluable guards (existing boundary)."""
     if limit.unit == "dollars":
         return snapshot.cash
@@ -138,8 +147,9 @@ def _cash_actual(limit: RiskLimit, snapshot: PortfolioSnapshot,
     return snapshot.cash / snapshot.total_value
 
 
-def _evaluate_cash_limit(limit: RiskLimit, snapshot: PortfolioSnapshot,
-                         breaches: list[RiskBreach], issues: list[EvaluationIssue]) -> None:
+def _evaluate_cash_limit(
+    limit: RiskLimit, snapshot: PortfolioSnapshot, breaches: list[RiskBreach], issues: list[EvaluationIssue]
+) -> None:
     """Minimum-cash arm (existing boundary)."""
     actual = _cash_actual(limit, snapshot, issues)
     # Dollars-arm None means unavailable cash; ratio-arm None already issued.
@@ -179,16 +189,22 @@ def _evaluate_limit(
 
 
 def _sector_exposures(
-    snapshot: PortfolioSnapshot, sector_map: dict[str, str], issues: list[EvaluationIssue],
+    snapshot: PortfolioSnapshot,
+    sector_map: dict[str, str],
+    issues: list[EvaluationIssue],
 ) -> dict[str, Decimal]:
     """Summed sector weights with unknown bucketing (existing boundary)."""
     exposures: dict[str, Decimal] = {}
     for position in snapshot.positions:
         if position.portfolio_weight is None:
-            issues.append(EvaluationIssue(
-                "position_weight_unavailable", "sector_exposure",
-                ticker=position.ticker, position_id=position.position_id,
-            ))
+            issues.append(
+                EvaluationIssue(
+                    "position_weight_unavailable",
+                    "sector_exposure",
+                    ticker=position.ticker,
+                    position_id=position.position_id,
+                )
+            )
             continue
         if position.entity_id is not None and position.entity_id in sector_map:
             sector = sector_map[position.entity_id]
@@ -199,7 +215,8 @@ def _sector_exposures(
 
 
 def _prohibited_breaches(
-    mandate: Mandate, snapshot: PortfolioSnapshot,
+    mandate: Mandate,
+    snapshot: PortfolioSnapshot,
 ) -> list[RiskBreach]:
     """Ticker/entity prohibited-asset matches (existing boundary)."""
     breaches: list[RiskBreach] = []
@@ -232,12 +249,8 @@ def evaluate_mandate(
     """
     sector_map = sector_map or {}
     issues: list[EvaluationIssue] = []
-    needs_sector_exposure = any(
-        limit.metric == "sector_exposure" for limit in mandate.limits
-    )
-    sector_exposures = (
-        _sector_exposures(snapshot, sector_map, issues) if needs_sector_exposure else {}
-    )
+    needs_sector_exposure = any(limit.metric == "sector_exposure" for limit in mandate.limits)
+    sector_exposures = _sector_exposures(snapshot, sector_map, issues) if needs_sector_exposure else {}
     breaches: list[RiskBreach] = []
     for limit in mandate.limits:
         _evaluate_limit(limit, snapshot, sector_exposures, breaches, issues)

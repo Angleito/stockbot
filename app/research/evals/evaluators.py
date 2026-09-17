@@ -21,7 +21,7 @@ import subprocess
 import uuid
 from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 from app.config import get_data_root
@@ -268,7 +268,7 @@ def _committee_freeze_disagreement(ids: tuple[str, ...]) -> bool:
     per round); separate waves legitimately use separate freezes, so only a
     mixed chunk counts as disagreement.
     """
-    return any(len(set(ids[start:start + 3])) > 1 for start in range(0, len(ids), 3))
+    return any(len(set(ids[start : start + 3])) > 1 for start in range(0, len(ids), 3))
 
 
 def _v_committee(inp: EvalInput) -> str | None:
@@ -418,7 +418,18 @@ def _v_committee_invariants(inp: EvalInput) -> str | None:
         failed = next((code for attr, code in _COMMITTEE_JOB_CHECKS if not getattr(inp, attr)), None)
         if failed is not None:
             return failed
-    return next((code for flag, code in ((inp.roles_mutate_freeze, "committee-mutates-freeze"), (not inp.claims_resolve_to_freeze, "committee-claims-unresolved"), (not inp.requests_separate_from_evidence, "committee-requests-as-evidence")) if flag), None)
+    return next(
+        (
+            code
+            for flag, code in (
+                (inp.roles_mutate_freeze, "committee-mutates-freeze"),
+                (not inp.claims_resolve_to_freeze, "committee-claims-unresolved"),
+                (not inp.requests_separate_from_evidence, "committee-requests-as-evidence"),
+            )
+            if flag
+        ),
+        None,
+    )
 
 
 def _v_finalize_answer(inp: EvalInput) -> str | None:
@@ -491,7 +502,10 @@ def evaluate(inp: EvalInput) -> ScenarioResult:
     """Run every hard invariant over one outcome and compute its s31 metrics."""
     violations = tuple(v for v in (check(inp) for check in _CHECKS) if v is not None)
     return ScenarioResult(
-        scenario_name=inp.scenario_name, passed=not violations, violations=violations, metrics=_eval_metrics(inp, violations)
+        scenario_name=inp.scenario_name,
+        passed=not violations,
+        violations=violations,
+        metrics=_eval_metrics(inp, violations),
     )
 
 
@@ -531,11 +545,13 @@ def _trace_claims(trace: object) -> tuple[tuple[str, str, str], ...]:
         if not isinstance(item, dict):
             continue
         text, declared, rendered = item.get("text"), item.get("claim_type"), item.get("rendered_as")
-        claims.append((
-            text if isinstance(text, str) else "",
-            declared if isinstance(declared, str) else "",
-            rendered if isinstance(rendered, str) else "",
-        ))
+        claims.append(
+            (
+                text if isinstance(text, str) else "",
+                declared if isinstance(declared, str) else "",
+                rendered if isinstance(rendered, str) else "",
+            )
+        )
     return tuple(claims)
 
 
@@ -568,27 +584,39 @@ def eval_input_from_fixture(fixture: AgentFixture) -> EvalInput:
     trace = fixture.get("trace")
     stop_reason = telemetry.get("stop_reason") if isinstance(telemetry, dict) else None
     return EvalInput(
-        scenario_name=fixture["scenario_name"], answer_text=fixture["answer_excerpt"],
-        tool_calls=tuple(fixture["tool_calls"]), evidence_ids=evidence, evidence_coverage=coverage,
-        as_of=fixture["as_of"], known_ats=tuple(fixture["known_ats"]),
-        budget_used=fixture["budget_used"] or 0, budget_cap=fixture["budget_cap"] or 0,
-        freeze_before=fixture["freeze_before"], freeze_after=fixture["freeze_after"],
-        claims_untraced=untraced, requires_evidence=fixture["validator"]["requires_evidence"],
-        searches=_telemetry_int(telemetry, "searches"), queries=_telemetry_strs(telemetry, "queries"),
-        forms=_telemetry_strs(telemetry, "forms"), entities=_telemetry_strs(telemetry, "entities"),
+        scenario_name=fixture["scenario_name"],
+        answer_text=fixture["answer_excerpt"],
+        tool_calls=tuple(fixture["tool_calls"]),
+        evidence_ids=evidence,
+        evidence_coverage=coverage,
+        as_of=fixture["as_of"],
+        known_ats=tuple(fixture["known_ats"]),
+        budget_used=fixture["budget_used"] or 0,
+        budget_cap=fixture["budget_cap"] or 0,
+        freeze_before=fixture["freeze_before"],
+        freeze_after=fixture["freeze_after"],
+        claims_untraced=untraced,
+        requires_evidence=fixture["validator"]["requires_evidence"],
+        searches=_telemetry_int(telemetry, "searches"),
+        queries=_telemetry_strs(telemetry, "queries"),
+        forms=_telemetry_strs(telemetry, "forms"),
+        entities=_telemetry_strs(telemetry, "entities"),
         exhibits=_telemetry_int(telemetry, "exhibits"),
         relationships_found=_telemetry_int(telemetry, "relationships_found"),
         relationships_skipped=_telemetry_int(telemetry, "relationships_skipped"),
         unresolved=_telemetry_strs(telemetry, "unresolved"),
         stop_reason=stop_reason if isinstance(stop_reason, str) else "",
-        requires_trace=_requires_trace(fixture["scenario_name"]), trace_present=trace is not None,
+        requires_trace=_requires_trace(fixture["scenario_name"]),
+        trace_present=trace is not None,
         filings_opened=_trace_strs(trace, "filings_opened"),
         documents_opened=_trace_strs(trace, "documents_opened"),
         passages_opened=_trace_strs(trace, "passages_opened"),
         raw_evidence_ids=_trace_strs(trace, "raw_evidence_ids"),
         navigation_evidence_ids=_trace_strs(trace, "navigation_evidence_ids"),
-        claims=_trace_claims(trace), claims_by_type=_trace_counts(trace),
-        waves=_trace_strs(trace, "waves"), trace_searches=_trace_strs(trace, "searches"),
+        claims=_trace_claims(trace),
+        claims_by_type=_trace_counts(trace),
+        waves=_trace_strs(trace, "waves"),
+        trace_searches=_trace_strs(trace, "searches"),
         committee_freeze_ids=_trace_strs(trace, "committee_freeze_ids"),
         roles_completed=_trace_strs(trace, "roles_completed"),
         limitations=_trace_strs(trace, "limitations"),
@@ -666,7 +694,13 @@ class EvalRunSummary:
 
 
 def _persist_eval_run(
-    conn: sqlite3.Connection, eval_run_id: str, model: str, provider: str, prompt_version: str, sha: str, started_at: str
+    conn: sqlite3.Connection,
+    eval_run_id: str,
+    model: str,
+    provider: str,
+    prompt_version: str,
+    sha: str,
+    started_at: str,
 ) -> None:
     conn.execute(
         "INSERT INTO eval_runs (eval_run_id, model, provider, harness_version,"
@@ -690,7 +724,9 @@ def _persist_result(conn: sqlite3.Connection, eval_run_id: str, result: Scenario
     )
 
 
-def _persist_failures(conn: sqlite3.Connection, eval_run_id: str, model: str, result: ScenarioResult, started_at: str) -> None:
+def _persist_failures(
+    conn: sqlite3.Connection, eval_run_id: str, model: str, result: ScenarioResult, started_at: str
+) -> None:
     for violation in result.violations:
         conn.execute(
             "INSERT INTO failure_records (failure_id, eval_run_id, scenario_name,"
@@ -717,7 +753,7 @@ def run_eval_suite(
 ) -> EvalRunSummary:
     """Evaluate outcomes and persist the stamped run; returns its summary."""
     eval_run_id = f"eval:{uuid.uuid4().hex[:12]}"
-    started_at = datetime.now(timezone.utc).isoformat()
+    started_at = datetime.now(UTC).isoformat()
     sha = git_sha if git_sha is not None else _git_sha()
     results = [evaluate(inp) for inp in outcomes]
     db = _db_path(data_root)
@@ -834,9 +870,7 @@ def _passed_count(results: dict[str, bool]) -> int:
     return sum(1 for ok in results.values() if ok)
 
 
-def _experiment_diff(
-    before: dict[str, bool], after: dict[str, bool]
-) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
+def _experiment_diff(before: dict[str, bool], after: dict[str, bool]) -> tuple[int, tuple[str, ...], tuple[str, ...]]:
     return _passed_count(after) - _passed_count(before), _improved(before, after), _regressed(before, after)
 
 
@@ -850,15 +884,13 @@ def _persist_experiment(summary: ExperimentSummary, payload: str, data_root: Pat
                 summary.experiment_id,
                 summary.before_run_id,
                 summary.after_run_id,
-                datetime.now(timezone.utc).isoformat(),
+                datetime.now(UTC).isoformat(),
                 payload,
             ),
         )
 
 
-def compare_experiments(
-    *, before_run_id: str, after_run_id: str, data_root: Path | None = None
-) -> ExperimentSummary:
+def compare_experiments(*, before_run_id: str, after_run_id: str, data_root: Path | None = None) -> ExperimentSummary:
     """Diff two eval runs scenario by scenario and persist the experiment."""
     before = {r.scenario_name: r.passed for r in get_eval_results(before_run_id, data_root)}
     after = {r.scenario_name: r.passed for r in get_eval_results(after_run_id, data_root)}

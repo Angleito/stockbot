@@ -284,7 +284,12 @@ def _req_str_list(raw: dict[str, object], key: str) -> list[str]:
 _TelemetryIntKey = Literal["searches", "exhibits", "relationships_found", "relationships_skipped"]
 _TelemetryListKey = Literal["queries", "forms", "entities", "unresolved"]
 _TelemetryStrKey = Literal["coverage", "stop_reason"]
-_TELEMETRY_INT_KEYS: tuple[_TelemetryIntKey, ...] = ("searches", "exhibits", "relationships_found", "relationships_skipped")
+_TELEMETRY_INT_KEYS: tuple[_TelemetryIntKey, ...] = (
+    "searches",
+    "exhibits",
+    "relationships_found",
+    "relationships_skipped",
+)
 _TELEMETRY_LIST_KEYS: tuple[_TelemetryListKey, ...] = ("queries", "forms", "entities", "unresolved")
 _TELEMETRY_STR_KEYS: tuple[_TelemetryStrKey, ...] = ("coverage", "stop_reason")
 
@@ -570,10 +575,8 @@ def _trace_line(header: object, kinds: dict[str, int], count: int) -> str:
     model = getattr(header, "model", "?")
     status = getattr(header, "status", "?")
     breakdown = ", ".join(f"{kind}={n}" for kind, n in sorted(kinds.items()))
-    return (
-        f"  trace {trace_id} wave={wave_id} model={model}"
-        f" status={status} events={count}"
-        + (f" [{breakdown}]" if breakdown else "")
+    return f"  trace {trace_id} wave={wave_id} model={model} status={status} events={count}" + (
+        f" [{breakdown}]" if breakdown else ""
     )
 
 

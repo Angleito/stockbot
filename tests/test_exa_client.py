@@ -18,8 +18,15 @@ from app.policy import Capability, RequestContext
 EXA_FIXTURES = Path(__file__).parent / "fixtures" / "exa"
 
 ALLOWED_PAYLOAD_KEYS = {
-    "query", "numResults", "contents", "category", "includeDomains",
-    "excludeDomains", "startPublishedDate", "endPublishedDate", "type",
+    "query",
+    "numResults",
+    "contents",
+    "category",
+    "includeDomains",
+    "excludeDomains",
+    "startPublishedDate",
+    "endPublishedDate",
+    "type",
 }
 
 
@@ -41,10 +48,12 @@ def _as_seq(value: object):
     assert isinstance(value, (list, tuple))
     return value
 
+
 def _err(result: dict[str, object]) -> str:
     err = result.get("error")
     assert isinstance(err, str)
     return err
+
 
 def _response(payload: object = None, status: int = 200) -> MagicMock:
     resp = MagicMock()
@@ -106,7 +115,7 @@ def test_disabled_when_key_unset(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_http_500(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    session = _patch_session(monkeypatch, FakeSession(_response(status=500)))
+    _patch_session(monkeypatch, FakeSession(_response(status=500)))
     result = exa_client.search("AMD news")
     assert result["error"] == "Exa search failed: HTTP 500"
     assert result["source"] == "exa"
@@ -144,7 +153,7 @@ def test_malformed_json(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_missing_results_key(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    session = _patch_session(monkeypatch, FakeSession(_response(payload={"foo": 1})))
+    _patch_session(monkeypatch, FakeSession(_response(payload={"foo": 1})))
     result = exa_client.search("AMD news")
     assert result["error"] == "Exa search returned an invalid response"
 
@@ -164,7 +173,7 @@ def test_limit_clamp(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_normalization_from_fixture(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
-    session = _patch_session(monkeypatch, FakeSession(_response(_fixture("search.json"))))
+    _patch_session(monkeypatch, FakeSession(_response(_fixture("search.json"))))
     result = exa_client.search("AMD news")
     assert result["result_type"] == "web_search"
     assert result["query"] == "AMD news"
@@ -192,12 +201,17 @@ def test_normalization_from_fixture(enabled: None, monkeypatch: pytest.MonkeyPat
 
 def test_highlight_truncated_to_max_chars(enabled: None, monkeypatch: pytest.MonkeyPatch) -> None:
     long_highlight = "x" * 2000
-    payload = {"results": [{
-        "title": "t", "url": "https://example.com/x",
-        "publishedDate": "2026-08-01T10:00:00.000Z",
-        "highlights": [long_highlight],
-    }]}
-    session = _patch_session(monkeypatch, FakeSession(_response(payload)))
+    payload = {
+        "results": [
+            {
+                "title": "t",
+                "url": "https://example.com/x",
+                "publishedDate": "2026-08-01T10:00:00.000Z",
+                "highlights": [long_highlight],
+            }
+        ]
+    }
+    _patch_session(monkeypatch, FakeSession(_response(payload)))
     result = exa_client.search("AMD news")
     assert len(_as_seq(result["evidence"])[0]["highlight"]) == exa_client.EXA_HIGHLIGHT_MAX_CHARS
 
@@ -289,9 +303,7 @@ def test_non_integer_limit(enabled: None, monkeypatch: pytest.MonkeyPatch) -> No
     monkeypatch.setattr(exa_client, "_ensure_session", boom)
     # Non-integer limit arrives as LLM JSON (untyped); dispatch preserves it for runtime validation.
     context = RequestContext("test", frozenset({Capability.RESEARCH}))
-    result = tools.execute_tool(
-        "search_web", {"query": "AMD news", "limit": "five"}, model="test", context=context
-    )
+    result = tools.execute_tool("search_web", {"query": "AMD news", "limit": "five"}, model="test", context=context)
     assert result["error"] == "limit must be an integer"
 
 

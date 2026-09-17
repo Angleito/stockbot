@@ -92,7 +92,16 @@ def append_event(
         events = _LOG.setdefault(session_id, [])
         sequence = (max((e.sequence for e in events), default=0)) + 1
         event = _build_journal_event(
-            session_id, event_type, actor_type, actor_id, payload, previous_state, new_state, event_id, timestamp, sequence
+            session_id,
+            event_type,
+            actor_type,
+            actor_id,
+            payload,
+            previous_state,
+            new_state,
+            event_id,
+            timestamp,
+            sequence,
         )
         if any(e.event_id == event.event_id for e in events):
             raise ValueError(f"<journal>: duplicate event_id {event.event_id!r}")

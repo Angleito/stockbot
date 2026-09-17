@@ -9,13 +9,14 @@ resolver derives sec:cik security ids itself.
 
 from __future__ import annotations
 
-from datetime import datetime, timezone
-from typing import Sequence, overload
+from collections.abc import Sequence
+from datetime import UTC, datetime
+from typing import overload
 
 from .ids import sec_security_id
 from .securities import SecurityResolution, TickerAlias
 
-_NEVER = datetime.min.replace(tzinfo=timezone.utc)
+_NEVER = datetime.min.replace(tzinfo=UTC)
 
 
 @overload
@@ -30,10 +31,10 @@ def _parse_iso(value: str | None) -> datetime | None:
     """
     if value is None:
         return None
-    parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    parsed = datetime.fromisoformat(value)
     if parsed.tzinfo is None or parsed.utcoffset() is None:
-        parsed = parsed.replace(tzinfo=timezone.utc)
-    return parsed.astimezone(timezone.utc)
+        parsed = parsed.replace(tzinfo=UTC)
+    return parsed.astimezone(UTC)
 
 
 def _instant(alias: TickerAlias) -> tuple[datetime, datetime]:
@@ -49,7 +50,7 @@ def _resolved_security_id(alias: TickerAlias) -> str | None:
     if alias.security_id is not None:
         return alias.security_id
     if alias.entity_id.startswith("sec:cik:"):
-        return sec_security_id(int(alias.entity_id[len("sec:cik:"):]))
+        return sec_security_id(int(alias.entity_id[len("sec:cik:") :]))
     return None
 
 
@@ -59,13 +60,14 @@ def _check_as_of(as_of: object) -> datetime:
         raise TypeError(f"as_of must be a timezone-aware datetime, got {type(as_of).__name__}")
     if as_of.tzinfo is None or as_of.utcoffset() is None:
         raise ValueError("as_of must be timezone-aware")
-    return as_of.astimezone(timezone.utc)
+    return as_of.astimezone(UTC)
 
 
 def _visible_aliases(aliases: Sequence[TickerAlias], as_of: datetime) -> list[TickerAlias]:
     """PIT visibility filter: known_at plus validity window (existing boundary)."""
     return [
-        alias for alias in aliases
+        alias
+        for alias in aliases
         if (known := _parse_iso(alias.known_at)) is not None
         and known <= as_of
         and (alias.valid_from is None or _parse_iso(alias.valid_from) <= as_of)

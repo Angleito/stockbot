@@ -25,10 +25,8 @@ def get_data_root() -> Path:
         p = REPO_ROOT / p
     return p
 
-FINRA_TOKEN_URL = (
-    "https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token"
-    "?grant_type=client_credentials"
-)
+
+FINRA_TOKEN_URL = "https://ews.fip.finra.org/fip/rest/ews/oauth2/access_token?grant_type=client_credentials"
 FINRA_API_BASE = "https://api.finra.org"
 EXA_API_BASE = "https://api.exa.ai"
 
@@ -101,9 +99,7 @@ def get_robinhood_mcp_url() -> str:
     # paths cannot accidentally direct Robinhood credentials to another host.
     from .robinhood.auth import validate_robinhood_server_url
 
-    return validate_robinhood_server_url(os.getenv(
-        "ROBINHOOD_MCP_URL", "https://agent.robinhood.com/mcp/trading"
-    ))
+    return validate_robinhood_server_url(os.getenv("ROBINHOOD_MCP_URL", "https://agent.robinhood.com/mcp/trading"))
 
 
 def broker_enabled() -> bool:
@@ -205,7 +201,7 @@ def get_youtube_search_daily_limit() -> int:
         return 80
     try:
         value = int(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise ValueError(f"invalid YOUTUBE_SEARCH_DAILY_LIMIT: {raw!r}") from None
     if value <= 0:
         raise ValueError(f"non-positive YOUTUBE_SEARCH_DAILY_LIMIT: {raw!r}")
@@ -221,11 +217,7 @@ def _youtube_gate() -> bool:
 
 
 def _bigquery_gate() -> bool:
-    return (
-        bool(get_google_cloud_project())
-        and get_bq_max_bytes_per_query() > 0
-        and get_bq_monthly_bytes_limit() > 0
-    )
+    return bool(get_google_cloud_project()) and get_bq_max_bytes_per_query() > 0 and get_bq_monthly_bytes_limit() > 0
 
 
 def google_source_enabled(name: str) -> bool:

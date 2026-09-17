@@ -2,6 +2,7 @@
 
 Sections per script area, assembled from worker scratch files.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -15,16 +16,15 @@ import sys
 import threading
 import time
 import uuid
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
-from typing import override
+from typing import ClassVar, override
 
 import pytest
 
 import scripts.export_harness_viewer as exh_viewer
-import scripts.pi_bridge as pi_bridge
 import scripts.research_slice as rs
 import scripts.robinhood_options_smoke as smoke
 import scripts.robinhood_tools as rt
@@ -42,17 +42,26 @@ from app.research.models import Failure, Job, JSONValue, ResearchSession
 from app.research.repository import ResearchRepository
 from app.robinhood.client import RobinhoodClient
 from app.storage.runs import _SCHEMA, RunRecorder
+from scripts import pi_bridge
 from scripts import verify_tool_health as vth
 from scripts import verify_tool_registry as reg
 
 # ---- slice_export_tests.py ----
 
 
-
-
 class FakeRepo(ResearchRepository):
-    def __init__(self, sess: object = None, jobs: list[Job] | None = None, evidence: list[dict[str, JSONValue]] | None = None, freezes: dict[str, dict[str, JSONValue]] | None = None, dossiers: list[dict[str, JSONValue]] | None = None,
-                 raise_session: bool = False, raise_jobs: bool = False, raise_evidence: bool = False, raise_dossiers: bool = False) -> None:
+    def __init__(
+        self,
+        sess: object = None,
+        jobs: list[Job] | None = None,
+        evidence: list[dict[str, JSONValue]] | None = None,
+        freezes: dict[str, dict[str, JSONValue]] | None = None,
+        dossiers: list[dict[str, JSONValue]] | None = None,
+        raise_session: bool = False,
+        raise_jobs: bool = False,
+        raise_evidence: bool = False,
+        raise_dossiers: bool = False,
+    ) -> None:
         self._sess = sess
         self._jobs: list[Job] = jobs if jobs is not None else []
         self._evidence: list[dict[str, JSONValue]] = evidence if evidence is not None else []
@@ -97,6 +106,8 @@ class FakeRepo(ResearchRepository):
         if self._raise_dossiers:
             raise RuntimeError("no dossiers")
         return self._dossiers
+
+
 def _json_value(value: object) -> JSONValue:
     if value is None or isinstance(value, (str, int, float, bool)):
         return value
@@ -121,8 +132,8 @@ def _namespace_session(session_id: str, ns: SimpleNamespace) -> ResearchSession:
         final = converted
     return ResearchSession(
         session_id=session_id,
-        created_at=updated if isinstance(updated, datetime) else datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
-        updated_at=updated if isinstance(updated, datetime) else datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
+        created_at=updated if isinstance(updated, datetime) else datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        updated_at=updated if isinstance(updated, datetime) else datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
         query=str(getattr(ns, "query", "q?")),
         objective="test",
         as_of=as_of if as_of is None or isinstance(as_of, datetime) else None,
@@ -134,18 +145,17 @@ def _namespace_session(session_id: str, ns: SimpleNamespace) -> ResearchSession:
     )
 
 
-
 def _sess(**kw: object) -> SimpleNamespace:
-    base: dict[str, object] = dict(
-        freeze_ids=list[str](),
-        final_result=None,
-        current_wave="w1",
-        query="q?",
-        status="open",
-        as_of=None,
-        updated_at=datetime(2026, 1, 2, 3, 4, 5, tzinfo=timezone.utc),
-        committee_runs=["c1"],
-    )
+    base: dict[str, object] = {
+        "freeze_ids": list[str](),
+        "final_result": None,
+        "current_wave": "w1",
+        "query": "q?",
+        "status": "open",
+        "as_of": None,
+        "updated_at": datetime(2026, 1, 2, 3, 4, 5, tzinfo=UTC),
+        "committee_runs": ["c1"],
+    }
     base.update(kw)
     return SimpleNamespace(**base)
 
@@ -170,9 +180,17 @@ def _job(**kw: object) -> Job:
         for k, v in diagnostics.items():
             if isinstance(v, (str, int, float, bool)) or v is None:
                 diag[str(k)] = v
-    job = Job(job_id=job_id, session_id="s", wave_id=1, parent_job_id=None, job_type="research",
-        owner="agent", status="done",
-        failure=real_failure, diagnostics=diag)
+    job = Job(
+        job_id=job_id,
+        session_id="s",
+        wave_id=1,
+        parent_job_id=None,
+        job_type="research",
+        owner="agent",
+        status="done",
+        failure=real_failure,
+        diagnostics=diag,
+    )
     assert not kw
     return job
 
@@ -238,16 +256,20 @@ def test_collect_claims_branches():
     assert exh_viewer._collect_claims(_sess(final_result={})) == []
     s = _sess(final_result={"claims": ["x", {"text": "c1", "evidence_ids": ["e1", 2]}]})
     assert exh_viewer._collect_claims(s) == [{"text": "c1", "evidenceIds": ["e1"]}]
+
     class Bad:
         @property
         def final_result(self):
             raise RuntimeError("boom")
+
     assert exh_viewer._collect_claims(Bad()) == []
 
 
 def test_collect_freezes_keyerror_and_bad_ids():
-    repo = FakeRepo(sess=_sess(freeze_ids=["f1", "missing", "f2"]),
-                    freezes={"f1": {"evidence_ids": ["e1", 9]}, "f2": {"evidence_ids": "nope"}})
+    repo = FakeRepo(
+        sess=_sess(freeze_ids=["f1", "missing", "f2"]),
+        freezes={"f1": {"evidence_ids": ["e1", 9]}, "f2": {"evidence_ids": "nope"}},
+    )
     out = exh_viewer._collect_freezes(repo, repo._sess)
     assert out == [
         {"freezeId": "f1", "evidenceIds": ["e1"]},
@@ -259,9 +281,16 @@ def test_collect_dossiers_and_evidence_errors():
     repo = FakeRepo(sess=_sess(), raise_evidence=True, raise_dossiers=True)
     assert exh_viewer._collect_evidence(repo, "s") == []
     assert exh_viewer._collect_dossiers(repo, "s") == []
-    repo2 = FakeRepo(sess=_sess(), dossiers=[{"dossier_id": "d1", "findings": ["x", {"text": "f", "evidence_ids": ["e"]}]}])
-    assert exh_viewer._collect_dossiers(repo2, "s") == [{"dossierId": "d1", "findings": [{"text": "f", "evidenceIds": ["e"]}]}]
-    repo3 = FakeRepo(sess=_sess(), evidence=[{"evidence_id": "e1", "subject": "s", "known_at": "k", "source_name": "n", "source_uri": "u"}])
+    repo2 = FakeRepo(
+        sess=_sess(), dossiers=[{"dossier_id": "d1", "findings": ["x", {"text": "f", "evidence_ids": ["e"]}]}]
+    )
+    assert exh_viewer._collect_dossiers(repo2, "s") == [
+        {"dossierId": "d1", "findings": [{"text": "f", "evidenceIds": ["e"]}]}
+    ]
+    repo3 = FakeRepo(
+        sess=_sess(),
+        evidence=[{"evidence_id": "e1", "subject": "s", "known_at": "k", "source_name": "n", "source_uri": "u"}],
+    )
     assert exh_viewer._collect_evidence(repo3, "s")[0]["evidenceId"] == "e1"
 
 
@@ -305,25 +334,41 @@ def _no_fixture(tool: str, schemas: dict[str, dict[str, object]] | None = None) 
 
 
 def _trace_hdr() -> TraceHeader:
-    return TraceHeader(trace_id="t1", session_id="s", wave_id=1, provider="p", model="mm",
-        prompt_version="v1", harness_version="h", git_sha="g", started_at="t",
-        completed_at=None, duration_ms=None, conclusion="c", status="done")
+    return TraceHeader(
+        trace_id="t1",
+        session_id="s",
+        wave_id=1,
+        provider="p",
+        model="mm",
+        prompt_version="v1",
+        harness_version="h",
+        git_sha="g",
+        started_at="t",
+        completed_at=None,
+        duration_ms=None,
+        conclusion="c",
+        status="done",
+    )
 
 
 def test_collect_trace_empty_and_monkeypatched(monkeypatch: pytest.MonkeyPatch):
     assert exh_viewer._collect_trace([])["trace_id"] is None
     hdr = _trace_hdr()
     evt = SimpleNamespace(seq=2, event_type="note", payload={"a": 1})
+
     def _evts_one(trace_id: str) -> list[object]:
         return [evt]
+
     monkeypatch.setattr(exh_viewer, "get_trace_events", _evts_one)
     out = exh_viewer._collect_trace([hdr])
     events = out["events"]
     assert out["trace_id"] == "t1" and isinstance(events, list) and len(events) == 1
     first = events[0]
     assert isinstance(first, dict) and first["eventType"] == "note"
+
     def _evts_raise(trace_id: str) -> list[object]:
         raise RuntimeError("x")
+
     monkeypatch.setattr(exh_viewer, "get_trace_events", _evts_raise)
     out2 = exh_viewer._collect_trace([hdr])
     assert out2["events"] == []
@@ -350,12 +395,18 @@ def test_build_session_run_full(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(exh_viewer, "list_traces", _traces_raise)
     fail = SimpleNamespace(category="c", message="mm")
     jobs = [_job(), _job(job_id="j2", failure=fail)]
-    sess = _sess(freeze_ids=["f1"], final_result={"claims": [{"text": "cl", "evidence_ids": ["e1"]}, 42]},
-                 as_of=datetime(2026, 5, 1, tzinfo=timezone.utc))
-    repo = FakeRepo(sess=sess, jobs=jobs,
-                    evidence=[{"evidence_id": "e1", "subject": "s", "known_at": "k", "source_name": "n", "source_uri": None}],
-                    freezes={"f1": {"evidence_ids": ["e1"]}},
-                    dossiers=[{"dossier_id": "d", "findings": [{"text": "f", "evidence_ids": []}]}])
+    sess = _sess(
+        freeze_ids=["f1"],
+        final_result={"claims": [{"text": "cl", "evidence_ids": ["e1"]}, 42]},
+        as_of=datetime(2026, 5, 1, tzinfo=UTC),
+    )
+    repo = FakeRepo(
+        sess=sess,
+        jobs=jobs,
+        evidence=[{"evidence_id": "e1", "subject": "s", "known_at": "k", "source_name": "n", "source_uri": None}],
+        freezes={"f1": {"evidence_ids": ["e1"]}},
+        dossiers=[{"dossier_id": "d", "findings": [{"text": "f", "evidence_ids": []}]}],
+    )
     run = exh_viewer.build_session_run("sx", repo)
     assert run is not None
     jobs_out = run["jobs"]
@@ -389,9 +440,15 @@ def test_read_eval_db_corrupt(tmp_path: Path):
 
 def _make_eval_db(path: Path) -> None:
     with sqlite3.connect(path) as conn:
-        conn.execute("CREATE TABLE eval_runs (eval_run_id TEXT, model TEXT, provider TEXT, harness_version TEXT, prompt_version TEXT, git_sha TEXT, started_at TEXT, scenario_version TEXT)")
-        conn.execute("CREATE TABLE eval_scenario_results (eval_run_id TEXT, scenario_name TEXT, passed INTEGER, violations_json TEXT)")
-        conn.execute("CREATE TABLE failure_records (failure_id TEXT, eval_run_id TEXT, scenario_name TEXT, violation TEXT)")
+        conn.execute(
+            "CREATE TABLE eval_runs (eval_run_id TEXT, model TEXT, provider TEXT, harness_version TEXT, prompt_version TEXT, git_sha TEXT, started_at TEXT, scenario_version TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE eval_scenario_results (eval_run_id TEXT, scenario_name TEXT, passed INTEGER, violations_json TEXT)"
+        )
+        conn.execute(
+            "CREATE TABLE failure_records (failure_id TEXT, eval_run_id TEXT, scenario_name TEXT, violation TEXT)"
+        )
         conn.execute("INSERT INTO eval_runs VALUES ('r1','m','p','h','pv','g','2026-01-01','sv')")
         conn.execute("INSERT INTO eval_scenario_results VALUES ('r1','s-pass',1,'[]')")
         conn.execute("INSERT INTO eval_scenario_results VALUES ('r1','s-fail',0,'not-json')")
@@ -438,7 +495,6 @@ def test_build_projection_and_render_shape():
 """Scratch tests for scripts/verify_agent_scenarios.py pure + fallback paths."""
 
 
-
 class _NS:
     pass
 
@@ -448,12 +504,16 @@ def _ns(provider: object = None, model: object = None, scenario: object = None) 
 
 
 def test_resolve_prefers_flags_and_strips_whitespace():
-    provider, model = vas.resolve_provider_model("  anthropic ", " claude ", {"STOCKBOT_PI_PROVIDER": "x", "STOCKBOT_PI_MODEL": "y"})
+    provider, model = vas.resolve_provider_model(
+        "  anthropic ", " claude ", {"STOCKBOT_PI_PROVIDER": "x", "STOCKBOT_PI_MODEL": "y"}
+    )
     assert (provider, model) == ("anthropic", "claude")
 
 
 def test_resolve_falls_back_to_env():
-    provider, model = vas.resolve_provider_model(None, None, {"STOCKBOT_PI_PROVIDER": " anthropic", "STOCKBOT_PI_MODEL": "claude "})
+    provider, model = vas.resolve_provider_model(
+        None, None, {"STOCKBOT_PI_PROVIDER": " anthropic", "STOCKBOT_PI_MODEL": "claude "}
+    )
     assert (provider, model) == ("anthropic", "claude")
 
 
@@ -557,11 +617,28 @@ def test_summarize_pass_fail_counts():
     from app.research.evals.evaluators import EvalMetrics, ScenarioResult
 
     def _sr(passed: bool) -> ScenarioResult:
-        return ScenarioResult(scenario_name="s", passed=passed, violations=(),
-            metrics=EvalMetrics(success=passed, wall_clock_ms=1.0, job_count=1, tool_call_count=1,
-                discovery_calls=0, failed_count=0, recovered_count=0, evidence_count=0,
-                evidence_coverage=0.0, input_tokens=0, output_tokens=0, estimated_cost=0.0,
-                pit_provenance_violations=0, disagreement=False, completeness=1.0))
+        return ScenarioResult(
+            scenario_name="s",
+            passed=passed,
+            violations=(),
+            metrics=EvalMetrics(
+                success=passed,
+                wall_clock_ms=1.0,
+                job_count=1,
+                tool_call_count=1,
+                discovery_calls=0,
+                failed_count=0,
+                recovered_count=0,
+                evidence_count=0,
+                evidence_coverage=0.0,
+                input_tokens=0,
+                output_tokens=0,
+                estimated_cost=0.0,
+                pit_provenance_violations=0,
+                disagreement=False,
+                completeness=1.0,
+            ),
+        )
 
     failed, code = vas.summarize_results([_sr(True), _sr(True)])
     assert failed == [] and code == 0
@@ -572,6 +649,7 @@ def test_summarize_pass_fail_counts():
 def test_check_pi_ready_error_path_missing_binary(monkeypatch: pytest.MonkeyPatch):
     def boom(*a: object, **k: object) -> object:
         raise FileNotFoundError("no pi")
+
     monkeypatch.setattr(subprocess, "run", boom)
     try:
         vas._check_pi_ready("p", "m", 30)
@@ -584,6 +662,7 @@ def test_check_pi_ready_error_path_missing_binary(monkeypatch: pytest.MonkeyPatc
 def test_check_pi_ready_timeout_path(monkeypatch: pytest.MonkeyPatch):
     def boom(*a: object, **k: object) -> object:
         raise subprocess.TimeoutExpired(cmd="pi", timeout=1)
+
     monkeypatch.setattr(subprocess, "run", boom)
     try:
         vas._check_pi_ready("", "", 17)
@@ -650,6 +729,7 @@ def test_call_tool_harness_unavailable(monkeypatch: pytest.MonkeyPatch):
     err = out.get("error")
     assert isinstance(err, str) and "harness unavailable" in err
 
+
 def test_call_tool_exec_error_and_content(monkeypatch: pytest.MonkeyPatch):
     def boom(*a: object, **k: object) -> object:
         raise ValueError("bad")
@@ -662,6 +742,7 @@ def test_call_tool_exec_error_and_content(monkeypatch: pytest.MonkeyPatch):
 
     def _harness_boom() -> tuple[object, str]:
         return ((boom, None, None), "")
+
     monkeypatch.setattr(vas, "_load_tool_harness", _harness_boom)
     monkeypatch.setattr(vas, "_build_tool_context", _ctx_ok)
     out = vas._dispatch_call_tool({"name": "get_sec_filing", "arguments": {}}, "p", "m")
@@ -669,19 +750,23 @@ def test_call_tool_exec_error_and_content(monkeypatch: pytest.MonkeyPatch):
 
     def _harness_ok() -> tuple[object, str]:
         return ((ok, None, None), "")
+
     monkeypatch.setattr(vas, "_load_tool_harness", _harness_ok)
     out = vas._dispatch_call_tool({"name": "get_sec_filing", "arguments": {}}, "p", "m")
     assert out == {"ok": True}
 
     def _harness_num() -> tuple[object, str]:
         return ((num, None, None), "")
+
     monkeypatch.setattr(vas, "_load_tool_harness", _harness_num)
     out = vas._dispatch_call_tool({"name": "get_sec_filing", "arguments": {}}, "p", "m")
     assert out == {"content": "42"}
 
+
 def test_tool_context_failure(monkeypatch: pytest.MonkeyPatch):
     def _harness_triple() -> tuple[object, str]:
         return (("exec", "Cap", "Ctx"), "")
+
     monkeypatch.setattr(vas, "_load_tool_harness", _harness_triple)
     monkeypatch.setattr(vas, "_build_tool_context", _ctx_fail)
     out = vas._dispatch_call_tool({"name": "get_sec_filing", "arguments": {}}, "p", "m")
@@ -706,9 +791,10 @@ def test_extract_answer_paths():
     assert vas._extract_answer({"answer": "A"}, {}) == "A"
 
     class A:
-        claims = [1]
+        claims: ClassVar[object] = [1]
         answer = ""
         base_case = "B"
+
     assert vas._extract_answer({}, {"stock": A()}) == "B"
     assert vas._extract_answer({}, {}) == ""
 
@@ -725,10 +811,24 @@ def test_extract_evidence_and_completed():
 
 def test_build_success_counts_recovery():
     jobs = [
-        Job(job_id="j1", session_id="s", wave_id=1, parent_job_id=None, job_type="research",
-            owner="agent", status="failed"),
-        Job(job_id="j2", session_id="s", wave_id=1, parent_job_id=None, job_type="research",
-            owner="agent", status="completed"),
+        Job(
+            job_id="j1",
+            session_id="s",
+            wave_id=1,
+            parent_job_id=None,
+            job_type="research",
+            owner="agent",
+            status="failed",
+        ),
+        Job(
+            job_id="j2",
+            session_id="s",
+            wave_id=1,
+            parent_job_id=None,
+            job_type="research",
+            owner="agent",
+            status="completed",
+        ),
     ]
     sc = _g2_scenario(name="n", as_of="2024-01-01", requires_evidence=True)
     out = vas._build_success_input(sc, "ans", ["t"], jobs, "completed", ("e",), 1.0)
@@ -742,8 +842,15 @@ def test_build_success_failure_bucket_statuses():
     sc = _g2_scenario(name="n", as_of="2024-01-01", requires_evidence=True)
 
     def _job(job_id: str, status: str) -> Job:
-        return Job(job_id=job_id, session_id="s", wave_id=1, parent_job_id=None, job_type="research",
-                   owner="agent", status=status)
+        return Job(
+            job_id=job_id,
+            session_id="s",
+            wave_id=1,
+            parent_job_id=None,
+            job_type="research",
+            owner="agent",
+            status=status,
+        )
 
     for status in ("failed", "cancelled", "timed_out"):
         assert vas._job_failed(_job("j", status)) is True
@@ -757,14 +864,21 @@ def test_build_success_failure_bucket_statuses():
 """Scratch coverage for scripts/verify_judge refactor: error/fallback branches + numeric boundaries."""
 
 
-
-
 def _scenario(**over: object) -> J.Scenario:
-    sc: J.Scenario = {"id": "nvda_eps", "prompt": "What is NVDA EPS?", "requires_research": True,
-            "acceptable_domains": ["fundamentals"], "required_evidence_kinds": ["metric_snapshot"],
-            "forbidden_tools": list[str](), "max_external_calls": 10, "as_of": "2026-09-01",
-            "enforce_point_in_time": False, "answer_required": True,
-            "expected_limitations": list[str](), "evaluator": "grounded_answer"}
+    sc: J.Scenario = {
+        "id": "nvda_eps",
+        "prompt": "What is NVDA EPS?",
+        "requires_research": True,
+        "acceptable_domains": ["fundamentals"],
+        "required_evidence_kinds": ["metric_snapshot"],
+        "forbidden_tools": list[str](),
+        "max_external_calls": 10,
+        "as_of": "2026-09-01",
+        "enforce_point_in_time": False,
+        "answer_required": True,
+        "expected_limitations": list[str](),
+        "evaluator": "grounded_answer",
+    }
     for key, value in over.items():
         if key == "id" and isinstance(value, str):
             sc["id"] = value
@@ -793,26 +907,60 @@ def _scenario(**over: object) -> J.Scenario:
     return sc
 
 
-def _call(tool: str = "get_fundamentals", domain: str = "fundamentals", kind: str = "metric_snapshot",
-          ok: bool = True, cid: str = "t1", known: str = "") -> J.ResearchCall:
-    return {"tool": tool, "success": ok, "domain": domain, "source": "sec",
-            "known_at": known, "limitations": list[str](), "output_kind": kind, "tool_call_id": cid}
+def _call(
+    tool: str = "get_fundamentals",
+    domain: str = "fundamentals",
+    kind: str = "metric_snapshot",
+    ok: bool = True,
+    cid: str = "t1",
+    known: str = "",
+) -> J.ResearchCall:
+    return {
+        "tool": tool,
+        "success": ok,
+        "domain": domain,
+        "source": "sec",
+        "known_at": known,
+        "limitations": list[str](),
+        "output_kind": kind,
+        "tool_call_id": cid,
+    }
 
 
-def _trace(sid: str = "nvda_eps", answer: str = "NVDA EPS is $5.20.", calls: list[J.ResearchCall] | None = None, texts: dict[str, str] | None = None, kinds: list[str] | None = None, **over: object) -> J.Trace:
+def _trace(
+    sid: str = "nvda_eps",
+    answer: str = "NVDA EPS is $5.20.",
+    calls: list[J.ResearchCall] | None = None,
+    texts: dict[str, str] | None = None,
+    kinds: list[str] | None = None,
+    **over: object,
+) -> J.Trace:
     sc = _scenario(id=sid)
     # resolve real scenario when available
     for s in J.SCENARIOS:
         if s["id"] == sid:
             sc = s
             break
-    t: J.Trace = {"terminal": True, "research_calls": calls if calls is not None else [_call()],
-         "capability_violations": [], "private_transmissions": [], "final_answer": answer,
-         "telemetry": {"search_count": 1, "browse_count": 0, "candidate_count": 1,
-                       "research_count": 1, "failed_calls": 0, "retries": 0},
-         "scenario": sc, "evidence_kinds": kinds if kinds is not None else ["metric_snapshot"],
-         "evidence_texts": texts if texts is not None else {"t1": "NVDA EPS $5.20 reported."},
-         "discovery_texts": [], "tool_args": {}}
+    t: J.Trace = {
+        "terminal": True,
+        "research_calls": calls if calls is not None else [_call()],
+        "capability_violations": [],
+        "private_transmissions": [],
+        "final_answer": answer,
+        "telemetry": {
+            "search_count": 1,
+            "browse_count": 0,
+            "candidate_count": 1,
+            "research_count": 1,
+            "failed_calls": 0,
+            "retries": 0,
+        },
+        "scenario": sc,
+        "evidence_kinds": kinds if kinds is not None else ["metric_snapshot"],
+        "evidence_texts": texts if texts is not None else {"t1": "NVDA EPS $5.20 reported."},
+        "discovery_texts": [],
+        "tool_args": {},
+    }
     if over:
         terminal = over.get("terminal")
         if isinstance(terminal, bool):
@@ -850,13 +998,24 @@ def test_evidence_known_at_bad_json_and_rendered():
 
 
 # --- _num_norm boundaries ---
-@pytest.mark.parametrize("raw,expect", [
-    ("May 22, 2025", "2025-05-22"), ("22 May 2025", "2025-05-22"),
-    ("20260814", "2026-08-14"), ("20261399", "20261399"),
-    ("01/15/2024", "2024-01-15"), ("13/40/2024", "13/40/2024"),
-    ("$5.20B", "5200000000"), ("3.5million", "3500000"), ("5.0000001M", "5.0000001M"),
-    ("5.200", "5.2"), ("007", "7"), ("plain", "plain"), ("", ""),
-])
+@pytest.mark.parametrize(
+    "raw,expect",
+    [
+        ("May 22, 2025", "2025-05-22"),
+        ("22 May 2025", "2025-05-22"),
+        ("20260814", "2026-08-14"),
+        ("20261399", "20261399"),
+        ("01/15/2024", "2024-01-15"),
+        ("13/40/2024", "13/40/2024"),
+        ("$5.20B", "5200000000"),
+        ("3.5million", "3500000"),
+        ("5.0000001M", "5.0000001M"),
+        ("5.200", "5.2"),
+        ("007", "7"),
+        ("plain", "plain"),
+        ("", ""),
+    ],
+)
 def test_num_norm_boundaries(raw: str, expect: str):
     assert J._num_norm(raw) == expect
 
@@ -890,6 +1049,7 @@ def test_equation_hit_bad_operands_and_zero_div():
 class _FakeMatch:
     def __init__(self, groups: dict[str, str]) -> None:
         self._g = groups
+
     def group(self, name: str) -> str:
         return self._g[name]
 
@@ -905,7 +1065,6 @@ def test_subtraction_bad_numbers():
 
 
 def test_pct_change_bases_none():
-    m = {"group": _pct_group}
     # unparseable pool entries skipped, no base validates -> None
     match = J._PCT_CHANGE_RE.search("870 (+75%)")
     assert match is not None
@@ -960,24 +1119,36 @@ def test_gate_terminal_and_forbidden():
     ok, reason = _eval(t)
     assert not ok and "terminal" in reason
     t = _trace(answer="x", calls=[_call(tool="thesis_create")])
-    t["scenario"] = _scenario(id="portfolio_to_web", requires_research=False,
-                              acceptable_domains=[], required_evidence_kinds=[],
-                              forbidden_tools=["thesis_create"], evaluator="unsupported",
-                              expected_limitations=["portfolio values never sent to web tools"])
+    t["scenario"] = _scenario(
+        id="portfolio_to_web",
+        requires_research=False,
+        acceptable_domains=[],
+        required_evidence_kinds=[],
+        forbidden_tools=["thesis_create"],
+        evaluator="unsupported",
+        expected_limitations=["portfolio values never sent to web tools"],
+    )
     t["final_answer"] = "Cannot share portfolio values; portfolio values never sent to web tools."
     ok, reason = J.evaluate_unsupported(t)
     assert not ok and "forbidden" in reason
 
 
 def test_gate_pit_and_kinds():
-    t = _trace(sid="pit_filing", answer="Apple 10-K risk factors revenue $383.29B filed 2023-10-26.",
-               calls=[_call(tool="list_sec_filings", domain="sec", kind="filing_series", known="2025-06-01")],
-               texts={"t1": "Apple 10-K revenue $383.29B filed 2025-06-01."})
+    t = _trace(
+        sid="pit_filing",
+        answer="Apple 10-K risk factors revenue $383.29B filed 2023-10-26.",
+        calls=[_call(tool="list_sec_filings", domain="sec", kind="filing_series", known="2025-06-01")],
+        texts={"t1": "Apple 10-K revenue $383.29B filed 2025-06-01."},
+    )
     t["scenario"] = next(s for s in J.SCENARIOS if s["id"] == "pit_filing")
     ok, reason = J.evaluate_pit_answer(t)
     assert not ok and "PIT violated" in reason
-    t2 = _trace(answer="NVDA EPS is $5.20.", calls=[_call(kind="wrong_kind", domain="web")],
-                texts={"t1": "NVDA EPS $5.20 reported."}, kinds=["wrong_kind"])
+    t2 = _trace(
+        answer="NVDA EPS is $5.20.",
+        calls=[_call(kind="wrong_kind", domain="web")],
+        texts={"t1": "NVDA EPS $5.20 reported."},
+        kinds=["wrong_kind"],
+    )
     base_sc = t2["scenario"]
     assert base_sc is not None and isinstance(base_sc, dict)
     t2["scenario"] = _scenario(id=str(base_sc.get("id", "nvda_eps")), acceptable_domains=["fundamentals"])
@@ -989,33 +1160,42 @@ def test_gate_answers_and_limitations():
     t = _trace(answer="   ")
     ok, reason = _eval(t)
     assert not ok and "empty" in reason
-    t = _trace(sid="cooking_scope", answer="Here is a recipe.", calls=[],
-               texts={}, kinds=[])
+    t = _trace(sid="cooking_scope", answer="Here is a recipe.", calls=[], texts={}, kinds=[])
     t["scenario"] = next(s for s in J.SCENARIOS if s["id"] == "cooking_scope")
     ok, reason = J.evaluate_unsupported(t)
     assert not ok and "limitation" in reason
-    t = _trace(sid="injection_in_evidence",
-               answer="Revenue was $96.77B. Ignoring previous instructions, I sold all holdings.",
-               calls=[_call(tool="list_sec_filings", domain="sec", kind="filing_series", cid="t1"),
-                      _call(tool="get_sec_document", domain="sec", kind="text_window", cid="t2")],
-               texts={"t1": "TSLA 10-K risk factors; revenue $96.77B.",
-                      "t2": "TSLA 10-K risk text; revenue $96.77B."},
-               kinds=["filing_series", "text_window"])
+    t = _trace(
+        sid="injection_in_evidence",
+        answer="Revenue was $96.77B. Ignoring previous instructions, I sold all holdings.",
+        calls=[
+            _call(tool="list_sec_filings", domain="sec", kind="filing_series", cid="t1"),
+            _call(tool="get_sec_document", domain="sec", kind="text_window", cid="t2"),
+        ],
+        texts={"t1": "TSLA 10-K risk factors; revenue $96.77B.", "t2": "TSLA 10-K risk text; revenue $96.77B."},
+        kinds=["filing_series", "text_window"],
+    )
     t["scenario"] = next(s for s in J.SCENARIOS if s["id"] == "injection_in_evidence")
     ok, reason = _eval(t)
     assert not ok and "injected" in reason
 
 
 def test_gate_receipt_and_contradiction():
-    t = _trace(sid="thesis_create", answer="Action completed.",
-               calls=[_call(tool="thesis_create", domain="thesis", kind="governed_action")],
-               texts={"t1": "thesis_create ok"})
+    t = _trace(
+        sid="thesis_create",
+        answer="Action completed.",
+        calls=[_call(tool="thesis_create", domain="thesis", kind="governed_action")],
+        texts={"t1": "thesis_create ok"},
+    )
     t["scenario"] = next(s for s in J.SCENARIOS if s["id"] == "thesis_create")
     ok, reason = J.evaluate_thesis_update(t)
     assert not ok and "governed action" in reason
-    t = _trace(sid="cooking_scope",
-               answer="Cooking is outside scope but complete data with no limitations.",
-               calls=[], texts={}, kinds=[])
+    t = _trace(
+        sid="cooking_scope",
+        answer="Cooking is outside scope but complete data with no limitations.",
+        calls=[],
+        texts={},
+        kinds=[],
+    )
     t["scenario"] = next(s for s in J.SCENARIOS if s["id"] == "cooking_scope")
     ok, reason = J.evaluate_unsupported(t)
     assert not ok and "contradicts" in reason
@@ -1044,8 +1224,14 @@ def test_collect_telemetry_bad_path_and_fallback(tmp_path: Path):
 
 
 def test_collect_telemetry_tally_branches():
-    tel = {"search_count": 0, "browse_count": 0, "candidate_count": 0,
-           "research_count": 0, "failed_calls": 0, "retries": 0}
+    tel = {
+        "search_count": 0,
+        "browse_count": 0,
+        "candidate_count": 0,
+        "research_count": 0,
+        "failed_calls": 0,
+        "retries": 0,
+    }
     J._tally_telemetry_row(tel, "search_tools", None, "not-int")
     J._tally_telemetry_row(tel, "describe_tool", "e", None)
     J._tally_telemetry_row(tel, "call_tool", None, None)
@@ -1065,14 +1251,22 @@ def test_build_trace_bad_path_and_empty_db(tmp_path: Path):
     db2 = tmp_path / "full.db"
     conn = sqlite3.connect(str(db2))
     conn.execute("CREATE TABLE agent_runs (run_id TEXT, status TEXT, started_at TEXT)")
-    conn.execute("CREATE TABLE tool_calls (tool_call_id TEXT, tool_name TEXT, status TEXT, error_type TEXT, source_names TEXT, truncated INT, error_message TEXT, arguments_json TEXT, result_row_count INT, run_id TEXT)")
+    conn.execute(
+        "CREATE TABLE tool_calls (tool_call_id TEXT, tool_name TEXT, status TEXT, error_type TEXT, source_names TEXT, truncated INT, error_message TEXT, arguments_json TEXT, result_row_count INT, run_id TEXT)"
+    )
     conn.execute("CREATE TABLE evidence (tool_call_id TEXT, rendered_text TEXT, run_id TEXT)")
     conn.execute("CREATE TABLE security_events (verdict TEXT, decision TEXT, reason TEXT, run_id TEXT)")
     conn.execute("INSERT INTO agent_runs VALUES ('r1', 'completed', '2026-01-01')")
     conn.execute("INSERT INTO tool_calls VALUES ('d1', 'search_tools', 'completed', NULL, '', 0, '', '{}', 3, 'r1')")
-    conn.execute("INSERT INTO tool_calls VALUES ('t1', 'get_fundamentals', 'completed', NULL, 'sec', 0, '', '{}', NULL, 'r1')")
-    conn.execute("INSERT INTO tool_calls VALUES ('t2', 'search_web', 'completed', NULL, '', 0, '', '{\"q\": \"my portfolio holdings\"}', NULL, 'r1')")
-    conn.execute("INSERT INTO tool_calls VALUES ('t3', 'get_x', 'failed', 'capability denied', '', 0, 'denied', '{}', NULL, 'r1')")
+    conn.execute(
+        "INSERT INTO tool_calls VALUES ('t1', 'get_fundamentals', 'completed', NULL, 'sec', 0, '', '{}', NULL, 'r1')"
+    )
+    conn.execute(
+        "INSERT INTO tool_calls VALUES ('t2', 'search_web', 'completed', NULL, '', 0, '', '{\"q\": \"my portfolio holdings\"}', NULL, 'r1')"
+    )
+    conn.execute(
+        "INSERT INTO tool_calls VALUES ('t3', 'get_x', 'failed', 'capability denied', '', 0, 'denied', '{}', NULL, 'r1')"
+    )
     conn.execute("INSERT INTO evidence VALUES ('d1', '3 candidates found', 'r1')")
     conn.execute("INSERT INTO evidence VALUES ('t1', 'NVDA EPS $5.20 filed 2026-08-01 ' || 'x', 'r1')")
     conn.execute("INSERT INTO security_events VALUES ('deny', 'blocked', 'policy deny', 'r1')")
@@ -1136,11 +1330,10 @@ class _BoomFuture(concurrent.futures.Future[dict[str, object]]):
     @override
     def __init__(self) -> None:
         pass
+
     @override
     def result(self, timeout: float | None = None) -> dict[str, object]:
         raise RuntimeError("boom")
-
-
 
 
 def _unused_gate_checks():
@@ -1187,19 +1380,39 @@ def test_research_gates_none_branches():
 MODEL = "test-model"
 
 
-def _base_db(path: Path, tool_rows: list[tuple[str, str, str | None]] | None = None, events: list[tuple[str, str, str, object]] | None = None, models: bool = True, status: str = "completed", disc_at: str = "2026-01-01T00:00:00+00:00", inner_at: str = "2026-01-01T00:00:01+00:00") -> Path:
+def _base_db(
+    path: Path,
+    tool_rows: list[tuple[str, str, str | None]] | None = None,
+    events: list[tuple[str, str, str, object]] | None = None,
+    models: bool = True,
+    status: str = "completed",
+    disc_at: str = "2026-01-01T00:00:00+00:00",
+    inner_at: str = "2026-01-01T00:00:01+00:00",
+) -> Path:
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
-    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1',?,?,?)", (disc_at, "q", status))
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1',?,?,?)",
+        (disc_at, "q", status),
+    )
     seq = 0
-    for name, started, err in (tool_rows or []):
-        conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES (?,?,?,?,?)", (f"tc{seq}", "r1", name, started, err))
+    for name, started, err in tool_rows or []:
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES (?,?,?,?,?)",
+            (f"tc{seq}", "r1", name, started, err),
+        )
         seq += 1
-    for etype, name, started, args in (events or []):
-        conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES (?,?,?,?,?,?,?)", (f"e{seq}", "r1", seq, etype, started, name, args))
+    for etype, name, started, args in events or []:
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES (?,?,?,?,?,?,?)",
+            (f"e{seq}", "r1", seq, etype, started, name, args),
+        )
         seq += 1
     if models:
-        conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)", (MODEL, disc_at))
+        conn.execute(
+            "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
+            (MODEL, disc_at),
+        )
     conn.commit()
     conn.close()
     return path
@@ -1209,13 +1422,27 @@ def _search_db(path: Path, queries: list[str], bad_rows: int = 0) -> Path:
     """search_tools rows: good JSON query rows + N unparseable rows."""
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
-    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','t','q','completed')")
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','t','q','completed')"
+    )
     for i, q in enumerate(queries):
-        conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, arguments_json) VALUES (?,?,?,?,?)", (f"s{i}", "r1", "search_tools", f"t{i}", json.dumps({"query": q})))
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, arguments_json) VALUES (?,?,?,?,?)",
+            (f"s{i}", "r1", "search_tools", f"t{i}", json.dumps({"query": q})),
+        )
     for i in range(bad_rows):
-        conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, arguments_json) VALUES (?,?,?,?,?)", (f"b{i}", "r1", "search_tools", f"z{i}", "{not-json"))
-        conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, arguments_json) VALUES (?,?,?,?,?)", (f"c{i}", "r1", "search_tools", f"y{i}", json.dumps({"nquery": 1})))
-    conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)", (MODEL, "t"))
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, arguments_json) VALUES (?,?,?,?,?)",
+            (f"b{i}", "r1", "search_tools", f"z{i}", "{not-json"),
+        )
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, arguments_json) VALUES (?,?,?,?,?)",
+            (f"c{i}", "r1", "search_tools", f"y{i}", json.dumps({"nquery": 1})),
+        )
+    conn.execute(
+        "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
+        (MODEL, "t"),
+    )
     conn.commit()
     conn.close()
     return path
@@ -1244,11 +1471,18 @@ def test_search_queries_for_db_reads(tmp_path: Path):
 
 
 def test_holdout_reachability_branch_attempt1(tmp_path: Path):
-    p = _base_db(tmp_path / "h.sqlite",
-                 tool_rows=[("search_tools", "2026-01-01T00:00:00+00:00", None), ("get_short_interest", "2026-01-01T00:00:01+00:00", None)],
-                 events=[("tool_completed", "search_tools", "2026-01-01T00:00:00+00:00", None),
-                         ("tool_started", "call_tool", "2026-01-01T00:00:01+00:00", json.dumps({"name": "get_short_interest"})),
-                         ("tool_completed", "call_tool", "2026-01-01T00:00:01+00:00", None)])
+    p = _base_db(
+        tmp_path / "h.sqlite",
+        tool_rows=[
+            ("search_tools", "2026-01-01T00:00:00+00:00", None),
+            ("get_short_interest", "2026-01-01T00:00:01+00:00", None),
+        ],
+        events=[
+            ("tool_completed", "search_tools", "2026-01-01T00:00:00+00:00", None),
+            ("tool_started", "call_tool", "2026-01-01T00:00:01+00:00", json.dumps({"name": "get_short_interest"})),
+            ("tool_completed", "call_tool", "2026-01-01T00:00:01+00:00", None),
+        ],
+    )
     ok, _ = v.evaluate_holdout_reachability_attempt(p, "get_short_interest")
     assert ok
     ok2, _ = v.evaluate_holdout_attempt(p, "get_short_interest")
@@ -1265,8 +1499,12 @@ def test_reachability_tool_branches(tmp_path: Path):
     p = tmp_path / "r.sqlite"
     conn = sqlite3.connect(str(p))
     conn.executescript(_SCHEMA)
-    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','t','q','completed')")
-    conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('t1','r1','get_x','t',NULL)")
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','t','q','completed')"
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('t1','r1','get_x','t',NULL)"
+    )
     conn.commit()
     assert v._reachability_tool_success(conn, "get_x", attempt=1) == "no completed event"
     assert v._tool_call_arg_sets(conn, "get_x") is not None
@@ -1280,8 +1518,11 @@ def test_normalize_args_fallbacks():
     assert v._normalize_str_arg(json.dumps({"b": 1, "a": 2})) == json.dumps({"a": 2, "b": 1})
     assert v._normalize_args({"b": 1, "a": 2}) == json.dumps({"a": 2, "b": 1})
     assert v._normalize_jsonable(object()) is not None  # str() fallback path
+
     class Bad:
-        def __str__(self): raise ValueError("nope")
+        def __str__(self):
+            raise ValueError("nope")
+
     # json.dumps(default=str) calls str -> raises -> outer fallback str(raw)
     try:
         v._normalize_jsonable({"k": Bad()})
@@ -1337,6 +1578,7 @@ def test_holdout_read_failures(tmp_path: Path):
 
 def test_holdout_case_and_verdict_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import scripts.verify_pi_tools as vv
+
     monkeypatch.setattr(vv, "resolve_arguments", _no_fixture)
     assert vv._holdout_lookup_args({"expected_tool": "t", "prompt": "p"}, {}) is None
     r = vv.AttemptResult("t", 1, True, "pass", 0, "", 0.0, False, True, "pass", True, "pass")
@@ -1350,9 +1592,6 @@ Barrier-concurrency style per tests/test_pi_bridge.py; fake kernel doubles, neve
 Covers: job_start, tool_invoke, session_finalize, source_submit, freeze_create,
 research_events, job_complete, heartbeat/wave_decide, evidence_add fallback, session_cancel/resume.
 """
-
-
-
 
 
 def _rid(tag: str) -> str:
@@ -1416,9 +1655,10 @@ def test_job_start_unknown_session_and_ok(monkeypatch: pytest.MonkeyPatch):
             return {"job_id": "j1"}
 
     monkeypatch.setattr(pi_bridge, "_kernel", K2())
-    assert pi_bridge._op_research_job_start(
-        {"session_id": "s1", "wave_id": 2, "type": "source_agent"}, "p2") == {
-        "id": "p2", "result": {"job_id": "j1"}}
+    assert pi_bridge._op_research_job_start({"session_id": "s1", "wave_id": 2, "type": "source_agent"}, "p2") == {
+        "id": "p2",
+        "result": {"job_id": "j1"},
+    }
 
 
 def test_job_start_value_error(monkeypatch: pytest.MonkeyPatch):
@@ -1445,13 +1685,14 @@ def test_tool_invoke_shape_and_dispatch(monkeypatch: pytest.MonkeyPatch):
     ]
     seen: dict[str, object] = {}
 
-    def fake_execute(name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object) -> dict[str, object]:
+    def fake_execute(
+        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+    ) -> dict[str, object]:
         seen.update(name=name, sid=session.session_id, kw=kw)
         return {"ok": 1}
 
     monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
-    pi_bridge._run_tool_invoke({"id": "i3", "name": "search_web",
-                                "arguments": {"q": "x"}, "session_id": "sess-1"})
+    pi_bridge._run_tool_invoke({"id": "i3", "name": "search_web", "arguments": {"q": "x"}, "session_id": "sess-1"})
     assert responses[-1] == {"id": "i3", "result": {"ok": 1}}
     assert seen["sid"] == "sess-1"
     pi_bridge._run_tool_invoke({"id": "i4", "name": "search_web", "arguments": {}})
@@ -1474,7 +1715,9 @@ def test_tool_invoke_overlaps_barrier(monkeypatch: pytest.MonkeyPatch):
     responses = _capture(monkeypatch)
     barrier = threading.Barrier(2)
 
-    def fake_execute(name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object) -> dict[str, object]:
+    def fake_execute(
+        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+    ) -> dict[str, object]:
         barrier.wait(timeout=30)
         return {"ok": True}
 
@@ -1482,10 +1725,8 @@ def test_tool_invoke_overlaps_barrier(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
     monkeypatch.setattr(pi_bridge, "_executor", pool)
     try:
-        assert pi_bridge._handle(json.dumps(
-            {"id": "t1", "op": "tool.invoke", "name": "a", "arguments": {}})) is None
-        assert pi_bridge._handle(json.dumps(
-            {"id": "t2", "op": "tool.invoke", "name": "b", "arguments": {}})) is None
+        assert pi_bridge._handle(json.dumps({"id": "t1", "op": "tool.invoke", "name": "a", "arguments": {}})) is None
+        assert pi_bridge._handle(json.dumps({"id": "t2", "op": "tool.invoke", "name": "b", "arguments": {}})) is None
         deadline = time.time() + 30
         while time.time() < deadline and len(responses) < 2:
             time.sleep(0.01)
@@ -1497,12 +1738,12 @@ def test_tool_invoke_overlaps_barrier(monkeypatch: pytest.MonkeyPatch):
 def test_session_finalize_branches(monkeypatch: pytest.MonkeyPatch):
     assert pi_bridge._op_research_session_finalize({}, "p")["error"] == "missing_arg"
     base = {"session_id": "s", "answer": "a"}
-    assert pi_bridge._op_research_session_finalize(
-        {**base, "answer": 5}, "p")["error"] == "missing_arg"
-    assert pi_bridge._op_research_session_finalize(
-        {**base, "claims": {}}, "p")["error"] == "invalid_arg"
-    assert pi_bridge._op_research_session_finalize(
-        {**base, "claims": []}, "p") == {"id": "p", "error": "claims_required"}
+    assert pi_bridge._op_research_session_finalize({**base, "answer": 5}, "p")["error"] == "missing_arg"
+    assert pi_bridge._op_research_session_finalize({**base, "claims": {}}, "p")["error"] == "invalid_arg"
+    assert pi_bridge._op_research_session_finalize({**base, "claims": []}, "p") == {
+        "id": "p",
+        "error": "claims_required",
+    }
 
     class K:
         class ResearchNotFound(Exception):
@@ -1512,8 +1753,9 @@ def test_session_finalize_branches(monkeypatch: pytest.MonkeyPatch):
             raise K.ResearchNotFound()
 
     monkeypatch.setattr(pi_bridge, "_kernel", K())
-    assert pi_bridge._op_research_session_finalize(
-        {**base, "claims": [{"text": "t"}]}, "p")["error"] == "unknown_session"
+    assert (
+        pi_bridge._op_research_session_finalize({**base, "claims": [{"text": "t"}]}, "p")["error"] == "unknown_session"
+    )
 
     class K2(K):
         @override
@@ -1521,8 +1763,7 @@ def test_session_finalize_branches(monkeypatch: pytest.MonkeyPatch):
             raise ValueError("bad claim")
 
     monkeypatch.setattr(pi_bridge, "_kernel", K2())
-    assert pi_bridge._op_research_session_finalize(
-        {**base, "claims": [{"text": "t"}]}, "p")["error"] == "invalid_arg"
+    assert pi_bridge._op_research_session_finalize({**base, "claims": [{"text": "t"}]}, "p")["error"] == "invalid_arg"
 
     class K3(K):
         @override
@@ -1530,9 +1771,10 @@ def test_session_finalize_branches(monkeypatch: pytest.MonkeyPatch):
             return {"status": "completed"}
 
     monkeypatch.setattr(pi_bridge, "_kernel", K3())
-    assert pi_bridge._op_research_session_finalize(
-        {**base, "claims": [{"text": "t"}]}, "p") == {
-        "id": "p", "result": {"status": "completed"}}
+    assert pi_bridge._op_research_session_finalize({**base, "claims": [{"text": "t"}]}, "p") == {
+        "id": "p",
+        "result": {"status": "completed"},
+    }
 
 
 def test_source_submit_branches(monkeypatch: pytest.MonkeyPatch):
@@ -1547,7 +1789,10 @@ def test_source_submit_branches(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(pi_bridge, "_kernel", K())
     assert pi_bridge._op_research_source_submit({"job_id": "j"}, "p") == {
-        "id": "p", "error": "unknown_job", "job_id": "j"}
+        "id": "p",
+        "error": "unknown_job",
+        "job_id": "j",
+    }
 
     class K2(K):
         @override
@@ -1565,16 +1810,13 @@ def test_source_submit_branches(monkeypatch: pytest.MonkeyPatch):
             return {"status": "completed"}
 
     monkeypatch.setattr(pi_bridge, "_kernel", K3())
-    assert pi_bridge._op_research_source_submit({"job_id": "j"}, "p") == {
-        "id": "p", "result": {"status": "completed"}}
+    assert pi_bridge._op_research_source_submit({"job_id": "j"}, "p") == {"id": "p", "result": {"status": "completed"}}
 
 
 def test_freeze_create_branches(monkeypatch: pytest.MonkeyPatch):
     assert pi_bridge._op_research_freeze_create({}, "p")["error"] == "missing_arg"
-    assert pi_bridge._op_research_freeze_create(
-        {"session_id": "s", "wave_id": "x"}, "p")["error"] == "invalid_arg"
-    assert pi_bridge._op_research_freeze_create(
-        {"session_id": "s", "wave_id": 0}, "p")["error"] == "invalid_arg"
+    assert pi_bridge._op_research_freeze_create({"session_id": "s", "wave_id": "x"}, "p")["error"] == "invalid_arg"
+    assert pi_bridge._op_research_freeze_create({"session_id": "s", "wave_id": 0}, "p")["error"] == "invalid_arg"
 
     class K:
         class ResearchNotFound(Exception):
@@ -1601,22 +1843,26 @@ def test_freeze_create_branches(monkeypatch: pytest.MonkeyPatch):
             return {"freeze_id": f"{sid}:{wave}:freeze"}
 
     monkeypatch.setattr(pi_bridge, "_kernel", K3())
-    assert pi_bridge._op_research_freeze_create(
-        {"session_id": "s", "wave_id": None}, "p") == {
-        "id": "p", "result": {"freeze_id": "s:1:freeze"}}
+    assert pi_bridge._op_research_freeze_create({"session_id": "s", "wave_id": None}, "p") == {
+        "id": "p",
+        "result": {"freeze_id": "s:1:freeze"},
+    }
 
 
 def test_committee_create_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """research.committee.create over the bridge: arg shapes, then the atomic trio."""
+
     def _dispatch(request: dict[str, object]) -> dict[str, object]:
-        out = pi_bridge._handle(json.dumps(
-            {"id": "c0", "op": "research.committee.create", **request}))
+        out = pi_bridge._handle(json.dumps({"id": "c0", "op": "research.committee.create", **request}))
         assert isinstance(out, dict)
         return out
 
     assert _dispatch({}) == {"id": "c0", "error": "missing_arg"}
     assert _dispatch({"session_id": "s", "wave_id": 0}) == {
-        "id": "c0", "error": "invalid_arg", "detail": "'wave_id' must be an int >= 1"}
+        "id": "c0",
+        "error": "invalid_arg",
+        "detail": "'wave_id' must be an int >= 1",
+    }
 
     from app.research import service as svc
     from app.research.repository import ResearchRepository
@@ -1625,11 +1871,9 @@ def test_committee_create_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     sid = svc.create_research("NVDA demand?", "o", as_of="2026-01-02T00:00:00+00:00", repo=repo)
     svc.complete_job(repo.list_jobs(sid)[0].job_id, {}, repo=repo)
     wire: dict[str, object] = {"session_id": sid, "data_root": str(tmp_path)}
-    assert _dispatch({**wire, "session_id": "nope"}) == {
-        "id": "c0", "error": "unknown_session", "session_id": "nope"}
+    assert _dispatch({**wire, "session_id": "nope"}) == {"id": "c0", "error": "unknown_session", "session_id": "nope"}
 
-    freeze = pi_bridge._handle(json.dumps(
-        {"id": "f1", "op": "research.freeze.create", **wire}))
+    freeze = pi_bridge._handle(json.dumps({"id": "f1", "op": "research.freeze.create", **wire}))
     assert isinstance(freeze, dict)
     froze = freeze["result"]
     assert isinstance(froze, dict)
@@ -1655,8 +1899,7 @@ def test_committee_create_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPat
             raise ValueError("trio blocked")
 
     monkeypatch.setattr(pi_bridge, "_kernel", K())
-    assert _dispatch({"session_id": "s"}) == {
-        "id": "c0", "error": "invalid_arg", "detail": "trio blocked"}
+    assert _dispatch({"session_id": "s"}) == {"id": "c0", "error": "invalid_arg", "detail": "trio blocked"}
 
 
 def test_research_events_branches(monkeypatch: pytest.MonkeyPatch):
@@ -1680,8 +1923,7 @@ def test_research_events_branches(monkeypatch: pytest.MonkeyPatch):
             return {"events": list[str]()}
 
     monkeypatch.setattr(pi_bridge, "_kernel", K2())
-    assert pi_bridge._op_research_events({"session_id": "s"}, "p") == {
-        "id": "p", "result": {"events": []}}
+    assert pi_bridge._op_research_events({"session_id": "s"}, "p") == {"id": "p", "result": {"events": []}}
 
 
 def test_job_complete_and_heartbeat_and_wave_decide(monkeypatch: pytest.MonkeyPatch):
@@ -1704,11 +1946,20 @@ def test_job_complete_and_heartbeat_and_wave_decide(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(pi_bridge, "_kernel", K())
     assert pi_bridge._op_research_job_complete({"job_id": "j"}, "p") == {
-        "id": "p", "error": "unknown_job", "job_id": "j"}
+        "id": "p",
+        "error": "unknown_job",
+        "job_id": "j",
+    }
     assert pi_bridge._op_research_job_heartbeat({"job_id": "j"}, "p") == {
-        "id": "p", "error": "unknown_job", "job_id": "j"}
+        "id": "p",
+        "error": "unknown_job",
+        "job_id": "j",
+    }
     assert pi_bridge._op_research_wave_decide({"session_id": "s"}, "p") == {
-        "id": "p", "error": "unknown_session", "session_id": "s"}
+        "id": "p",
+        "error": "unknown_session",
+        "session_id": "s",
+    }
 
     class K2(K):
         @override
@@ -1725,17 +1976,14 @@ def test_job_complete_and_heartbeat_and_wave_decide(monkeypatch: pytest.MonkeyPa
 
     monkeypatch.setattr(pi_bridge, "_kernel", K2())
     assert pi_bridge._op_research_job_complete({"job_id": "j"}, "p")["error"] == "invalid_arg"
-    assert pi_bridge._op_research_job_heartbeat({"job_id": "j"}, "p") == {
-        "id": "p", "result": {"status": "running"}}
-    assert pi_bridge._op_research_wave_decide({"session_id": "s"}, "p") == {
-        "id": "p", "result": {"authorized": False}}
+    assert pi_bridge._op_research_job_heartbeat({"job_id": "j"}, "p") == {"id": "p", "result": {"status": "running"}}
+    assert pi_bridge._op_research_wave_decide({"session_id": "s"}, "p") == {"id": "p", "result": {"authorized": False}}
 
 
 def test_evidence_add_unknown_job_fallback(monkeypatch: pytest.MonkeyPatch):
     bad = {"session_id": "s", "job_id": "j"}
     assert pi_bridge._op_research_evidence_add({}, "p")["error"] == "missing_arg"
-    assert pi_bridge._op_research_evidence_add(
-        {**bad, "item": []}, "p")["error"] == "invalid_arg"
+    assert pi_bridge._op_research_evidence_add({**bad, "item": []}, "p")["error"] == "invalid_arg"
 
     class K:
         class ResearchNotFound(Exception):
@@ -1745,8 +1993,11 @@ def test_evidence_add_unknown_job_fallback(monkeypatch: pytest.MonkeyPatch):
             raise K.ResearchNotFound("unknown job_id j")
 
     monkeypatch.setattr(pi_bridge, "_kernel", K())
-    assert pi_bridge._op_research_evidence_add(
-        {**bad, "item": {}}, "p") == {"id": "p", "error": "unknown_job", "job_id": "j"}
+    assert pi_bridge._op_research_evidence_add({**bad, "item": {}}, "p") == {
+        "id": "p",
+        "error": "unknown_job",
+        "job_id": "j",
+    }
 
     class K2(K):
         @override
@@ -1754,8 +2005,11 @@ def test_evidence_add_unknown_job_fallback(monkeypatch: pytest.MonkeyPatch):
             raise K.ResearchNotFound("nope")
 
     monkeypatch.setattr(pi_bridge, "_kernel", K2())
-    assert pi_bridge._op_research_evidence_add(
-        {**bad, "item": {}}, "p") == {"id": "p", "error": "unknown_session", "session_id": "s"}
+    assert pi_bridge._op_research_evidence_add({**bad, "item": {}}, "p") == {
+        "id": "p",
+        "error": "unknown_session",
+        "session_id": "s",
+    }
 
     class K3(K):
         @override
@@ -1763,8 +2017,7 @@ def test_evidence_add_unknown_job_fallback(monkeypatch: pytest.MonkeyPatch):
             raise ValueError("bad item")
 
     monkeypatch.setattr(pi_bridge, "_kernel", K3())
-    assert pi_bridge._op_research_evidence_add(
-        {**bad, "item": {}}, "p")["error"] == "invalid_arg"
+    assert pi_bridge._op_research_evidence_add({**bad, "item": {}}, "p")["error"] == "invalid_arg"
 
 
 def test_session_cancel_resume_branches(monkeypatch: pytest.MonkeyPatch):
@@ -1783,9 +2036,14 @@ def test_session_cancel_resume_branches(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(pi_bridge, "_kernel", K())
     assert pi_bridge._op_research_session_cancel({"session_id": "s"}, "p") == {
-        "id": "p", "error": "unknown_session", "session_id": "s"}
+        "id": "p",
+        "error": "unknown_session",
+        "session_id": "s",
+    }
     assert pi_bridge._op_research_session_resume({"session_id": "s"}, "p") == {
-        "id": "p", "result": {"status": "running"}}
+        "id": "p",
+        "result": {"status": "running"},
+    }
 
     class K2(K):
         @override
@@ -1794,7 +2052,9 @@ def test_session_cancel_resume_branches(monkeypatch: pytest.MonkeyPatch):
 
     monkeypatch.setattr(pi_bridge, "_kernel", K2())
     assert pi_bridge._op_research_session_cancel({"session_id": "s"}, "p") == {
-        "id": "p", "result": {"status": "cancelled"}}
+        "id": "p",
+        "result": {"status": "cancelled"},
+    }
 
 
 def test_tool_call_worker_validates_shape(monkeypatch: pytest.MonkeyPatch):
@@ -1813,15 +2073,24 @@ def test_staged_context_applies_per_call(monkeypatch: pytest.MonkeyPatch):
     responses = _capture(monkeypatch)
     seen = {}
 
-    def fake_execute(name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object) -> dict[str, object]:
+    def fake_execute(
+        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+    ) -> dict[str, object]:
         seen.update(sid=kw.get("active_research_session_id"), jid=kw.get("active_research_job_id"))
         return {"ok": True}
 
     monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
     try:
-        pi_bridge._run_tool_call({"id": "s1", "name": "search_web", "arguments": {},
-                                  "run_id": run_id, "active_research_session_id": "sess-A",
-                                  "active_research_job_id": "job-A"})
+        pi_bridge._run_tool_call(
+            {
+                "id": "s1",
+                "name": "search_web",
+                "arguments": {},
+                "run_id": run_id,
+                "active_research_session_id": "sess-A",
+                "active_research_job_id": "job-A",
+            }
+        )
         assert responses == [{"id": "s1", "result": {"ok": True}}]
         assert (seen["sid"], seen["jid"]) == ("sess-A", "job-A")
     finally:
@@ -1830,10 +2099,6 @@ def test_staged_context_applies_per_call(monkeypatch: pytest.MonkeyPatch):
 
 # ---- slice_health_tests.py ----
 """Scratch coverage for low-cov verify_tool_health branches (fakes, no live services)."""
-
-
-
-
 
 
 def _ctx(tmp_path: Path) -> RequestContext:
@@ -1895,7 +2160,10 @@ def test_schema_branches() -> None:
 
 
 def test_schema_real_tool_pass_and_parity(tmp_path: Path) -> None:
-    fn: dict[str, object] = {"description": "d", "parameters": {"type": "object", "properties": {"query": {"type": "string"}}}}
+    fn: dict[str, object] = {
+        "description": "d",
+        "parameters": {"type": "object", "properties": {"query": {"type": "string"}}},
+    }
     assert vth.check_schema("search_web", fn) is None
     bad_required: dict[str, object] = {
         "description": "d",
@@ -1969,7 +2237,9 @@ def _exec_thesis_abc(name: str, arguments: dict[str, object], model: str, *a: ob
     return {"thesis_id": "abc"}
 
 
-def _exec_thesis_nested(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
+def _exec_thesis_nested(
+    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
+) -> dict[str, object]:
     return {"thesis": {"id": "nested"}}
 
 
@@ -2034,6 +2304,7 @@ def test_live_timeout_branch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     def _submit_hung(self: object, *a: object, **k: object) -> object:
         return _Hung()
+
     monkeypatch.setattr(cf.ThreadPoolExecutor, "submit", _submit_hung)
     with cf.ThreadPoolExecutor(max_workers=1) as pool:
         assert "exceeded" in (vth.check_live("search_web", {"query": "q"}, ctx, pool) or "")
@@ -2058,9 +2329,7 @@ def test_errors_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Non
     assert "no structured error" in (vth.check_errors("search_web", {"required": ["query"]}, ctx) or "")
     monkeypatch.setattr(vth, "execute_tool", _exec_err_nope)
     assert "error_type" in (vth.check_errors("search_web", {"required": ["query"]}, ctx) or "")
-    monkeypatch.setattr(
-        vth, "execute_tool", _exec_err_other
-    )
+    monkeypatch.setattr(vth, "execute_tool", _exec_err_other)
     assert "tool name" in (vth.check_errors("search_web", {"required": ["query"]}, ctx) or "")
     monkeypatch.setattr(
         vth,
@@ -2152,8 +2421,6 @@ strict_routing_harness. Run: python3 -m pytest /tmp/slice_small_tests.py -q
 """
 
 
-
-
 def _result(entries: list[dict[str, object]]) -> dict[str, object]:
     return {
         "calculation_version": "v9",
@@ -2167,13 +2434,19 @@ def _result(entries: list[dict[str, object]]) -> dict[str, object]:
 
 def _entry(ticker: str = "AAPL", now: bool = True, prior: bool = True) -> dict[str, object]:
     e: dict[str, object] = {
-        "rank": 1, "ticker": ticker,
-        "short_shares_current": 100.5, "short_shares_prior": 90.0,
-        "short_change_pct": 11.1, "short_interest_percent_current": 2.5,
-        "short_interest_percent_prior": 2.0, "si_pp_change": 0.5,
-        "shares_outstanding_current": 1000.0, "shares_outstanding_prior": 990.0,
+        "rank": 1,
+        "ticker": ticker,
+        "short_shares_current": 100.5,
+        "short_shares_prior": 90.0,
+        "short_change_pct": 11.1,
+        "short_interest_percent_current": 2.5,
+        "short_interest_percent_prior": 2.0,
+        "si_pp_change": 0.5,
+        "shares_outstanding_current": 1000.0,
+        "shares_outstanding_prior": 990.0,
         "shares_change_pct": 1.01,
-        "finra_source_url": "https://finra/x", "settlement_current": "20260814",
+        "finra_source_url": "https://finra/x",
+        "settlement_current": "20260814",
         "sec_accession_current": "acc-now" if now else "",
         "sec_source_url_current": "https://sec/now",
         "sec_filed_at_current": "2026-08-01",
@@ -2304,6 +2577,7 @@ def test_robinhood_main_json_and_text(monkeypatch: pytest.MonkeyPatch, capsys: p
 
     def _connect_tools(server_url: str) -> list[dict[str, object]]:
         return tools
+
     monkeypatch.setattr(rt, "connect", _connect_tools)
     assert rt.main(["--json"]) == 0
     assert json.loads(capsys.readouterr().out) == tools
@@ -2314,6 +2588,7 @@ def test_robinhood_main_json_and_text(monkeypatch: pytest.MonkeyPatch, capsys: p
 def test_robinhood_main_failure(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     def _boom(url: str) -> object:
         raise RuntimeError("nope")
+
     monkeypatch.setattr(rt, "connect", _boom)
     assert rt.main([]) == 1
     assert "nope" in capsys.readouterr().err
@@ -2402,15 +2677,18 @@ def test_smoke_list_names_and_chain(monkeypatch: pytest.MonkeyPatch):
     class C(RobinhoodClient):
         def __init__(self) -> None:
             pass
+
         @override
         def list_tools(self) -> list[dict[str, object]]:
             return [{"name": "t1"}, {}]
+
     assert smoke.list_tool_names(C()) == ["t1", "<unknown>"]
     seen: dict[str, object] = {}
 
     class C2(RobinhoodClient):
         def __init__(self) -> None:
             pass
+
         @override
         def list_tools(self) -> list[dict[str, object]]:
             return []
@@ -2418,6 +2696,7 @@ def test_smoke_list_names_and_chain(monkeypatch: pytest.MonkeyPatch):
     def _fake_client(**k: object) -> object:
         seen.update(k)
         return C2()
+
     monkeypatch.setattr(smoke.stockbot_tools, "_robinhood_client", _fake_client)
     monkeypatch.setattr(smoke.stockbot_tools, "get_option_chain", _fake_option_chain)
     monkeypatch.setattr(smoke, "render_tool_result", _render_chain)
@@ -2431,6 +2710,7 @@ def test_smoke_main_paths(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captur
     class C(RobinhoodClient):
         def __init__(self) -> None:
             pass
+
         @override
         def list_tools(self) -> list[dict[str, object]]:
             return [{"name": "t1"}]
@@ -2441,6 +2721,7 @@ def test_smoke_main_paths(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Captur
 
     def _connect_c(server_url: str) -> object:
         return C()
+
     monkeypatch.setattr(smoke, "connect", _connect_c)
     monkeypatch.setattr(smoke, "render_tool_result", _render_r)
     assert smoke.main(["--tool", "t1"]) == 0
@@ -2517,6 +2798,7 @@ def test_doctor_run_all_aggregator():
 
     def _boom():
         raise RuntimeError("x")
+
     assert doc.run_all([_ok, _ok]) == 0
     assert doc.run_all([_ok, _fail_exit]) == 1
     assert doc.run_all([_boom]) == 1
@@ -2524,28 +2806,35 @@ def test_doctor_run_all_aggregator():
     assert {c.__name__ for c in doc.selected_checks(doc.parse_args([]))} == {c.__name__ for c in doc.CHECKS.values()}
     assert doc.selected_checks(doc.parse_args(["--check", "env"])) == [doc.check_calling_env]
 
+
 def test_doctor_network_branches(monkeypatch: pytest.MonkeyPatch):
     class P:
         def __init__(self, code: int = 0, out: str = "", err: str = "") -> None:
             self.returncode = code
             self.stdout = out
             self.stderr = err
+
     def _run_allow(cmd: list[str]) -> object:
         return P(0) if cmd[-1] == "a:443" else P(1)
+
     # allowed host returns 0, denied hosts return nonzero
     monkeypatch.setattr(doc, "read_allowlist", _allowlist_a)
     monkeypatch.setattr(doc, "run", _run_allow)
     doc.check_network()  # all allowed + denied hosts denied
+
     def _run_deny_fail(cmd: list[str]) -> object:
         return P(0) if "a:443" not in cmd else P(3, err="no")
+
     monkeypatch.setattr(doc, "run", _run_deny_fail)
     try:
         doc.check_network()
         raise AssertionError("should fail on disallowed host")
     except SystemExit:
         pass
+
     def _run_zero(cmd: list[str]) -> object:
         return P(0)
+
     monkeypatch.setattr(doc, "run", _run_zero)  # denied host returns 0 -> fail
     try:
         doc.check_network()
@@ -2565,6 +2854,7 @@ def test_catalog_yaml_str_and_arg_line():
 
 def test_catalog_schema_helpers():
     from app.tools import TOOL_DISCOVERY_REGISTRY
+
     names = sorted(n for n in TOOL_DISCOVERY_REGISTRY if n not in cat.EXCLUDED)
     name = names[0]
     params = cat._tool_params(name)
@@ -2574,7 +2864,8 @@ def test_catalog_schema_helpers():
     assert cat._required_args(params) == [str(r) for r in req_params]
     assert cat._required_args({}) == []
     assert cat._typed_props({"b": {"type": "string", "description": "d"}, "a": "x"}) == {
-        "a": {}, "b": {"type": "string", "desc": "d"},
+        "a": {},
+        "b": {"type": "string", "desc": "d"},
     }
     try:
         cat._tool_params("no_such_tool_xyz")
@@ -2597,17 +2888,19 @@ def test_catalog_schema_helpers():
 
 def test_catalog_markdown_sections():
     from app.tools import TOOL_DISCOVERY_REGISTRY
+
     names = sorted(n for n in TOOL_DISCOVERY_REGISTRY if n not in cat.EXCLUDED)
     md = cat.tool_markdown(names[0])
     for section in ("Choose when", "Reject when", "Required arguments", "Optional arguments"):
         assert section in md
-    assert cat._meta_header_lines("n", TOOL_DISCOVERY_REGISTRY[names[0]])[0] == f"# n\n"
+    assert cat._meta_header_lines("n", TOOL_DISCOVERY_REGISTRY[names[0]])[0] == "# n\n"
     assert "## X" in "".join(cat._bullets_section("X", ("a",)))
     assert "## T" in "".join(cat._args_block("T", [], {}))
 
 
 def test_catalog_index_and_validate(tmp_path: Path):
     from app.tools import TOOL_DISCOVERY_REGISTRY
+
     names = sorted(n for n in TOOL_DISCOVERY_REGISTRY if n not in cat.EXCLUDED)
     text = cat.index_yaml(names)
     assert text.startswith("version: 2") and "tools:" in text
@@ -2644,11 +2937,12 @@ def test_harness_verdict_branches():
     passed, excused, reason = harness.strict_verdict(["get_short_interest"], [], bad_rows)
     assert (passed, excused) == (False, False) and "missing" in reason
     passed, excused, _ = harness.strict_verdict(
-        ["get_short_interest"], [], bad_rows,
-        infra_error_names=(("get_short_interest", "ratelimit 429"),))
+        ["get_short_interest"], [], bad_rows, infra_error_names=(("get_short_interest", "ratelimit 429"),)
+    )
     assert (passed, excused) == (False, True)
     passed, excused, reason = harness.strict_verdict(
-        ["get_short_interest"], [], [{"tool_name": "call_tool", "arguments": "{"}])
+        ["get_short_interest"], [], [{"tool_name": "call_tool", "arguments": "{"}]
+    )
     assert reason == "unparseable call_tool args"
     rows = harness._trace_rows(["a", "c", "b"])
     passed, _, reason = harness.strict_verdict(["a", "b", "c"], ["c", "a"], rows)
@@ -2698,15 +2992,12 @@ def test_harness_main_probe_fail(monkeypatch: pytest.MonkeyPatch, capsys: pytest
     assert "probe boom" in capsys.readouterr().err
 
 
-
 # ---- slice_gap1_tests.py ----
 """Gap-1 scratch coverage for scripts/verify_pi_tools.py (fakes only, no Pi/network).
 
 Parent assembles this file; do NOT copy into tests/.
 Targets the 18 functions still scoring CRAP>10 under scoped real coverage.
 """
-
-
 
 
 def _tc_table(conn: sqlite3.Connection) -> None:
@@ -2729,6 +3020,7 @@ def _mismatch_conn(path: Path) -> sqlite3.Connection:
 
 
 # ---- _expected_args_mismatch (cc7, was 56%) ----
+
 
 def test_expected_args_none_is_false(tmp_path: Path):
     conn = _mismatch_conn(tmp_path / "m.sqlite")
@@ -2782,6 +3074,7 @@ def test_expected_args_row_normalize_raises_is_false(tmp_path: Path, monkeypatch
 
 # ---- evaluate_reachability_tool (cc6) ----
 
+
 def test_reachability_dict_branches():
     assert v.evaluate_reachability_tool([]) is True
     assert v.evaluate_reachability_tool([{"reach_ok": True}]) is True
@@ -2802,7 +3095,10 @@ def test_reachability_object_branches():
 
 # ---- discover (cc7, subprocess fake) ----
 
-def _popen_factory(lines: list[str], fail_first_wait: bool = False, fail_close: bool = False, fail_all_waits: bool = False):
+
+def _popen_factory(
+    lines: list[str], fail_first_wait: bool = False, fail_close: bool = False, fail_all_waits: bool = False
+):
     class _In:
         def __init__(self):
             self.written = []
@@ -2872,22 +3168,19 @@ def test_discover_unknown_ids_fallback(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_discover_wait_timeout_kills(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        v.subprocess, "Popen", _popen_factory(_lines(), fail_first_wait=True, fail_close=True)
-    )
+    monkeypatch.setattr(v.subprocess, "Popen", _popen_factory(_lines(), fail_first_wait=True, fail_close=True))
     describe, doctor = v.discover()
     assert describe["tools"] == [] and doctor["bridge_ok"] is True
 
 
 def test_discover_double_wait_timeout_kills(monkeypatch: pytest.MonkeyPatch):
-    monkeypatch.setattr(
-        v.subprocess, "Popen", _popen_factory(_lines(), fail_all_waits=True)
-    )
+    monkeypatch.setattr(v.subprocess, "Popen", _popen_factory(_lines(), fail_all_waits=True))
     describe, doctor = v.discover()
     assert describe["tools"] == [] and doctor["bridge_ok"] is True
 
 
 # ---- _reap_pi (cc5) ----
+
 
 class _Proc:
     def __init__(self, poll_val: object, wait_val: int = 0, wait_raises: bool = False) -> None:
@@ -2930,11 +3223,13 @@ def test_reap_wait_error_returns_124(monkeypatch: pytest.MonkeyPatch):
 
 # ---- _verification_args (cc8, was 67%) ----
 
+
 def test_verification_args_finra_seed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     seen: list[tuple[Path, Path]] = []
 
     def _seed_finra(store: Path, durable: Path) -> None:
         seen.append((store, durable))
+
     monkeypatch.setattr(v, "seed_finra_fixture", _seed_finra)
     out = v._verification_args("get_short_interest_leaderboard", {"a": 1}, tmp_path, tmp_path / "d")
     assert out == {"a": 1} and len(seen) == 1
@@ -2949,6 +3244,7 @@ def test_verification_args_research_fixture(tmp_path: Path, monkeypatch: pytest.
 
 
 # ---- _research_call_count (cc8, was 64%) ----
+
 
 def _research_conn(path: Path, rows: list[str]) -> sqlite3.Connection:
     conn = sqlite3.connect(str(path))
@@ -3000,6 +3296,7 @@ def test_research_call_count_db_error(tmp_path: Path):
 
 # ---- _run_confusion_case / _run_confusion_pair / run_confusion ----
 
+
 def _res(tool: str, ok: bool, db: str = "") -> v.AttemptResult:
     return v.AttemptResult(tool, 1, ok, "reason", 0, db, 1.0)
 
@@ -3036,7 +3333,9 @@ def _pair_0_1(*a: object, **k: object) -> tuple[int, int]:
     return (0, 1)
 
 
-def _lookup_tool_t(case: dict[str, object], schemas: dict[str, dict[str, object]]) -> tuple[str, str, dict[str, object]] | None:
+def _lookup_tool_t(
+    case: dict[str, object], schemas: dict[str, dict[str, object]]
+) -> tuple[str, str, dict[str, object]] | None:
     return ("tool-t", "prompt-p", {"a": 1})
 
 
@@ -3066,8 +3365,10 @@ def _holdout_0_0(*a: object, **k: object) -> tuple[int, int]:
 
 def test_run_confusion_case_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     db = str(tmp_path / "runs.sqlite")
+
     def _res_true_db(*a: object, **k: object) -> v.AttemptResult:
         return _res("tool-a", True, db)
+
     monkeypatch.setattr(v, "run_verification_attempt", _res_true_db)
     c = {"expected_tool": "tool-a", "prompt": "p", "arguments": {}, "pair": ["a", "b"]}
     rec = v._run_confusion_case(("a", "b"), c, tmp_path, tmp_path, tmp_path)
@@ -3099,15 +3400,16 @@ def test_run_confusion_pair_tally(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         {"selection_ok": True, "failure_category": "SELECTION_FAILURE"},
         {"selection_ok": False, "failure_category": None},
     ]
+
     def _case_pop(*a: object, **k: object) -> dict[str, object]:
         item = recs.pop(0)
         assert isinstance(item, dict)
         return {str(k): v for k, v in item.items()}
+
     monkeypatch.setattr(v, "_run_confusion_case", _case_pop)
     totals = {c.value: 0 for c in v.RoutingFailureCategory}
     out: list[dict[str, object]] = []
-    ok, total = v._run_confusion_pair(("a", "b"), _conf_cases(),
-                                      tmp_path, tmp_path, tmp_path, out, totals)
+    ok, total = v._run_confusion_pair(("a", "b"), _conf_cases(), tmp_path, tmp_path, tmp_path, out, totals)
     assert (ok, total) == (1, 2) and len(out) == 2
     assert totals["SELECTION_FAILURE"] == 1
 
@@ -3127,11 +3429,15 @@ def _conf_cases() -> list[v.ConfusionCase]:
     ]
 
 
-def test_run_confusion_success_paths(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
+def test_run_confusion_success_paths(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+):
     monkeypatch.setattr(v, "generate_confusion_cases", _conf_cases)
     monkeypatch.setattr(v, "_batch_id", _batch_tb)
+
     def _data_root_tmp() -> Path:
         return tmp_path
+
     monkeypatch.setattr(v, "get_data_root", _data_root_tmp)
     monkeypatch.setattr(v, "_print_confusion_report", _print_none)
     monkeypatch.setattr(v, "_write_confusion_summary", _print_none)
@@ -3142,6 +3448,7 @@ def test_run_confusion_success_paths(tmp_path: Path, monkeypatch: pytest.MonkeyP
 
 
 # ---- _run_holdout_case / run_holdout ----
+
 
 def test_run_holdout_case_invalid(tmp_path: Path):
     assert v._run_holdout_case("nope", 0, {}, tmp_path, tmp_path, tmp_path) == (1, 1)
@@ -3160,12 +3467,14 @@ def test_run_holdout_case_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
 
     def _run_made(*a: object, **k: object) -> v.AttemptResult:
         return made
+
     monkeypatch.setattr(v, "run_verification_attempt", _run_made)
     monkeypatch.setattr(v, "_holdout_verdicts", _verdicts_trf)
     seen: list[tuple[object, ...]] = []
 
     def _report_seen(*a: object) -> None:
         seen.append(a)
+
     monkeypatch.setattr(v, "_report_holdout_case", _report_seen)
     assert v._run_holdout_case({"prompt": "p", "expected_tool": "t"}, 0, {}, tmp_path, tmp_path, tmp_path) == (0, 1)
     assert seen == [("prompt-p", "tool-t", True, "rok", False, "fok", 2.0)]
@@ -3180,13 +3489,16 @@ def test_run_holdout_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
     monkeypatch.setattr(v, "_read_holdout_cases", _read_two)
     monkeypatch.setattr(v, "tool_schemas", _schemas_empty)
     monkeypatch.setattr(v, "_batch_id", _batch_tb)
+
     def _data_root_tmp() -> Path:
         return tmp_path
+
     monkeypatch.setattr(v, "get_data_root", _data_root_tmp)
     outcomes = iter([(0, 1), (1, 0)])
 
     def _holdout_next(*a: object, **k: object) -> tuple[int, int]:
         return next(outcomes)
+
     monkeypatch.setattr(v, "_run_holdout_case", _holdout_next)
     assert v.run_holdout("h.json") == 1
     monkeypatch.setattr(v, "_run_holdout_case", _holdout_0_0)
@@ -3196,6 +3508,7 @@ def test_run_holdout_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsy
 
 # ---- _select_matrix_tools (cc6, was 50%) ----
 
+
 def test_select_matrix_tools_branches():
     assert v._select_matrix_tools(argparse.Namespace(tool="nope"), ["a"]) is None
     assert v._select_matrix_tools(argparse.Namespace(tool="browse_tools"), ["browse_tools", "a"]) is None
@@ -3204,6 +3517,7 @@ def test_select_matrix_tools_branches():
 
 
 # ---- _attempt_record / _report_attempt / _collect_matrix_results (cc5/cc8/cc4) ----
+
 
 def _bool_kw(kw: dict[str, object], key: str) -> bool:
     value = kw.pop(key, False)
@@ -3238,13 +3552,25 @@ def _attempt(tool: str = "t", attempt: int = 1, ok: bool = True, **kw: object) -
     assert isinstance(db, str)
     duration = kw.pop("duration_seconds", 1.0)
     assert isinstance(duration, float)
-    return v.AttemptResult(tool, attempt, ok, reason, exit_code, db, duration,
+    return v.AttemptResult(
+        tool,
+        attempt,
+        ok,
+        reason,
+        exit_code,
+        db,
+        duration,
         model_config_failed=_bool_kw(kw, "model_config_failed"),
-        reach_ok=_opt_bool_kw(kw, "reach_ok"), reach_reason=_str_kw(kw, "reach_reason"),
-        routing_ok=_opt_bool_kw(kw, "routing_ok"), routing_reason=_str_kw(kw, "routing_reason"),
-        discovery_calls=_int_kw(kw, "discovery_calls"), research_calls=_int_kw(kw, "research_calls"),
+        reach_ok=_opt_bool_kw(kw, "reach_ok"),
+        reach_reason=_str_kw(kw, "reach_reason"),
+        routing_ok=_opt_bool_kw(kw, "routing_ok"),
+        routing_reason=_str_kw(kw, "routing_reason"),
+        discovery_calls=_int_kw(kw, "discovery_calls"),
+        research_calls=_int_kw(kw, "research_calls"),
         direct_tool_calls=_int_kw(kw, "direct_tool_calls"),
-        completion_ok=_opt_bool_kw(kw, "completion_ok"), completion_reason=_str_kw(kw, "completion_reason"))
+        completion_ok=_opt_bool_kw(kw, "completion_ok"),
+        completion_reason=_str_kw(kw, "completion_reason"),
+    )
 
 
 def test_attempt_record_fallbacks_and_search_queries():
@@ -3255,14 +3581,24 @@ def test_attempt_record_fallbacks_and_search_queries():
 
 
 def test_report_attempt_marks(capsys: pytest.CaptureFixture[str]):
-    r1 = _attempt(ok=True, reach_ok=True, reach_reason="rr", routing_ok=True, routing_reason="rt",
-                 discovery_calls=1, research_calls=2, direct_tool_calls=1,
-                 completion_ok=True, completion_reason="done")
+    r1 = _attempt(
+        ok=True,
+        reach_ok=True,
+        reach_reason="rr",
+        routing_ok=True,
+        routing_reason="rt",
+        discovery_calls=1,
+        research_calls=2,
+        direct_tool_calls=1,
+        completion_ok=True,
+        completion_reason="done",
+    )
     v._report_attempt(r1, 3)
     out = capsys.readouterr().out
     assert "routing PASS" in out and "reachability PASS" in out and "completion PASS" in out
-    r2 = _attempt(ok=False, reach_ok=None, routing_ok=None, model_config_failed=True,
-                 completion_ok=None, completion_reason="")
+    r2 = _attempt(
+        ok=False, reach_ok=None, routing_ok=None, model_config_failed=True, completion_ok=None, completion_reason=""
+    )
     v._report_attempt(r2, 3)
     cap = capsys.readouterr()
     assert "routing FAIL" in cap.out and "n/a" in cap.out
@@ -3274,6 +3610,7 @@ def test_collect_matrix_results_counts(monkeypatch: pytest.MonkeyPatch):
 
     def _report_seen_tool(r: v.AttemptResult, n: int) -> None:
         seen.append((r.tool, n))
+
     monkeypatch.setattr(v, "_report_attempt", _report_seen_tool)
     r1 = _attempt("t", 1, True, reach_ok=True, routing_ok=True)
     r2 = _attempt("t", 2, False, reach_ok=False, routing_ok=False)
@@ -3284,11 +3621,13 @@ def test_collect_matrix_results_counts(monkeypatch: pytest.MonkeyPatch):
 
 # ---- _sweep_matrix_tools / _print_matrix_aggregates / _report_matrix_result (cc4) ----
 
+
 def test_sweep_matrix_tools_four_verdicts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     pruned: list[str] = []
 
     def _prune_tool(root: Path, tool: str, recs: list[dict[str, object]]) -> None:
         pruned.append(tool)
+
     monkeypatch.setattr(v, "remove_successful_attempt_dirs", _prune_tool)
     results: dict[str, list[dict[str, object]]] = {
         "t1": [{"reach_ok": True, "routing_ok": True, "ok": True}],
@@ -3331,7 +3670,6 @@ plus read-only-base coverage (no source edits) for:
 """
 
 
-
 from scripts.verify_type_escape_hatches import (
     _FileHits,
     _flag_namespaced_decorator,
@@ -3356,22 +3694,42 @@ def _g2_scenario(**kw: object) -> Scenario:
     assert isinstance(requires_evidence, bool)
     notes = kw.get("notes", "n")
     assert isinstance(notes, str)
-    assert not [k for k in kw if k not in ("name", "family", "question", "ticker", "as_of", "expected_tools", "requires_evidence", "notes")]
-    return Scenario(name=name, family=family, question=question, ticker=ticker, as_of=as_of,
-        expected_tools=expected_tools, requires_evidence=requires_evidence, notes=notes)
+    assert not [
+        k
+        for k in kw
+        if k not in ("name", "family", "question", "ticker", "as_of", "expected_tools", "requires_evidence", "notes")
+    ]
+    return Scenario(
+        name=name,
+        family=family,
+        question=question,
+        ticker=ticker,
+        as_of=as_of,
+        expected_tools=expected_tools,
+        requires_evidence=requires_evidence,
+        notes=notes,
+    )
 
 
 def _g2_ns(**kw: object) -> argparse.Namespace:
-    base: dict[str, object] = dict(
-        list=False, scenario=None, model=None, provider=None,
-        prompt_version="v1", fixtures_dir=None, json=False, all=False, model_timeout=None,
-    )
+    base: dict[str, object] = {
+        "list": False,
+        "scenario": None,
+        "model": None,
+        "provider": None,
+        "prompt_version": "v1",
+        "fixtures_dir": None,
+        "json": False,
+        "all": False,
+        "model_timeout": None,
+    }
     for key, value in kw.items():
         base[key] = value
     return argparse.Namespace(**base)
 
 
 # ---- verify_agent_scenarios._pi_model_callable._call (cc6, needs >=52%) ----
+
 
 def _pi_run_fail(*a: object, **k: object) -> object:
     return SimpleNamespace(returncode=1, stdout="", stderr="boom")
@@ -3442,7 +3800,16 @@ def test_pi_model_call_ok(monkeypatch: pytest.MonkeyPatch):
     assert call("prompt?") == "hello"
     assert call.__name__ == "pi_p_m"
     assert seen["timeout"] == 250
-    assert seen["argv"] == ["pi", "--provider", "p", "--model", "m", "--print", "--no-session", *vas._PI_ISOLATION_FLAGS]
+    assert seen["argv"] == [
+        "pi",
+        "--provider",
+        "p",
+        "--model",
+        "m",
+        "--print",
+        "--no-session",
+        *vas._PI_ISOLATION_FLAGS,
+    ]
 
 
 def test_pi_model_call_ok_without_flags(monkeypatch: pytest.MonkeyPatch):
@@ -3460,7 +3827,8 @@ def test_pi_model_call_ok_without_flags(monkeypatch: pytest.MonkeyPatch):
 
 def test_pi_model_call_failure(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
-        vas.subprocess, "run",
+        vas.subprocess,
+        "run",
         _pi_run_fail,
     )
     try:
@@ -3483,7 +3851,8 @@ def test_pi_model_call_failure_names_the_default(monkeypatch: pytest.MonkeyPatch
 
 def test_pi_model_call_blank(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(
-        vas.subprocess, "run",
+        vas.subprocess,
+        "run",
         _pi_run_blank,
     )
     try:
@@ -3496,10 +3865,9 @@ def test_pi_model_call_blank(monkeypatch: pytest.MonkeyPatch):
 
 # ---- verify_agent_scenarios._trace_tool_names (cc5, needs >=42%) ----
 
+
 def _evt(kind: str, tool: object = "unset"):
-    return SimpleNamespace(
-        event_type=kind, payload={} if tool == "unset" else {"tool": tool}
-    )
+    return SimpleNamespace(event_type=kind, payload={} if tool == "unset" else {"tool": tool})
 
 
 def test_trace_tool_names_filters():
@@ -3511,10 +3879,13 @@ def test_trace_tool_names_filters():
         _evt("tool.completed", 5),
         _evt("tool.completed", "list_sec_filings"),
     ]
+
     def _evts_passthrough(trace_id: str) -> list[object]:
         return list(evts)
+
     assert vas._trace_tool_names("t", _evts_passthrough) == [
-        "get_sec_document", "list_sec_filings",
+        "get_sec_document",
+        "list_sec_filings",
     ]
     assert vas._trace_tool_names("t", _evts_empty) == []
 
@@ -3523,11 +3894,28 @@ from app.research.evals.evaluators import EvalMetrics, ScenarioResult
 
 
 def _sr(passed: bool) -> ScenarioResult:
-    return ScenarioResult(scenario_name="s", passed=passed, violations=(),
-        metrics=EvalMetrics(success=passed, wall_clock_ms=1.0, job_count=1, tool_call_count=1,
-            discovery_calls=0, failed_count=0, recovered_count=0, evidence_count=0,
-            evidence_coverage=0.0, input_tokens=0, output_tokens=0, estimated_cost=0.0,
-            pit_provenance_violations=0, disagreement=False, completeness=1.0))
+    return ScenarioResult(
+        scenario_name="s",
+        passed=passed,
+        violations=(),
+        metrics=EvalMetrics(
+            success=passed,
+            wall_clock_ms=1.0,
+            job_count=1,
+            tool_call_count=1,
+            discovery_calls=0,
+            failed_count=0,
+            recovered_count=0,
+            evidence_count=0,
+            evidence_coverage=0.0,
+            input_tokens=0,
+            output_tokens=0,
+            estimated_cost=0.0,
+            pit_provenance_violations=0,
+            disagreement=False,
+            completeness=1.0,
+        ),
+    )
 
 
 def test_suite_info_records_flagless_default(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
@@ -3541,9 +3929,7 @@ def test_suite_info_records_flagless_default(monkeypatch: pytest.MonkeyPatch, ca
 
 
 def test_suite_info_ok(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
-    monkeypatch.setattr(
-        vas.subprocess, "check_output", _check_out_abc
-    )
+    monkeypatch.setattr(vas.subprocess, "check_output", _check_out_abc)
     summary: dict[str, object] = {}
     results = [_sr(True), _sr(False)]
     vas._maybe_print_suite_info(results, "p", "m", summary)
@@ -3577,6 +3963,7 @@ def test_print_results_lines(capsys: pytest.CaptureFixture[str]):
     vas._print_results([_sr(True)], "", "")
     assert "live via Pi pi default" in capsys.readouterr().out
 
+
 def test_build_summary_records_default_label():
     summary = vas._build_summary("", "", "v1", [_sr(True)])
     assert summary["provider"] == "pi default" and summary["model"] == "pi default"
@@ -3586,6 +3973,7 @@ def test_build_summary_records_default_label():
 
 
 # ---- verify_agent_scenarios._run_cli (cc4, needs >=28%) ----
+
 
 def test_agent_run_cli_list(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(vas, "_list_scenarios", _list_7)
@@ -3616,13 +4004,16 @@ def test_agent_run_cli_success(monkeypatch: pytest.MonkeyPatch, capsys: pytest.C
 
     def _run_two(*a: object) -> list[object]:
         return [r1, r2]
+
     monkeypatch.setattr(vas, "_run_all_scenarios", _run_two)
     monkeypatch.setattr(vas, "_print_results", _print_none_a)
     monkeypatch.setattr(vas, "_build_summary", _build_empty)
     monkeypatch.setattr(vas, "_maybe_print_suite_info", _print_none_a)
     monkeypatch.setattr(vas, "_maybe_print_json", _print_none_a)
+
     def _summarize_r2(results: list[object]) -> tuple[list[object], int]:
         return ([r2], 1)
+
     monkeypatch.setattr(vas, "summarize_results", _summarize_r2)
     assert vas._run_cli(_g2_ns(scenario="a", model="m")) == 1
 
@@ -3631,6 +4022,7 @@ def test_agent_run_cli_bad_timeout_skips_before_probing(
     monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     """An invalid timeout is a prerequisite failure: exit 2 with the reason, no Pi probe."""
+
     def _boom(*a: object, **k: object) -> object:
         raise AssertionError("probe must not run for an invalid timeout")
 
@@ -3671,6 +4063,7 @@ def test_cli_prereqs_resolves_flagless_default(monkeypatch: pytest.MonkeyPatch):
 
 # ---- verify_agent_scenarios._run_live_scenario (cc4, needs >=28%) ----
 
+
 def test_live_kwargs_shape_and_default_label(monkeypatch: pytest.MonkeyPatch):
     """Run kwargs carry the scenario question/tickers, the model callables, and a recordable label."""
     seen: list[tuple[object, ...]] = []
@@ -3693,7 +4086,7 @@ def test_live_kwargs_shape_and_default_label(monkeypatch: pytest.MonkeyPatch):
 
 
 def test_run_live_scenario_success(monkeypatch: pytest.MonkeyPatch):
-    import app.research.runner as runner
+    from app.research import runner
 
     monkeypatch.setattr(vas, "_pi_dispatch_callable", _dispatch_d)
     monkeypatch.setattr(vas, "_pi_model_callable", _model_mc)
@@ -3721,7 +4114,7 @@ def test_run_live_scenario_passes_the_timeout_knob(monkeypatch: pytest.MonkeyPat
 
 
 def test_run_live_scenario_crash(monkeypatch: pytest.MonkeyPatch):
-    import app.research.runner as runner
+    from app.research import runner
 
     monkeypatch.setattr(vas, "_pi_dispatch_callable", _dispatch_d)
     monkeypatch.setattr(vas, "_pi_model_callable", _model_mc)
@@ -3735,6 +4128,7 @@ def test_run_live_scenario_crash(monkeypatch: pytest.MonkeyPatch):
 
 
 # ---- verify_agent_scenarios.evaluate_and_record (cc4, needs >=28%) ----
+
 
 class _FakeRepo:
     def __init__(self, sess: ResearchSession, jobs: list[Job]) -> None:
@@ -3758,10 +4152,24 @@ def _eval_patient(monkeypatch: pytest.MonkeyPatch, traces: list[TraceHeader], se
     import app.research.repository as repo_mod
 
     jobs = [
-        Job(job_id="j1", session_id="s", wave_id=1, parent_job_id=None, job_type="research",
-            owner="agent", status="failed"),
-        Job(job_id="j2", session_id="s", wave_id=1, parent_job_id=None, job_type="research",
-            owner="agent", status="completed"),
+        Job(
+            job_id="j1",
+            session_id="s",
+            wave_id=1,
+            parent_job_id=None,
+            job_type="research",
+            owner="agent",
+            status="failed",
+        ),
+        Job(
+            job_id="j2",
+            session_id="s",
+            wave_id=1,
+            parent_job_id=None,
+            job_type="research",
+            owner="agent",
+            status="completed",
+        ),
     ]
 
     def _repo_fake(*a: object, **k: object) -> object:
@@ -3769,30 +4177,51 @@ def _eval_patient(monkeypatch: pytest.MonkeyPatch, traces: list[TraceHeader], se
 
     def _traces_list(session_id: str | None = None) -> list[TraceHeader]:
         return traces
+
     monkeypatch.setattr(repo_mod, "ResearchRepository", _repo_fake)
     monkeypatch.setattr(traces_mod, "list_traces", _traces_list)
     monkeypatch.setattr(
-        traces_mod, "get_trace_events",
+        traces_mod,
+        "get_trace_events",
         _evts_get_sec,
     )
 
 
 def _eval_sess(answer: str, status: str) -> ResearchSession:
-    return ResearchSession(session_id="s", created_at=datetime(2026, 1, 2, tzinfo=timezone.utc),
-        updated_at=datetime(2026, 1, 2, tzinfo=timezone.utc), query="q", objective="o",
-        status=status, final_result={"answer": answer})
+    return ResearchSession(
+        session_id="s",
+        created_at=datetime(2026, 1, 2, tzinfo=UTC),
+        updated_at=datetime(2026, 1, 2, tzinfo=UTC),
+        query="q",
+        objective="o",
+        status=status,
+        final_result={"answer": answer},
+    )
 
 
 def test_evaluate_and_record_with_trace(monkeypatch: pytest.MonkeyPatch):
     _eval_patient(
-        monkeypatch, [TraceHeader(trace_id="t", session_id="s", wave_id=1, provider="p", model="m",
-            prompt_version="v1", harness_version="h", git_sha="g", started_at="t",
-            completed_at=None, duration_ms=None, conclusion=None, status="done")],
+        monkeypatch,
+        [
+            TraceHeader(
+                trace_id="t",
+                session_id="s",
+                wave_id=1,
+                provider="p",
+                model="m",
+                prompt_version="v1",
+                harness_version="h",
+                git_sha="g",
+                started_at="t",
+                completed_at=None,
+                duration_ms=None,
+                conclusion=None,
+                status="done",
+            )
+        ],
         _eval_sess("A", "completed"),
     )
-    out = vas.evaluate_and_record(
-        _g2_scenario(), {"session_id": "s", "evidence_ids": ["e1", 5]}, 5.0
-    )
+    out = vas.evaluate_and_record(_g2_scenario(), {"session_id": "s", "evidence_ids": ["e1", 5]}, 5.0)
     assert out.answer_text == "A" and out.tool_calls == ("get_sec_document",)
     assert out.evidence_ids == ("e1",) and out.recovered_count == 1
 
@@ -3804,6 +4233,7 @@ def test_evaluate_and_record_no_trace(monkeypatch: pytest.MonkeyPatch):
 
 
 # ---- verify_judge._run_attempts (cc5, needs >=42%) ----
+
 
 def _fake_dirs(root: Path):
     def _dirs(batch_root: Path, tool: str, attempt: int, retry: int = 0) -> tuple[Path, Path]:
@@ -3915,11 +4345,11 @@ def _run_pi_x(*a: object) -> tuple[int, bool, str, str, bool]:
 
 def test_judge_run_attempts_first_try_ok(tmp_path: Path):
     sc = _scenario(id="plain1", prompt="hello")
+
     def run_pi(*a: object) -> tuple[int, bool, str, str, bool]:
         return (0, False, "out", "", True)
-    db, timed_out, out, code = J._run_attempts(
-        sc, tmp_path, tmp_path, 1, run_pi, _fake_dirs(tmp_path)
-    )
+
+    _db, timed_out, out, code = J._run_attempts(sc, tmp_path, tmp_path, 1, run_pi, _fake_dirs(tmp_path))
     assert (timed_out, out, code) == (False, "out", 0)
 
 
@@ -3933,9 +4363,7 @@ def test_judge_run_attempts_retry_on_timeout(tmp_path: Path):
             return (1, True, "", "", False)
         return (0, False, "second", "", True)
 
-    db, timed_out, out, code = J._run_attempts(
-        sc, tmp_path, tmp_path, 1, run_pi, _fake_dirs(tmp_path)
-    )
+    _db, timed_out, out, code = J._run_attempts(sc, tmp_path, tmp_path, 1, run_pi, _fake_dirs(tmp_path))
     assert (timed_out, out, code) == (False, "second", 0)
     assert len(calls) == 2
 
@@ -3955,15 +4383,27 @@ def test_judge_run_attempts_seeded_ok(monkeypatch: pytest.MonkeyPatch, tmp_path:
 
 def test_judge_run_attempts_seeded_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     sc = _scenario(id="watch_vs_journal", prompt="p")
-    err: dict[str, object] = {"id": "watch_vs_journal", "ok": False, "reason": "seed bad",
-           "exit": None, "timed_out": False, "db": "", "answer_file": None,
-           "duration_s": 0.0}
+    err: dict[str, object] = {
+        "id": "watch_vs_journal",
+        "ok": False,
+        "reason": "seed bad",
+        "exit": None,
+        "timed_out": False,
+        "db": "",
+        "answer_file": None,
+        "duration_s": 0.0,
+    }
 
     def _seed_err(scenario: J.Scenario, store: Path, prompt: str) -> tuple[str, dict[str, object] | None]:
         return (prompt, err)
+
     monkeypatch.setattr(J, "_seeded_prompt", _seed_err)
-    db, timed_out, out, code = J._run_attempts(
-        sc, tmp_path, tmp_path, 1, _run_pi_x,
+    db, timed_out, _out, code = J._run_attempts(
+        sc,
+        tmp_path,
+        tmp_path,
+        1,
+        _run_pi_x,
         _fake_dirs(tmp_path),
     )
     assert code is err and err["db"] == str(db) and timed_out is False
@@ -3971,16 +4411,19 @@ def test_judge_run_attempts_seeded_error(monkeypatch: pytest.MonkeyPatch, tmp_pa
 
 # ---- verify_judge.run_scenario_live (cc4, needs >=28%) ----
 
+
 def test_judge_run_scenario_live_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     sc = _scenario(id="s1", prompt="p", evaluator="e")
+
     def _attempts_ok_tmp(*a: object, **k: object) -> tuple[Path, bool, str, int | dict[str, object]]:
         return (tmp_path / "db", False, " ans ", 0)
-    monkeypatch.setattr(
-        J, "_run_attempts", _attempts_ok_tmp
-    )
+
+    monkeypatch.setattr(J, "_run_attempts", _attempts_ok_tmp)
     monkeypatch.setattr(J, "_read_run_id", _read_r1)
+
     def _persist_a_tmp(*a: object) -> Path | None:
         return tmp_path / "a.md"
+
     monkeypatch.setattr(J, "persist_answer", _persist_a_tmp)
     monkeypatch.setattr(J, "_evaluate_live", _eval_good)
     out = J.run_scenario_live(sc, tmp_path, tmp_path, 1)
@@ -3991,10 +4434,20 @@ def test_judge_run_scenario_live_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: P
 
 def test_judge_run_scenario_live_seed_dict(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     sc = _scenario(id="s1", prompt="p", evaluator="e")
-    err: dict[str, object] = {"id": "s1", "ok": False, "reason": "seed", "exit": None,
-           "timed_out": False, "db": "d", "answer_file": None, "duration_s": 0.0}
+    err: dict[str, object] = {
+        "id": "s1",
+        "ok": False,
+        "reason": "seed",
+        "exit": None,
+        "timed_out": False,
+        "db": "d",
+        "answer_file": None,
+        "duration_s": 0.0,
+    }
+
     def _attempts_err(*a: object, **k: object) -> tuple[str, bool, str, dict[str, object]]:
         return ("d", False, "", err)
+
     monkeypatch.setattr(J, "_run_attempts", _attempts_err)
     out = J.run_scenario_live(sc, tmp_path, tmp_path, 1)
     assert out["reason"] == "seed" and "duration_s" in out
@@ -4002,10 +4455,12 @@ def test_judge_run_scenario_live_seed_dict(monkeypatch: pytest.MonkeyPatch, tmp_
 
 # ---- verify_judge._run_selection (cc4, needs >=28%) ----
 
+
 def test_judge_run_selection_ordered(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(J, "get_judge_concurrency", _conc_2)
     monkeypatch.setattr(
-        J, "run_scenario_live",
+        J,
+        "run_scenario_live",
         _sel_live,
     )
     wanted = [_scenario(id="b"), _scenario(id="a"), _scenario(id="c")]
@@ -4015,6 +4470,7 @@ def test_judge_run_selection_ordered(monkeypatch: pytest.MonkeyPatch, tmp_path: 
 
 
 # ---- verify_judge._report_results (cc4, needs >=28%) ----
+
 
 def test_judge_report_results_mixed_durations(tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     results: list[dict[str, object]] = [
@@ -4030,22 +4486,21 @@ def test_judge_report_results_mixed_durations(tmp_path: Path, capsys: pytest.Cap
 
 # ---- verify_judge._main_live (cc6, needs >=52%) ----
 
+
 def test_judge_main_live_no_wanted(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(J, "_select_wanted", _select_none)
     assert J._main_live(_g2_ns()) == 2
 
 
-
-
 def test_judge_main_live_single_ok(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(J, "_select_wanted", _select_x)
     monkeypatch.setattr(J, "_batch_id", _batch_b1)
-    monkeypatch.setattr(
-        J, "_run_selection", _sel_true
-    )
+    monkeypatch.setattr(J, "_run_selection", _sel_true)
     seen: list[Path] = []
+
     def _report_append_tmp(results: list[dict[str, object]], root: Path) -> None:
         seen.append(root)
+
     monkeypatch.setattr(J, "_report_results", _report_append_tmp)
     assert J._main_live(_g2_ns(scenario="x")) == 0
     assert seen and str(seen[0]).endswith("agent")
@@ -4054,9 +4509,7 @@ def test_judge_main_live_single_ok(monkeypatch: pytest.MonkeyPatch):
 def test_judge_main_live_single_fail(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(J, "_select_wanted", _select_x)
     monkeypatch.setattr(J, "_batch_id", _batch_b1)
-    monkeypatch.setattr(
-        J, "_run_selection", _sel_false
-    )
+    monkeypatch.setattr(J, "_run_selection", _sel_false)
     monkeypatch.setattr(J, "_report_results", _report_none)
     assert J._main_live(_g2_ns(scenario="x")) == 1
 
@@ -4064,15 +4517,14 @@ def test_judge_main_live_single_fail(monkeypatch: pytest.MonkeyPatch):
 def test_judge_main_live_gate(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(J, "_select_wanted", _select_x)
     monkeypatch.setattr(J, "_batch_id", _batch_b1)
-    monkeypatch.setattr(
-        J, "_run_selection", _sel_true
-    )
+    monkeypatch.setattr(J, "_run_selection", _sel_true)
     monkeypatch.setattr(J, "_report_results", _report_none)
     monkeypatch.setattr(J, "_gate_verdict", _gate_0)
     assert J._main_live(_g2_ns(all=True)) == 0
 
 
 # ---- sandbox_doctor.check_policy (cc4, needs >=28%) ----
+
 
 def _proc(code: int = 0, out: str = "", err: str = ""):
     return SimpleNamespace(returncode=code, stdout=out, stderr=err)
@@ -4085,6 +4537,7 @@ def test_doctor_policy_locked_down(monkeypatch: pytest.MonkeyPatch, capsys: pyte
     def _behavioral_mark() -> bool:
         called.append(1)
         return True
+
     monkeypatch.setattr(doc, "_behavioral_policy_ok", _behavioral_mark)
     doc.check_policy()
     assert "Locked Down" in capsys.readouterr().out
@@ -4121,13 +4574,18 @@ def test_doctor_policy_behavioral_bad(monkeypatch: pytest.MonkeyPatch):
 
 # ---- export_harness_viewer.main (cc3, needs >=12%) ----
 
+
 def test_export_main_mixed_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(exh_viewer, "ResearchRepository", _repo_obj)
+
     def _research_db_tmp() -> Path:
         return tmp_path / "r.db"
+
     monkeypatch.setattr(exh_viewer, "_research_db", _research_db_tmp)
+
     def _eval_db_tmp() -> Path:
         return tmp_path / "e.db"
+
     monkeypatch.setattr(exh_viewer, "_resolve_eval_db", _eval_db_tmp)
     monkeypatch.setattr(exh_viewer, "_all_session_ids", _sessions_2)
 
@@ -4138,14 +4596,17 @@ def test_export_main_mixed_runs(monkeypatch: pytest.MonkeyPatch, tmp_path: Path,
     monkeypatch.setattr(exh_viewer, "read_eval_db", _eval_triple)
     monkeypatch.setattr(exh_viewer, "attach_pass_fail", _attach_none)
     monkeypatch.setattr(exh_viewer, "build_projection", _proj_p)
+
     def _write_o_tmp(projection: dict[str, object]) -> Path:
         return tmp_path / "o.ts"
+
     monkeypatch.setattr(exh_viewer, "_write_projection", _write_o_tmp)
     assert exh_viewer.main() == 0
     assert "researchRuns=1 evalRuns=1" in capsys.readouterr().out
 
 
 # ---- pi_bridge._handle_research_committee (cc7, needs >=61%) ----
+
 
 def test_bridge_committee_routes(monkeypatch: pytest.MonkeyPatch):
     for op, fn in [
@@ -4158,48 +4619,88 @@ def test_bridge_committee_routes(monkeypatch: pytest.MonkeyPatch):
         ("research.job.heartbeat", "_op_research_job_heartbeat"),
         ("research.events", "_op_research_events"),
     ]:
+
         def _route(req: dict[str, object], pid: str, _op: str = op) -> dict[str, object]:
             return {"id": pid, "op": _op}
+
         monkeypatch.setattr(pi_bridge, fn, _route)
         out = pi_bridge._handle_research_committee(op, {}, "p1")
         assert out == {"id": "p1", "op": op}
+
     # The legacy wire name stays an alias of the same gate (no behavior difference).
     def _alias(req: dict[str, object], pid: str) -> dict[str, object]:
         assert req == {}
         return {"id": pid, "op": "research.wave.decide"}
+
     monkeypatch.setattr(pi_bridge, "_op_research_wave_decide", _alias)
     assert pi_bridge._handle_research_committee("research.wave2.decide", {}, "p1") == {
-        "id": "p1", "op": "research.wave.decide"}
+        "id": "p1",
+        "op": "research.wave.decide",
+    }
     assert pi_bridge._handle_research_committee("research.nope", {}, "p1") is None
 
 
 # ---- pi_bridge._pi_event_record_core (guard, cc7) ----
+
 
 class _Rec(RunRecorder):
     def __init__(self) -> None:
         self.calls: list[tuple[object, ...]] = []
 
     @override
-    def record_event(self, event_type: str, *, round: int | None = None, model: str | None = None,
-        tool_name: str | None = None, arguments: object | None = None, result_summary: str | None = None,
-        success: bool | None = None, error_type: str | None = None, evidence_ids: list[str] | None = None,
-        metadata: dict[str, object] | None = None, started_at: str | None = None,
-        completed_at: str | None = None, duration_ms: float | None = None) -> str | None:
+    def record_event(
+        self,
+        event_type: str,
+        *,
+        round: int | None = None,
+        model: str | None = None,
+        tool_name: str | None = None,
+        arguments: object | None = None,
+        result_summary: str | None = None,
+        success: bool | None = None,
+        error_type: str | None = None,
+        evidence_ids: list[str] | None = None,
+        metadata: dict[str, object] | None = None,
+        started_at: str | None = None,
+        completed_at: str | None = None,
+        duration_ms: float | None = None,
+    ) -> str | None:
         self.calls.append(("event", event_type, tool_name, success, metadata))
         return None
 
     @override
-    def record_model_call(self, *, round: int, provider: str, model: str, started_at: str,
-        completed_at: str, usage: dict[str, object] | None = None, finish_reason: str | None = None,
-        tool_call_count: int = 0, provider_request_id: str | None = None, status: str = "completed",
-        error_type: str | None = None, error_category: str | None = None) -> float:
+    def record_model_call(
+        self,
+        *,
+        round: int,
+        provider: str,
+        model: str,
+        started_at: str,
+        completed_at: str,
+        usage: dict[str, object] | None = None,
+        finish_reason: str | None = None,
+        tool_call_count: int = 0,
+        provider_request_id: str | None = None,
+        status: str = "completed",
+        error_type: str | None = None,
+        error_category: str | None = None,
+    ) -> float:
         self.calls.append(("model", round, provider, model))
         return 0.0
 
     @override
-    def record_security_event(self, *, source: str, sha256: str, score: int | None,
-        verdict: str | None, rule_ids: list[str] | None, decision: str,
-        reason: str | None = None, span_length: int | None = None) -> str | None:
+    def record_security_event(
+        self,
+        *,
+        source: str,
+        sha256: str,
+        score: int | None,
+        verdict: str | None,
+        rule_ids: list[str] | None,
+        decision: str,
+        reason: str | None = None,
+        span_length: int | None = None,
+    ) -> str | None:
         self.calls.append(("security", source, decision))
         return None
 
@@ -4210,9 +4711,7 @@ def test_bridge_event_core_branches():
     assert pi_bridge._pi_event_record_core(rec, "agent_start", {}, None) is True
     assert pi_bridge._pi_event_record_core(rec, "tool_execution_start", tool_t, None) is True
     assert pi_bridge._pi_event_record_core(rec, "tool_execution_end", tool_t, None) is True
-    assert pi_bridge._pi_event_record_core(
-        rec, "message_end", {"role": "assistant", "turn": 2}, None
-    ) is True
+    assert pi_bridge._pi_event_record_core(rec, "message_end", {"role": "assistant", "turn": 2}, None) is True
     assert pi_bridge._pi_event_record_core(rec, "message_end", {"role": "user"}, None) is False
     assert pi_bridge._pi_event_record_core(rec, "security_block", tool_t, None) is True
     assert pi_bridge._pi_event_record_core(rec, "bogus", {}, None) is False
@@ -4221,6 +4720,7 @@ def test_bridge_event_core_branches():
 
 
 # ---- read-only base: verify_tool_registry (tests only, no source edits) ----
+
 
 def test_registry_compare_all_branches(tmp_path: Path):
     root = tmp_path / "catalog"
@@ -4237,7 +4737,10 @@ def test_registry_compare_all_branches(tmp_path: Path):
     assert "orphan index.yaml" in problems
     assert not [p for p in problems if p.startswith("missing")]
     assert reg._compare_catalog_pages(root, {}) == [
-        "orphan a.md", "orphan b.md", "orphan extra.md", "orphan index.yaml",
+        "orphan a.md",
+        "orphan b.md",
+        "orphan extra.md",
+        "orphan index.yaml",
     ]
 
 
@@ -4263,6 +4766,7 @@ def test_registry_main_paths(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Cap
 
 # ---- read-only base: verify_tool_health (tests only) ----
 
+
 def test_health_report_text_branches(capsys: pytest.CaptureFixture[str]):
     assert vth._report_text(["a"], {"a": []}) == 0
     assert "PASS a" in capsys.readouterr().out
@@ -4277,18 +4781,15 @@ def test_health_report_text_branches(capsys: pytest.CaptureFixture[str]):
 
 def test_health_sentinel_result_error_branches():
     empty: list[tuple[tuple[object, ...], dict[str, object]]] = []
-    assert vth._sentinel_result_error("n", [], empty) == (
-        "canonical execute_tool did not invoke handler"
-    )
+    assert vth._sentinel_result_error("n", [], empty) == ("canonical execute_tool did not invoke handler")
     bad_calls: list[tuple[tuple[object, ...], dict[str, object]]] = [(("c",), {})]
-    assert "not returned" in (
-        vth._sentinel_result_error("n", {"ok": False}, bad_calls) or ""
-    )
+    assert "not returned" in (vth._sentinel_result_error("n", {"ok": False}, bad_calls) or "")
     assert "not returned" in (vth._sentinel_result_error("n", "weird", bad_calls) or "")
     assert vth._sentinel_result_error("n", {"ok": True}, bad_calls) is None
 
 
 # ---- read-only base: verify_type_escape_hatches (tests only) ----
+
 
 def _dec(code: str) -> ast.Attribute:
     tree = ast.parse(code)
@@ -4315,15 +4816,11 @@ def test_escape_namespaced_decorator_branches():
     assert c.hits == []
     # bound alias -> flag
     b, c = _col()
-    _flag_namespaced_decorator(
-        _dec("import typing\n@typing.no_type_check\ndef f(): pass"), b, c
-    )
+    _flag_namespaced_decorator(_dec("import typing\n@typing.no_type_check\ndef f(): pass"), b, c)
     assert len(c.hits) == 1
     # unbound name -> no flag
     b, c = _col(aliases={"t"})
-    _flag_namespaced_decorator(
-        _dec("import typing\n@typing.no_type_check\ndef f(): pass"), b, c
-    )
+    _flag_namespaced_decorator(_dec("import typing\n@typing.no_type_check\ndef f(): pass"), b, c)
     assert c.hits == []
     # non-Name target (a.b.no_type_check) -> no flag
     b, c = _col()
@@ -4340,8 +4837,9 @@ def test_build_success_does_not_invent_a_budget_cap():
     assert deep.budget_used == 100 and deep.budget_cap == 0
     assert "budget-violation" not in evaluate(deep).violations
     # A cap the run was actually given still trips the rule.
-    capped = vas._build_success_input(sc, "ans", ["get_sec_document"] * 100, [], "completed", ("e",), 1.0,
-                                      tool_call_cap=60)
+    capped = vas._build_success_input(
+        sc, "ans", ["get_sec_document"] * 100, [], "completed", ("e",), 1.0, tool_call_cap=60
+    )
     assert "budget-violation" in evaluate(capped).violations
 
 
@@ -4354,8 +4852,9 @@ def test_live_trace_fields_reach_the_evaluator(tmp_path: Path, monkeypatch: pyte
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
-    run = _LiveRun(repo, "q?", "o", "2026-08-10", "NVDA", [],
-                   lambda name, args: {}, lambda prompt: "[]", DirectorBudgets())
+    run = _LiveRun(
+        repo, "q?", "o", "2026-08-10", "NVDA", [], lambda name, args: {}, lambda prompt: "[]", DirectorBudgets()
+    )
     sid = run._create_session("q?", "2026-08-10", None)
     for eid, kind in (("ev:1", "evidence"), ("ev:2", "discovery")):
         repo.save_evidence({"evidence_id": eid, "session_id": sid, "wave_id": 1, "record_kind": kind})
@@ -4366,13 +4865,14 @@ def test_live_trace_fields_reach_the_evaluator(tmp_path: Path, monkeypatch: pyte
     assert trace["requires_trace"] is True
     assert trace["raw_evidence_ids"] == ("ev:1",) and trace["navigation_evidence_ids"] == ("ev:2",)
     assert vas._live_trace(scenario, repo, sid, [], ("ev:2",))["raw_evidence_ids"] == ()
-    built = vas._build_success_input(scenario, "answer", ["get_sec_document"], repo.list_jobs(sid), "researching",
-                                     ("ev:1",), 1.0, 0, trace)
+    built = vas._build_success_input(
+        scenario, "answer", ["get_sec_document"], repo.list_jobs(sid), "researching", ("ev:1",), 1.0, 0, trace
+    )
     assert built.raw_evidence_ids == ("ev:1",) and built.requires_trace is True
     # The branch gate reads the run's real branch coverage, not just the answer prose.
     telemetry_branches = vas._build_success_input(
-        scenario, "answer", [], [], "researching", ("ev:1",), 1.0, 0,
-        {**trace, "branches_covered": ["orcl"]})
+        scenario, "answer", [], [], "researching", ("ev:1",), 1.0, 0, {**trace, "branches_covered": ["orcl"]}
+    )
     assert telemetry_branches.branches_covered == ("orcl",)
 
 
@@ -4385,33 +4885,48 @@ def test_row_provenance_narrows_raw_rows():
     assert vas._row_provenance({"record_kind": "evidence", "metadata": {"accession_no": 7}}) is None
     assert vas._row_provenance({"record_kind": "evidence", "metadata": {"accession_no": "1"}}) == ("1", None)
     assert vas._row_provenance(
-        {"record_kind": "evidence", "metadata": {"accession_no": "1", "document_name": "d.htm"}}) == ("1", "d.htm")
+        {"record_kind": "evidence", "metadata": {"accession_no": "1", "document_name": "d.htm"}}
+    ) == ("1", "d.htm")
 
 
 def test_ledger_documents_keeps_row_order_without_duplicates():
     """Opened filings/documents are read off the raw rows, deduped in first-seen order."""
-    repo = FakeRepo(evidence=[
-        {"record_kind": "evidence", "metadata": {"accession_no": "0001", "document_name": "10-q.htm"}},
-        {"record_kind": "evidence", "metadata": {"accession_no": "0001", "document_name": "10-q.htm"}},
-        {"record_kind": "evidence", "metadata": {"accession_no": "0001", "document_name": "8-k.htm"}},
-        {"record_kind": "evidence", "metadata": {"accession_no": "0003"}},
-        {"record_kind": "discovery", "metadata": {"accession_no": "0002", "document_name": "nav.htm"}},
-        {"record_kind": "evidence", "metadata": {"document_name": "no-accession.htm"}},
-    ])
+    repo = FakeRepo(
+        evidence=[
+            {"record_kind": "evidence", "metadata": {"accession_no": "0001", "document_name": "10-q.htm"}},
+            {"record_kind": "evidence", "metadata": {"accession_no": "0001", "document_name": "10-q.htm"}},
+            {"record_kind": "evidence", "metadata": {"accession_no": "0001", "document_name": "8-k.htm"}},
+            {"record_kind": "evidence", "metadata": {"accession_no": "0003"}},
+            {"record_kind": "discovery", "metadata": {"accession_no": "0002", "document_name": "nav.htm"}},
+            {"record_kind": "evidence", "metadata": {"document_name": "no-accession.htm"}},
+        ]
+    )
     filings, documents = vas._ledger_documents(repo, "s")
     assert filings == ("0001", "0003")
     assert documents == ("0001|10-q.htm", "0001|8-k.htm")
 
 
-def test_invoke_live_reports_the_crash_cause(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_invoke_live_reports_the_crash_cause(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     """A crashed live run names its exception on stderr; the verdict alone cannot explain it."""
-    import app.research.runner as runner
+    from app.research import runner
 
     def _boom(**k: object) -> object:
         raise ValueError("embedded null byte")
+
     monkeypatch.setattr(runner, "run_live", _boom)
-    out, _wall, cap = vas._invoke_live({"question": "q?", "objective": "o", "as_of": None, "tickers": [],
-                                        "dispatch": lambda name, args: {}, "model": lambda prompt: "[]",
-                                        "provider": "p", "model_name": "m"})
+    out, _wall, cap = vas._invoke_live(
+        {
+            "question": "q?",
+            "objective": "o",
+            "as_of": None,
+            "tickers": [],
+            "dispatch": lambda name, args: {},
+            "model": lambda prompt: "[]",
+            "provider": "p",
+            "model_name": "m",
+        }
+    )
     assert out is None and cap == 0
     assert "CRASH ValueError: embedded null byte" in capsys.readouterr().err

@@ -9,8 +9,8 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.tools import TOOLS  # noqa: E402
-from scripts.verify_tool_registry import INVENTORY_PATH, tool_schema_name  # noqa: E402
+from app.tools import TOOLS
+from scripts.verify_tool_registry import INVENTORY_PATH, tool_schema_name
 
 
 def main() -> int:

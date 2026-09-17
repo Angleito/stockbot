@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """List Robinhood MCP tools, then optionally invoke a read-only tool."""
+
 import argparse
 import os
 import sys
@@ -15,7 +16,9 @@ from app.tool_render import render_tool_result
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("ticker", nargs="?", help="ticker to inspect after discovery")
-    parser.add_argument("--server-url", default=os.getenv("ROBINHOOD_MCP_URL", "https://agent.robinhood.com/mcp/trading"))
+    parser.add_argument(
+        "--server-url", default=os.getenv("ROBINHOOD_MCP_URL", "https://agent.robinhood.com/mcp/trading")
+    )
     parser.add_argument("--type", dest="option_type", choices=("put", "call"), default="put")
     parser.add_argument("--min-dte", type=int, default=180)
     parser.add_argument("--max-dte", type=int, default=365)

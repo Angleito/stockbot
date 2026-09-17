@@ -6,6 +6,7 @@ scripts/verify_type_escape_hatches.py, scripts/verify_agent_scenarios.py,
 app/research/stage.py, app/services/evidence_resolution.py,
 app/tools.py::_thesis_refine (validation + no-op plan paths only).
 """
+
 from __future__ import annotations
 
 import argparse
@@ -28,6 +29,7 @@ from app.services.evidence_resolution import (
 )
 
 # --- verify_judge: concurrency + as_of helpers ---
+
 
 def test_parse_concurrency_paths(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("STOCKBOT_VERIFY_CONCURRENCY", raising=False)
@@ -195,6 +197,7 @@ def test_registry_and_trace_helpers():
 
 # --- verify_tool_health: pure helpers ---
 
+
 def test_worker_swaps_and_envelope():
     assert vth._handler_swaps("no_such_tool_xyz") is None
     assert vth._handler_swaps("thesis_create") == []
@@ -231,6 +234,7 @@ def test_health_proc_and_report_helpers():
 
 # --- verify_type_escape_hatches: pure helpers ---
 
+
 def test_type_escape_helpers(tmp_path: Path):
     assert list(vte._iter_scan_file(tmp_path, "missing.py")) == []
     assert vte._scan_patterns.__name__ == "_scan_patterns"
@@ -252,8 +256,16 @@ def test_type_escape_helpers(tmp_path: Path):
     assert vte.scan(tmp_path) == []
 
 
-_SCENARIO_BASE = Scenario(name="s", family=ScenarioFamily.FACTUAL, question="q",
-                ticker="NVDA", as_of=None, expected_tools=(), requires_evidence=True, notes="n")
+_SCENARIO_BASE = Scenario(
+    name="s",
+    family=ScenarioFamily.FACTUAL,
+    question="q",
+    ticker="NVDA",
+    as_of=None,
+    expected_tools=(),
+    requires_evidence=True,
+    notes="n",
+)
 
 
 def _scenario() -> Scenario:
@@ -289,6 +301,7 @@ def test_agent_scenario_helpers():
 
 # --- stage + evidence_resolution ---
 
+
 def test_stage_helpers():
     assert stage_for_session({"status": "COMPLETED"}, []) == "FINAL"
     assert stage_for_session({"status": "TARGETED_RESEARCH"}, []) == "SOURCE_RESEARCH"
@@ -298,6 +311,7 @@ def test_stage_helpers():
         check_stage_tool("FINAL", "research_start")
     check_stage_tool("FINAL", "research_finalize")
     check_stage_tool("SOURCE_RESEARCH", "browse_tools")
+
 
 def test_stage_trio_helpers():
     from app.research.stage import (
@@ -313,23 +327,39 @@ def test_stage_trio_helpers():
     sess = {"freeze_ids": ["f"], "committee_runs": [{"freeze_id": "f", "jobs": ["j1", "j2"]}, "junk"]}
     assert _wanted_trio_jobs(sess, "f") == {"j1", "j2"}
     assert _wanted_trio_jobs({"committee_runs": "nope"}, "f") == set()
-    jobs = [{"job_id": "j1", "status": "completed", "job_type": "stockbot"},
-            {"job_id": "j2", "status": "completed", "job_type": "bullbot"},
-            {"job_id": "j3", "status": "running", "job_type": "bearbot"}, {"no": 1}]
+    jobs = [
+        {"job_id": "j1", "status": "completed", "job_type": "stockbot"},
+        {"job_id": "j2", "status": "completed", "job_type": "bullbot"},
+        {"job_id": "j3", "status": "running", "job_type": "bearbot"},
+        {"no": 1},
+    ]
     _j1 = _job_index(jobs)["j1"]
     assert isinstance(_j1, dict)
     assert _j1["job_type"] == "stockbot"
     assert _job_index("nope") == {}
     assert _completed_job_roles(jobs, {"j1", "j2", "zzz"}) == {"stockbot", "bullbot"}
-    full = [{"job_id": "j1", "status": "completed", "job_type": "stockbot"},
-            {"job_id": "j2", "status": "completed", "job_type": "bullbot"},
-            {"job_id": "j3", "status": "completed", "job_type": "bearbot"}]
-    assert _trio_complete({"freeze_ids": ["f"], "committee_runs": [{"freeze_id": "f", "jobs": ["j1", "j2", "j3"]}]}, full) is True
+    full = [
+        {"job_id": "j1", "status": "completed", "job_type": "stockbot"},
+        {"job_id": "j2", "status": "completed", "job_type": "bullbot"},
+        {"job_id": "j3", "status": "completed", "job_type": "bearbot"},
+    ]
+    assert (
+        _trio_complete({"freeze_ids": ["f"], "committee_runs": [{"freeze_id": "f", "jobs": ["j1", "j2", "j3"]}]}, full)
+        is True
+    )
     assert _trio_complete({"freeze_ids": []}, full) is False
     assert _trio_complete({"freeze_ids": [5]}, full) is False
-    assert stage_for_session(
-        {"status": "FREEZING", "freeze_ids": ["f"],
-         "committee_runs": [{"freeze_id": "f", "jobs": ["j1", "j2", "j3"]}]}, full) == "FINAL"
+    assert (
+        stage_for_session(
+            {
+                "status": "FREEZING",
+                "freeze_ids": ["f"],
+                "committee_runs": [{"freeze_id": "f", "jobs": ["j1", "j2", "j3"]}],
+            },
+            full,
+        )
+        == "FINAL"
+    )
 
 
 def test_evidence_resolution_helpers():
@@ -343,6 +373,7 @@ def test_evidence_resolution_helpers():
 
 # --- app/tools.py::_thesis_refine (validation + no-op only) ---
 
+
 def _thesis_ctx(tmp_path: Path) -> RequestContext:
     return RequestContext(principal_id="t", capabilities=frozenset({Capability.RESEARCH}), data_root=tmp_path)
 
@@ -352,25 +383,39 @@ def test_thesis_refine_validation(tmp_path: Path):
 
     ctx = _thesis_ctx(tmp_path)
     repo = tools_mod._thesis_repo_for(ctx)
-    tid = repo.create_thesis("NVDA demand stays strong", scope="NVDA",
-                             claims=[{"claim_id": "claim:c1", "statement": "NVDA demand stays strong"}]).thesis_id
+    tid = repo.create_thesis(
+        "NVDA demand stays strong",
+        scope="NVDA",
+        claims=[{"claim_id": "claim:c1", "statement": "NVDA demand stays strong"}],
+    ).thesis_id
     with pytest.raises(ValueError):
         tools_mod._thesis_refine({"clarification": "x"}, ctx)
     with pytest.raises(ValueError):
         tools_mod._thesis_refine({"id": tid}, ctx)
     thesis, clar = tools_mod._refine_inputs(repo, {"id": tid, "clarification": "  more  "}, ctx)
     assert clar == "more" and thesis.thesis_id == tid
-    plan: dict[str, object] = {"merged": {"user_thesis": thesis.user_thesis}, "added_claims": [], "added_expressions": []}
+    plan: dict[str, object] = {
+        "merged": {"user_thesis": thesis.user_thesis},
+        "added_claims": [],
+        "added_expressions": [],
+    }
     assert tools_mod._refine_is_noop(plan, thesis) is True
     assert tools_mod._refine_noop_result(thesis)["applied"] is False
     applied = tools_mod._thesis_refine(
-        {"id": tid, "clarification": "Networking demand also stays strong",
-         "claims": [{"statement": "NVDA networking demand also strong"}]}, ctx)
+        {
+            "id": tid,
+            "clarification": "Networking demand also stays strong",
+            "claims": [{"statement": "NVDA networking demand also strong"}],
+        },
+        ctx,
+    )
     assert applied.get("applied") is True
     noop2 = tools_mod._thesis_refine({"id": tid, "clarification": "   "}, ctx) if False else None
     assert noop2 is None
 
+
 # --- CrapScripts: _search_tool_names + _telemetry_count decision paths ---
+
 
 def test_search_tool_names_live_registry_shapes():
     from app.research.agents.source_agent import SEC_TOOLS

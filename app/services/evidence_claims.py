@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 from collections.abc import Callable, Mapping, Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 from urllib.parse import urlparse
 
@@ -68,10 +68,7 @@ def _claim_dates(item: Mapping[str, object], retrieved_fallback: str) -> tuple[s
 def _claim_source(item: Mapping[str, object], source_url: str | None) -> tuple[str | None, str | None]:
     """(source domain with explicit override, evidence summary)."""
     domain_raw = item.get("source_domain")
-    source_domain: str | None = (
-        domain_raw if isinstance(domain_raw, str)
-        else _domain(source_url)
-    )
+    source_domain: str | None = domain_raw if isinstance(domain_raw, str) else _domain(source_url)
     summary_raw = item.get("evidence_summary")
     evidence_summary: str | None = summary_raw if isinstance(summary_raw, str) else None
     return source_domain, evidence_summary
@@ -101,6 +98,7 @@ def _claim_resolver(
     instant: datetime,
 ) -> Callable[[str | None, str | None], SecurityResolution]:
     """Bound subject/object resolver: explicit override or warehouse path."""
+
     def _resolve(ticker: str | None, name: str | None):
         if resolve is not None:
             return resolve(ticker=ticker, name=name, as_of=instant)
@@ -111,6 +109,7 @@ def _claim_resolver(
             name_to_ticker=name_to_ticker,
             as_of=instant,
         )
+
     return _resolve
 
 
@@ -187,7 +186,7 @@ def build_evidence_claims(
     # ponytail: one loop over ≤20 items, no batching infra for this size
     if not isinstance(reader_items, list) or not reader_items:
         return []
-    instant = as_of or datetime.now(timezone.utc)
+    instant = as_of or datetime.now(UTC)
     aliases_by_ticker, name_to_ticker = _claim_lookups(aliases_by_ticker, name_to_ticker, instant, data_root)
     _resolve = _claim_resolver(resolve, aliases_by_ticker, name_to_ticker, instant)
     claims: list[EvidenceClaim] = []
@@ -196,6 +195,7 @@ def build_evidence_claims(
         if claim is not None:
             claims.append(claim)
     return claims
+
 
 def claim_to_enriched_dict(claim: EvidenceClaim) -> dict[str, object]:
     """EvidenceClaim → gateway/render/persist dict (enums as values)."""

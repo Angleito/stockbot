@@ -99,9 +99,7 @@ def summarize_records(
     }
 
 
-def _sort_rows_by_date(
-    rows: list[dict[str, object]], date_field: str | None
-) -> list[dict[str, object]]:
+def _sort_rows_by_date(rows: list[dict[str, object]], date_field: str | None) -> list[dict[str, object]]:
     """Date-ascending rows with dateless rows last (stable sort)."""
     if not date_field or not rows:
         return rows
@@ -112,6 +110,7 @@ def _sort_rows_by_date(
             cell is None,
             _norm_date(cell),
         )
+
     return sorted(rows, key=_date_key)
 
 
@@ -187,7 +186,7 @@ def _to_number(value: object) -> float | None:
         return float(value)
     try:
         return float(str(value).replace(",", ""))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -225,10 +224,7 @@ def _latest_prior(
         return []
     latest = rows[-1]
     prior = rows[-2]
-    if (
-        date_field
-        and _norm_date(latest.get(date_field)) == _norm_date(prior.get(date_field))
-    ):
+    if date_field and _norm_date(latest.get(date_field)) == _norm_date(prior.get(date_field)):
         return []
     out: list[dict[str, object]] = []
     for name in numeric_fields:
@@ -260,25 +256,15 @@ def _derive_trends(latest_prior: list[dict[str, object]]) -> list[str]:
         if not isinstance(change, (int, float)):
             continue
         if pct is None:
-            trends.append(
-                f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} "
-                f"(change {change:+,})"
-            )
+            trends.append(f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} (change {change:+,})")
         elif isinstance(pct, (int, float)):
-            direction = (
-                "up" if pct > 0
-                else "down" if pct < 0
-                else "flat"
-            )
+            direction = "up" if pct > 0 else "down" if pct < 0 else "flat"
             trends.append(
                 f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} "
                 f"({change:+,}, {pct:+.2f}%) — {direction}"
             )
         else:
-            trends.append(
-                f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} "
-                f"(change {change:+,})"
-            )
+            trends.append(f"{lp.get('field')}: {lp.get('latest')} vs prior {lp.get('prior')} (change {change:+,})")
     return trends
 
 
@@ -344,9 +330,7 @@ def _missing_warnings(rows: list[dict[str, object]], spec: DatasetSpec) -> list[
         name = name_obj
         missing = sum(1 for r in rows if r.get(name) is None or r.get(name) == "")
         if missing:
-            warnings.append(
-                f"Field '{name}' missing in {missing}/{len(rows)} analyzed rows."
-            )
+            warnings.append(f"Field '{name}' missing in {missing}/{len(rows)} analyzed rows.")
     return warnings
 
 
@@ -359,9 +343,7 @@ def _norm_date(value: object) -> str | None:
     return s
 
 
-def _coverage_dates(
-    rows: list[dict[str, object]], date_field: str | None
-) -> tuple[str | None, str | None]:
+def _coverage_dates(rows: list[dict[str, object]], date_field: str | None) -> tuple[str | None, str | None]:
     if not date_field:
         return None, None
     dates = [_norm_date(r.get(date_field)) for r in rows]
@@ -385,6 +367,6 @@ def _query_complete(pagination: dict[str, object] | None, returned_count: int) -
     try:
         offset = int(offset_raw) if isinstance(offset_raw, (int, float, str)) else 0
         total = int(total_records) if isinstance(total_records, (int, float, str)) else 0
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return (offset + returned_count) >= total

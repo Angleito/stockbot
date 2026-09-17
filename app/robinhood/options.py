@@ -3,8 +3,8 @@
 from __future__ import annotations
 
 from collections.abc import Mapping
-from dataclasses import dataclass
-from datetime import date, datetime, timezone
+from dataclasses import dataclass, field
+from datetime import UTC, date, datetime
 from decimal import Decimal
 
 from .account import _decimal, _first_present
@@ -56,7 +56,7 @@ class OptionQuote:
     rho: Decimal | None = None
     volume: int | None = None
     open_interest: int | None = None
-    retrieved_at: datetime = datetime.min.replace(tzinfo=timezone.utc)
+    retrieved_at: datetime = field(default_factory=lambda: datetime.min.replace(tzinfo=UTC))
     source: str = "robinhood_mcp"
 
     @property
@@ -72,7 +72,7 @@ def _coerce_option_int(raw: object) -> int | None:
     if isinstance(raw, (int, float, Decimal, str)):
         try:
             return int(raw)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return None
     return None
 
@@ -104,13 +104,13 @@ def _option_expiry_strike(payload: Mapping[str, object]) -> tuple[date, Decimal]
 def _option_retrieved_at(payload: Mapping[str, object]) -> datetime:
     retrieved = _first_present(payload, "retrieved_at", "retrievedAt", "updated_at", "updatedAt")
     if isinstance(retrieved, str):
-        retrieved_at = datetime.fromisoformat(retrieved.replace("Z", "+00:00"))
+        retrieved_at = datetime.fromisoformat(retrieved)
     elif isinstance(retrieved, datetime):
         retrieved_at = retrieved
     else:
-        retrieved_at = datetime.now(timezone.utc)
+        retrieved_at = datetime.now(UTC)
     if retrieved_at.tzinfo is None:
-        retrieved_at = retrieved_at.replace(tzinfo=timezone.utc)
+        retrieved_at = retrieved_at.replace(tzinfo=UTC)
     return retrieved_at
 
 

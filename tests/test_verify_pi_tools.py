@@ -16,7 +16,24 @@ from app.storage.runs import _SCHEMA
 MODEL = "test-model"
 
 
-def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: str = "completed", tool_error: str | None = None, tool_message: str | None = None, event: str = "completed", other_tool: str | None = None, rejected_other: str | None = None, extra_tool: str | None = None, extra_error: str | None = None, extra_message: str | None = None, discovery: str | None = "search_tools", disc_at: str = "2026-01-01T00:00:00+00:00", inner_at: str = "2026-01-01T00:00:01+00:00", via_call_tool: bool = True) -> Path:
+def _db(
+    path: Path,
+    tool: str = "get_fundamentals",
+    model: str = MODEL,
+    status: str = "completed",
+    tool_error: str | None = None,
+    tool_message: str | None = None,
+    event: str = "completed",
+    other_tool: str | None = None,
+    rejected_other: str | None = None,
+    extra_tool: str | None = None,
+    extra_error: str | None = None,
+    extra_message: str | None = None,
+    discovery: str | None = "search_tools",
+    disc_at: str = "2026-01-01T00:00:00+00:00",
+    inner_at: str = "2026-01-01T00:00:01+00:00",
+    via_call_tool: bool = True,
+) -> Path:
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
     conn.execute(
@@ -52,7 +69,10 @@ def _db(path: Path, tool: str = "get_fundamentals", model: str = MODEL, status: 
     elif event in ("completed", "both", "harness-rejected"):
         conn.execute(
             "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e1','r1',1,'tool_completed',?,?)",
-            (inner_at, tool if other_tool is None else other_tool if False else tool if event == 'both' else target_name),
+            (
+                inner_at,
+                tool if other_tool is None else other_tool if False else tool if event == "both" else target_name,
+            ),
         )
     if event == "both":
         conn.execute(
@@ -115,7 +135,24 @@ def _ok(
     via_call_tool: bool = True,
 ) -> Path:
     p = tmp_path / "runs.sqlite"
-    _db(p, tool=tool, model=model, status=status, tool_error=tool_error, tool_message=tool_message, event=event, other_tool=other_tool, rejected_other=rejected_other, extra_tool=extra_tool, extra_error=extra_error, extra_message=extra_message, discovery=discovery, disc_at=disc_at, inner_at=inner_at, via_call_tool=via_call_tool)
+    _db(
+        p,
+        tool=tool,
+        model=model,
+        status=status,
+        tool_error=tool_error,
+        tool_message=tool_message,
+        event=event,
+        other_tool=other_tool,
+        rejected_other=rejected_other,
+        extra_tool=extra_tool,
+        extra_error=extra_error,
+        extra_message=extra_message,
+        discovery=discovery,
+        disc_at=disc_at,
+        inner_at=inner_at,
+        via_call_tool=via_call_tool,
+    )
     return p
 
 
@@ -136,6 +173,7 @@ def test_missing_dispatcher_fails_pre_pi(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(reg, "get_registry_sets", lambda: {**real, "handlers": set()})
     monkeypatch.setattr(v, "get_registry_sets", lambda: {**real, "handlers": set()})
     assert v.check_pre_pi(["get_fundamentals"]) is not None
+
 
 def test_missing_fixture_fails_closed():
     try:
@@ -160,7 +198,10 @@ def test_timeout_fails(tmp_path: Path):
 def test_timeout_with_wrong_tool_still_routing_fails(tmp_path: Path):
     ok, reason = v.evaluate_attempt(
         _ok(tmp_path, extra_tool="get_xbrl_facts", extra_error="tool_error"),
-        "get_fundamentals", 0, True, attempt=1,
+        "get_fundamentals",
+        0,
+        True,
+        attempt=1,
     )
     assert not ok
     assert "routing failed" in reason
@@ -168,7 +209,11 @@ def test_timeout_with_wrong_tool_still_routing_fails(tmp_path: Path):
 
 def test_target_rate_limited_returns_transient(tmp_path: Path):
     ok, reason = v.evaluate_attempt(
-        _ok(tmp_path, tool_error="rate_limited"), "get_fundamentals", 0, False, attempt=1,
+        _ok(tmp_path, tool_error="rate_limited"),
+        "get_fundamentals",
+        0,
+        False,
+        attempt=1,
     )
     assert not ok
     assert reason.startswith("transient: ")
@@ -177,7 +222,10 @@ def test_target_rate_limited_returns_transient(tmp_path: Path):
 def test_target_timeout_message_returns_transient(tmp_path: Path):
     ok, reason = v.evaluate_attempt(
         _ok(tmp_path, tool_error="tool_error", tool_message="Exa search timed out"),
-        "get_fundamentals", 0, False, attempt=1,
+        "get_fundamentals",
+        0,
+        False,
+        attempt=1,
     )
     assert not ok
     assert reason.startswith("transient: ")
@@ -197,14 +245,17 @@ def test_target_mixed_errors_plain_fail(tmp_path: Path):
     assert not reason.startswith("transient: ")
 
 
-
-
 def test_zero_call_absence_plain_fail(tmp_path: Path):
     p = tmp_path / "empty.sqlite"
     conn = sqlite3.connect(str(p))
     conn.executescript(_SCHEMA)
-    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','2026-01-01T00:00:00+00:00','q','completed')")
-    conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?, '2026-01-01T00:00:00+00:00')", (MODEL,))
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','2026-01-01T00:00:00+00:00','q','completed')"
+    )
+    conn.execute(
+        "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?, '2026-01-01T00:00:00+00:00')",
+        (MODEL,),
+    )
     conn.commit()
     conn.close()
     ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False)
@@ -216,8 +267,13 @@ def test_required_tool_absent_fails(tmp_path: Path):
     p = tmp_path / "empty.sqlite"
     conn = sqlite3.connect(str(p))
     conn.executescript(_SCHEMA)
-    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','2026-01-01T00:00:00+00:00','q','completed')")
-    conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?, '2026-01-01T00:00:00+00:00')", (MODEL,))
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','2026-01-01T00:00:00+00:00','q','completed')"
+    )
+    conn.execute(
+        "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?, '2026-01-01T00:00:00+00:00')",
+        (MODEL,),
+    )
     conn.commit()
     conn.close()
     ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False)
@@ -225,7 +281,9 @@ def test_required_tool_absent_fails(tmp_path: Path):
 
 
 def test_wrong_tool_only_fails(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, other_tool="search_web", event="completed"), "get_fundamentals", 0, False, attempt=1)
+    ok, reason = v.evaluate_attempt(
+        _ok(tmp_path, other_tool="search_web", event="completed"), "get_fundamentals", 0, False, attempt=1
+    )
     assert not ok
     assert "routing failed" in reason
 
@@ -264,19 +322,29 @@ def test_harness_rejection_without_execution_fails_attempt_3(tmp_path: Path):
 
 
 def test_rejected_wrong_tool_fails_attempt_1(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1)
+    ok, reason = v.evaluate_attempt(
+        _ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=1
+    )
     assert not ok
     assert "harness-rejected" in reason
 
 
 def test_rejected_wrong_tool_fails_attempt_3(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=3)
+    ok, reason = v.evaluate_attempt(
+        _ok(tmp_path, event="completed", rejected_other="get_xbrl_facts"), "get_fundamentals", 0, False, attempt=3
+    )
     assert not ok
     assert "routing failed" in reason
 
 
 def test_dispatched_wrong_tool_error_fails_attempt_1(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=1)
+    ok, reason = v.evaluate_attempt(
+        _ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"),
+        "get_fundamentals",
+        0,
+        False,
+        attempt=1,
+    )
     assert not ok
     assert "unexpected" in reason
 
@@ -290,24 +358,33 @@ def test_dispatched_wrong_tool_success_passes_attempt_1(tmp_path: Path):
     assert reach_ok
 
 
-
-
 def test_rejected_prereq_fails_attempt_1(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", rejected_other="search_sec_filings"), "list_sec_filings", 0, False, attempt=1)
+    ok, reason = v.evaluate_attempt(
+        _ok(tmp_path, tool="list_sec_filings", rejected_other="search_sec_filings"),
+        "list_sec_filings",
+        0,
+        False,
+        attempt=1,
+    )
     assert not ok
     assert "harness-rejected" in reason
 
 
-
-
 def test_errored_prereq_fails_attempt_1(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, tool="list_sec_filings", extra_tool="search_sec_filings", extra_error="tool_error"), "list_sec_filings", 0, False, attempt=1)
+    ok, _ = v.evaluate_attempt(
+        _ok(tmp_path, tool="list_sec_filings", extra_tool="search_sec_filings", extra_error="tool_error"),
+        "list_sec_filings",
+        0,
+        False,
+        attempt=1,
+    )
     assert not ok
 
 
 def test_prereq_chains_are_documented_in_descriptions():
     from app.tools import TOOLS
     from scripts.verify_tool_registry import tool_schema_function, tool_schema_name
+
     descriptions = {tool_schema_name(raw): str(tool_schema_function(raw).get("description", "")) for raw in TOOLS}
     assert set(v.PREREQ_CHAINS) <= set(descriptions)
     for target, prereqs in v.PREREQ_CHAINS.items():
@@ -317,19 +394,30 @@ def test_prereq_chains_are_documented_in_descriptions():
 
 
 def test_dispatched_wrong_tool_fails_attempt_3(tmp_path: Path):
-    ok, reason = v.evaluate_attempt(_ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"), "get_fundamentals", 0, False, attempt=3)
+    ok, reason = v.evaluate_attempt(
+        _ok(tmp_path, event="completed", extra_tool="get_xbrl_facts", extra_error="tool_error"),
+        "get_fundamentals",
+        0,
+        False,
+        attempt=3,
+    )
     assert not ok
     assert "routing failed" in reason
 
 
 def test_failed_builtin_ignored_attempt_1(tmp_path: Path):
-    ok, _ = v.evaluate_attempt(_ok(tmp_path, event="completed", rejected_other="read"), "get_fundamentals", 0, False, attempt=1)
+    ok, _ = v.evaluate_attempt(
+        _ok(tmp_path, event="completed", rejected_other="read"), "get_fundamentals", 0, False, attempt=1
+    )
     assert ok
 
 
-
 def test_two_of_three_is_not_pass():
-    trio = [v.AttemptResult("t", 1, True, "pass", 0, "", 0.0), v.AttemptResult("t", 2, True, "pass", 0, "", 0.0), v.AttemptResult("t", 3, False, "routing failed: x", 1, "", 0.0)]
+    trio = [
+        v.AttemptResult("t", 1, True, "pass", 0, "", 0.0),
+        v.AttemptResult("t", 2, True, "pass", 0, "", 0.0),
+        v.AttemptResult("t", 3, False, "routing failed: x", 1, "", 0.0),
+    ]
     assert not v.tool_passes(trio)
     assert v.tool_passes([v.AttemptResult("t", n, True, "pass", 0, "", 0.0) for n in (1, 2, 3)])
 
@@ -339,10 +427,14 @@ def test_doctor_describe_skew_fails():
     doc = {"bridge_ok": True, "tool_count": 1, "tool_names": ["a"]}
     assert v.check_discovery(desc, doc) is not None
 
+
 def test_any_pi_model_id_accepted(tmp_path: Path):
     ok, _ = v.evaluate_attempt(
         _ok(tmp_path, model="muse-spark-1.3-contributor"),
-        "get_fundamentals", 0, False, attempt=1,
+        "get_fundamentals",
+        0,
+        False,
+        attempt=1,
     )
     assert ok
 
@@ -388,8 +480,10 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
 
     class _FakeProc:
         pid = 999999
+
         def poll(self) -> int | None:
             return 0
+
         def wait(self, timeout: float | None = None) -> int:
             return 0
 
@@ -419,7 +513,6 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
     assert os.environ.get("STOCKBOT_DATA_DIR") == str(durable)
     assert len(captured_cmds) == 2
     for cmd in captured_cmds:
-
         assert "--no-builtin-tools" in cmd
         assert "--no-extensions" in cmd
         assert "--no-skills" in cmd
@@ -429,10 +522,17 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
         assert cmd.index("--no-context-files") < cmd.index("--")
         assert cmd[-2] == "--"
         assert cmd[-1] == "prompt"
-        assert cmd[:8] == ["pi", "-p", "--no-session", "--no-builtin-tools", "--no-extensions", "--no-skills",
-                          "--no-prompt-templates", "--no-context-files"]
+        assert cmd[:8] == [
+            "pi",
+            "-p",
+            "--no-session",
+            "--no-builtin-tools",
+            "--no-extensions",
+            "--no-skills",
+            "--no-prompt-templates",
+            "--no-context-files",
+        ]
         assert cmd[8:10] == ["--extension", v.EXTENSION]
-
 
 
 def test_get_concurrency_default_and_override(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -508,9 +608,14 @@ def test_run_matrix_failure_does_not_cancel_siblings() -> None:
 
 
 def test_two_pass_one_fail_is_tool_failure() -> None:
-    trio = [v.AttemptResult("t", 1, True, "pass", 0, "", 0.0), v.AttemptResult("t", 2, True, "pass", 0, "", 0.0), v.AttemptResult("t", 3, False, "x", 1, "", 0.0)]
+    trio = [
+        v.AttemptResult("t", 1, True, "pass", 0, "", 0.0),
+        v.AttemptResult("t", 2, True, "pass", 0, "", 0.0),
+        v.AttemptResult("t", 3, False, "x", 1, "", 0.0),
+    ]
     assert not v.tool_passes(trio)
     assert v.tool_passes([v.AttemptResult("t", n, True, "pass", 0, "", 0.0) for n in (1, 2, 3)])
+
 
 def test_infra_only_still_fails_but_reports_infra() -> None:
     assert v.is_infra_failure("ratelimit 429 quota exceeded")
@@ -518,7 +623,9 @@ def test_infra_only_still_fails_but_reports_infra() -> None:
     assert not v.is_infra_failure("Overloaded 503 try again")
     assert not v.is_infra_failure("routing failed: unexpected research tool call(s): foo")
     assert not v.is_infra_failure("target 'x' absent (ok)")
-    infra_trio = [v.AttemptResult("t", n, False, "transient: pi timeout before terminal state", 124, "", 0.0) for n in (1, 2, 3)]
+    infra_trio = [
+        v.AttemptResult("t", n, False, "transient: pi timeout before terminal state", 124, "", 0.0) for n in (1, 2, 3)
+    ]
     assert not v.tool_passes(infra_trio)
 
 
@@ -533,8 +640,12 @@ def test_routing_reasons_win_over_mixed_infra_keywords() -> None:
 
 
 @pytest.mark.parametrize("stderr", ["Error 429 Too Many Requests", "model request failed: 429 Too Many Requests"])
-def test_stderr_429_does_not_reclassify_routing_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str) -> None:
-    def rate_limited(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+def test_stderr_429_does_not_reclassify_routing_failure(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, stderr: str
+) -> None:
+    def rate_limited(
+        prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None
+    ) -> tuple[int, bool, str, str, bool]:
         return (1, False, "", stderr, False)
 
     monkeypatch.setattr(v, "run_pi", rate_limited)
@@ -547,7 +658,9 @@ def test_stderr_429_does_not_reclassify_routing_failure(tmp_path: Path, monkeypa
 
 
 def test_timeout_still_fails_gate_but_flags_infra(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def hung(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+    def hung(
+        prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None
+    ) -> tuple[int, bool, str, str, bool]:
         return (0, True, "", "", False)
 
     monkeypatch.setattr(v, "run_pi", hung)
@@ -589,21 +702,36 @@ def test_verification_attempt_isolates_thesis_per_attempt(tmp_path: Path, monkey
         stores.append(store)
         return next(ids)
 
-    def fake_run_pi(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+    def fake_run_pi(
+        prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None
+    ) -> tuple[int, bool, str, str, bool]:
         assert stockbot_store is not None
         prompts.append(prompt)
         return (0, False, "", "", True)
 
-    def fake_eval(db_path: Path, tool: str, code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3) -> tuple[bool, str]:
+    def fake_eval(
+        db_path: Path, tool: str, code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3
+    ) -> tuple[bool, str]:
         return (True, "pass")
 
     monkeypatch.setattr(v, "ensure_thesis_fixture", fake_fixture)
     monkeypatch.setattr(v, "run_pi", fake_run_pi)
     monkeypatch.setattr(v, "evaluate_attempt", fake_eval)
     monkeypatch.setattr(v, "evaluate_reachability_attempt", fake_eval)
-    def fake_routing(db_path: Path, tool: str, code: int, timed_out: bool, *, completed_override: bool = False, attempt: int = 3, expected_args: object = None) -> tuple[bool, str]:
+
+    def fake_routing(
+        db_path: Path,
+        tool: str,
+        code: int,
+        timed_out: bool,
+        *,
+        completed_override: bool = False,
+        attempt: int = 3,
+        expected_args: object = None,
+    ) -> tuple[bool, str]:
         del expected_args
         return fake_eval(db_path, tool, code, timed_out, completed_override=completed_override, attempt=attempt)
+
     monkeypatch.setattr(v, "evaluate_routing_attempt", fake_routing)
     base: dict[str, object] = {"id": v.THESIS_ID_PLACEHOLDER}
     batch = tmp_path / "batch"
@@ -633,7 +761,9 @@ def test_run_matrix_survives_worker_crash() -> None:
 
 
 def test_verification_attempt_crash_is_failed_attempt(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    def boom(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+    def boom(
+        prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None
+    ) -> tuple[int, bool, str, str, bool]:
         raise RuntimeError("pi exploded")
 
     monkeypatch.setattr(v, "run_pi", boom)
@@ -648,7 +778,9 @@ def test_verification_attempt_retries_transient_then_passes(tmp_path: Path, monk
     calls: list[Path] = []
     del v.TRANSIENT_RETRIES[:]
 
-    def fake_run_pi(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+    def fake_run_pi(
+        prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None
+    ) -> tuple[int, bool, str, str, bool]:
         calls.append(db_path)
         if len(calls) == 1:
             _db(db_path, tool="get_fundamentals", tool_error="rate_limited")
@@ -673,7 +805,9 @@ def test_verification_attempt_cap_exhaustion_fails(tmp_path: Path, monkeypatch: 
     calls: list[Path] = []
     del v.TRANSIENT_RETRIES[:]
 
-    def fake_run_pi(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+    def fake_run_pi(
+        prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None
+    ) -> tuple[int, bool, str, str, bool]:
         calls.append(db_path)
         _db(db_path, tool="get_fundamentals", tool_error="rate_limited")
         return (0, False, "", "", False)
@@ -772,7 +906,14 @@ def test_tool_success_via_call_tool_dispatch(tmp_path: Path) -> None:
     assert ok
 
 
-def _holdout_db(path: Path, *, discovery: str = "browse_tools", disc_at: str = "2026-01-01T00:00:00+00:00", inner_at: str = "2026-01-01T00:00:01+00:00", via_call_tool: bool = True) -> Path:
+def _holdout_db(
+    path: Path,
+    *,
+    discovery: str = "browse_tools",
+    disc_at: str = "2026-01-01T00:00:00+00:00",
+    inner_at: str = "2026-01-01T00:00:01+00:00",
+    via_call_tool: bool = True,
+) -> Path:
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
     conn.execute(
@@ -831,6 +972,7 @@ def test_holdout_passes_on_direct_completion(tmp_path: Path) -> None:
     ok, _ = v.evaluate_holdout_attempt(p, "get_short_interest")
     assert ok
 
+
 def test_attempt1_browse_only_passes_before_call_tool(tmp_path: Path) -> None:
     ok, _ = v.evaluate_attempt(_ok(tmp_path, discovery="browse_tools"), "get_fundamentals", 0, False, attempt=1)
     assert ok
@@ -852,6 +994,8 @@ def test_attempt1_late_discovery_fails(tmp_path: Path) -> None:
     ok, reason = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
     assert not ok
     assert "precede" in reason
+
+
 def test_errored_target_reports_failed_not_ordering() -> None:
     root = Path(__file__).resolve().parents[1]
     cases = [("get_xbrl_facts", "get_xbrl_facts-attempt1.sqlite", 1), ("query_finra", "query_finra-attempt2.sqlite", 2)]
@@ -860,7 +1004,12 @@ def test_errored_target_reports_failed_not_ordering() -> None:
         assert p.is_file(), f"missing pinned regression fixture {p}"
         conn = sqlite3.connect(str(p))
         try:
-            rows = {r[0]: (r[1], r[2]) for r in conn.execute("SELECT tool_name, MIN(started_at), MAX(error_type) FROM tool_calls GROUP BY tool_name").fetchall()}
+            rows = {
+                r[0]: (r[1], r[2])
+                for r in conn.execute(
+                    "SELECT tool_name, MIN(started_at), MAX(error_type) FROM tool_calls GROUP BY tool_name"
+                ).fetchall()
+            }
         finally:
             conn.close()
         assert rows["search_tools"][0] < rows["browse_tools"][0] < rows[tool][0]
@@ -868,7 +1017,11 @@ def test_errored_target_reports_failed_not_ordering() -> None:
         routing_ok, routing_reason = v.evaluate_routing_attempt(p, tool, 0, False, attempt=attempt)
         assert not routing_ok
         assert "did not precede" not in routing_reason
-        assert "failed-research-call" in routing_reason or "failed execution" in routing_reason or "errored execution" in routing_reason
+        assert (
+            "failed-research-call" in routing_reason
+            or "failed execution" in routing_reason
+            or "errored execution" in routing_reason
+        )
         reach_ok, reach_reason = v.evaluate_reachability_attempt(p, tool, 0, False, attempt=attempt)
         assert not reach_ok
         assert "did not precede" not in reach_reason
@@ -882,7 +1035,9 @@ def test_errored_target_reports_failed_not_ordering() -> None:
 
 
 def test_errored_target_before_discovery_reports_ordering(tmp_path: Path) -> None:
-    p = _ok(tmp_path, disc_at="2026-01-01T00:00:02+00:00", inner_at="2026-01-01T00:00:01+00:00", tool_error="tool_error")
+    p = _ok(
+        tmp_path, disc_at="2026-01-01T00:00:02+00:00", inner_at="2026-01-01T00:00:01+00:00", tool_error="tool_error"
+    )
     routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_fundamentals", 0, False, attempt=1)
     assert not routing_ok
     assert "did not precede" in routing_reason
@@ -903,8 +1058,6 @@ def test_attempt3_errored_target_reports_failed_not_bare_absent(tmp_path: Path) 
     assert "absent" not in reach_reason
 
 
-
-
 def test_attempt1_direct_tool_completion_passes(tmp_path: Path) -> None:
     p = _ok(tmp_path, via_call_tool=False)
     ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=1)
@@ -915,6 +1068,8 @@ def test_attempt3_exact_call_tool_passes_with_zero_discovery(tmp_path: Path) -> 
     p = _ok(tmp_path, discovery=None, via_call_tool=True)
     ok, _ = v.evaluate_attempt(p, "get_fundamentals", 0, False, attempt=3)
     assert ok
+
+
 def test_attempt3_clean_stray_passes_and_harness_rejected_fails(tmp_path: Path) -> None:
     p = _ok(tmp_path, discovery=None, extra_tool="get_xbrl_facts")
     routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_fundamentals", 0, False, attempt=3)
@@ -932,11 +1087,17 @@ def test_attempt3_clean_stray_passes_and_harness_rejected_fails(tmp_path: Path) 
     ok2, reason2 = v.evaluate_attempt(qpath, "get_fundamentals", 0, False, attempt=3)
     assert not ok2
     assert "harness-rejected" in reason2
+
+
 def test_search_tools_directly_verifiable(tmp_path: Path) -> None:
-    ok1, _ = v.evaluate_attempt(_ok(tmp_path, tool="search_tools", discovery=None, via_call_tool=False), "search_tools", 0, False, attempt=1)
+    ok1, _ = v.evaluate_attempt(
+        _ok(tmp_path, tool="search_tools", discovery=None, via_call_tool=False), "search_tools", 0, False, attempt=1
+    )
     assert ok1
     p2 = tmp_path / "s3.sqlite"
     _db(p2, tool="search_tools", discovery=None, via_call_tool=False)
+
+
 def test_search_tools_capability_path_covered_without_matrix() -> None:
     schemas = v.tool_schemas()
     props = schemas["search_tools"].get("properties")
@@ -949,6 +1110,7 @@ def test_search_tools_capability_path_covered_without_matrix() -> None:
     assert v._natural_prompt_v2("search_tools", args).endswith(v._SEARCH_ONLY_GUIDANCE)
     assert len(v.AGENT_LOOP_CASES) == 5
 
+
 def test_explicit_prompt_exact_dispatch_shape() -> None:
     prompt = v.build_explicit_prompt("get_short_interest", {"ticker": "AAPL"})
     assert "You may use browse_tools, search_tools, or describe_tool" in prompt
@@ -960,13 +1122,16 @@ def test_explicit_prompt_exact_dispatch_shape() -> None:
     assert "Call the `search_tools` tool" in direct
     assert "call_tool exactly once" not in direct
 
+
 def test_pi_research_prompt_hidden_dispatch_contract() -> None:
     from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
+
     assert PROMPT_VERSION == "33"
     assert "TOOL USE" in PI_RESEARCH_PROMPT
     assert "exactly once" not in PI_RESEARCH_PROMPT.lower()
     assert "call that tool before answering" not in PI_RESEARCH_PROMPT
     assert "Use call_tool only when the required research tool cannot be called directly" not in PI_RESEARCH_PROMPT
+
 
 def test_attempt1_describe_only_passes_before_call_tool(tmp_path: Path) -> None:
     ok, _ = v.evaluate_attempt(_ok(tmp_path, discovery="describe_tool"), "get_fundamentals", 0, False, attempt=1)
@@ -1052,12 +1217,14 @@ def test_errored_nontransient_stray_fails(tmp_path: Path) -> None:
     assert not ok
     assert "unexpected research" in reason
 
+
 def _norm_holdout_text(value: str) -> str:
     return " ".join(value.lower().split())
 
 
 def test_holdout_prompts_are_novel_and_unquoted() -> None:
     from app.tools import TOOL_DISCOVERY_REGISTRY
+
     holdout = __import__("json").loads(__import__("pathlib").Path("evals/holdout_discovery.json").read_text())
     assert isinstance(holdout, list) and len(holdout) == 20
     verify_texts = {_norm_holdout_text(c.get("natural_v1", "")) for c in v.VERIFY_CASES.values()}
@@ -1076,27 +1243,56 @@ def test_holdout_prompts_are_novel_and_unquoted() -> None:
         for phrase in registry_phrases:
             assert phrase not in norm_prompt, f"holdout copies catalog prose: {phrase!r} in {prompt!r}"
 
+
 def _probe_db(path: Path, *, clean_args: str | None, failed_args: str | None) -> Path:
     """Discovery + dispatched target with one clean and one failed same-tool call."""
     conn = sqlite3.connect(str(path))
     conn.executescript(_SCHEMA)
     disc = "2026-01-01T00:00:00+00:00"
     inner = "2026-01-01T00:00:01+00:00"
-    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1',?, 'q', 'completed')", (disc,))
-    conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','browse_tools',?,NULL)", (disc,))
-    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,'browse_tools')", (disc,))
-    conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, arguments_json, started_at, error_type) VALUES ('tc1','r1','get_threshold_securities',?,?,NULL)", (clean_args, inner))
-    conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, arguments_json, started_at, error_type, error_message) VALUES ('tc2','r1','get_threshold_securities',?,?,'tool_error','No data')", (failed_args, inner))
-    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started',?,'call_tool',?)", (inner, json.dumps({"name": "get_threshold_securities", "arguments": {"ticker": "AAPL"}})))
-    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed',?,'call_tool')", (inner,))
-    conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)", (MODEL, disc))
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1',?, 'q', 'completed')",
+        (disc,),
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','browse_tools',?,NULL)",
+        (disc,),
+    )
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed',?,'browse_tools')",
+        (disc,),
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, arguments_json, started_at, error_type) VALUES ('tc1','r1','get_threshold_securities',?,?,NULL)",
+        (clean_args, inner),
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, arguments_json, started_at, error_type, error_message) VALUES ('tc2','r1','get_threshold_securities',?,?,'tool_error','No data')",
+        (failed_args, inner),
+    )
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started',?,'call_tool',?)",
+        (inner, json.dumps({"name": "get_threshold_securities", "arguments": {"ticker": "AAPL"}})),
+    )
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed',?,'call_tool')",
+        (inner,),
+    )
+    conn.execute(
+        "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?,?)",
+        (MODEL, disc),
+    )
     conn.commit()
     conn.close()
     return path
 
 
 def test_same_tool_different_args_probe_forgiven(tmp_path: Path) -> None:
-    p = _probe_db(tmp_path / "runs.sqlite", clean_args='{"ticker": "AAPL"}', failed_args='{"ticker": "AAPL", "tradeDate": "2026-09-11"}')
+    p = _probe_db(
+        tmp_path / "runs.sqlite",
+        clean_args='{"ticker": "AAPL"}',
+        failed_args='{"ticker": "AAPL", "tradeDate": "2026-09-11"}',
+    )
     reach_ok, _ = v.evaluate_reachability_attempt(p, "get_threshold_securities", 0, False, attempt=1)
     assert reach_ok
     routing_ok, routing_reason = v.evaluate_routing_attempt(p, "get_threshold_securities", 0, False, attempt=1)
@@ -1226,8 +1422,11 @@ def test_completion_double_continuation_fails(tmp_path: Path) -> None:
 
 def test_completion_unsupported_zero_match_passes(tmp_path: Path) -> None:
     p = _completion_db(
-        tmp_path / "runs.sqlite", expected_tool=None, research=False,
-        search_row_count=0, answer="no suitable tool exists",
+        tmp_path / "runs.sqlite",
+        expected_tool=None,
+        research=False,
+        search_row_count=0,
+        answer="no suitable tool exists",
     )
     ok, _ = v.evaluate_completion_attempt(p, None)
     assert ok
@@ -1235,8 +1434,11 @@ def test_completion_unsupported_zero_match_passes(tmp_path: Path) -> None:
 
 def test_completion_unsupported_nonzero_match_passes_without_discovery(tmp_path: Path) -> None:
     p = _completion_db(
-        tmp_path / "runs.sqlite", expected_tool=None, research=False,
-        search_row_count=2, answer="no suitable tool exists",
+        tmp_path / "runs.sqlite",
+        expected_tool=None,
+        research=False,
+        search_row_count=2,
+        answer="no suitable tool exists",
     )
     ok, _ = v.evaluate_completion_attempt(p, None)
     assert ok
@@ -1244,8 +1446,11 @@ def test_completion_unsupported_nonzero_match_passes_without_discovery(tmp_path:
 
 def test_completion_unsupported_null_row_count_passes_without_discovery(tmp_path: Path) -> None:
     p = _completion_db(
-        tmp_path / "runs.sqlite", expected_tool=None, research=False,
-        search_row_count=None, answer="no suitable tool exists",
+        tmp_path / "runs.sqlite",
+        expected_tool=None,
+        research=False,
+        search_row_count=None,
+        answer="no suitable tool exists",
     )
     ok, _ = v.evaluate_completion_attempt(p, None)
     assert ok
@@ -1253,7 +1458,10 @@ def test_completion_unsupported_null_row_count_passes_without_discovery(tmp_path
 
 def test_completion_unsupported_with_research_fails(tmp_path: Path) -> None:
     p = _completion_db(
-        tmp_path / "runs.sqlite", expected_tool=None, research=False, search_row_count=0,
+        tmp_path / "runs.sqlite",
+        expected_tool=None,
+        research=False,
+        search_row_count=0,
     )
     conn = sqlite3.connect(str(p))
     conn.execute(
@@ -1268,8 +1476,11 @@ def test_completion_unsupported_with_research_fails(tmp_path: Path) -> None:
 
 def test_completion_unsupported_empty_answer_fails(tmp_path: Path) -> None:
     p = _completion_db(
-        tmp_path / "runs.sqlite", expected_tool=None, research=False,
-        search_row_count=0, answer="   ",
+        tmp_path / "runs.sqlite",
+        expected_tool=None,
+        research=False,
+        search_row_count=0,
+        answer="   ",
     )
     ok, reason = v.evaluate_completion_attempt(p, None)
     assert not ok
@@ -1290,21 +1501,97 @@ def test_routing_metrics_event_parses_latest(tmp_path: Path) -> None:
 
 
 def _attempt(
-    tool: str, attempt: int, ok: bool, discovery: int = 1, research: int = 1,
-    metrics: dict[str, object] | None = None, completion: bool | None = None,
+    tool: str,
+    attempt: int,
+    ok: bool,
+    discovery: int = 1,
+    research: int = 1,
+    metrics: dict[str, object] | None = None,
+    completion: bool | None = None,
     terminal: bool = True,
 ) -> v.AttemptResult:
     return v.AttemptResult(
-        tool, attempt, ok, "pass" if ok else "routing failed: x", 0, "", 0.0,
-        False, None, "", None, "", discovery, research, 0, completion,
-        "" if completion else "", metrics, terminal_completed=terminal,
+        tool,
+        attempt,
+        ok,
+        "pass" if ok else "routing failed: x",
+        0,
+        "",
+        0.0,
+        False,
+        None,
+        "",
+        None,
+        "",
+        discovery,
+        research,
+        0,
+        completion,
+        "",
+        metrics,
+        terminal_completed=terminal,
     )
+
 
 def test_aggregate_formulas() -> None:
     results = [
-        _attempt("a", 1, True, 1, 1, {"discovered_tool_count": 2, "premature_stop_detected": False, "continuation_injected": True, "continuation_succeeded": True, "invalid_tool_calls": 0, "unrelated_research_calls": 0, "discovery_calls": 1, "call_tool_count": 0, "direct_tool_calls": 1}, True),
-        _attempt("a", 2, True, 1, 0, {"discovered_tool_count": 1, "premature_stop_detected": True, "continuation_injected": False, "continuation_succeeded": False, "invalid_tool_calls": 2, "unrelated_research_calls": 1, "discovery_calls": 1, "call_tool_count": 1, "direct_tool_calls": 0}, False),
-        _attempt("unsupported", 5, True, 1, 0, {"discovered_tool_count": 0, "premature_stop_detected": False, "continuation_injected": False, "continuation_succeeded": False, "invalid_tool_calls": 0, "unrelated_research_calls": 0, "discovery_calls": 1, "call_tool_count": 0, "direct_tool_calls": 0}, True),
+        _attempt(
+            "a",
+            1,
+            True,
+            1,
+            1,
+            {
+                "discovered_tool_count": 2,
+                "premature_stop_detected": False,
+                "continuation_injected": True,
+                "continuation_succeeded": True,
+                "invalid_tool_calls": 0,
+                "unrelated_research_calls": 0,
+                "discovery_calls": 1,
+                "call_tool_count": 0,
+                "direct_tool_calls": 1,
+            },
+            True,
+        ),
+        _attempt(
+            "a",
+            2,
+            True,
+            1,
+            0,
+            {
+                "discovered_tool_count": 1,
+                "premature_stop_detected": True,
+                "continuation_injected": False,
+                "continuation_succeeded": False,
+                "invalid_tool_calls": 2,
+                "unrelated_research_calls": 1,
+                "discovery_calls": 1,
+                "call_tool_count": 1,
+                "direct_tool_calls": 0,
+            },
+            False,
+        ),
+        _attempt(
+            "unsupported",
+            5,
+            True,
+            1,
+            0,
+            {
+                "discovered_tool_count": 0,
+                "premature_stop_detected": False,
+                "continuation_injected": False,
+                "continuation_succeeded": False,
+                "invalid_tool_calls": 0,
+                "unrelated_research_calls": 0,
+                "discovery_calls": 1,
+                "call_tool_count": 0,
+                "direct_tool_calls": 0,
+            },
+            True,
+        ),
         _attempt("b", 1, False, 0, 0, None, None, terminal=False),
         _attempt("c", 1, False, 5, 5, {"discovered_tool_count": 5}, None, terminal=False),
     ]
@@ -1325,9 +1612,32 @@ def test_aggregate_formulas() -> None:
     assert isinstance(completion, dict) and completion == {"passed": 2, "evaluated": 3, "rate": 2 / 3}
     assert agg["median_discovery_calls"] == 1.0
     assert agg["median_research_calls"] == 0.0
+
+
 def test_aggregate_reports_extension_and_verifier_unrelated_separately() -> None:
     def _verifier_attempt(tool: str, attempt: int, reason_tools: str) -> v.AttemptResult:
-        return v.AttemptResult(tool, attempt, False, "routing failed: x", 0, "", 0.0, False, False, "", False, f"routing failed: unrelated-research-success: unexpected research tool call(s): {reason_tools}", 0, 0, 0, None, "", {"unrelated_research_calls": 0}, terminal_completed=True)
+        return v.AttemptResult(
+            tool,
+            attempt,
+            False,
+            "routing failed: x",
+            0,
+            "",
+            0.0,
+            False,
+            False,
+            "",
+            False,
+            f"routing failed: unrelated-research-success: unexpected research tool call(s): {reason_tools}",
+            0,
+            0,
+            0,
+            None,
+            "",
+            {"unrelated_research_calls": 0},
+            terminal_completed=True,
+        )
+
     single = _verifier_attempt("a", 1, "get_xbrl_facts")
     agg_single = v.aggregate_results([single])
     assert agg_single["unrelated_research_calls"] == 0
@@ -1338,15 +1648,16 @@ def test_aggregate_reports_extension_and_verifier_unrelated_separately() -> None
     assert agg_both["verifier_unrelated_success"] == {"attempts": 2, "calls": 2}
 
 
-
 def test_run_agent_loop_main_writes_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     canned = [
         _attempt("search_web", 1, True, 1, 1, {"continuation_injected": False}, True),
         _attempt("unsupported", 5, True, 1, 0, None, True),
     ]
+
     def _canned(root: Path, cwd: Path) -> list[v.AttemptResult]:
         del root, cwd
         return canned
+
     monkeypatch.setattr(v, "run_agent_loop", _canned)
     monkeypatch.chdir(tmp_path)
     assert v.run_agent_loop_main() == 0
@@ -1357,39 +1668,88 @@ def test_run_agent_loop_main_writes_summary(tmp_path: Path, monkeypatch: pytest.
     assert summary["aggregates"]["population"] == 2
     assert summary["aggregates"]["completion"] == {"passed": 2, "evaluated": 2, "rate": 1.0}
     failing = [v.AttemptResult("x", 1, False, "routing failed: x", 1, "", 0.0)]
+
     def _failing(root: Path, cwd: Path) -> list[v.AttemptResult]:
         del root, cwd
         return failing
+
     monkeypatch.setattr(v, "run_agent_loop", _failing)
     assert v.run_agent_loop_main() == 1
 
-def _metrics_db(path: Path, *, expected: str = "get_fundamentals", discovered: list[str] | None, extra_clean: str | None = None, dispatch_expected: bool = True, expected_error: str | None = None, unparseable: bool = False, rejected_expected: bool = False, args_json: str | None = None) -> Path:
+
+def _metrics_db(
+    path: Path,
+    *,
+    expected: str = "get_fundamentals",
+    discovered: list[str] | None,
+    extra_clean: str | None = None,
+    dispatch_expected: bool = True,
+    expected_error: str | None = None,
+    unparseable: bool = False,
+    rejected_expected: bool = False,
+    args_json: str | None = None,
+) -> Path:
     """Minimal trace for classify tests with explicit routing_metrics surfaced list."""
     import sqlite3 as _sq
 
     from app.storage.runs import _SCHEMA as _SC
+
     conn = _sq.connect(str(path))
     conn.executescript(_SC)
-    conn.execute("INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','2026-01-01T00:00:00+00:00','q','completed')")
-    conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools','2026-01-01T00:00:00+00:00',NULL)")
-    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed','2026-01-01T00:00:00+00:00','search_tools')")
+    conn.execute(
+        "INSERT INTO agent_runs (run_id, request_id, started_at, question, status) VALUES ('r1','r1','2026-01-01T00:00:00+00:00','q','completed')"
+    )
+    conn.execute(
+        "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc0','r1','search_tools','2026-01-01T00:00:00+00:00',NULL)"
+    )
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e0','r1',0,'tool_completed','2026-01-01T00:00:00+00:00','search_tools')"
+    )
     if dispatch_expected:
         err = expected_error
-        conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type, arguments_json) VALUES ('tc1','r1',?,'2026-01-01T00:00:01+00:00',?,?)", (expected, err, args_json or '{"ticker": "AAPL"}'))
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type, arguments_json) VALUES ('tc1','r1',?,'2026-01-01T00:00:01+00:00',?,?)",
+            (expected, err, args_json or '{"ticker": "AAPL"}'),
+        )
         if unparseable:
-            conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started','2026-01-01T00:00:01+00:00','call_tool','not-json')")
+            conn.execute(
+                "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started','2026-01-01T00:00:01+00:00','call_tool','not-json')"
+            )
         else:
-            conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started','2026-01-01T00:00:01+00:00','call_tool',?)", (json.dumps({"name": expected, "arguments": {"ticker": "AAPL"}}),))
-        conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed','2026-01-01T00:00:01+00:00','call_tool')")
+            conn.execute(
+                "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name, arguments) VALUES ('e1','r1',1,'tool_started','2026-01-01T00:00:01+00:00','call_tool',?)",
+                (json.dumps({"name": expected, "arguments": {"ticker": "AAPL"}}),),
+            )
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e2','r1',2,'tool_completed','2026-01-01T00:00:01+00:00','call_tool')"
+        )
     if extra_clean is not None:
-        conn.execute("INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc9','r1',?,'2026-01-01T00:00:01+00:00',NULL)", (extra_clean,))
-        conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,'tool_completed','2026-01-01T00:00:01+00:00',?)", (extra_clean,))
+        conn.execute(
+            "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('tc9','r1',?,'2026-01-01T00:00:01+00:00',NULL)",
+            (extra_clean,),
+        )
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e9','r1',9,'tool_completed','2026-01-01T00:00:01+00:00',?)",
+            (extra_clean,),
+        )
     if rejected_expected:
-        conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e8','r1',8,'tool_failed','2026-01-01T00:00:01+00:00',?)", (expected,))
+        conn.execute(
+            "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, tool_name) VALUES ('e8','r1',8,'tool_failed','2026-01-01T00:00:01+00:00',?)",
+            (expected,),
+        )
     empty: list[str] = []
-    payload = {"discovered_tools": discovered if discovered is not None else empty, "discovered_tool_count": len(discovered or [])}
-    conn.execute("INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, metadata) VALUES ('m1','r1',5,'routing_metrics','2026-01-01T00:00:03+00:00',?)", (json.dumps(payload),))
-    conn.execute("INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?, '2026-01-01T00:00:00+00:00')", ("test-model",))
+    payload = {
+        "discovered_tools": discovered if discovered is not None else empty,
+        "discovered_tool_count": len(discovered or []),
+    }
+    conn.execute(
+        "INSERT INTO agent_events (event_id, run_id, sequence, event_type, started_at, metadata) VALUES ('m1','r1',5,'routing_metrics','2026-01-01T00:00:03+00:00',?)",
+        (json.dumps(payload),),
+    )
+    conn.execute(
+        "INSERT INTO model_calls (model_call_id, run_id, provider, model, started_at) VALUES ('m1','r1','pi',?, '2026-01-01T00:00:00+00:00')",
+        ("test-model",),
+    )
     conn.commit()
     conn.close()
     return path
@@ -1401,7 +1761,9 @@ def test_classify_discovery_failure(tmp_path: Path):
 
 
 def test_classify_selection_failure(tmp_path: Path):
-    p = _metrics_db(tmp_path / "s.sqlite", discovered=["get_fundamentals", "get_xbrl_facts"], extra_clean="get_xbrl_facts")
+    p = _metrics_db(
+        tmp_path / "s.sqlite", discovered=["get_fundamentals", "get_xbrl_facts"], extra_clean="get_xbrl_facts"
+    )
     assert v.classify_routing_failure(p, "get_fundamentals", attempt=1) == v.RoutingFailureCategory.SELECTION_FAILURE
 
 
@@ -1428,7 +1790,9 @@ def test_classify_execution_failure(tmp_path: Path):
 
 def test_classify_precedence_discovery_first(tmp_path: Path):
     # Missing from surfaced beats even a clean stray.
-    p = _metrics_db(tmp_path / "p.sqlite", discovered=["search_web"], extra_clean="get_xbrl_facts", dispatch_expected=False)
+    p = _metrics_db(
+        tmp_path / "p.sqlite", discovered=["search_web"], extra_clean="get_xbrl_facts", dispatch_expected=False
+    )
     assert v.classify_routing_failure(p, "get_fundamentals", attempt=1) == v.RoutingFailureCategory.DISCOVERY_FAILURE
 
 
@@ -1451,7 +1815,13 @@ def test_generate_confusion_cases_complete():
         pairs.add((pair[0], pair[1]))
     assert len(pairs) == 34
     assert ("get_short_interest", "query_finra") in pairs or ("get_finra_datapoints", "query_finra") in pairs
-    for new_pair in [("get_macro_context", "search_web"), ("get_material_events", "list_sec_filings"), ("get_sec_filing", "search_sec_filings"), ("thesis_journal", "thesis_refine"), ("thesis_show", "thesis_watch")]:
+    for new_pair in [
+        ("get_macro_context", "search_web"),
+        ("get_material_events", "list_sec_filings"),
+        ("get_sec_filing", "search_sec_filings"),
+        ("thesis_journal", "thesis_refine"),
+        ("thesis_show", "thesis_watch"),
+    ]:
         assert tuple(sorted(new_pair)) in pairs
     for c in cases:
         assert c["prompt"] and c["expected_tool"] and isinstance(c["arguments"], dict)
@@ -1459,6 +1829,7 @@ def test_generate_confusion_cases_complete():
 
 def test_holdout_hash_rejects_altered(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import evals as _e  # noqa: F401
+
     hold = Path("evals/holdout_discovery.json")
     digest = __import__("hashlib").sha256(hold.read_bytes()).hexdigest()
     assert digest == v.HOLDOUT_SHA256
@@ -1484,4 +1855,3 @@ def test_clean_prompt_strips_nul():
     import scripts.verify_agent_scenarios as vas
 
     assert vas._clean_prompt("PDF\x00 head") == "PDF head"
-

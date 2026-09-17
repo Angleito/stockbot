@@ -5,7 +5,7 @@ from __future__ import annotations
 from collections.abc import Collection, Mapping, Sequence
 from copy import deepcopy
 from dataclasses import dataclass, field
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 
 from app.research.models import NO_CUTOFF_AS_OF
 
@@ -62,7 +62,10 @@ CONCEPT_FAMILIES = {
     "receivable_credit": ("has_receivable_from", "receivable", "credit_exposure"),
     "supplier": ("supplier_to", "supplier", "vendor", "supply_chain"),
     "purchase_capacity_commitment": (
-        "purchase_commitment_to", "capacity_commitment_to", "commitment", "take_or_pay",
+        "purchase_commitment_to",
+        "capacity_commitment_to",
+        "commitment",
+        "take_or_pay",
     ),
     "guarantee": ("guarantee", "guarantor", "indemnity"),
     "debt_financing": ("debt", "financing", "loan", "credit_facility", "notes_payable"),
@@ -94,7 +97,7 @@ def dossier_to_dict(dossier: SECDossier) -> dict[str, object]:
         "limitations": list(dossier.limitations),
         "open_questions": list(dossier.open_questions),
         "as_of": dossier.as_of.isoformat() if dossier.as_of else None,
-        "created_at": datetime.now(timezone.utc).isoformat(),
+        "created_at": datetime.now(UTC).isoformat(),
     }
 
 
@@ -175,11 +178,12 @@ def _coerce_as_of(value: datetime | str | None) -> datetime | None:
         parsed = datetime.fromisoformat(value)
     except ValueError:
         raise DossierIntegrityError(f"dossier: 'as_of' must be ISO-8601, got {value!r}") from None
-    return parsed if parsed.tzinfo else parsed.replace(tzinfo=timezone.utc)
+    return parsed if parsed.tzinfo else parsed.replace(tzinfo=UTC)
 
 
 def _ground_findings(
-    findings: Sequence[Mapping[str, object]], dossier_id: str,
+    findings: Sequence[Mapping[str, object]],
+    dossier_id: str,
 ) -> tuple[list[dict[str, object]], list[str]]:
     """Validated findings + derived supporting set (order-stable, deduped)."""
     grounded: list[dict[str, object]] = []
@@ -191,6 +195,8 @@ def _ground_findings(
             if eid not in supporting:
                 supporting.append(eid)
     return grounded, supporting
+
+
 def _nonempty_str(value: object) -> str | None:
     """Stripped text or None (non-strings and blanks collapse to one arm)."""
     text = value.strip() if isinstance(value, str) else None
@@ -221,14 +227,19 @@ def _relationship_verification(raw: object) -> dict[str, object] | None:
         return {"status": "observed_from_filing"}
     return dict(raw) if isinstance(raw, Mapping) and raw.get("status") == "observed_from_filing" else None
 
+
 def _relationship_fields(rel: Mapping[str, object], rid: str, dossier_id: str) -> tuple[object, object]:
     """Flat table over the three entity fields (one loop, one raise site); returns (materiality, attributes)."""
     for key in ("from_entity", "to_entity", "relationship_type"):
         if _nonempty_str(rel.get(key)) is None:
-            raise DossierIntegrityError(f"dossier {dossier_id}: relationship {rid!r} {key!r} must be a non-empty string")
+            raise DossierIntegrityError(
+                f"dossier {dossier_id}: relationship {rid!r} {key!r} must be a non-empty string"
+            )
     materiality = rel.get("materiality")
     if materiality is not None and materiality not in MATERIALITY_LEVELS:
-        raise DossierIntegrityError(f"dossier {dossier_id}: relationship {rid!r} 'materiality' must be one of {list(MATERIALITY_LEVELS)}")
+        raise DossierIntegrityError(
+            f"dossier {dossier_id}: relationship {rid!r} 'materiality' must be one of {list(MATERIALITY_LEVELS)}"
+        )
     attributes = rel.get("attributes")
     if attributes is not None and not isinstance(attributes, Mapping):
         raise DossierIntegrityError(f"dossier {dossier_id}: relationship {rid!r} 'attributes' must be a mapping")
@@ -236,7 +247,8 @@ def _relationship_fields(rel: Mapping[str, object], rid: str, dossier_id: str) -
 
 
 def _validate_relationship_shape(
-    rel: object, dossier_id: str,
+    rel: object,
+    dossier_id: str,
 ) -> tuple[dict[str, object], list[str]]:
     """One commercial record + deduped evidence ids (raises on ungrounded links).
 
@@ -256,10 +268,14 @@ def _validate_relationship_shape(
         raise DossierIntegrityError(f"dossier {dossier_id}: relationship {rid!r} 'source' must be 'SEC'")
     uniq = _relationship_evidence_ids(rel.get("evidence_ids"))
     if uniq is None:
-        raise DossierIntegrityError(f"dossier {dossier_id}: relationship {rid!r} 'evidence_ids' must be a non-empty list of strings")
+        raise DossierIntegrityError(
+            f"dossier {dossier_id}: relationship {rid!r} 'evidence_ids' must be a non-empty list of strings"
+        )
     verification = _relationship_verification(rel.get("verification"))
     if verification is None:
-        raise DossierIntegrityError(f"dossier {dossier_id}: relationship {rid!r} 'verification.status' must be 'observed_from_filing'")
+        raise DossierIntegrityError(
+            f"dossier {dossier_id}: relationship {rid!r} 'verification.status' must be 'observed_from_filing'"
+        )
     record: dict[str, object] = {
         "relationship_id": rel.get("relationship_id"),
         "source": "SEC",
@@ -276,7 +292,8 @@ def _validate_relationship_shape(
 
 
 def _ground_relationships(
-    relationships: Sequence[Mapping[str, object]], dossier_id: str,
+    relationships: Sequence[Mapping[str, object]],
+    dossier_id: str,
 ) -> tuple[list[dict[str, object]], list[str]]:
     """Validated commercial records + derived evidence ids (order-stable, deduped)."""
     grounded: list[dict[str, object]] = []
@@ -285,7 +302,9 @@ def _ground_relationships(
     for rel in relationships:
         record, uniq = _validate_relationship_shape(rel, dossier_id)
         if record["relationship_id"] in seen:
-            raise DossierIntegrityError(f"dossier {dossier_id}: duplicate relationship_id {record['relationship_id']!r}")
+            raise DossierIntegrityError(
+                f"dossier {dossier_id}: duplicate relationship_id {record['relationship_id']!r}"
+            )
         seen.append(record["relationship_id"])
         grounded.append(record)
         for eid in uniq:
@@ -320,7 +339,8 @@ def _alias_fields(alias: Mapping[str, object], dossier_id: str) -> tuple[str, st
 
 
 def _validate_alias_shape(
-    alias: Mapping[str, object], dossier_id: str,
+    alias: Mapping[str, object],
+    dossier_id: str,
 ) -> tuple[dict[str, object], list[str]]:
     """One alias->result record + deduped evidence ids (raises on ungrounded aliases).
 
@@ -333,16 +353,22 @@ def _validate_alias_shape(
         raise DossierIntegrityError(f"dossier {dossier_id}: alias must be a mapping")
     name, entity, source = _alias_fields(alias, dossier_id)
     if source not in ALIAS_SOURCES:
-        raise DossierIntegrityError(f"dossier {dossier_id}: alias {name!r} 'source' must be one of {list(ALIAS_SOURCES)}")
+        raise DossierIntegrityError(
+            f"dossier {dossier_id}: alias {name!r} 'source' must be one of {list(ALIAS_SOURCES)}"
+        )
     uniq = _alias_evidence_ids(alias.get("evidence_ids"))
     if uniq is None:
         raise DossierIntegrityError(f"dossier {dossier_id}: alias {name!r} 'evidence_ids' must be a list of strings")
     if source in ("sec_document", "grounded_evidence") and not uniq:
-        raise DossierIntegrityError(f"dossier {dossier_id}: alias {name!r} from {source!r} must cite 'evidence_ids' provenance")
+        raise DossierIntegrityError(
+            f"dossier {dossier_id}: alias {name!r} from {source!r} must cite 'evidence_ids' provenance"
+        )
     return {"alias": name, "entity": entity, "source": source, "evidence_ids": uniq}, uniq
 
+
 def _ground_aliases(
-    aliases: Sequence[Mapping[str, object]], dossier_id: str,
+    aliases: Sequence[Mapping[str, object]],
+    dossier_id: str,
 ) -> tuple[list[dict[str, object]], list[str]]:
     """Validated alias set + derived evidence ids (order-stable, deduped)."""
     grounded: list[dict[str, object]] = []
@@ -369,7 +395,9 @@ def _check_relationship_records(dossier: SECDossier) -> list[str]:
     for rel in dossier.relationships:
         record, uniq = _validate_relationship_shape(rel, dossier.dossier_id)
         if record["relationship_id"] in seen:
-            raise DossierIntegrityError(f"dossier {dossier.dossier_id}: duplicate relationship_id {record['relationship_id']!r}")
+            raise DossierIntegrityError(
+                f"dossier {dossier.dossier_id}: duplicate relationship_id {record['relationship_id']!r}"
+            )
         seen.append(record["relationship_id"])
         ids.extend(uniq)
     return ids
@@ -495,14 +523,21 @@ def _check_coverage_contract(coverage: Mapping[str, object], dossier_id: str) ->
         raise DossierIntegrityError(f"dossier {dossier_id}: coverage missing keys {missing}")
     for key in ("entities", "forms", "sources_examined", "exclusions"):
         _require_str_list(coverage, key, dossier_id)
-    for key in ("resolved", "partially_resolved", "unresolved", "source_limitations",
-                "dates", "partitions", "docs", "gaps"):
+    for key in (
+        "resolved",
+        "partially_resolved",
+        "unresolved",
+        "source_limitations",
+        "dates",
+        "partitions",
+        "docs",
+        "gaps",
+    ):
         if key in coverage:
             _require_str_list(coverage, key, dossier_id)
     _check_coverage_time_range(coverage, dossier_id)
     if not isinstance(coverage.get("complete"), bool):
         raise DossierIntegrityError(f"dossier {dossier_id}: coverage['complete'] must be a bool")
-
 
 
 def _check_finding_ids_shape(ids: object, dossier_id: str) -> list[str]:
@@ -522,7 +557,10 @@ def _check_finding_membership(ids: list[str], known: set[str], supporting_set: s
 
 
 def _check_single_finding_ref(
-    finding: object, known: set[str], supporting_set: set[str], dossier_id: str,
+    finding: object,
+    known: set[str],
+    supporting_set: set[str],
+    dossier_id: str,
 ) -> None:
     """One finding mapping + membership (shape then ledger gates)."""
     if not isinstance(finding, dict):
@@ -547,7 +585,9 @@ def _check_dossier_refs(dossier: SECDossier, known: set[str]) -> None:
     supporting_set = set(dossier.supporting_evidence_ids)
     for eid in (*relationship_ids, *alias_ids):
         if eid not in supporting_set:
-            raise DossierIntegrityError(f"dossier {dossier.dossier_id}: relationship/alias cites id outside supporting set: {eid!r}")
+            raise DossierIntegrityError(
+                f"dossier {dossier.dossier_id}: relationship/alias cites id outside supporting set: {eid!r}"
+            )
     for finding in dossier.findings:
         _check_single_finding_ref(finding, known, supporting_set, dossier.dossier_id)
 
@@ -560,7 +600,8 @@ def validate_dossier(dossier: SECDossier, ledger_ids: Collection[str]) -> None:
 
 
 def should_expand_entity(
-    relationship: Mapping[str, object] | str, could_change_answer: bool = False,
+    relationship: Mapping[str, object] | str,
+    could_change_answer: bool = False,
 ) -> bool:
     """One-hop expansion rule: follow a discovered entity iff its link is materially
     significant (critical/high/medium) AND the linked entity could change the answer.
@@ -569,6 +610,9 @@ def should_expand_entity(
     only: expansion results are recorded, and any further hop needs its own
     materially-significant link.
     """
-    materiality: object = relationship if isinstance(relationship, str) else (
-        relationship.get("materiality") if isinstance(relationship, Mapping) else None)
+    materiality: object = (
+        relationship
+        if isinstance(relationship, str)
+        else (relationship.get("materiality") if isinstance(relationship, Mapping) else None)
+    )
     return could_change_answer and materiality in ("critical", "high", "medium")

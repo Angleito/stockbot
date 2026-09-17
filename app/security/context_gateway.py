@@ -102,7 +102,9 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "get_finra_datapoints": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "query_finra": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_short_interest": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
-    "get_short_interest_leaderboard": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
+    "get_short_interest_leaderboard": _envelope(
+        "finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL
+    ),
     "get_reg_sho_volume": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     "get_threshold_securities": _envelope("finra", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.CANONICAL),
     # Analyst consensus data.
@@ -111,11 +113,21 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     # Exa web evidence.
     "search_web": _envelope("exa", SourceType.WEB, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
     # Google public data (external, bounded research).
-    "find_alternative_signals": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
-    "get_trend_evidence": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
-    "investigate_social_arbitrage_candidate": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
-    "get_macro_context": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
-    "search_company_patents": _envelope("google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True),
+    "find_alternative_signals": _envelope(
+        "google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True
+    ),
+    "get_trend_evidence": _envelope(
+        "google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True
+    ),
+    "investigate_social_arbitrage_candidate": _envelope(
+        "google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True
+    ),
+    "get_macro_context": _envelope(
+        "google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True
+    ),
+    "search_company_patents": _envelope(
+        "google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True
+    ),
     # Bounded local thesis operations (locally derived, never canonical market data).
     "thesis_create": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "thesis_show": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
@@ -130,7 +142,9 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "research_read": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "research_read_search": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "research_add_evidence": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
-    "research_submit_source_result": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
+    "research_submit_source_result": _envelope(
+        "research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED
+    ),
     "research_add_analysis": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "research_finalize": _envelope("research", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     # Robinhood market data (account-connected, public observations).
@@ -146,9 +160,8 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "run_scan": _envelope("robinhood", SourceType.MCP, Sensitivity.PRIVATE, Integrity.AUTHENTICATED),
 }
 
-_FALLBACK_ENVELOPE = _envelope(
-    "unknown", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL
-)
+_FALLBACK_ENVELOPE = _envelope("unknown", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL)
+
 
 def envelope_for_tool(name: str, result: dict[str, object]) -> ContextEnvelope:
     """The labeled envelope for a tool result (conservative fallback for
@@ -172,9 +185,7 @@ def _secret_pattern_hits(text: str) -> list[str]:
     return [name for name, pattern in _SECRET_PATTERNS if pattern.search(text)]
 
 
-def prepare_context(
-    envelope: ContextEnvelope, rendered: str
-) -> SafeContext | QuarantinedContext:
+def prepare_context(envelope: ContextEnvelope, rendered: str) -> SafeContext | QuarantinedContext:
     """Gateway decision for one context item.
 
     SECRET never enters model context. Every other rendered result — no
@@ -182,9 +193,7 @@ def prepare_context(
     injection patterns; PRIVATE content is allowed only when benign.
     """
     if envelope.sensitivity == Sensitivity.SECRET:
-        return QuarantinedContext(
-            envelope, "BLOCK", 100, (SECRET_BLOCK_REASON,), ("secret_envelope",)
-        )
+        return QuarantinedContext(envelope, "BLOCK", 100, (SECRET_BLOCK_REASON,), ("secret_envelope",))
     hits = _secret_pattern_hits(rendered)
     if hits:
         return QuarantinedContext(

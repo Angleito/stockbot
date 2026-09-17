@@ -12,7 +12,7 @@ The resolution rules under test:
 """
 
 from collections.abc import Callable
-from datetime import date, datetime, timedelta, timezone
+from datetime import UTC, date, datetime, timedelta, timezone
 from pathlib import Path
 
 import pytest
@@ -36,49 +36,75 @@ def _write(rows: list[dict[str, object]], name: str, data_root: Path) -> None:
 
 
 def _seed_entity(data_root: Path, entity_id: str = AMD_ENTITY, name: str = "Advanced Micro Devices Inc") -> None:
-    _write([{
-        "entity_id": entity_id,
-        "name": name,
-        "entity_type": "company",
-        "sic": "3674",
-        "source": "sec",
-        "known_at": "2026-01-01T00:00:00Z",
-        "retrieved_at": "2026-01-01T00:00:00Z",
-        "content_hash": f"entity-{entity_id}",
-        "parser_version": "test",
-    }], "entities", data_root)
+    _write(
+        [
+            {
+                "entity_id": entity_id,
+                "name": name,
+                "entity_type": "company",
+                "sic": "3674",
+                "source": "sec",
+                "known_at": "2026-01-01T00:00:00Z",
+                "retrieved_at": "2026-01-01T00:00:00Z",
+                "content_hash": f"entity-{entity_id}",
+                "parser_version": "test",
+            }
+        ],
+        "entities",
+        data_root,
+    )
 
 
-def _seed_alias(data_root: Path, entity_id: str = AMD_ENTITY, security_id: str | None = AMD_SECURITY, alias: str = "AMD",
-                known_at: str = "2026-01-01T00:00:00Z", source: str = "sec") -> None:
-    _write([{
-        "alias_type": "ticker",
-        "alias_value": alias,
-        "entity_id": entity_id,
-        "security_id": security_id,
-        "source": source,
-        "valid_from": "2026-01-01",
-        "valid_to": None,
-        "known_at": known_at,
-        "retrieved_at": known_at,
-        "content_hash": f"alias-{entity_id}-{known_at}",
-        "parser_version": "test",
-    }], "entity_aliases", data_root)
+def _seed_alias(
+    data_root: Path,
+    entity_id: str = AMD_ENTITY,
+    security_id: str | None = AMD_SECURITY,
+    alias: str = "AMD",
+    known_at: str = "2026-01-01T00:00:00Z",
+    source: str = "sec",
+) -> None:
+    _write(
+        [
+            {
+                "alias_type": "ticker",
+                "alias_value": alias,
+                "entity_id": entity_id,
+                "security_id": security_id,
+                "source": source,
+                "valid_from": "2026-01-01",
+                "valid_to": None,
+                "known_at": known_at,
+                "retrieved_at": known_at,
+                "content_hash": f"alias-{entity_id}-{known_at}",
+                "parser_version": "test",
+            }
+        ],
+        "entity_aliases",
+        data_root,
+    )
 
 
-def _seed_security(data_root: Path, security_id: str = AMD_SECURITY, entity_id: str = AMD_ENTITY, ticker: str = "AMD") -> None:
-    _write([{
-        "security_id": security_id,
-        "entity_id": entity_id,
-        "security_type": "equity-common",
-        "ticker": ticker,
-        "exchange": "NASDAQ",
-        "source": "sec",
-        "known_at": "2026-01-01T00:00:00Z",
-        "retrieved_at": "2026-01-01T00:00:00Z",
-        "content_hash": f"security-{security_id}",
-        "parser_version": "test",
-    }], "securities", data_root)
+def _seed_security(
+    data_root: Path, security_id: str = AMD_SECURITY, entity_id: str = AMD_ENTITY, ticker: str = "AMD"
+) -> None:
+    _write(
+        [
+            {
+                "security_id": security_id,
+                "entity_id": entity_id,
+                "security_type": "equity-common",
+                "ticker": ticker,
+                "exchange": "NASDAQ",
+                "source": "sec",
+                "known_at": "2026-01-01T00:00:00Z",
+                "retrieved_at": "2026-01-01T00:00:00Z",
+                "content_hash": f"security-{security_id}",
+                "parser_version": "test",
+            }
+        ],
+        "securities",
+        data_root,
+    )
 
 
 def _seed_amd(data_root: Path, known_at: str = "2026-01-01T00:00:00Z") -> None:
@@ -89,7 +115,7 @@ def _seed_amd(data_root: Path, known_at: str = "2026-01-01T00:00:00Z") -> None:
 
 def test_ticker_resolves_to_entity_and_security_ids(data_root: Path) -> None:
     _seed_amd(data_root)
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is True
     assert resolution.resolution_method == "entity_alias"
     assert resolution.ticker == "AMD"
@@ -99,7 +125,7 @@ def test_ticker_resolves_to_entity_and_security_ids(data_root: Path) -> None:
 
 def test_lookup_is_case_insensitive(data_root: Path) -> None:
     _seed_amd(data_root)
-    resolution = resolve_security("amd", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
+    resolution = resolve_security("amd", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is True
     assert resolution.entity_id == AMD_ENTITY
     assert resolution.security_id == AMD_SECURITY
@@ -107,7 +133,7 @@ def test_lookup_is_case_insensitive(data_root: Path) -> None:
 
 def test_unknown_ticker_is_unresolved_without_crashing(data_root: Path) -> None:
     _seed_amd(data_root)
-    resolution = resolve_security("NOTREAL", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
+    resolution = resolve_security("NOTREAL", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is False
     assert resolution.resolution_method == "unresolved"
     assert resolution.entity_id is None
@@ -117,10 +143,10 @@ def test_unknown_ticker_is_unresolved_without_crashing(data_root: Path) -> None:
 
 def test_alias_known_after_as_of_is_invisible(data_root: Path) -> None:
     _seed_amd(data_root, known_at="2026-09-01T12:00:00Z")
-    early = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
+    early = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     assert early.resolved is False
     assert early.resolution_method == "unresolved"
-    on_day = resolve_security("AMD", as_of=datetime(2026, 9, 1, 13, 0, tzinfo=timezone.utc), data_root=data_root)
+    on_day = resolve_security("AMD", as_of=datetime(2026, 9, 1, 13, 0, tzinfo=UTC), data_root=data_root)
     assert on_day.resolved is True
     assert on_day.entity_id == AMD_ENTITY
 
@@ -136,11 +162,11 @@ def test_ambiguous_when_multiple_entities_knowable(data_root: Path) -> None:
         security_id="sec:equity:0000320194",
         known_at="2026-06-01T12:00:00Z",
     )
-    before_relabel = resolve_security("AMD", as_of=datetime(2026, 3, 1, 0, 0, tzinfo=timezone.utc), data_root=data_root)
+    before_relabel = resolve_security("AMD", as_of=datetime(2026, 3, 1, 0, 0, tzinfo=UTC), data_root=data_root)
     assert before_relabel.resolved is True
     assert before_relabel.entity_id == AMD_ENTITY
     assert before_relabel.security_id == AMD_SECURITY
-    after_relabel = resolve_security("AMD", as_of=datetime(2026, 8, 1, 0, 0, tzinfo=timezone.utc), data_root=data_root)
+    after_relabel = resolve_security("AMD", as_of=datetime(2026, 8, 1, 0, 0, tzinfo=UTC), data_root=data_root)
     assert after_relabel.resolved is False
     assert after_relabel.resolution_method == "ambiguous"
     assert after_relabel.entity_id is None
@@ -149,11 +175,11 @@ def test_ambiguous_when_multiple_entities_knowable(data_root: Path) -> None:
 
 def test_provider_instrument_id_does_not_change_resolution(data_root: Path) -> None:
     _seed_amd(data_root)
-    plain = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
+    plain = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     with_instrument = resolve_security(
         "AMD",
         provider_instrument_id="instr-amd",
-        as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc),
+        as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
         data_root=data_root,
     )
     assert with_instrument == plain
@@ -164,25 +190,26 @@ def test_default_as_of_is_today_and_resolves(data_root: Path) -> None:
     resolution = resolve_security("AMD", data_root=data_root)
     assert resolution.resolved is True
     assert resolution.entity_id == AMD_ENTITY
-    assert datetime.now(timezone.utc).date() >= date(2026, 1, 1)
+    assert datetime.now(UTC).date() >= date(2026, 1, 1)
+
 
 def test_same_instant_z_and_offset_visible(data_root: Path) -> None:
     _seed_amd(data_root, known_at="2026-08-25T12:00:00Z")
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is True
     assert resolution.entity_id == AMD_ENTITY
 
 
 def test_record_one_microsecond_after_as_of_invisible(data_root: Path) -> None:
     _seed_amd(data_root, known_at="2026-08-25T12:00:00.000001Z")
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is False
     assert resolution.resolution_method == "unresolved"
 
 
 def test_non_utc_offset_compares_chronologically(data_root: Path) -> None:
     _seed_amd(data_root, known_at="2026-08-25T13:00:00+01:00")
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc), data_root=data_root)
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is True
     assert resolution.entity_id == AMD_ENTITY
 
@@ -190,14 +217,16 @@ def test_non_utc_offset_compares_chronologically(data_root: Path) -> None:
 def test_naive_as_of_rejected(data_root: Path) -> None:
     _seed_amd(data_root)
     with pytest.raises(ValueError):
-        resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0), data_root=data_root)
+        resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0), data_root=data_root)  # noqa: DTZ001 - naive input is the case under test
 
 
 def test_date_as_of_rejected(data_root: Path) -> None:
     _seed_amd(data_root)
     with pytest.raises(TypeError):
         _resolve: Callable[..., object] = resolve_security
-        _resolve("AMD", as_of=date(2026, 8, 25), data_root=data_root)  # runtime TypeError guard: date is not a valid as_of
+        _resolve(
+            "AMD", as_of=date(2026, 8, 25), data_root=data_root
+        )  # runtime TypeError guard: date is not a valid as_of
 
 
 def test_newest_alias_wins_chronologically_not_lexically(data_root: Path) -> None:
@@ -207,9 +236,7 @@ def test_newest_alias_wins_chronologically_not_lexically(data_root: Path) -> Non
     # (alias_type, alias_value, entity_id, source, valid_from).
     _seed_alias(data_root, known_at="2026-08-25T12:30:00Z", security_id=AMD_SECURITY, source="control")
     _seed_security(data_root)
-    resolution = resolve_security(
-        "AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc), data_root=data_root
-    )
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC), data_root=data_root)
     # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
     # older than 12:30Z — the 12:30Z alias must win.
     assert resolution.resolved is True
@@ -221,9 +248,7 @@ def test_same_instant_conflicting_securities_are_ambiguous(data_root: Path) -> N
     _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id=AMD_SECURITY)
     _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id="sec:equity:0000999999", source="control")
     _seed_security(data_root)
-    resolution = resolve_security(
-        "AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc), data_root=data_root
-    )
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is False
     assert resolution.resolution_method == "ambiguous"
     assert resolution.entity_id == AMD_ENTITY
@@ -235,17 +260,16 @@ def test_same_instant_null_and_explicit_security_not_conflict(data_root: Path) -
     _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id=None)
     _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id=AMD_SECURITY, source="control")
     _seed_security(data_root)
-    resolution = resolve_security(
-        "AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc), data_root=data_root
-    )
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC), data_root=data_root)
     assert resolution.resolved is True
     assert resolution.security_id == AMD_SECURITY
+
 
 # ---------------------------------------------------------------------------
 # Pure resolver (no storage): resolve_ticker_aliases over constructed aliases
 # ---------------------------------------------------------------------------
 
-AS_OF = datetime(2026, 8, 25, 12, 0, tzinfo=timezone.utc)
+AS_OF = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
 
 
 def _alias(
@@ -291,7 +315,7 @@ def test_pure_date_only_valid_to_boundary_expired_on_the_25th() -> None:
     resolution = resolve_ticker_aliases(
         "AMD",
         [_alias("2026-08-01T00:00:00Z", valid_from="2026-01-01", valid_to="2026-08-25")],
-        as_of=datetime(2026, 8, 25, 0, 0, tzinfo=timezone.utc),
+        as_of=datetime(2026, 8, 25, 0, 0, tzinfo=UTC),
     )
     assert resolution.resolved is False
     assert resolution.resolution_method == "unresolved"
@@ -356,7 +380,7 @@ def test_pure_older_mapping_then_newer_mapping_newer_wins() -> None:
             _alias("2026-08-25T12:00:00Z", security_id="sec:equity:0000999999"),
             _alias("2026-08-25T13:00:00Z", security_id=AMD_SECURITY, source="control"),
         ],
-        as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc),
+        as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC),
     )
     assert resolution.resolved is True
     assert resolution.resolution_method == "entity_alias"
@@ -378,7 +402,7 @@ def test_pure_timezone_offset_known_at_chronological_not_lexical() -> None:
             _alias("2026-08-25T13:00:00+01:00", security_id=None),
             _alias("2026-08-25T12:30:00Z", security_id=AMD_SECURITY, source="control"),
         ],
-        as_of=datetime(2026, 8, 26, 0, 0, tzinfo=timezone.utc),
+        as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC),
     )
     assert resolution.resolved is True
     assert resolution.security_id == AMD_SECURITY
@@ -386,13 +410,15 @@ def test_pure_timezone_offset_known_at_chronological_not_lexical() -> None:
 
 def test_pure_naive_as_of_rejected() -> None:
     with pytest.raises(ValueError):
-        resolve_ticker_aliases("AMD", [_alias("2026-01-01T00:00:00Z")], as_of=datetime(2026, 8, 25, 12, 0))
+        resolve_ticker_aliases("AMD", [_alias("2026-01-01T00:00:00Z")], as_of=datetime(2026, 8, 25, 12, 0))  # noqa: DTZ001 - naive input is the case under test
 
 
 def test_pure_date_as_of_rejected() -> None:
     with pytest.raises(TypeError):
         _aliases: Callable[..., object] = resolve_ticker_aliases
-        _aliases("AMD", [_alias("2026-01-01T00:00:00Z")], as_of=date(2026, 8, 25))  # runtime TypeError guard: date is not a valid as_of
+        _aliases(
+            "AMD", [_alias("2026-01-01T00:00:00Z")], as_of=date(2026, 8, 25)
+        )  # runtime TypeError guard: date is not a valid as_of
 
 
 def test_pure_aware_non_utc_as_of_compares_chronologically() -> None:

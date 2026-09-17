@@ -1,4 +1,5 @@
 """Trust/taint regressions for the Exa ontology layer."""
+
 import inspect
 from datetime import datetime
 from pathlib import Path
@@ -107,4 +108,3 @@ def test_planner_exposes_no_portfolio_or_snapshot():
         query2 = q["query"]
         assert isinstance(query2, str)
         assert "TSLA" not in query2
-

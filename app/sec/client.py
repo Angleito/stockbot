@@ -4,6 +4,7 @@ has no side effects and never touches the network."""
 from __future__ import annotations
 
 from collections.abc import Callable, Iterable
+from datetime import UTC
 from typing import TYPE_CHECKING, Literal, Protocol, runtime_checkable
 
 if TYPE_CHECKING:
@@ -25,7 +26,9 @@ if TYPE_CHECKING:
 @runtime_checkable
 class _FrameRows(Protocol):
     """Structural frame seam: pandas frame or test double with itertuples."""
+
     def itertuples(self) -> Iterable[object]: ...
+
 
 class SECClientError(Exception):
     """SEC EDGAR transport/parse failure; never a no-data answer."""
@@ -52,9 +55,7 @@ def get_company(ticker_or_cik: str | int) -> Company:
     ensure_identity()
     from edgar import Company
 
-    if isinstance(ticker_or_cik, int) or (
-        isinstance(ticker_or_cik, str) and ticker_or_cik.strip().isdigit()
-    ):
+    if isinstance(ticker_or_cik, int) or (isinstance(ticker_or_cik, str) and ticker_or_cik.strip().isdigit()):
         return Company(int(str(ticker_or_cik).strip()))
     return Company(ticker_or_cik)
 
@@ -83,7 +84,7 @@ def _row_to_company_candidate(row: object) -> dict[str, object] | None:
     """Index row to candidate dict; None when the CIK is non-numeric."""
     try:
         cik = int(str(getattr(row, "cik")).strip())  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return {
         "name": str(getattr(row, "company", "")),
@@ -106,6 +107,7 @@ def _fetch_company_frame(query: str, limit: int) -> _FrameRows | None:
         return None
     return frame
 
+
 def _check_find_params(query: str, limit: int) -> str:
     """Validated issuer query; raises on blank query or non-positive limit."""
     if not isinstance(query, str) or not query.strip():
@@ -127,6 +129,7 @@ def _collect_company_candidates(frame: _FrameRows, limit: int) -> list[dict[str,
             break
     return out
 
+
 def find_sec_company(query: str, limit: int = 10) -> list[dict[str, object]]:
     """Issuer name to candidate CIKs via the edgartools company index."""
     _check_find_params(query, limit)
@@ -137,9 +140,9 @@ def find_sec_company(query: str, limit: int = 10) -> list[dict[str, object]]:
 
 
 def _utcnow() -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+    return datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
 
 
 def _check_search_query(query: str) -> str:
@@ -154,6 +157,8 @@ def _check_search_limit(limit: int) -> int:
     if limit < 1:
         raise ValueError(f"invalid limit: {limit!r}")
     return limit
+
+
 def _check_search_cik(cik: int | str | None) -> int | None:
     """Issuer-scope CIK as int; None passes through, garbage raises."""
     if cik is None:
@@ -205,6 +210,7 @@ def _search_filters(
     }
     return filters
 
+
 def _normalize_search_params(
     query: str,
     forms: list[str] | None,
@@ -234,8 +240,7 @@ def _normalize_search_params(
         as_of=as_of,
         max_results=limit,
     )
-    return query, search_id, request, _search_filters(
-        forms, start_date, end_date, as_of, cik, ticker)
+    return query, search_id, request, _search_filters(forms, start_date, end_date, as_of, cik, ticker)
 
 
 def _record_attempt(
@@ -253,22 +258,24 @@ def _record_attempt(
     from .models import SearchAttempt
 
     now = _utcnow()
-    attempts.append(SearchAttempt(
-        attempt_id=f"{search_id}-p{page_num}",
-        search_id=search_id,
-        backend="efts",
-        query=query,
-        filters={**filters, "page": page_num},
-        started_at=now,
-        completed_at=now,
-        status=status,
-        results_reported=reported,
-        results_retrieved=retrieved,
-        pages_retrieved=1,
-        truncated=status in ("partial", "source_limited"),
-        pit_basis="filed_at",
-        **extra,
-    ))
+    attempts.append(
+        SearchAttempt(
+            attempt_id=f"{search_id}-p{page_num}",
+            search_id=search_id,
+            backend="efts",
+            query=query,
+            filters={**filters, "page": page_num},
+            started_at=now,
+            completed_at=now,
+            status=status,
+            results_reported=reported,
+            results_retrieved=retrieved,
+            pages_retrieved=1,
+            truncated=status in ("partial", "source_limited"),
+            pit_basis="filed_at",
+            **extra,
+        )
+    )
 
 
 def _coerce_reported_total(page: object) -> int:
@@ -278,7 +285,7 @@ def _coerce_reported_total(page: object) -> int:
         reported = len(getattr(page, "results", None) or [])
     try:
         return int(reported)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0
 
 
@@ -296,9 +303,13 @@ def _fetch_first_page(
     from edgar.search.efts import search_filings
 
     return search_filings(
-        query, forms=forms, start_date=start_date, end_date=end_date,
+        query,
+        forms=forms,
+        start_date=start_date,
+        end_date=end_date,
         limit=min(limit, 100),
-        cik=cik, ticker=(ticker if cik is None else None),
+        cik=cik,
+        ticker=(ticker if cik is None else None),
     )
 
 
@@ -316,22 +327,36 @@ def _failed_search_result(
     from .models import SearchCoverage, SECSearchResult
 
     return SECSearchResult(
-        search_id=search_id, request=request,
+        search_id=search_id,
+        request=request,
         coverage=SearchCoverage(
-            status="failed", sources_attempted=("efts",),
+            status="failed",
+            sources_attempted=("efts",),
             sources_failed=("efts",),
-            date_coverage=f"{start_date or ''}:{end_date or ''}" or None,
+            date_coverage=f"{start_date or ''}:{end_date or ''}",
             forms_covered=tuple(forms) if forms else (),
         ),
-        attempts=tuple(attempts), warnings=tuple(warnings),
-        errors=tuple(errors), retrieval_order=("efts",),
-        search_runs=(_search_run(search_id, request.query or "", _search_filters(forms, start_date, end_date, request.as_of, request.cik, request.ticker), request.as_of, []),),
+        attempts=tuple(attempts),
+        warnings=tuple(warnings),
+        errors=tuple(errors),
+        retrieval_order=("efts",),
+        search_runs=(
+            _search_run(
+                search_id,
+                request.query or "",
+                _search_filters(forms, start_date, end_date, request.as_of, request.cik, request.ticker),
+                request.as_of,
+                [],
+            ),
+        ),
     )
 
 
 def _pit_excluded(filed: str, as_of: str | None) -> bool:
     """Point-in-time exclusion: missing filed date or filed after as_of."""
     return as_of is not None and (not filed or filed > as_of)
+
+
 def _hit_resource_uri(accession_no: str, document: object) -> str:
     """Stable document address mirroring documents._source_uri_for (no import)."""
     doc = document if isinstance(document, str) and document else "primary"
@@ -344,12 +369,13 @@ def _scope_excluded(filer_cik: int | None, issuer_cik: int | None) -> bool:
 
 
 def _warn_scope_gaps(
-    warnings: list[str], scope_gaps: int, issuer_cik: int | None,
+    warnings: list[str],
+    scope_gaps: int,
+    issuer_cik: int | None,
 ) -> None:
     """Issuer-scope exclusion warning; silent when everything matched scope."""
     if scope_gaps > 0:
-        warnings.append(
-            f"{scope_gaps} EFTS hit(s) outside filer scope CIK {issuer_cik} excluded")
+        warnings.append(f"{scope_gaps} EFTS hit(s) outside filer scope CIK {issuer_cik} excluded")
 
 
 def _accept_hit(
@@ -366,6 +392,7 @@ def _accept_hit(
     hits.append(text_hit)
     return True
 
+
 def _map_one_hit(
     hit: EFTSResult,
     search_id: str,
@@ -377,14 +404,13 @@ def _map_one_hit(
     issuer_cik: int | None = None,
 ) -> tuple[int, int, int]:
     """Map one EFTS hit; returns (retrieved, pit_gaps, scope_gaps) increments."""
-    text_hit = _hit_to_text_hit(
-        search_id, f"{search_id}-p{page_num}", query, hit, page_num,
-        issuer_cik=issuer_cik)
+    text_hit = _hit_to_text_hit(search_id, f"{search_id}-p{page_num}", query, hit, page_num, issuer_cik=issuer_cik)
     if _pit_excluded((text_hit.filed_at or "")[:10], as_of):
         return 0, 1, 0
     if _scope_excluded(text_hit.filer_cik, issuer_cik):
         return 0, 0, 1
     return (1, 0, 0) if _accept_hit(query, text_hit, seen, hits) else (0, 0, 0)
+
 
 def _map_page_hits(
     results: list[EFTSResult],
@@ -404,8 +430,7 @@ def _map_page_hits(
     for hit in results:
         if len(hits) >= limit:
             break
-        got, pit, scope = _map_one_hit(
-            hit, search_id, page_num, query, as_of, hits, seen, issuer_cik)
+        got, pit, scope = _map_one_hit(hit, search_id, page_num, query, as_of, hits, seen, issuer_cik)
         retrieved += got
         pit_gaps += pit
         scope_gaps += scope
@@ -432,14 +457,15 @@ def _drain_one_page(
     if not results:
         return None, 0, False, False, 0, 0
     retrieved, pit_gaps, scope_gaps = _map_page_hits(
-        results, search_id, page_num, query, as_of, limit, hits, seen,
-        issuer_cik)
+        results, search_id, page_num, query, as_of, limit, hits, seen, issuer_cik
+    )
     if len(hits) >= limit or len(hits) + pit_gaps + scope_gaps >= reported:
         return None, retrieved, False, False, pit_gaps, scope_gaps
     nxt, failed_tail, source_capped = _advance_page(
-        page, page_num, reported, attempts, search_id, query,
-        filters, errors)
+        page, page_num, reported, attempts, search_id, query, filters, errors
+    )
     return nxt, retrieved, failed_tail, source_capped, pit_gaps, scope_gaps
+
 
 def _drain_recorder(
     attempts: list[SearchAttempt],
@@ -449,16 +475,17 @@ def _drain_recorder(
     reported: int,
 ) -> Callable[..., None]:
     """Attempt recorder bound to one drain's ledger context."""
+
     def _attempt(
         page_no: int,
         status: Literal["complete", "source_limited", "partial", "failed", "not_applicable"],
         retrieved: int,
         **extra: str,
     ) -> None:
-        _record_attempt(
-            attempts, search_id, query, filters,
-            page_no, status, reported, retrieved, **extra)
+        _record_attempt(attempts, search_id, query, filters, page_no, status, reported, retrieved, **extra)
+
     return _attempt
+
 
 def _apply_drain_step(
     page: object,
@@ -478,10 +505,11 @@ def _apply_drain_step(
 ) -> tuple[object | None, int, int, bool, bool]:
     """One drain iteration: step the page, record the attempt, sum gaps."""
     page, retrieved, failed_tail, source_capped, pit_gaps, scope_gaps = _drain_one_page(
-        page, page_num, query, search_id, filters, as_of, limit,
-        reported, attempts, hits, seen, errors, issuer_cik)
+        page, page_num, query, search_id, filters, as_of, limit, reported, attempts, hits, seen, errors, issuer_cik
+    )
     record(page_num, "complete", retrieved)
     return page, pit_gaps, scope_gaps, failed_tail, source_capped
+
 
 def _drain_pages(
     page: object,
@@ -510,15 +538,27 @@ def _drain_pages(
     while page is not None and len(hits) < limit:
         page_num += 1
         page, pit, scope, failed_tail, source_capped = _apply_drain_step(
-            page, page_num, query, search_id, filters, as_of, limit,
-            reported, attempts, hits, seen, errors, _attempt, issuer_cik)
+            page,
+            page_num,
+            query,
+            search_id,
+            filters,
+            as_of,
+            limit,
+            reported,
+            attempts,
+            hits,
+            seen,
+            errors,
+            _attempt,
+            issuer_cik,
+        )
         pit_gaps += pit
         scope_gaps += scope
         page = None if (failed_tail or source_capped) else page
     _warn_pit_gaps(warnings, pit_gaps, as_of)
     _warn_scope_gaps(warnings, scope_gaps, issuer_cik)
     return page_num, pit_gaps, scope_gaps, failed_tail, source_capped
-
 
 
 def _advance_page(
@@ -544,9 +584,17 @@ def _advance_page(
         nxt_page = nxt()
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         _record_attempt(
-            attempts, search_id, query, filters, page_num + 1,
-            "failed", reported, 0,
-            error_type=type(exc).__name__, error_message=str(exc))
+            attempts,
+            search_id,
+            query,
+            filters,
+            page_num + 1,
+            "failed",
+            reported,
+            0,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
         errors.append(f"efts page {page_num + 1} failed: {exc}")
         return page, True, False
     if nxt_page is None:
@@ -554,17 +602,17 @@ def _advance_page(
     return nxt_page, False, False
 
 
-def _search_failed(hits: list[SECTextHit], pit_gaps: int, scope_gaps: int, reported: int,
-                   failed_tail: bool, limit: int) -> bool:
+def _search_failed(
+    hits: list[SECTextHit], pit_gaps: int, scope_gaps: int, reported: int, failed_tail: bool, limit: int
+) -> bool:
     """Caller-bound failure: transport tail loss or reporting over the bound."""
     return failed_tail or (len(hits) + pit_gaps + scope_gaps < reported and len(hits) >= limit)
 
 
-def _search_drained(hits: list[SECTextHit], pit_gaps: int, scope_gaps: int, reported: int,
-                    source_capped: bool) -> bool:
+def _search_drained(hits: list[SECTextHit], pit_gaps: int, scope_gaps: int, reported: int, source_capped: bool) -> bool:
     """Drain completeness without a source cap; empty/empty counts as drained."""
-    return (len(hits) + pit_gaps + scope_gaps >= reported or (not hits and not reported)
-            ) and not source_capped
+    return (len(hits) + pit_gaps + scope_gaps >= reported or (not hits and not reported)) and not source_capped
+
 
 def _resolve_search_status(
     hits: list[SECTextHit],
@@ -589,7 +637,7 @@ def _hit_filer_cik(hit: EFTSResult) -> int | None:
     """EFTS hit CIK as int; None when missing or non-numeric."""
     try:
         return int(str(getattr(hit, "cik", None)).strip())
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -597,7 +645,7 @@ def _hit_score(hit: EFTSResult) -> float:
     """EFTS hit score as float; zero when missing or non-numeric."""
     try:
         return float(getattr(hit, "score", 0.0) or 0.0)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return 0.0
 
 
@@ -650,13 +698,13 @@ def _hit_to_text_hit(
 
 
 def _warn_pit_gaps(
-    warnings: list[str], pit_gaps: int, as_of: str | None,
+    warnings: list[str],
+    pit_gaps: int,
+    as_of: str | None,
 ) -> None:
     """Point-in-time exclusion warning; silent when nothing excluded."""
     if pit_gaps > 0:
-        warnings.append(
-            f"{pit_gaps} EFTS hit(s) excluded by as_of {as_of} "
-            "(no usable filed date or filed after as_of)")
+        warnings.append(f"{pit_gaps} EFTS hit(s) excluded by as_of {as_of} (no usable filed date or filed after as_of)")
 
 
 def _coverage_limits(
@@ -668,9 +716,7 @@ def _coverage_limits(
     """Source-limit marker for capped coverage; warns with reported/retrieved."""
     if status != "complete_within_source_limits":
         return ()
-    warnings.append(
-        f"EFTS reports {reported} hits; retrieved {retrieved} "
-        "within source limits")
+    warnings.append(f"EFTS reports {reported} hits; retrieved {retrieved} within source limits")
     return ("efts:deep-pagination-cap",)
 
 
@@ -690,9 +736,10 @@ def _coverage_counts(
 ) -> tuple[str | None, tuple[str, ...]]:
     """(date_coverage, forms_covered) projections for the coverage block."""
     return (
-        f"{start_date or ''}:{end_date or ''}" or None,
+        f"{start_date or ''}:{end_date or ''}",
         tuple(forms) if forms else (),
     )
+
 
 def _search_coverage(
     status: Literal["complete", "complete_within_source_limits", "partial", "failed"],
@@ -709,8 +756,7 @@ def _search_coverage(
     from .models import SearchCoverage
 
     completed, failed = _coverage_status_block(status, failed_tail)
-    date_coverage, forms_covered = _coverage_counts(
-        start_date, end_date, forms)
+    date_coverage, forms_covered = _coverage_counts(start_date, end_date, forms)
     return SearchCoverage(
         status=status,
         sources_attempted=("efts",),
@@ -723,6 +769,7 @@ def _search_coverage(
         date_coverage=date_coverage,
         forms_covered=forms_covered,
     )
+
 
 def _search_run(
     search_id: str,
@@ -766,14 +813,22 @@ def _build_search_result(
     from .models import SECSearchResult
 
     limits = _coverage_limits(status, warnings, reported, len(hits))
-    runs = (_search_run(search_id, request.query or "", _search_filters(forms, start_date, end_date, request.as_of, request.cik, request.ticker), request.as_of, list(hits)),)
+    runs = (
+        _search_run(
+            search_id,
+            request.query or "",
+            _search_filters(forms, start_date, end_date, request.as_of, request.cik, request.ticker),
+            request.as_of,
+            list(hits),
+        ),
+    )
     return SECSearchResult(
         search_id=search_id,
         request=request,
         text_hits=tuple(hits),
         coverage=_search_coverage(
-            status, failed_tail, reported, len(hits), page_num,
-            start_date, end_date, forms, limits),
+            status, failed_tail, reported, len(hits), page_num, start_date, end_date, forms, limits
+        ),
         attempts=tuple(attempts),
         warnings=tuple(warnings),
         errors=tuple(errors),
@@ -804,35 +859,52 @@ def search_sec_filings(
     cik = _check_search_cik(cik)
     ticker = _check_search_ticker(ticker)
     query, search_id, request, filters = _normalize_search_params(
-        query, forms, start_date, end_date, limit, as_of, cik, ticker)
+        query, forms, start_date, end_date, limit, as_of, cik, ticker
+    )
     as_of = request.as_of
-    issuer_cik = cik if cik is not None else (
-        resolve_cik(ticker) if ticker else None)
+    issuer_cik = cik if cik is not None else (resolve_cik(ticker) if ticker else None)
     attempts: list[SearchAttempt] = []
     hits: list[SECTextHit] = []
     warnings: list[str] = []
     errors: list[str] = []
     seen: set[tuple[str, str, str | None]] = set()
     try:
-        page = _fetch_first_page(
-            query, forms, start_date, end_date, limit, cik, ticker)
+        page = _fetch_first_page(query, forms, start_date, end_date, limit, cik, ticker)
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         _record_attempt(
-            attempts, search_id, query, filters, 0, "failed", 0, 0,
-            error_type=type(exc).__name__, error_message=str(exc))
+            attempts,
+            search_id,
+            query,
+            filters,
+            0,
+            "failed",
+            0,
+            0,
+            error_type=type(exc).__name__,
+            error_message=str(exc),
+        )
         errors.append(f"efts page 1 failed: {exc}")
-        return _failed_search_result(
-            search_id, request, attempts, warnings, errors,
-            start_date, end_date, forms)
+        return _failed_search_result(search_id, request, attempts, warnings, errors, start_date, end_date, forms)
     reported = _coerce_reported_total(page)
     page_num, pit_gaps, scope_gaps, failed_tail, source_capped = _drain_pages(
-        page, query, search_id, filters, as_of, limit, reported,
-        attempts, hits, seen, warnings, errors, issuer_cik)
-    status = _resolve_search_status(
-        hits, pit_gaps, scope_gaps, reported, source_capped, failed_tail, limit)
+        page, query, search_id, filters, as_of, limit, reported, attempts, hits, seen, warnings, errors, issuer_cik
+    )
+    status = _resolve_search_status(hits, pit_gaps, scope_gaps, reported, source_capped, failed_tail, limit)
     return _build_search_result(
-        search_id, request, hits, attempts, warnings, errors, reported,
-        page_num, failed_tail, start_date, end_date, forms, status)
+        search_id,
+        request,
+        hits,
+        attempts,
+        warnings,
+        errors,
+        reported,
+        page_num,
+        failed_tail,
+        start_date,
+        end_date,
+        forms,
+        status,
+    )
 
 
 def _normalize_lookup_text(value: object) -> str:
@@ -842,6 +914,8 @@ def _normalize_lookup_text(value: object) -> str:
 
     text = unicodedata.normalize("NFKD", str(value or "")).casefold()
     return re.sub(r"\s+", " ", re.sub(r"[\W_]+", " ", text)).strip()
+
+
 def _fetch_lookup_frame(query: str) -> _FrameRows:
     """CIK lookup dataset; fetch failure raises (never zero-result)."""
     try:
@@ -867,13 +941,15 @@ def _rank_lookup_name(normed: str, want: str) -> int | None:
     if want in normed:
         return 2
     return None
+
+
 def _scan_lookup_frame(frame: _FrameRows, want: str) -> list[tuple[int, str, int]]:
     """Deterministic normalized substring scan over lookup rows."""
     rows: list[tuple[int, str, int]] = []
     for row in frame.itertuples():
         try:
             cik = int(str(getattr(row, "cik")).strip())  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             continue
         name = str(getattr(row, "name", ""))
         rank = _rank_lookup_name(_normalize_lookup_text(name), want)
@@ -902,7 +978,8 @@ def _scan_lookup_rows(frame: _FrameRows, query: str, want: str) -> list[tuple[in
 
 
 def _format_lookup_rows(
-    rows: list[tuple[int, str, int]], limit: int,
+    rows: list[tuple[int, str, int]],
+    limit: int,
 ) -> list[dict[str, object]]:
     """Ranked rows to bounded candidate dicts."""
     rows.sort()
@@ -910,6 +987,7 @@ def _format_lookup_rows(
     for _, name, cik in rows[:limit]:
         out.append({"name": name, "cik": cik, "tickers": [], "exchange": None})
     return out
+
 
 def get_cik_lookup_candidates(query: str, limit: int = 10) -> list[dict[str, object]]:
     """General legal-name to CIK candidates via SEC ``cik-lookup-data.txt``.
@@ -936,14 +1014,14 @@ def _maybe_str(value: object) -> str | None:
 
 def _address_dict(address: object) -> dict[str, object | None]:
     """Best-effort address projection over dict or attribute surfaces."""
+
     def _get(name: str) -> object:
         if isinstance(address, dict):
             return address.get(name)
         return getattr(address, name, None)
 
     out: dict[str, object | None] = {}
-    for key in ("street1", "street2", "city", "stateOrCountry",
-                "stateOrCountryDescription", "zipCode"):
+    for key in ("street1", "street2", "city", "stateOrCountry", "stateOrCountryDescription", "zipCode"):
         try:
             out[key] = _maybe_str(_get(key))
         except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
@@ -955,7 +1033,7 @@ def _parse_submissions_cik(cik: int | str) -> int | None:
     """CIK text to int; None when not a plain integer."""
     try:
         return int(str(cik).strip())
-    except (TypeError, ValueError, AttributeError):
+    except TypeError, ValueError, AttributeError:
         return None
 
 
@@ -969,8 +1047,7 @@ def _fetch_submissions_data(cik_int: int, cik: int | str) -> object | None:
     except Exception as exc:
         if "404" in str(exc):
             return None
-        raise SECClientError(
-            f"submissions fetch failed for CIK {cik!r}: {exc}") from exc
+        raise SECClientError(f"submissions fetch failed for CIK {cik!r}: {exc}") from exc
 
 
 def _clean_str_list(raw: object) -> list[str]:
@@ -987,12 +1064,14 @@ def _parse_former_names(data: object) -> list[dict[str, object | None]]:
     for entry in getattr(data, "former_names", None) or []:
         if isinstance(entry, dict):
             get = entry.get
-            former.append({
-                "name": _maybe_str(get("name")),
-                "from": _maybe_str(get("from")),
-                "to": _maybe_str(get("to")),
-                "type": _maybe_str(get("type")),
-            })
+            former.append(
+                {
+                    "name": _maybe_str(get("name")),
+                    "from": _maybe_str(get("from")),
+                    "to": _maybe_str(get("to")),
+                    "type": _maybe_str(get("type")),
+                }
+            )
     return former
 
 
@@ -1005,11 +1084,13 @@ def _parse_filing_history(data: object) -> list[dict[str, object | None]]:
         if candidates is None:
             candidates = []
         for item in list(candidates)[:5]:
-            history.append({
-                "form": _maybe_str(getattr(item, "form", None)),
-                "filed_at": _maybe_str(getattr(item, "filing_date", None)),
-                "accession_no": _maybe_str(getattr(item, "accession_number", None)),
-            })
+            history.append(
+                {
+                    "form": _maybe_str(getattr(item, "form", None)),
+                    "filed_at": _maybe_str(getattr(item, "filing_date", None)),
+                    "accession_no": _maybe_str(getattr(item, "accession_number", None)),
+                }
+            )
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         history = []
     return history
@@ -1025,7 +1106,9 @@ def _parse_sic(data: object) -> str | None:
 
 
 def _assemble_submissions_metadata(
-    cik: int | str, cik_int: int, data: object,
+    cik: int | str,
+    cik_int: int,
+    data: object,
 ) -> dict[str, object]:
     """Map the submissions payload to the metadata contract."""
     return {
@@ -1036,13 +1119,13 @@ def _assemble_submissions_metadata(
         "sic": _parse_sic(data),
         "sic_description": _maybe_str(getattr(data, "sic_description", None)),
         "entity_type": _maybe_str(getattr(data, "entity_type", None)),
-        "state_of_incorporation": _maybe_str(
-            getattr(data, "state_of_incorporation", None)),
+        "state_of_incorporation": _maybe_str(getattr(data, "state_of_incorporation", None)),
         "business_address": _address_dict(getattr(data, "business_address", None)),
         "mailing_address": _address_dict(getattr(data, "mailing_address", None)),
         "former_names": _parse_former_names(data),
         "filing_history": _parse_filing_history(data),
     }
+
 
 def get_submissions_metadata(cik: int | str) -> dict[str, object] | None:
     """Authoritative per-CIK metadata from SEC submissions.
@@ -1062,8 +1145,7 @@ def get_submissions_metadata(cik: int | str) -> dict[str, object] | None:
     try:
         return _assemble_submissions_metadata(cik, cik_int, data)
     except Exception as exc:
-        raise SECClientError(
-            f"submissions parse failed for CIK {cik!r}: {exc}") from exc
+        raise SECClientError(f"submissions parse failed for CIK {cik!r}: {exc}") from exc
 
 
 def _normalize_feed_items(feed: object) -> list[Filing]:
@@ -1078,9 +1160,10 @@ def _normalize_feed_items(feed: object) -> list[Filing]:
     for item in feed:
         try:
             out.append(filing_from_edgar(item))
-        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
     return out
+
 
 def get_global_filings(
     year: int | list[int] | range | None = None,
@@ -1101,9 +1184,9 @@ def get_global_filings(
     ensure_identity()
     import edgar
 
-    return _normalize_feed_items(edgar.get_filings(
-        year, quarter, form=form, amendments=amendments,
-        filing_date=filing_date))
+    return _normalize_feed_items(
+        edgar.get_filings(year, quarter, form=form, amendments=amendments, filing_date=filing_date)
+    )
 
 
 def get_current_filings(
@@ -1120,5 +1203,4 @@ def get_current_filings(
     ensure_identity()
     import edgar
 
-    return _normalize_feed_items(edgar.get_current_filings(
-        form=form or "", page_size=page_size, owner=owner))
+    return _normalize_feed_items(edgar.get_current_filings(form=form or "", page_size=page_size, owner=owner))

@@ -90,7 +90,9 @@ def _check_freeze_membership(freeze_id: str, session_id: str, wave_id: int, recs
 def _check_freeze_pit(freeze_id: str, frozen_as_of: datetime | None, recs: list[Evidence]) -> None:
     for record in recs:
         if pit_unverified(frozen_as_of, record.known_at):
-            raise FreezeIntegrityError(f"freeze {freeze_id}: {record.evidence_id} unverified PIT (known_at unknown for historical as_of)")
+            raise FreezeIntegrityError(
+                f"freeze {freeze_id}: {record.evidence_id} unverified PIT (known_at unknown for historical as_of)"
+            )
         if pit_violated(frozen_as_of, record.known_at):
             raise FreezeIntegrityError(f"freeze {freeze_id}: {record.evidence_id} violates PIT (known_at > as_of)")
 

@@ -17,14 +17,14 @@ from pathlib import Path
 REPO_ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(REPO_ROOT))
 
-from app.config import get_data_root  # noqa: E402
-from app.research.evals.traces import (  # noqa: E402
+from app.config import get_data_root
+from app.research.evals.traces import (
     TraceHeader,
     get_trace_events,
     list_traces,
 )
-from app.research.models import Job, ResearchSession  # noqa: E402
-from app.research.repository import (  # noqa: E402
+from app.research.models import Job, ResearchSession
+from app.research.repository import (
     ResearchRepository,
     get_research_db_path,
 )
@@ -80,12 +80,10 @@ def _safe_list_traces(sid: str) -> list[TraceHeader]:
 
 def _collect_trace(traces: list[TraceHeader]) -> dict[str, object]:
     if not traces:
-        return {"trace_id": None, "provider": None, "model": None,
-                "conclusion": None, "status": None, "events": []}
+        return {"trace_id": None, "provider": None, "model": None, "conclusion": None, "status": None, "events": []}
     trace_id = traces[0].trace_id
     if not trace_id:
-        return {"trace_id": trace_id, "provider": None, "model": None,
-                "conclusion": None, "status": None, "events": []}
+        return {"trace_id": trace_id, "provider": None, "model": None, "conclusion": None, "status": None, "events": []}
     events: list[dict[str, object]] = []
     try:
         for evt in get_trace_events(trace_id):
@@ -103,21 +101,29 @@ def _collect_trace(traces: list[TraceHeader]) -> dict[str, object]:
         status = None
         provider = None
         model = None
-    return {"trace_id": trace_id, "provider": provider, "model": model,
-            "conclusion": conclusion, "status": status, "events": events}
+    return {
+        "trace_id": trace_id,
+        "provider": provider,
+        "model": model,
+        "conclusion": conclusion,
+        "status": status,
+        "events": events,
+    }
 
 
 def _collect_evidence(repo: ResearchRepository, sid: str) -> list[dict[str, object]]:
     evidence: list[dict[str, object]] = []
     try:
         for rec in repo.list_evidence(sid):
-            evidence.append({
-                "evidenceId": str(rec.get("evidence_id", "")),
-                "subject": str(rec.get("subject", "")),
-                "knownAt": _ts(rec.get("known_at")),
-                "sourceName": str(rec.get("source_name", "")),
-                "sourceUri": _ts(rec.get("source_uri")),
-            })
+            evidence.append(
+                {
+                    "evidenceId": str(rec.get("evidence_id", "")),
+                    "subject": str(rec.get("subject", "")),
+                    "knownAt": _ts(rec.get("known_at")),
+                    "sourceName": str(rec.get("source_name", "")),
+                    "sourceUri": _ts(rec.get("source_uri")),
+                }
+            )
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         evidence = []
     return evidence
@@ -169,10 +175,12 @@ def _collect_dossiers(repo: ResearchRepository, sid: str) -> list[dict[str, obje
     dossiers: list[dict[str, object]] = []
     try:
         for d in repo.list_dossiers(sid):
-            dossiers.append({
-                "dossierId": str(d.get("dossier_id", "")),
-                "findings": _clean_text_items(d.get("findings")),
-            })
+            dossiers.append(
+                {
+                    "dossierId": str(d.get("dossier_id", "")),
+                    "findings": _clean_text_items(d.get("findings")),
+                }
+            )
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         dossiers = []
     return dossiers
@@ -202,8 +210,11 @@ def _job_row(job: Job) -> dict[str, object]:
     if not isinstance(role, str):
         role = None
     return {
-        "jobId": job.job_id, "parentJobId": job.parent_job_id,
-        "jobType": job.job_type, "owner": job.owner, "waveId": job.wave_id,
+        "jobId": job.job_id,
+        "parentJobId": job.parent_job_id,
+        "jobType": job.job_type,
+        "owner": job.owner,
+        "waveId": job.wave_id,
         "status": job.status,
         "failureCategory": failure_category,
         "failureMessage": failure_message,
@@ -222,6 +233,7 @@ def _job_rows(jobs: list[Job]) -> list[dict[str, object]]:
 def _session_as_of_str(sess: object) -> str | None:
     """ISO as-of string or None when absent/non-datetime."""
     from datetime import datetime
+
     as_of = getattr(sess, "as_of", None)
     return as_of.isoformat() if isinstance(as_of, datetime) else None
 
@@ -229,6 +241,7 @@ def _session_as_of_str(sess: object) -> str | None:
 def _session_time_str(sess: object, name: str) -> str:
     """ISO datetime session field; missing/non-datetime reads as empty."""
     from datetime import datetime
+
     value = getattr(sess, name, None)
     return value.isoformat() if isinstance(value, datetime) else ""
 
@@ -239,18 +252,36 @@ def _session_str_list(sess: object, name: str) -> list[object]:
     return value if isinstance(value, list) else []
 
 
-def _session_row(sid: str, sess: ResearchSession, jobs: list[Job], trace: dict[str, object], evidence: list[dict[str, object]], freezes: list[dict[str, object]], dossiers: list[dict[str, object]], claims: list[dict[str, object]]) -> dict[str, object]:
+def _session_row(
+    sid: str,
+    sess: ResearchSession,
+    jobs: list[Job],
+    trace: dict[str, object],
+    evidence: list[dict[str, object]],
+    freezes: list[dict[str, object]],
+    dossiers: list[dict[str, object]],
+    claims: list[dict[str, object]],
+) -> dict[str, object]:
     events = trace["events"]
     assert isinstance(events, list)
     return {
-        "sessionId": sid, "waveId": sess.current_wave, "question": sess.query,
-        "status": sess.status, "asOf": _session_as_of_str(sess),
+        "sessionId": sid,
+        "waveId": sess.current_wave,
+        "question": sess.query,
+        "status": sess.status,
+        "asOf": _session_as_of_str(sess),
         "updatedAt": _session_time_str(sess, "updated_at"),
-        "traceId": trace["trace_id"], "conclusion": trace["conclusion"],
+        "traceId": trace["trace_id"],
+        "conclusion": trace["conclusion"],
         "traceStatus": trace["status"],
-        "provider": trace["provider"], "model": trace["model"],
-        "jobs": _job_rows(jobs), "events": sorted(events, key=_event_seq),
-        "claims": claims, "evidence": evidence, "freezes": freezes, "dossiers": dossiers,
+        "provider": trace["provider"],
+        "model": trace["model"],
+        "jobs": _job_rows(jobs),
+        "events": sorted(events, key=_event_seq),
+        "claims": claims,
+        "evidence": evidence,
+        "freezes": freezes,
+        "dossiers": dossiers,
         "committeeRuns": list(_session_str_list(sess, "committee_runs")),
     }
 
@@ -283,23 +314,46 @@ def _parse_violations(raw: object) -> list[object]:
 
 def _read_eval_runs(conn: sqlite3.Connection) -> list[dict[str, object]]:
     runs: list[dict[str, object]] = []
-    for row in conn.execute("SELECT eval_run_id, model, provider, harness_version, prompt_version, git_sha, started_at, scenario_version FROM eval_runs ORDER BY started_at DESC LIMIT 20"):
-        runs.append({"evalRunId": str(row[0]), "model": str(row[1]), "provider": str(row[2]), "harnessVersion": str(row[3]), "promptVersion": str(row[4]), "gitSha": str(row[5]), "startedAt": str(row[6]), "scenarioVersion": str(row[7]), "passed": 0, "failed": 0})
+    for row in conn.execute(
+        "SELECT eval_run_id, model, provider, harness_version, prompt_version, git_sha, started_at, scenario_version FROM eval_runs ORDER BY started_at DESC LIMIT 20"
+    ):
+        runs.append(
+            {
+                "evalRunId": str(row[0]),
+                "model": str(row[1]),
+                "provider": str(row[2]),
+                "harnessVersion": str(row[3]),
+                "promptVersion": str(row[4]),
+                "gitSha": str(row[5]),
+                "startedAt": str(row[6]),
+                "scenarioVersion": str(row[7]),
+                "passed": 0,
+                "failed": 0,
+            }
+        )
     return runs
 
 
 def _read_scenario_results(conn: sqlite3.Connection) -> list[dict[str, object]]:
     results: list[dict[str, object]] = []
-    for row in conn.execute("SELECT eval_run_id, scenario_name, passed, violations_json FROM eval_scenario_results ORDER BY eval_run_id, scenario_name LIMIT 200"):
+    for row in conn.execute(
+        "SELECT eval_run_id, scenario_name, passed, violations_json FROM eval_scenario_results ORDER BY eval_run_id, scenario_name LIMIT 200"
+    ):
         violations = _parse_violations(row[3])
-        results.append({"evalRunId": str(row[0]), "scenarioName": str(row[1]), "passed": bool(row[2]), "violations": violations})
+        results.append(
+            {"evalRunId": str(row[0]), "scenarioName": str(row[1]), "passed": bool(row[2]), "violations": violations}
+        )
     return results
 
 
 def _read_failure_records(conn: sqlite3.Connection) -> list[dict[str, object]]:
     records: list[dict[str, object]] = []
-    for row in conn.execute("SELECT failure_id, eval_run_id, scenario_name, violation FROM failure_records ORDER BY eval_run_id, scenario_name LIMIT 200"):
-        records.append({"failureId": str(row[0]), "evalRunId": str(row[1]), "scenarioName": str(row[2]), "violation": str(row[3])})
+    for row in conn.execute(
+        "SELECT failure_id, eval_run_id, scenario_name, violation FROM failure_records ORDER BY eval_run_id, scenario_name LIMIT 200"
+    ):
+        records.append(
+            {"failureId": str(row[0]), "evalRunId": str(row[1]), "scenarioName": str(row[2]), "violation": str(row[3])}
+        )
     return records
 
 
@@ -335,17 +389,25 @@ def attach_pass_fail(eval_runs: list[dict[str, object]], scenario_results: list[
         run["failed"] = failed
 
 
-def build_projection(research_runs: list[dict[str, object]], eval_runs: list[dict[str, object]], scenario_results: list[dict[str, object]], experiments: list[dict[str, object]], failure_records: list[dict[str, object]]) -> dict[str, object]:
+def build_projection(
+    research_runs: list[dict[str, object]],
+    eval_runs: list[dict[str, object]],
+    scenario_results: list[dict[str, object]],
+    experiments: list[dict[str, object]],
+    failure_records: list[dict[str, object]],
+) -> dict[str, object]:
     return {
-        "researchRuns": research_runs, "evalRuns": eval_runs,
-        "evalScenarioResults": scenario_results, "experiments": experiments,
+        "researchRuns": research_runs,
+        "evalRuns": eval_runs,
+        "evalScenarioResults": scenario_results,
+        "experiments": experiments,
         "failureRecords": failure_records,
     }
 
 
 def render_projection_ts(projection: dict[str, object]) -> str:
     return (
-        "import type { EvalRun, EvalScenarioResult, Experiment, FailureRecord, ResearchRun } from \"./schema\";\n"
+        'import type { EvalRun, EvalScenarioResult, Experiment, FailureRecord, ResearchRun } from "./schema";\n'
         "export const PROJECTION: { researchRuns: ResearchRun[]; evalRuns: EvalRun[]; "
         "evalScenarioResults: EvalScenarioResult[]; experiments: Experiment[]; "
         "failureRecords: FailureRecord[] } = " + json.dumps(projection, indent=2, sort_keys=True) + ";\n"

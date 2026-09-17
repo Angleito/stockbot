@@ -38,20 +38,24 @@ def test_robinhood_endpoint_is_pinned(monkeypatch: pytest.MonkeyPatch, url: str)
     with pytest.raises(OAuthStoreError, match="Robinhood MCP URL"):
         config.get_robinhood_mcp_url()
 
+
 def test_broker_enabled_prefers_new_true(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BROKER_ENABLED", "true")
     monkeypatch.setenv("ROBINHOOD_ENABLED", "false")
     assert config.broker_enabled() is True
+
 
 def test_broker_enabled_explicit_new_false_wins(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setenv("BROKER_ENABLED", "false")
     monkeypatch.setenv("ROBINHOOD_ENABLED", "true")
     assert config.broker_enabled() is False
 
+
 def test_broker_enabled_legacy_fallback(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("BROKER_ENABLED", raising=False)
     monkeypatch.setenv("ROBINHOOD_ENABLED", "true")
     assert config.broker_enabled() is True
+
 
 def test_broker_enabled_defaults_false(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.delenv("BROKER_ENABLED", raising=False)

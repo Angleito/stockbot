@@ -13,22 +13,24 @@ import re
 # Normalized (lowercase, punctuation-stripped) dict keys whose values are
 # always replaced with "[REDACTED]" — e.g. account_number, accountNumber,
 # access token all normalize to the same norm.
-SENSITIVE_KEY_NORMS = frozenset({
-    "accesstoken",
-    "refreshtoken",
-    "token",
-    "authorization",
-    "auth",
-    "clientsecret",
-    "clientid",
-    "secret",
-    "password",
-    "apikey",
-    "cookie",
-    "crumb",
-    "accountnumber",
-    "accountid",
-})
+SENSITIVE_KEY_NORMS = frozenset(
+    {
+        "accesstoken",
+        "refreshtoken",
+        "token",
+        "authorization",
+        "auth",
+        "clientsecret",
+        "clientid",
+        "secret",
+        "password",
+        "apikey",
+        "cookie",
+        "crumb",
+        "accountnumber",
+        "accountid",
+    }
+)
 
 _REDACTED = "[REDACTED]"
 
@@ -87,5 +89,5 @@ def redact_json(text: str) -> str:
     """Redact a JSON document in place; fall back to text redaction if unparseable."""
     try:
         return json.dumps(redact_value(json.loads(text)))
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return redact_text(text)

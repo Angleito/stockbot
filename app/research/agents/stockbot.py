@@ -35,9 +35,7 @@ def _coerce_wave(wave_id: int | str) -> int:
     elif isinstance(wave_id, str):
         text = wave_id.strip()
         if not text.isdigit():
-            raise ValueError(
-                f"stockbot: 'wave_id' must be an int >= 1, got {wave_id!r}"
-            )
+            raise ValueError(f"stockbot: 'wave_id' must be an int >= 1, got {wave_id!r}")
         wave = int(text)
     else:
         raise ValueError(f"stockbot: 'wave_id' must be an int >= 1, got {wave_id!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
@@ -124,9 +122,7 @@ def run_stockbot(
     extra = _tag_requests(list(follow_ups or []))
     env = parse_committee_envelope(text, frozen=frozen, agent="stockbot")
     unknowns: list[str] = (
-        list(env.uncertainties)
-        if env.uncertainties
-        else ([] if env.claims or frozen else ["freeze holds no evidence"])
+        list(env.uncertainties) if env.uncertainties else ([] if env.claims or frozen else ["freeze holds no evidence"])
     )
     prose = _prose_or_placeholder(env.claims, frozen)
     extra = list(env.follow_ups) + list(extra)

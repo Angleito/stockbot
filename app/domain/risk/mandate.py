@@ -6,9 +6,9 @@ loads JSON payloads and hands them to :func:`parse_mandate`.
 
 from __future__ import annotations
 
+from collections.abc import Mapping
 from dataclasses import dataclass
 from decimal import Decimal, InvalidOperation
-from typing import Mapping
 
 SUPPORTED_METRICS = ("single_position_weight", "minimum_cash", "sector_exposure")
 SUPPORTED_OPERATORS = ("<=", ">=")
@@ -21,9 +21,9 @@ class RiskLimit:
     metric: str
     operator: str
     threshold: Decimal
-    target: str | None = None       # required for sector_exposure (sector name)
-    severity: str = "warning"       # "warning" | "critical"
-    unit: str = "ratio"             # "ratio" | "dollars" (minimum_cash)
+    target: str | None = None  # required for sector_exposure (sector name)
+    severity: str = "warning"  # "warning" | "critical"
+    unit: str = "ratio"  # "ratio" | "dollars" (minimum_cash)
 
 
 @dataclass(frozen=True)
@@ -59,26 +59,20 @@ def _limit_vocab(entry: dict[str, object], index: int) -> tuple[str, str, str, s
     metric = entry.get("metric")
     if metric not in SUPPORTED_METRICS:
         raise ValueError(
-            f"mandate limit {index}: unknown metric {metric!r} "
-            f"(supported: {', '.join(SUPPORTED_METRICS)})"
+            f"mandate limit {index}: unknown metric {metric!r} (supported: {', '.join(SUPPORTED_METRICS)})"
         )
     operator = entry.get("operator")
     if operator not in SUPPORTED_OPERATORS:
         raise ValueError(
-            f"mandate limit {index}: unknown operator {operator!r} "
-            f"(supported: {', '.join(SUPPORTED_OPERATORS)})"
+            f"mandate limit {index}: unknown operator {operator!r} (supported: {', '.join(SUPPORTED_OPERATORS)})"
         )
     unit = entry.get("unit", "ratio")
     if unit not in SUPPORTED_UNITS:
-        raise ValueError(
-            f"mandate limit {index}: unknown unit {unit!r} "
-            f"(supported: {', '.join(SUPPORTED_UNITS)})"
-        )
+        raise ValueError(f"mandate limit {index}: unknown unit {unit!r} (supported: {', '.join(SUPPORTED_UNITS)})")
     severity = entry.get("severity", "warning")
     if severity not in SUPPORTED_SEVERITIES:
         raise ValueError(
-            f"mandate limit {index}: unknown severity {severity!r} "
-            f"(supported: {', '.join(SUPPORTED_SEVERITIES)})"
+            f"mandate limit {index}: unknown severity {severity!r} (supported: {', '.join(SUPPORTED_SEVERITIES)})"
         )
     assert isinstance(metric, str) and isinstance(operator, str)
     assert isinstance(unit, str) and isinstance(severity, str)
@@ -103,9 +97,7 @@ def _limit_target(entry: dict[str, object], metric: str, index: int) -> str | No
     if isinstance(target, str):
         target = target.strip()
     if metric == "sector_exposure" and not (isinstance(target, str) and target.strip()):
-        raise ValueError(
-            f"mandate limit {index}: sector_exposure requires a non-empty 'target' sector"
-        )
+        raise ValueError(f"mandate limit {index}: sector_exposure requires a non-empty 'target' sector")
     assert target is None or isinstance(target, str)
     return target
 
@@ -129,9 +121,7 @@ def _parse_limit(entry: object, index: int) -> RiskLimit:
 def _prohibited_assets(data: dict[str, object]) -> tuple[str, ...]:
     """Prohibited-assets list check (existing boundary)."""
     prohibited = data.get("prohibited_assets", [])
-    if not isinstance(prohibited, list) or not all(
-        isinstance(item, str) and item.strip() for item in prohibited
-    ):
+    if not isinstance(prohibited, list) or not all(isinstance(item, str) and item.strip() for item in prohibited):
         raise ValueError("mandate: 'prohibited_assets' must be a list of non-empty strings")
     return tuple(item.strip() for item in prohibited)
 

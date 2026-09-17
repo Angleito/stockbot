@@ -17,7 +17,7 @@ import urllib.parse
 import webbrowser
 from collections.abc import Mapping
 from dataclasses import dataclass
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import override
 
@@ -66,9 +66,7 @@ def validate_robinhood_server_url(server_url: str) -> str:
     """Allow OAuth only for the canonical production Robinhood MCP endpoint."""
     server_origin(server_url)
     if server_url != ROBINHOOD_MCP_URL:
-        raise OAuthStoreError(
-            f"Robinhood MCP URL must be {ROBINHOOD_MCP_URL}"
-        )
+        raise OAuthStoreError(f"Robinhood MCP URL must be {ROBINHOOD_MCP_URL}")
     return server_url
 
 
@@ -114,7 +112,7 @@ class LoopbackCallback:
         callback = self
 
         class Handler(http.server.BaseHTTPRequestHandler):
-            def do_GET(self):  # noqa: N802 - stdlib handler API
+            def do_GET(self):
                 request = urllib.parse.urlparse(self.path)
                 if request.path != callback.path:
                     self.send_error(404)
@@ -128,16 +126,12 @@ class LoopbackCallback:
                 self.wfile.write(body)
 
             @override
-            def log_message(self, format: str, *args: object) -> None:  # noqa: A002 - stdlib handler API
+            def log_message(self, format: str, *args: object) -> None:
                 return
 
         self._handler_type = Handler
         self.server: http.server.ThreadingHTTPServer | None = None
-        self.redirect_uri = (
-            f"http://{self.host}:{self.requested_port}{self.path}"
-            if self.requested_port
-            else ""
-        )
+        self.redirect_uri = f"http://{self.host}:{self.requested_port}{self.path}" if self.requested_port else ""
         if not self.requested_port:
             self._bind()
 
@@ -145,9 +139,7 @@ class LoopbackCallback:
         if self.server is not None:
             return
         try:
-            self.server = http.server.ThreadingHTTPServer(
-                (self.host, self.requested_port), self._handler_type
-            )
+            self.server = http.server.ThreadingHTTPServer((self.host, self.requested_port), self._handler_type)
         except OSError as exc:
             raise OAuthStoreError(
                 f"Cannot bind OAuth callback listener at "
@@ -201,9 +193,7 @@ def load_tokens(path: Path = DEFAULT_TOKEN_PATH) -> dict[str, object] | None:
     return value if isinstance(value, dict) else None
 
 
-def load_tokens_for_origin(
-    origin: str, path: Path = DEFAULT_TOKEN_PATH
-) -> dict[str, object] | None:
+def load_tokens_for_origin(origin: str, path: Path = DEFAULT_TOKEN_PATH) -> dict[str, object] | None:
     """Load state only when it was issued for exactly this MCP origin.
 
     Legacy unbound files are intentionally treated as unusable so a user must
@@ -230,9 +220,9 @@ def _is_token_expired(issued: object, expires_in: object, now: datetime | None) 
         return True
     try:
         issued_dt = datetime.fromisoformat(issued)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return True
-    return (now if now is not None else datetime.now(timezone.utc)) >= issued_dt + timedelta(seconds=expires_in)
+    return (now if now is not None else datetime.now(UTC)) >= issued_dt + timedelta(seconds=expires_in)
 
 
 def has_valid_tokens(origin: str, path: Path = DEFAULT_TOKEN_PATH, *, now: datetime | None = None) -> bool:
@@ -251,10 +241,7 @@ def has_valid_tokens(origin: str, path: Path = DEFAULT_TOKEN_PATH, *, now: datet
         return False
     issued: object = state.get("issued_at")
     expires_in: object = tokens.get("expires_in")
-    if issued is not None and expires_in is not None:
-        if _is_token_expired(issued, expires_in, now):
-            return False
-    return True
+    return not (issued is not None and expires_in is not None and _is_token_expired(issued, expires_in, now))
 
 
 def save_tokens(tokens: dict[str, object], path: Path = DEFAULT_TOKEN_PATH) -> None:
@@ -315,7 +302,7 @@ def build_oauth_provider(config: OAuthConfig, path: Path = DEFAULT_TOKEN_PATH) -
                 state["tokens"] = dumped
             else:
                 state["tokens"] = tokens
-            state["issued_at"] = datetime.now(timezone.utc).isoformat()
+            state["issued_at"] = datetime.now(UTC).isoformat()
             save_tokens(state, path)
 
         async def get_client_info(self):

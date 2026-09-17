@@ -1,4 +1,5 @@
 """Forced Pi-timeout closure: FAILED/TIMEOUT persisted, resume stable with no dup."""
+
 import subprocess
 from pathlib import Path
 

@@ -22,6 +22,7 @@ DOCUMENT_KIND = "document"
 def _document_key(accession_no: str, document_name: str) -> str:
     return f"{accession_no}/{document_name}"
 
+
 def archive_sec_filing(
     filing: Filing,
     payloads: dict[str, bytes],
@@ -53,6 +54,7 @@ def find_archived(
     """Return the archived record for an accession/kind, or None."""
     return raw_archive.find("sec", kind, accession_no, root=root)
 
+
 def archive_sec_document(
     accession_no: str,
     document_name: str,
@@ -70,8 +72,7 @@ def archive_sec_document(
     """
     key = _document_key(accession_no, document_name)
     digest = raw_archive.content_hash(payload)
-    existed = raw_archive.has_payload(
-        "sec", DOCUMENT_KIND, key, sha256=digest, root=root)
+    existed = raw_archive.has_payload("sec", DOCUMENT_KIND, key, sha256=digest, root=root)
     meta: dict[str, object] = {"accession_no": accession_no, "document_name": document_name}
     meta.update(metadata or {})
     record = raw_archive.archive(
@@ -85,8 +86,7 @@ def archive_sec_document(
         root=root,
     )
     if not existed:
-        others = [r for r in raw_archive.iter_archive(
-            "sec", DOCUMENT_KIND, key, root=root) if r.sha256 != digest]
+        others = [r for r in raw_archive.iter_archive("sec", DOCUMENT_KIND, key, root=root) if r.sha256 != digest]
         if others:
             warnings.warn(
                 f"new immutable revision for {accession_no}/{document_name}: "
@@ -104,9 +104,7 @@ def find_archived_document(
     root: Path | None = None,
 ) -> raw_archive.ArchiveRecord | None:
     """Return the archived record for one accession/document, or None."""
-    return raw_archive.find(
-        "sec", DOCUMENT_KIND, _document_key(accession_no, document_name),
-        sha256=sha256, root=root)
+    return raw_archive.find("sec", DOCUMENT_KIND, _document_key(accession_no, document_name), sha256=sha256, root=root)
 
 
 def iter_archived_documents(
@@ -116,6 +114,4 @@ def iter_archived_documents(
     root: Path | None = None,
 ) -> Iterator[raw_archive.ArchiveRecord]:
     """All byte revisions for one accession/document, oldest first."""
-    yield from raw_archive.iter_archive(
-        "sec", DOCUMENT_KIND, _document_key(accession_no, document_name),
-        root=root)
+    yield from raw_archive.iter_archive("sec", DOCUMENT_KIND, _document_key(accession_no, document_name), root=root)

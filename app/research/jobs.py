@@ -44,9 +44,7 @@ __all__ = [
 ]
 
 ACTIVE_STATUSES: frozenset[str] = frozenset({JobStatus.QUEUED.value, JobStatus.RUNNING.value})
-COMMITTEE_TYPES: frozenset[str] = frozenset(
-    {JobType.STOCKBOT.value, JobType.BULLBOT.value, JobType.BEARBOT.value}
-)
+COMMITTEE_TYPES: frozenset[str] = frozenset({JobType.STOCKBOT.value, JobType.BULLBOT.value, JobType.BEARBOT.value})
 _JOBTYPE_SECTION: dict[str, str] = {
     JobType.SOURCE_AGENT.value: "source",
     JobType.SCOUT.value: "scout",
@@ -161,12 +159,20 @@ def _check_capacity(session: ResearchSession, jobs: list[Job], jtype: str, wave_
     policy = session.policy
     max_waves = _research_limit(policy, "max_waves")
     if wave_id < 1 or (max_waves is not None and wave_id > max_waves):
-        raise ValueError(f"<job>: wave_limit_exceeded: wave {wave_id} outside 1..{max_waves if max_waves is not None else 'unbounded'}")
-    _check_ceiling(len(session.job_ids), _research_limit(policy, "max_total_jobs"),
-                   "<job>: job_limit_exceeded: session max_total_jobs reached")
+        raise ValueError(
+            f"<job>: wave_limit_exceeded: wave {wave_id} outside 1..{max_waves if max_waves is not None else 'unbounded'}"
+        )
+    _check_ceiling(
+        len(session.job_ids),
+        _research_limit(policy, "max_total_jobs"),
+        "<job>: job_limit_exceeded: session max_total_jobs reached",
+    )
     mine = [j for j in jobs if j.session_id == session.session_id]
-    _check_ceiling(len(active_jobs(mine)), _research_limit(policy, "max_parallel"),
-                   "<job>: parallelism_exceeded: session max_parallel reached")
+    _check_ceiling(
+        len(active_jobs(mine)),
+        _research_limit(policy, "max_parallel"),
+        "<job>: parallelism_exceeded: session max_parallel reached",
+    )
     _check_committee(mine, policy, jtype)
     return mine
 
@@ -176,9 +182,7 @@ def check_source_allowed(session: ResearchSession, source_domain: str | None) ->
     if source_domain is None:
         return
     if not source_domain_allowed(session.source_policy, source_domain, "<job>"):
-        raise ValueError(
-            f"<job>: policy_denied: source_domain {source_domain!r} denied by session source_policy"
-        )
+        raise ValueError(f"<job>: policy_denied: source_domain {source_domain!r} denied by session source_policy")
 
 
 def _check_parent(mine: list[Job], policy: Mapping[str, object], parent_job_id: str | None) -> None:
@@ -205,7 +209,21 @@ def _parse_deadline(deadline: datetime | str | None) -> datetime | None:
     raise ValueError(f"<job>: 'deadline' must be ISO-8601, datetime, or null, got {deadline!r}")
 
 
-def _build_job(session: ResearchSession, *, jtype: str, owner: str, wave_id: int, parent_job_id: str | None, source_domain: str | None, model: str | None, token_budget: int | None, tool_budget: int | None, child_budget: int | None, deadline: datetime | str | None, job_id: str | None) -> tuple[ResearchSession, Job]:
+def _build_job(
+    session: ResearchSession,
+    *,
+    jtype: str,
+    owner: str,
+    wave_id: int,
+    parent_job_id: str | None,
+    source_domain: str | None,
+    model: str | None,
+    token_budget: int | None,
+    tool_budget: int | None,
+    child_budget: int | None,
+    deadline: datetime | str | None,
+    job_id: str | None,
+) -> tuple[ResearchSession, Job]:
     """Assemble, validate, and attach one queued job."""
     policy = session.policy
     parsed_deadline = _parse_deadline(deadline)
@@ -268,7 +286,20 @@ def create_job(
     mine = _check_capacity(session, jobs, jtype, wave_id)
     _check_parent(mine, session.policy, parent_job_id)
     check_source_allowed(session, source_domain)
-    return _build_job(session, jtype=jtype, owner=owner, wave_id=wave_id, parent_job_id=parent_job_id, source_domain=source_domain, model=model, token_budget=token_budget, tool_budget=tool_budget, child_budget=child_budget, deadline=deadline, job_id=job_id)
+    return _build_job(
+        session,
+        jtype=jtype,
+        owner=owner,
+        wave_id=wave_id,
+        parent_job_id=parent_job_id,
+        source_domain=source_domain,
+        model=model,
+        token_budget=token_budget,
+        tool_budget=tool_budget,
+        child_budget=child_budget,
+        deadline=deadline,
+        job_id=job_id,
+    )
 
 
 def start_job(job: Job) -> Job:

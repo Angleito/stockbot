@@ -5,7 +5,7 @@ from pathlib import Path
 
 import pytest
 
-import app.valuation as valuation
+from app import valuation
 from app.normalization import normalize_sec_company_facts, normalize_sec_tickers
 from app.services import sec_facts
 from app.services.sec_facts import _assemble_dividend_safety
@@ -42,24 +42,30 @@ def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
 def _seed_ticker(tmp_path: Path, cik: int, ticker: str) -> None:
     datasets = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}},
-        retrieved_at=RETRIEVED_AT, content_hash=f"tickers-{cik}",
+        retrieved_at=RETRIEVED_AT,
+        content_hash=f"tickers-{cik}",
     )
     for name, rows in datasets.items():
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
 
 
 def _qfact(val: float, start: str, end: str, fy: int, fp: str, filed: str, accn: str) -> dict[str, object]:
-    return {"start": start, "end": end, "val": val, "accn": accn,
-            "fy": fy, "fp": fp, "filed": filed}
+    return {"start": start, "end": end, "val": val, "accn": accn, "fy": fy, "fp": fp, "filed": filed}
 
 
 def _seed_concepts(tmp_path: Path, cik: int, concepts: Mapping[str, object], suffix: str) -> None:
     """Seed canonical + per-share facts through normalization (unit-aware)."""
-    payload = {"cik": cik, "entityName": f"CIK{cik}", "facts": {
-        "us-gaap": {tag: {"units": units} for tag, units in concepts.items()},
-    }}
+    payload = {
+        "cik": cik,
+        "entityName": f"CIK{cik}",
+        "facts": {
+            "us-gaap": {tag: {"units": units} for tag, units in concepts.items()},
+        },
+    }
     datasets = normalize_sec_company_facts(
-        payload, retrieved_at=RETRIEVED_AT, content_hash=f"safety-{suffix}-{cik}",
+        payload,
+        retrieved_at=RETRIEVED_AT,
+        content_hash=f"safety-{suffix}-{cik}",
         source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
         source_record_id=f"safety-{suffix}-cik{cik:010d}",
     )
@@ -67,14 +73,18 @@ def _seed_concepts(tmp_path: Path, cik: int, concepts: Mapping[str, object], suf
         parquet.write_rows(name, rows, root=tmp_path / "parquet")
 
 
-def _quarters(tag_values: list[tuple[str, str, tuple[float, ...]]], prefix: str) -> dict[str, dict[str, list[dict[str, object]]]]:
+def _quarters(
+    tag_values: list[tuple[str, str, tuple[float, ...]]], prefix: str
+) -> dict[str, dict[str, list[dict[str, object]]]]:
     """tag -> unit -> quarterly facts zipped over QUARTERS."""
     out: dict[str, dict[str, list[dict[str, object]]]] = {}
     for tag, unit, values in tag_values:
-        out[tag] = {unit: [
-            _qfact(v, s, e, fy, fp, filed, f"{prefix}-{tag}-{fp}{fy}")
-            for v, (s, e, fy, fp, filed) in zip(values, QUARTERS)
-        ]}
+        out[tag] = {
+            unit: [
+                _qfact(v, s, e, fy, fp, filed, f"{prefix}-{tag}-{fp}{fy}")
+                for v, (s, e, fy, fp, filed) in zip(values, QUARTERS)
+            ]
+        }
     return out
 
 
@@ -88,51 +98,99 @@ def _seed_healthy(
     paid: tuple[float, ...] = (-260.0,) * 4,
 ) -> None:
     _seed_ticker(tmp_path, KO_CIK, "KO")
-    _seed_concepts(tmp_path, KO_CIK,
-                   _quarters([(DPS_TAG, "USD/shares", dps), (EPS_TAG, "USD/shares", eps),
-                              (OCF_TAG, "USD", ocf), (CAPX_TAG, "USD", capx),
-                              (PAID_TAG, "USD", paid)], "q"),
-                   "quarters")
+    _seed_concepts(
+        tmp_path,
+        KO_CIK,
+        _quarters(
+            [
+                (DPS_TAG, "USD/shares", dps),
+                (EPS_TAG, "USD/shares", eps),
+                (OCF_TAG, "USD", ocf),
+                (CAPX_TAG, "USD", capx),
+                (PAID_TAG, "USD", paid),
+            ],
+            "q",
+        ),
+        "quarters",
+    )
     fy = {
-        OCF_TAG: {"USD": [
-            _qfact(3500.0, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-ocf-2024"),
-            _qfact(3800.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-ocf-2025"),
-        ]},
-        CAPX_TAG: {"USD": [
-            _qfact(-700.0, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-capx-2024"),
-            _qfact(-750.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-capx-2025"),
-        ]},
-        PAID_TAG: {"USD": [
-            _qfact(-900.0, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-paid-2024"),
-            _qfact(-1000.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-paid-2025"),
-        ]},
-        INCOME_TAG: {"USD": [
-            _qfact(2500.0, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-ni-2024"),
-            _qfact(2800.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-ni-2025"),
-        ]},
+        OCF_TAG: {
+            "USD": [
+                _qfact(3500.0, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-ocf-2024"),
+                _qfact(3800.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-ocf-2025"),
+            ]
+        },
+        CAPX_TAG: {
+            "USD": [
+                _qfact(-700.0, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-capx-2024"),
+                _qfact(-750.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-capx-2025"),
+            ]
+        },
+        PAID_TAG: {
+            "USD": [
+                _qfact(-900.0, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-paid-2024"),
+                _qfact(-1000.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-paid-2025"),
+            ]
+        },
+        INCOME_TAG: {
+            "USD": [
+                _qfact(2500.0, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-ni-2024"),
+                _qfact(2800.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-ni-2025"),
+            ]
+        },
     }
     _seed_concepts(tmp_path, KO_CIK, fy, "fy")
-    _seed_concepts(tmp_path, KO_CIK, {
-        DPS_TAG: {"USD/shares": [
-            _qfact(1.90, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-dps-2024"),
-            _qfact(2.00, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-dps-2025"),
-        ]},
-        CASH_TAG: {"USD": [
-            {"end": "2026-06-30", "val": 5000.0, "accn": "cash-2026",
-             "fy": 2026, "fp": "Q2", "filed": "2026-07-28"},
-        ]},
-        DEBT_TAG: {"USD": [
-            {"end": "2025-06-30", "val": 8000.0, "accn": "debt-2025",
-             "fy": 2025, "fp": "Q2", "filed": "2025-07-28"},
-            {"end": "2026-06-30", "val": 9000.0, "accn": "debt-2026",
-             "fy": 2026, "fp": "Q2", "filed": "2026-07-28"},
-        ]},
-    }, "fy-div-cash-debt")
+    _seed_concepts(
+        tmp_path,
+        KO_CIK,
+        {
+            DPS_TAG: {
+                "USD/shares": [
+                    _qfact(1.90, "2024-01-01", "2024-12-31", 2024, "FY", "2025-02-10", "fy-dps-2024"),
+                    _qfact(2.00, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "fy-dps-2025"),
+                ]
+            },
+            CASH_TAG: {
+                "USD": [
+                    {
+                        "end": "2026-06-30",
+                        "val": 5000.0,
+                        "accn": "cash-2026",
+                        "fy": 2026,
+                        "fp": "Q2",
+                        "filed": "2026-07-28",
+                    },
+                ]
+            },
+            DEBT_TAG: {
+                "USD": [
+                    {
+                        "end": "2025-06-30",
+                        "val": 8000.0,
+                        "accn": "debt-2025",
+                        "fy": 2025,
+                        "fp": "Q2",
+                        "filed": "2025-07-28",
+                    },
+                    {
+                        "end": "2026-06-30",
+                        "val": 9000.0,
+                        "accn": "debt-2026",
+                        "fy": 2026,
+                        "fp": "Q2",
+                        "filed": "2026-07-28",
+                    },
+                ]
+            },
+        },
+        "fy-div-cash-debt",
+    )
 
 
 def _fail_on_price(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(ticker: str) -> dict[str, object]:
         raise AssertionError("historical dividend query must not call Yahoo")
+
     monkeypatch.setattr(valuation, "get_live_quote", _boom)
 
 
@@ -215,20 +273,31 @@ def test_zero_dividend_nulls_coverage_with_flag(store: Path, monkeypatch: pytest
 def test_payout_expanding_verdict(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
     _seed_ticker(store, KO_CIK, "KO")
-    _seed_concepts(store, KO_CIK, {
-        DPS_TAG: {"USD/shares": [
-            _qfact(1.00, "2020-01-01", "2020-12-31", 2020, "FY", "2021-02-10", "v-dps-2020"),
-            _qfact(2.00, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "v-dps-2025"),
-        ]},
-        OCF_TAG: {"USD": [
-            _qfact(3500.0, "2020-01-01", "2020-12-31", 2020, "FY", "2021-02-10", "v-ocf-2020"),
-            _qfact(3800.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "v-ocf-2025"),
-        ]},
-        CAPX_TAG: {"USD": [
-            _qfact(-500.0, "2020-01-01", "2020-12-31", 2020, "FY", "2021-02-10", "v-capx-2020"),
-            _qfact(-750.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "v-capx-2025"),
-        ]},
-    }, "verdict")
+    _seed_concepts(
+        store,
+        KO_CIK,
+        {
+            DPS_TAG: {
+                "USD/shares": [
+                    _qfact(1.00, "2020-01-01", "2020-12-31", 2020, "FY", "2021-02-10", "v-dps-2020"),
+                    _qfact(2.00, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "v-dps-2025"),
+                ]
+            },
+            OCF_TAG: {
+                "USD": [
+                    _qfact(3500.0, "2020-01-01", "2020-12-31", 2020, "FY", "2021-02-10", "v-ocf-2020"),
+                    _qfact(3800.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "v-ocf-2025"),
+                ]
+            },
+            CAPX_TAG: {
+                "USD": [
+                    _qfact(-500.0, "2020-01-01", "2020-12-31", 2020, "FY", "2021-02-10", "v-capx-2020"),
+                    _qfact(-750.0, "2025-01-01", "2025-12-31", 2025, "FY", "2026-02-10", "v-capx-2025"),
+                ]
+            },
+        },
+        "verdict",
+    )
     safety = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["safety"]
     assert isinstance(safety, dict)
     comp = safety["dividend_vs_fcf_growth_5y"]

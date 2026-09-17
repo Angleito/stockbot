@@ -150,14 +150,24 @@ def _horizon_of(row: Mapping[str, object]) -> Mapping[str, object]:
     return horizon_raw if isinstance(horizon_raw, Mapping) else {}
 
 
-def _row_annual(row: Mapping[str, object], amount_b: float, kind: str, years: int, schedule: list[Mapping[str, object]], total: float, horizon: Mapping[str, object]) -> float:
+def _row_annual(
+    row: Mapping[str, object],
+    amount_b: float,
+    kind: str,
+    years: int,
+    schedule: list[Mapping[str, object]],
+    total: float,
+    horizon: Mapping[str, object],
+) -> float:
     """Annualized $B for one row: disclosed schedule wins, else horizon, else flat."""
     if schedule and total > 0:
         return total / max(1, len(schedule))
     return _horizon_annual(row, amount_b, kind, years, horizon)
 
 
-def _horizon_annual(row: Mapping[str, object], amount_b: float, kind: str, years: int, horizon: Mapping[str, object]) -> float:
+def _horizon_annual(
+    row: Mapping[str, object], amount_b: float, kind: str, years: int, horizon: Mapping[str, object]
+) -> float:
     """Annualized $B from the payment horizon (front-loaded remainder, else flat)."""
     # ponytail: front-loaded remainder (~0.75yr) + tail spread; flat fallback otherwise
     cloud_schedule = _schedule_entries(horizon.get("schedule"))
@@ -194,13 +204,25 @@ def _row_bucket(row: Mapping[str, object]) -> str | None:
     return "contingent"
 
 
-def _record_schedule_entries(impact_by_fy: dict[str, dict[str, float]], bucket: str, entries: list[Mapping[str, object]]) -> None:
+def _record_schedule_entries(
+    impact_by_fy: dict[str, dict[str, float]], bucket: str, entries: list[Mapping[str, object]]
+) -> None:
     """Attribute disclosed schedule entries to their FY buckets."""
     for y in entries:
         _add_fy_amount(impact_by_fy, str(y.get("fiscal_year") or ""), bucket, _entry_amount(y))
 
 
-def _record_row_schedule(impact_by_fy: dict[str, dict[str, float]], flat_annual_by_bucket: dict[str, float], bucket: str, annual: float, row: Mapping[str, object], schedule: list[Mapping[str, object]], total: float, horizon: Mapping[str, object], years: int) -> None:
+def _record_row_schedule(
+    impact_by_fy: dict[str, dict[str, float]],
+    flat_annual_by_bucket: dict[str, float],
+    bucket: str,
+    annual: float,
+    row: Mapping[str, object],
+    schedule: list[Mapping[str, object]],
+    total: float,
+    horizon: Mapping[str, object],
+    years: int,
+) -> None:
     """Attribute one row's impact to FY buckets (disclosed FYs) or the flat bucket."""
     if schedule and total > 0:
         _record_schedule_entries(impact_by_fy, bucket, schedule)
@@ -212,7 +234,9 @@ def _record_row_schedule(impact_by_fy: dict[str, dict[str, float]], flat_annual_
     flat_annual_by_bucket[bucket] += annual
 
 
-def _record_horizon_schedule(impact_by_fy: dict[str, dict[str, float]], bucket: str, horizon: Mapping[str, object]) -> bool:
+def _record_horizon_schedule(
+    impact_by_fy: dict[str, dict[str, float]], bucket: str, horizon: Mapping[str, object]
+) -> bool:
     """Attribute a horizon schedule to FYs (False = no horizon schedule)."""
     cloud_schedule = _schedule_entries(horizon.get("schedule"))
     if not cloud_schedule:
@@ -229,7 +253,9 @@ def _front_loaded_amounts(horizon: Mapping[str, object]) -> tuple[float, str] | 
     return (near_flat, remainder_year) if near_flat and remainder_year else None
 
 
-def _record_front_loaded(impact_by_fy: dict[str, dict[str, float]], bucket: str, horizon: Mapping[str, object], years: int) -> bool:
+def _record_front_loaded(
+    impact_by_fy: dict[str, dict[str, float]], bucket: str, horizon: Mapping[str, object], years: int
+) -> bool:
     """Attribute a front-loaded remainder+tail horizon to FYs (False = no horizon)."""
     amounts = _front_loaded_amounts(horizon)
     if amounts is None:
@@ -240,7 +266,13 @@ def _record_front_loaded(impact_by_fy: dict[str, dict[str, float]], bucket: str,
     return True
 
 
-def _record_tail_years(impact_by_fy: dict[str, dict[str, float]], bucket: str, horizon: Mapping[str, object], remainder_year: str, years: int) -> None:
+def _record_tail_years(
+    impact_by_fy: dict[str, dict[str, float]],
+    bucket: str,
+    horizon: Mapping[str, object],
+    remainder_year: str,
+    years: int,
+) -> None:
     """Spread a front-loaded horizon's tail evenly over the following FYs."""
     tail_raw = horizon.get("paid_after_remainder_billions", 0.0)
     tail_flat = float(tail_raw) if isinstance(tail_raw, (int, float)) else 0.0
@@ -261,7 +293,10 @@ def _remainder_base_year(remainder_year: str) -> int | None:
     except ValueError:
         return None
 
-def _per_kind_entry(row: Mapping[str, object], amount_b: float, annual: float, horizon: Mapping[str, object]) -> dict[str, object]:
+
+def _per_kind_entry(
+    row: Mapping[str, object], amount_b: float, annual: float, horizon: Mapping[str, object]
+) -> dict[str, object]:
     """per_kind row: rounded totals plus the flags that chose its bucket."""
     return {
         "total_billions": round(amount_b, 3),
@@ -272,6 +307,7 @@ def _per_kind_entry(row: Mapping[str, object], amount_b: float, annual: float, h
         "default_triggered": bool(row.get("default_triggered")) or row.get("type") in DEFAULT_TRIGGERED_TYPES,
         "payment_horizon": horizon,
     }
+
 
 def _obligation_annual_impact(obligations_rows: Sequence[Mapping[str, object]], years: int) -> ObligationAnnualImpact:
     """Per-kind annualized $B impact split by EPS treatment.
@@ -333,8 +369,7 @@ def _obligation_annual_impact(obligations_rows: Sequence[Mapping[str, object]], 
         "per_kind": per_kind,
         "flat_annual_by_bucket": {k: round(v, 3) for k, v in flat_annual_by_bucket.items()},
         "impact_by_fiscal_year": {
-            year: {k: round(v, 3) for k, v in buckets.items()}
-            for year, buckets in impact_by_fy.items()
+            year: {k: round(v, 3) for k, v in buckets.items()} for year, buckets in impact_by_fy.items()
         },
     }
 
@@ -365,8 +400,7 @@ def _projected_prices(eps_by_tier: dict[str, float | None], price: float | None)
         tiers.append({"tier": tier, "eps": round(eps, 2), "prices": cells})
     return {
         "assumption": (
-            "projected price = scenario EPS x assumed P/E multiple; "
-            "pct_change is vs the current live price"
+            "projected price = scenario EPS x assumed P/E multiple; pct_change is vs the current live price"
         ),
         "multiples": list(PROJECTION_MULTIPLES),
         "current_price": round(price, 2) if price is not None else None,
@@ -379,11 +413,13 @@ def _tax_rate_from_note_markdown(md: str) -> float | None:
     match = re.search(
         r"(?:income tax expense|provision for income taxes)"
         r"[^|]{0,80}\|\s*\$?([\d,]+)",
-        md, re.IGNORECASE,
+        md,
+        re.IGNORECASE,
     )
     pre = re.search(
         r"income before income tax(?:es)?[^|]{0,80}\|\s*\$?([\d,]+)",
-        md, re.IGNORECASE,
+        md,
+        re.IGNORECASE,
     )
     if not match or not pre:
         return None
@@ -426,13 +462,10 @@ def _facts_tax_rate(ticker: str) -> float | None:
             raise ValueError("company facts unavailable")
         df = facts_obj.to_dataframe()
         tax = df[
-            df["concept"].str.contains("IncomeTaxExpenseBenefit", case=False)
-            & (df["fiscal_period"] == "FY")
+            df["concept"].str.contains("IncomeTaxExpenseBenefit", case=False) & (df["fiscal_period"] == "FY")
         ].sort_values("period_end")
         pre = df[
-            df["concept"].str.contains(
-                "IncomeLossFromContinuingOperationsBeforeIncomeTaxes", case=False
-            )
+            df["concept"].str.contains("IncomeLossFromContinuingOperationsBeforeIncomeTaxes", case=False)
             & (df["fiscal_period"] == "FY")
         ].sort_values("period_end")
         if tax.empty or pre.empty:
@@ -457,6 +490,7 @@ def _ob_ticker(ob_rows: Mapping[str, object]) -> str:
     ob_ticker = ob_rows.get("ticker", "")
     return ob_ticker if isinstance(ob_ticker, str) else ""
 
+
 def _effective_tax_rate(ob_rows: Mapping[str, object]) -> float | None:
     """Company's own effective tax rate from its 10-K (income tax expense /
     pre-tax income), falling back to XBRL annual facts, else None. Rates
@@ -480,8 +514,7 @@ def _revenue_matched_margin(ticker: str) -> tuple[float | None, str]:
             raise ValueError("company facts unavailable")
         df = facts_obj.to_dataframe()
         gp = df[
-            df["concept"].str.fullmatch(r"(us-gaap:)?GrossProfit", case=False)
-            & (df["fiscal_period"] == "FY")
+            df["concept"].str.fullmatch(r"(us-gaap:)?GrossProfit", case=False) & (df["fiscal_period"] == "FY")
         ].sort_values("period_end")
         rev = df.iloc[0:0]
         for concept in (
@@ -490,8 +523,7 @@ def _revenue_matched_margin(ticker: str) -> tuple[float | None, str]:
             "SalesRevenueNet",
         ):
             hit = df[
-                df["concept"].str.fullmatch(rf"(us-gaap:)?{concept}", case=False)
-                & (df["fiscal_period"] == "FY")
+                df["concept"].str.fullmatch(rf"(us-gaap:)?{concept}", case=False) & (df["fiscal_period"] == "FY")
             ].sort_values("period_end")
             if not hit.empty:
                 rev = hit
@@ -508,29 +540,58 @@ def _revenue_matched_margin(ticker: str) -> tuple[float | None, str]:
     return None, "unavailable: gross margin fact missing"
 
 
-def _scenario_hit(rows: list[dict[str, object]], name: str, pretax_billions: float, one_time: bool, note: str, shares_out: int | None, tax_rate: float | None) -> None:
+def _scenario_hit(
+    rows: list[dict[str, object]],
+    name: str,
+    pretax_billions: float,
+    one_time: bool,
+    note: str,
+    shares_out: int | None,
+    tax_rate: float | None,
+) -> None:
     """Append one after-tax EPS scenario (missing rate/shares -> None with reason)."""
     if tax_rate is None:
-        rows.append({
-            "scenario": name, "pretax_billions": round(pretax_billions, 3),
-            "after_tax_billions": None, "eps_impact": None, "one_time": one_time,
-            "tax_rate": None, "reason": "effective tax rate unavailable", "note": note,
-        })
+        rows.append(
+            {
+                "scenario": name,
+                "pretax_billions": round(pretax_billions, 3),
+                "after_tax_billions": None,
+                "eps_impact": None,
+                "one_time": one_time,
+                "tax_rate": None,
+                "reason": "effective tax rate unavailable",
+                "note": note,
+            }
+        )
         return
     after_tax = pretax_billions * (1 - tax_rate)
     if not shares_out:
-        rows.append({
-            "scenario": name, "pretax_billions": round(pretax_billions, 3),
-            "after_tax_billions": round(after_tax, 3), "eps_impact": None, "one_time": one_time,
-            "tax_rate": round(tax_rate, 3), "reason": "diluted shares unavailable", "note": note,
-        })
+        rows.append(
+            {
+                "scenario": name,
+                "pretax_billions": round(pretax_billions, 3),
+                "after_tax_billions": round(after_tax, 3),
+                "eps_impact": None,
+                "one_time": one_time,
+                "tax_rate": round(tax_rate, 3),
+                "reason": "diluted shares unavailable",
+                "note": note,
+            }
+        )
         return
     eps = after_tax / (shares_out / 1e9)
-    rows.append({
-        "scenario": name, "pretax_billions": round(pretax_billions, 3),
-        "after_tax_billions": round(after_tax, 3), "eps_impact": round(-eps, 3), "one_time": one_time,
-        "tax_rate": round(tax_rate, 3), "reason": None, "note": note,
-    })
+    rows.append(
+        {
+            "scenario": name,
+            "pretax_billions": round(pretax_billions, 3),
+            "after_tax_billions": round(after_tax, 3),
+            "eps_impact": round(-eps, 3),
+            "one_time": one_time,
+            "tax_rate": round(tax_rate, 3),
+            "reason": None,
+            "note": note,
+        }
+    )
 
 
 def _snapshot_of(ob_rows: Mapping[str, object]) -> list[Mapping[str, object]]:
@@ -553,7 +614,10 @@ def _total_future_commitments(snapshot: list[Mapping[str, object]]) -> float:
     """Summed future-cash + off-balance-sheet commitments (excl. supply)."""
     total = 0.0
     for row in snapshot:
-        if row.get("status") in ("future_cash_obligation", "off_balance_sheet") and row.get("type") != "supply_commitments":
+        if (
+            row.get("status") in ("future_cash_obligation", "off_balance_sheet")
+            and row.get("type") != "supply_commitments"
+        ):
             commit_raw = row.get("amount_billions")
             if isinstance(commit_raw, (int, float)):
                 total += commit_raw
@@ -566,36 +630,65 @@ def _scenario_exposure(row: Mapping[str, object]) -> float:
     return float(trigger_raw) if isinstance(trigger_raw, (int, float)) else 0.0
 
 
-def _add_purchase_scenarios(rows: list[dict[str, object]], purchase: float | None, shares_out: int | None, tax_rate: float | None) -> None:
+def _add_purchase_scenarios(
+    rows: list[dict[str, object]], purchase: float | None, shares_out: int | None, tax_rate: float | None
+) -> None:
     """5/10/20% write-down scenarios for purchase commitments."""
     if not purchase:
         return
     for pct in (0.05, 0.10, 0.20):
         _scenario_hit(
-            rows, f"purchase_commitments_write_down_{int(pct*100)}pct",
-            purchase * pct, True,
-            f"{int(pct*100)}% of ${purchase}B purchase commitments written down",
-            shares_out, tax_rate,
+            rows,
+            f"purchase_commitments_write_down_{int(pct * 100)}pct",
+            purchase * pct,
+            True,
+            f"{int(pct * 100)}% of ${purchase}B purchase commitments written down",
+            shares_out,
+            tax_rate,
         )
 
 
-def _add_commitment_scenario(rows: list[dict[str, object]], total_commitments: float, shares_out: int | None, tax_rate: float | None) -> None:
+def _add_commitment_scenario(
+    rows: list[dict[str, object]], total_commitments: float, shares_out: int | None, tax_rate: float | None
+) -> None:
     """Annualized all-future-commitments scenario (skipped when zero)."""
     if total_commitments:
         _scenario_hit(
-            rows, "all_future_commitments_annualized", total_commitments / 6.0, False,
+            rows,
+            "all_future_commitments_annualized",
+            total_commitments / 6.0,
+            False,
             "disclosed future-cash and off-balance-sheet commitments spread over 6 years",
-            shares_out, tax_rate,
+            shares_out,
+            tax_rate,
         )
 
 
-def _add_trigger_scenarios(rows: list[dict[str, object]], snapshot: list[Mapping[str, object]], shares_out: int | None, tax_rate: float | None) -> None:
+def _add_trigger_scenarios(
+    rows: list[dict[str, object]], snapshot: list[Mapping[str, object]], shares_out: int | None, tax_rate: float | None
+) -> None:
     """Default-triggered guarantee + tax-settlement scenarios."""
     for row in snapshot:
         if row.get("default_triggered"):
-            _scenario_hit(rows, f"{row.get('type')}_call", _scenario_exposure(row), True, "default-triggered guarantee called", shares_out, tax_rate)
+            _scenario_hit(
+                rows,
+                f"{row.get('type')}_call",
+                _scenario_exposure(row),
+                True,
+                "default-triggered guarantee called",
+                shares_out,
+                tax_rate,
+            )
         elif row.get("type") == "unrecognized_tax_benefits":
-            _scenario_hit(rows, "tax_settlement", _scenario_exposure(row), True, "full adverse tax settlement", shares_out, tax_rate)
+            _scenario_hit(
+                rows,
+                "tax_settlement",
+                _scenario_exposure(row),
+                True,
+                "full adverse tax settlement",
+                shares_out,
+                tax_rate,
+            )
 
 
 def _scenario_assumption(tax_rate: float | None) -> str:
@@ -606,6 +699,7 @@ def _scenario_assumption(tax_rate: float | None) -> str:
         " / diluted shares; one-time items are "
         "shown per event, recurring items annualized"
     )
+
 
 def _obligation_eps_scenarios(
     ob_rows: Mapping[str, object], shares_out: int | None, tax_rate: float | None
@@ -637,16 +731,17 @@ def _implied_coverage(revenue_matched_b: float, gross_margin: float | None) -> f
         return revenue_matched_b / (1 - gross_margin)
     return None
 
-def _eps_line(eps_value: float | None, contractual: float | None, contingent: float | None, label: str, price: float | None) -> dict[str, object] | None:
+
+def _eps_line(
+    eps_value: float | None, contractual: float | None, contingent: float | None, label: str, price: float | None
+) -> dict[str, object] | None:
     """One forward-EPS tier with contractual/contingent drags applied (None EPS -> None)."""
     if eps_value is None:
         return None
     line: dict[str, object] = {
         "eps": round(eps_value, 2),
         "price": round(price, 2) if price is not None else None,
-        "pe": round(price / eps_value, 1)
-        if (price is not None and eps_value)
-        else None,
+        "pe": round(price / eps_value, 1) if (price is not None and eps_value) else None,
         "label": label,
     }
     _apply_contractual_drag(line, eps_value, contractual, price)
@@ -654,7 +749,9 @@ def _eps_line(eps_value: float | None, contractual: float | None, contingent: fl
     return line
 
 
-def _apply_contractual_drag(line: dict[str, object], eps_value: float, contractual: float | None, price: float | None) -> None:
+def _apply_contractual_drag(
+    line: dict[str, object], eps_value: float, contractual: float | None, price: float | None
+) -> None:
     """Contractual per-share drag onto an EPS line (falsy drag skipped)."""
     if contractual:
         line["obligation_drag_per_share"] = round(contractual, 2)
@@ -671,7 +768,9 @@ def _contingent_residual(eps_value: float, contractual: float | None, contingent
     return eps_value - (contractual or 0.0) - contingent
 
 
-def _apply_contingent_drag(line: dict[str, object], eps_value: float, contractual: float | None, contingent: float | None, price: float | None) -> None:
+def _apply_contingent_drag(
+    line: dict[str, object], eps_value: float, contractual: float | None, contingent: float | None, price: float | None
+) -> None:
     """Contingent per-share drag onto an EPS line (falsy drag skipped)."""
     if not contingent:
         return
@@ -679,9 +778,7 @@ def _apply_contingent_drag(line: dict[str, object], eps_value: float, contractua
     line["contingent_drag_per_share"] = round(contingent, 2)
     line["eps_after_all_obligations"] = round(residual, 2)
     line["pe_after_all_obligations"] = (
-        round(price / max(0.01, residual), 1)
-        if (price is not None and residual > 0)
-        else None
+        round(price / max(0.01, residual), 1) if (price is not None and residual > 0) else None
     )
 
 
@@ -691,14 +788,22 @@ def _fy_year(period: dict[str, object]) -> str | None:
     return year or None
 
 
-def _fy_ps(impact_by_fy: dict[str, dict[str, float]], flat_map: dict[str, float], shares_out: int | None, year: str | None, key: str) -> float | None:
+def _fy_ps(
+    impact_by_fy: dict[str, dict[str, float]],
+    flat_map: dict[str, float],
+    shares_out: int | None,
+    year: str | None,
+    key: str,
+) -> float | None:
     """Per-share impact for one FY bucket (missing shares/year -> None)."""
     if shares_out and year:
         return (impact_by_fy.get(year, {}).get(key, 0.0) + flat_map.get(key, 0.0)) / (shares_out / 1e9)
     return None
 
 
-def _fy_drags(impact_by_fy: dict[str, dict[str, float]], flat_map: dict[str, float], shares_out: int | None, year: str | None) -> dict[str, float | None]:
+def _fy_drags(
+    impact_by_fy: dict[str, dict[str, float]], flat_map: dict[str, float], shares_out: int | None, year: str | None
+) -> dict[str, float | None]:
     """All four per-share drags for one FY (contractual/contingent/default/revenue)."""
     return {
         "contractual": _fy_ps(impact_by_fy, flat_map, shares_out, year, "contractual"),
@@ -713,8 +818,6 @@ def _drag_ps(annual_billions: float, shares_out: int | None) -> float | None:
     return annual_billions / (shares_out / 1e9) if shares_out else None
 
 
-
-
 def _estimates_by_period(estimates: dict[str, object]) -> dict[str, dict[str, object]] | None:
     """Forward estimates keyed by period (None when the list is missing)."""
     forward_rows = estimates.get("forward_estimates")
@@ -723,54 +826,80 @@ def _estimates_by_period(estimates: dict[str, object]) -> dict[str, dict[str, ob
     return {r["period"]: r for r in forward_rows}
 
 
-def _current_fy_eps(eps_current: float | None, cur: dict[str, float | None], price: float | None) -> dict[str, dict[str, object] | None]:
+def _current_fy_eps(
+    eps_current: float | None, cur: dict[str, float | None], price: float | None
+) -> dict[str, dict[str, object] | None]:
     """Current-FY forward-EPS tiers (consensus/adjusted/scenario/worst-case)."""
     return {
         "consensus": _eps_line(eps_current, None, None, "consensus", price),
         "adjusted": _eps_line(
-            eps_current, cur["contractual"], None,
-            "adjusted forward EPS (contractual obligations included)", price,
+            eps_current,
+            cur["contractual"],
+            None,
+            "adjusted forward EPS (contractual obligations included)",
+            price,
         ),
         "scenario": _eps_line(
-            eps_current, cur["contractual"], cur["contingent"],
-            "forward EPS incl. contingent obligations (stress scenario, no counterparty default)", price,
+            eps_current,
+            cur["contractual"],
+            cur["contingent"],
+            "forward EPS incl. contingent obligations (stress scenario, no counterparty default)",
+            price,
         ),
         "scenario_with_defaults": _eps_line(
-            eps_current, cur["contractual"],
+            eps_current,
+            cur["contractual"],
             (cur["contingent"] or 0.0) + (cur["default_triggered"] or 0.0),
-            "forward EPS incl. contingent obligations AND counterparty-default-triggered guarantees (pay only on counterparty default)", price,
+            "forward EPS incl. contingent obligations AND counterparty-default-triggered guarantees (pay only on counterparty default)",
+            price,
         ),
         "worst_case": _eps_line(
             eps_current,
             (cur["contractual"] or 0.0) + (cur["revenue_matched"] or 0.0),
             (cur["contingent"] or 0.0) + (cur["default_triggered"] or 0.0),
-            "worst-case EPS (all disclosed obligations incl. revenue-matched supply stranded AND counterparty defaults)", price,
+            "worst-case EPS (all disclosed obligations incl. revenue-matched supply stranded AND counterparty defaults)",
+            price,
         ),
     }
 
 
-def _next_fy_eps(eps_next: float | None, nxt: dict[str, float | None], price: float | None) -> dict[str, dict[str, object] | None]:
+def _next_fy_eps(
+    eps_next: float | None, nxt: dict[str, float | None], price: float | None
+) -> dict[str, dict[str, object] | None]:
     """Next-FY forward-EPS tiers (consensus/adjusted/scenario/worst-case)."""
     return {
         "consensus_next_fy": _eps_line(eps_next, None, None, "consensus", price),
         "adjusted_next_fy": _eps_line(
-            eps_next, nxt["contractual"], None,
-            "adjusted forward EPS (contractual obligations included)", price,
+            eps_next,
+            nxt["contractual"],
+            None,
+            "adjusted forward EPS (contractual obligations included)",
+            price,
         ),
         "scenario_next_fy": _eps_line(
-            eps_next, nxt["contractual"], nxt["contingent"],
-            "forward EPS incl. contingent obligations (stress scenario, no counterparty default)", price,
+            eps_next,
+            nxt["contractual"],
+            nxt["contingent"],
+            "forward EPS incl. contingent obligations (stress scenario, no counterparty default)",
+            price,
         ),
         "worst_case_next_fy": _eps_line(
             eps_next,
             (nxt["contractual"] or 0.0) + (nxt["revenue_matched"] or 0.0),
             (nxt["contingent"] or 0.0) + (nxt["default_triggered"] or 0.0),
-            "worst-case EPS (all disclosed obligations incl. revenue-matched supply stranded AND counterparty defaults)", price,
+            "worst-case EPS (all disclosed obligations incl. revenue-matched supply stranded AND counterparty defaults)",
+            price,
         ),
     }
 
 
-def _build_forward_eps(eps_current: float | None, eps_next: float | None, cur: dict[str, float | None], nxt: dict[str, float | None], price: float | None) -> dict[str, dict[str, object] | None]:
+def _build_forward_eps(
+    eps_current: float | None,
+    eps_next: float | None,
+    cur: dict[str, float | None],
+    nxt: dict[str, float | None],
+    price: float | None,
+) -> dict[str, dict[str, object] | None]:
     """Nine-tier forward-EPS map (consensus/adjusted/scenario/worst-case x FY)."""
     return {**_current_fy_eps(eps_current, cur, price), **_next_fy_eps(eps_next, nxt, price)}
 
@@ -792,18 +921,36 @@ def _next_scenario_tier_label(kind: str, year: str | None) -> str:
     return f"Scenario FY{year} {suffix}" if year else f"Scenario (next FY, {suffix[1:]}"
 
 
-def _projected_eps_map(forward_eps: dict[str, dict[str, object] | None], year_cur: str | None, year_next: str | None) -> dict[str, float | None]:
+def _projected_eps_map(
+    forward_eps: dict[str, dict[str, object] | None], year_cur: str | None, year_next: str | None
+) -> dict[str, float | None]:
     """Scenario-EPS map consumed by the projected-prices matrix."""
     return {
         _tier_label("Consensus", year_cur, "Consensus (current FY)"): _tier_eps(forward_eps.get("consensus"), "eps"),
-        _tier_label("Adjusted", year_cur, "Adjusted (current FY)"): _tier_eps(forward_eps.get("adjusted"), "eps_after_contractual"),
-        _scenario_tier_label("no_default", year_cur): _tier_eps(forward_eps.get("scenario"), "eps_after_all_obligations"),
-        _scenario_tier_label("default", year_cur): _tier_eps(forward_eps.get("scenario_with_defaults"), "eps_after_all_obligations"),
-        _tier_label("Worst case", year_cur, "Worst case (current FY)"): _tier_eps(forward_eps.get("worst_case"), "eps_after_all_obligations"),
-        _tier_label("Consensus", year_next, "Consensus (next FY)"): _tier_eps(forward_eps.get("consensus_next_fy"), "eps"),
-        _next_scenario_tier_label("no_default", year_next): _tier_eps(forward_eps.get("scenario_next_fy"), "eps_after_all_obligations"),
-        _next_scenario_tier_label("default", year_next): _tier_eps(forward_eps.get("scenario_with_defaults_next_fy"), "eps_after_all_obligations"),
-        _tier_label("Worst case", year_next, "Worst case (next FY)"): _tier_eps(forward_eps.get("worst_case_next_fy"), "eps_after_all_obligations"),
+        _tier_label("Adjusted", year_cur, "Adjusted (current FY)"): _tier_eps(
+            forward_eps.get("adjusted"), "eps_after_contractual"
+        ),
+        _scenario_tier_label("no_default", year_cur): _tier_eps(
+            forward_eps.get("scenario"), "eps_after_all_obligations"
+        ),
+        _scenario_tier_label("default", year_cur): _tier_eps(
+            forward_eps.get("scenario_with_defaults"), "eps_after_all_obligations"
+        ),
+        _tier_label("Worst case", year_cur, "Worst case (current FY)"): _tier_eps(
+            forward_eps.get("worst_case"), "eps_after_all_obligations"
+        ),
+        _tier_label("Consensus", year_next, "Consensus (next FY)"): _tier_eps(
+            forward_eps.get("consensus_next_fy"), "eps"
+        ),
+        _next_scenario_tier_label("no_default", year_next): _tier_eps(
+            forward_eps.get("scenario_next_fy"), "eps_after_all_obligations"
+        ),
+        _next_scenario_tier_label("default", year_next): _tier_eps(
+            forward_eps.get("scenario_with_defaults_next_fy"), "eps_after_all_obligations"
+        ),
+        _tier_label("Worst case", year_next, "Worst case (next FY)"): _tier_eps(
+            forward_eps.get("worst_case_next_fy"), "eps_after_all_obligations"
+        ),
     }
 
 
@@ -823,6 +970,7 @@ def _coverage_warning_list(ob_rows: Mapping[str, object], ob_coverage: Mapping[s
     """Coverage warnings list (missing/non-list -> [])."""
     warnings_raw: object = ob_coverage.get("warnings") or ob_rows.get("warnings") or []
     return list(warnings_raw) if isinstance(warnings_raw, list) else []
+
 
 def _filings_examined(ob_rows: Mapping[str, object], manifest: list[object], rows: list[dict[str, object]]) -> object:
     """Filings examined: explicit list wins, else manifest/row dates."""
@@ -845,9 +993,7 @@ def _sections_examined(ob_rows: Mapping[str, object], manifest: list[object], ro
 def _unquantified_count(ob_rows: Mapping[str, object], ob_coverage: Mapping[str, object]) -> int:
     """Unquantified exposure count (coverage wins, else longest alias list)."""
     unquantified_raw = (
-        ob_rows.get("unquantified_exposures")
-        or ob_rows.get("unquantified")
-        or ob_rows.get("unquantified_items")
+        ob_rows.get("unquantified_exposures") or ob_rows.get("unquantified") or ob_rows.get("unquantified_items")
     )
     fallback = len(unquantified_raw) if isinstance(unquantified_raw, list) else 0
     count = ob_coverage.get("quantified_count", None)
@@ -886,6 +1032,7 @@ def _build_coverage(ob_rows: Mapping[str, object], price_gap: str | None) -> dic
         coverage_warnings.append(price_gap)
     return coverage
 
+
 def _live_price_gap(ticker: str) -> tuple[float | None, str | None]:
     """Live price plus the no-price gap note (None gap when priced)."""
     price = get_live_price(ticker)
@@ -905,8 +1052,9 @@ def _period_eps(period: dict[str, object]) -> float | None:
     return eps_avg if isinstance(eps_avg, (int, float)) else None
 
 
-
-def _valuation_drags(impact: ObligationAnnualImpact, ticker: str, shares_out: int | None) -> tuple[float | None, float | None, float | None, float | None, float | None, str, float | None]:
+def _valuation_drags(
+    impact: ObligationAnnualImpact, ticker: str, shares_out: int | None
+) -> tuple[float | None, float | None, float | None, float | None, float | None, str, float | None]:
     """Per-share drags + revenue coverage for the metrics assembly."""
     contractual_ps = _drag_ps(impact["contractual_annual_billions"], shares_out)
     contingent_ps = _drag_ps(impact["contingent_annual_billions"], shares_out)
@@ -917,9 +1065,26 @@ def _valuation_drags(impact: ObligationAnnualImpact, ticker: str, shares_out: in
     revenue_matched_ps = _drag_ps(impact["revenue_matched_annual_billions"], shares_out)
     gross_margin, margin_source = _revenue_matched_margin(ticker)
     implied_coverage_b = _implied_coverage(impact["revenue_matched_annual_billions"], gross_margin)
-    return contractual_ps, contingent_ps, default_triggered_ps, revenue_matched_ps, gross_margin, margin_source, implied_coverage_b
+    return (
+        contractual_ps,
+        contingent_ps,
+        default_triggered_ps,
+        revenue_matched_ps,
+        gross_margin,
+        margin_source,
+        implied_coverage_b,
+    )
 
-def _valuation_forward_tiers(impact: ObligationAnnualImpact, shares_out: int | None, fy_current: dict[str, object], fy_next: dict[str, object], eps_current: float | None, eps_next: float | None, price: float | None) -> tuple[dict[str, dict[str, object] | None], str | None, str | None]:
+
+def _valuation_forward_tiers(
+    impact: ObligationAnnualImpact,
+    shares_out: int | None,
+    fy_current: dict[str, object],
+    fy_next: dict[str, object],
+    eps_current: float | None,
+    eps_next: float | None,
+    price: float | None,
+) -> tuple[dict[str, dict[str, object] | None], str | None, str | None]:
     """Forward-EPS tiers + FY years for the metrics assembly."""
     impact_by_fy = impact.get("impact_by_fiscal_year") or {}
     flat_map = impact.get("flat_annual_by_bucket") or {}
@@ -955,6 +1120,7 @@ def _fetch_obligations(ticker: str) -> tuple[dict[str, object] | None, dict[str,
         return {"error": f"No valuation data for {ticker}: {ob_rows.get('error') or ''!s}"}, {}
     return None, ob_rows
 
+
 def _fetch_estimates(ticker: str) -> tuple[dict[str, object] | None, dict[str, dict[str, object]]]:
     """Analyst estimates + forward periods, or the _no_data payload."""
     estimates = analyst_client.get_analyst_estimates(ticker)
@@ -974,19 +1140,62 @@ def _fetch_eps(ticker: str, estimates: dict[str, object]) -> tuple[dict[str, obj
     return None, _ttm_eps(eps), _shares_from_estimates(estimates)
 
 
-def _finish_metrics(ticker: str, key: str, estimates: dict[str, object], price: float | None, price_gap: str | None, ob_rows: dict[str, object], shares_out: int | None, ttm_eps_diluted: float | None, impact: ObligationAnnualImpact, eps_scenarios: dict[str, object], estimates_by_period: dict[str, dict[str, object]]) -> dict[str, object]:
+def _finish_metrics(
+    ticker: str,
+    key: str,
+    estimates: dict[str, object],
+    price: float | None,
+    price_gap: str | None,
+    ob_rows: dict[str, object],
+    shares_out: int | None,
+    ttm_eps_diluted: float | None,
+    impact: ObligationAnnualImpact,
+    eps_scenarios: dict[str, object],
+    estimates_by_period: dict[str, dict[str, object]],
+) -> dict[str, object]:
     """Forward EPS + coverage + final dict (+ cache when fully priced)."""
     fy_current = estimates_by_period.get("current_fiscal_year") or {}
     fy_next = estimates_by_period.get("next_fiscal_year") or {}
     eps_current = _period_eps(fy_current)
     eps_next = _period_eps(fy_next)
-    contractual_ps, contingent_ps, default_triggered_ps, revenue_matched_ps, gross_margin, margin_source, implied_coverage_b = _valuation_drags(impact, ticker, shares_out)
-    forward_eps, year_cur, year_next = _valuation_forward_tiers(impact, shares_out, fy_current, fy_next, eps_current, eps_next, price)
+    (
+        contractual_ps,
+        contingent_ps,
+        default_triggered_ps,
+        revenue_matched_ps,
+        gross_margin,
+        margin_source,
+        implied_coverage_b,
+    ) = _valuation_drags(impact, ticker, shares_out)
+    forward_eps, year_cur, year_next = _valuation_forward_tiers(
+        impact, shares_out, fy_current, fy_next, eps_current, eps_next, price
+    )
     coverage = _build_coverage(ob_rows, price_gap)
-    value = _assemble_value(ticker, estimates, price, price_gap, coverage, shares_out, ttm_eps_diluted, impact, contractual_ps, contingent_ps, default_triggered_ps, revenue_matched_ps, implied_coverage_b, gross_margin, margin_source, eps_scenarios, forward_eps, year_cur, year_next)
+    value = _assemble_value(
+        ticker,
+        estimates,
+        price,
+        price_gap,
+        coverage,
+        shares_out,
+        ttm_eps_diluted,
+        impact,
+        contractual_ps,
+        contingent_ps,
+        default_triggered_ps,
+        revenue_matched_ps,
+        implied_coverage_b,
+        gross_margin,
+        margin_source,
+        eps_scenarios,
+        forward_eps,
+        year_cur,
+        year_next,
+    )
     if price_gap is None:  # never cache a quote gap; retry fresh next call
         cache.set(key, value)
     return value
+
 
 def get_valuation_metrics(ticker: str) -> dict[str, object]:
     """Price-anchored valuation with obligation-aware forward EPS (cached 15m)."""
@@ -1012,10 +1221,42 @@ def get_valuation_metrics(ticker: str) -> dict[str, object]:
     impact = _obligation_annual_impact(_snapshot_of(ob_rows), years=6)
     tax_rate = _effective_tax_rate(ob_rows)
     eps_scenarios = _obligation_eps_scenarios(ob_rows, shares_out, tax_rate)
-    return _finish_metrics(ticker, key, estimates, price, price_gap, ob_rows, shares_out, ttm_eps_diluted, impact, eps_scenarios, estimates_by_period)
+    return _finish_metrics(
+        ticker,
+        key,
+        estimates,
+        price,
+        price_gap,
+        ob_rows,
+        shares_out,
+        ttm_eps_diluted,
+        impact,
+        eps_scenarios,
+        estimates_by_period,
+    )
 
 
-def _assemble_value(ticker: str, estimates: dict[str, object], price: float | None, price_gap: str | None, coverage: dict[str, object], shares_out: int | None, ttm_eps_diluted: float | None, impact: ObligationAnnualImpact, contractual_ps: float | None, contingent_ps: float | None, default_triggered_ps: float | None, revenue_matched_ps: float | None, implied_coverage_b: float | None, gross_margin: float | None, margin_source: str, eps_scenarios: dict[str, object], forward_eps: dict[str, dict[str, object] | None], year_cur: str | None, year_next: str | None) -> dict[str, object]:
+def _assemble_value(
+    ticker: str,
+    estimates: dict[str, object],
+    price: float | None,
+    price_gap: str | None,
+    coverage: dict[str, object],
+    shares_out: int | None,
+    ttm_eps_diluted: float | None,
+    impact: ObligationAnnualImpact,
+    contractual_ps: float | None,
+    contingent_ps: float | None,
+    default_triggered_ps: float | None,
+    revenue_matched_ps: float | None,
+    implied_coverage_b: float | None,
+    gross_margin: float | None,
+    margin_source: str,
+    eps_scenarios: dict[str, object],
+    forward_eps: dict[str, dict[str, object] | None],
+    year_cur: str | None,
+    year_next: str | None,
+) -> dict[str, object]:
     """Final metrics dict: price, obligations, forward EPS, projections, note."""
     return {
         "ticker": ticker,
@@ -1031,12 +1272,17 @@ def _assemble_value(ticker: str, estimates: dict[str, object], price: float | No
         "coverage": coverage,
         "shares_outstanding": shares_out,
         "ttm_gaap_eps": ttm_eps_diluted,
-        "trailing_pe": (
-            round(price / ttm_eps_diluted, 1)
-            if (price is not None and ttm_eps_diluted)
-            else None
+        "trailing_pe": (round(price / ttm_eps_diluted, 1) if (price is not None and ttm_eps_diluted) else None),
+        "obligations": _obligations_block(
+            impact,
+            contractual_ps,
+            contingent_ps,
+            default_triggered_ps,
+            revenue_matched_ps,
+            implied_coverage_b,
+            gross_margin,
+            margin_source,
         ),
-        "obligations": _obligations_block(impact, contractual_ps, contingent_ps, default_triggered_ps, revenue_matched_ps, implied_coverage_b, gross_margin, margin_source),
         "obligation_eps_scenarios": eps_scenarios,
         "forward_eps": forward_eps,
         "projected_prices": _projected_prices(_projected_eps_map(forward_eps, year_cur, year_next), price),
@@ -1059,7 +1305,16 @@ def _assemble_value(ticker: str, estimates: dict[str, object], price: float | No
     }
 
 
-def _obligations_block(impact: ObligationAnnualImpact, contractual_ps: float | None, contingent_ps: float | None, default_triggered_ps: float | None, revenue_matched_ps: float | None, implied_coverage_b: float | None, gross_margin: float | None, margin_source: str) -> dict[str, object]:
+def _obligations_block(
+    impact: ObligationAnnualImpact,
+    contractual_ps: float | None,
+    contingent_ps: float | None,
+    default_triggered_ps: float | None,
+    revenue_matched_ps: float | None,
+    implied_coverage_b: float | None,
+    gross_margin: float | None,
+    margin_source: str,
+) -> dict[str, object]:
     """Obligations block: annual $B buckets, per-share drags, margin coverage."""
     return {
         "contractual_annual_billions": impact["contractual_annual_billions"],

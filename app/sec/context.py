@@ -13,14 +13,33 @@ from .models import Filing
 INSTITUTIONAL_FORMS = ("13F-HR", "13F-HR/A", "13F-NT", "13F-NT/A")
 
 GOVERNANCE_FORMS = (
-    "DEF 14A", "DEFA14A", "PREC14A", "DEFC14A", "DFAN14A", "PX14A6G",
-    "PREM14A", "DEFM14A", "PRE 14C", "DEF 14C",
+    "DEF 14A",
+    "DEFA14A",
+    "PREC14A",
+    "DEFC14A",
+    "DFAN14A",
+    "PX14A6G",
+    "PREM14A",
+    "DEFM14A",
+    "PRE 14C",
+    "DEF 14C",
 )
 
 TRANSACTION_FORMS = (
-    "SC TO-T", "SC TO-T/A", "SC TO-I", "SC TO-I/A", "SC 14D9", "SC 14D9/A",
-    "SC 13E3", "SC 13E3/A", "S-4", "S-4/A", "F-4", "F-4/A",
-    "DEFM14A", "PREM14A",
+    "SC TO-T",
+    "SC TO-T/A",
+    "SC TO-I",
+    "SC TO-I/A",
+    "SC 14D9",
+    "SC 14D9/A",
+    "SC 13E3",
+    "SC 13E3/A",
+    "S-4",
+    "S-4/A",
+    "F-4",
+    "F-4/A",
+    "DEFM14A",
+    "PREM14A",
 )
 
 
@@ -51,8 +70,11 @@ def _history(
 
     try:
         return list_sec_filings(
-            ticker_or_cik, forms=list(forms), start_date=start_date,
-            as_of=as_of, limit=limit,
+            ticker_or_cik,
+            forms=list(forms),
+            start_date=start_date,
+            as_of=as_of,
+            limit=limit,
         )
     except ValueError:
         raise
@@ -95,7 +117,11 @@ def get_governance_context(
 ) -> dict[str, object]:
     """Proxy filing pointers (structured parsing lands with Step-10 parsers)."""
     filings = _history(
-        ticker_or_cik, GOVERNANCE_FORMS, as_of=as_of, start_date=since, limit=limit,
+        ticker_or_cik,
+        GOVERNANCE_FORMS,
+        as_of=as_of,
+        start_date=since,
+        limit=limit,
     )
     return {
         "ticker": str(ticker_or_cik).upper(),
@@ -128,7 +154,9 @@ def get_transaction_context(
 
 
 _SHORT_POSITION_KEYS = (
-    "short_position", "shortPosition", "short_interest",
+    "short_position",
+    "shortPosition",
+    "short_interest",
     "current_short_position",
 )
 
@@ -149,8 +177,7 @@ def _fetch_shares_outstanding(ticker: str) -> object:
     try:
         from ..services import sec_facts
 
-        return sec_facts.get_fundamentals(
-            ticker, "shares_outstanding").get("shares_outstanding")
+        return sec_facts.get_fundamentals(ticker, "shares_outstanding").get("shares_outstanding")
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
 
@@ -167,7 +194,8 @@ def _extract_short_position(short: dict[str, object] | None) -> int | float | No
 
 
 def _short_ratio(
-    short_position: int | float | None, shares: object,
+    short_position: float | None,
+    shares: object,
 ) -> float | None:
     """Deterministic short/outstanding percent; None unless both quantify."""
     if not isinstance(short_position, (int, float)):

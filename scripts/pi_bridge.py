@@ -51,7 +51,7 @@ import os
 import sys
 import threading
 from collections.abc import Mapping
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
@@ -89,6 +89,7 @@ def _bridge_ctx(request: Mapping[str, object]) -> RequestContext:
         as_of if isinstance(as_of, str) else None,
     )
 
+
 _sessions: dict[str, PiSessionContext] = {}
 _recorders: dict[str, RunRecorder] = {}
 _inflight: dict[str, set[concurrent.futures.Future[None]]] = {}
@@ -105,7 +106,7 @@ def _as_int(value: object) -> int | None:
         return None
     try:
         return int(value)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
 
 
@@ -115,6 +116,7 @@ def _tool_name(tool: dict[str, object]) -> str:
     name = fn["name"]
     assert isinstance(name, str)
     return name
+
 
 def _write(response: dict[str, object]) -> None:
     with _stdout_lock:
@@ -227,9 +229,8 @@ def _validate_tool_call_staged(request: Mapping[str, object]) -> dict[str, objec
     error = _validate_staged_jid(request.get("active_research_job_id"))
     if error is not None:
         return error
-    if request.get("active_research_session_id") is None:
-        if request.get("active_research_job_id") is not None:
-            return {"error": "invalid_research_context"}
+    if request.get("active_research_session_id") is None and request.get("active_research_job_id") is not None:
+        return {"error": "invalid_research_context"}
     return None
 
 
@@ -292,7 +293,7 @@ def _tool_call_wire(request: Mapping[str, object]) -> tuple[str | None, str | No
     raw_queue_ms = request.get("bridge_queue_ms")
     try:
         queue_ms = float(raw_queue_ms if isinstance(raw_queue_ms, (int, float, str)) else 0.0)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         queue_ms = 0.0
     return (tool_call_id, data_root, as_of, queue_ms)
 
@@ -301,6 +302,7 @@ def _lookup_tool_session(raw_run_id: str) -> tuple[PiSessionContext | None, RunR
     """Session + recorder snapshot under the state lock."""
     with _state_lock:
         return (_sessions.get(raw_run_id), _recorders.get(raw_run_id))
+
 
 def _stage_tool_session(session: PiSessionContext, raw_sid: object, raw_jid: object) -> tuple[str | None, str | None]:
     """Apply staged research ids; return the captured pair for this call."""
@@ -317,9 +319,17 @@ def _stage_tool_session(session: PiSessionContext, raw_sid: object, raw_jid: obj
 
 
 def _invoke_tool_call(
-    session: PiSessionContext, recorder: RunRecorder | None, name: str, arguments: dict[str, object],
-    tool_call_id: str | None, protocol_id: object, queue_ms: float, data_root: str | None,
-    as_of: str | None, captured_sid: str | None, captured_jid: str | None,
+    session: PiSessionContext,
+    recorder: RunRecorder | None,
+    name: str,
+    arguments: dict[str, object],
+    tool_call_id: str | None,
+    protocol_id: object,
+    queue_ms: float,
+    data_root: str | None,
+    as_of: str | None,
+    captured_sid: str | None,
+    captured_jid: str | None,
 ) -> object:
     """Run one tool under its recorder scope; return the gateway result."""
     token = set_current_recorder(recorder) if recorder is not None else None
@@ -356,10 +366,21 @@ def _run_tool_call(request: Mapping[str, object]) -> None:
             _write({"id": protocol_id, "error": "unknown_run"})
             return
         captured_sid, captured_jid = _stage_tool_session(
-            session, request.get("active_research_session_id"), request.get("active_research_job_id"))
+            session, request.get("active_research_session_id"), request.get("active_research_job_id")
+        )
         result = _invoke_tool_call(
-            session, recorder, name, arguments, tool_call_id, protocol_id,
-            queue_ms, data_root, as_of, captured_sid, captured_jid)
+            session,
+            recorder,
+            name,
+            arguments,
+            tool_call_id,
+            protocol_id,
+            queue_ms,
+            data_root,
+            as_of,
+            captured_sid,
+            captured_jid,
+        )
         _write({"id": protocol_id, "result": result})
     except Exception:  # per-request failure never breaks the loop
         logger.exception("tool_call failed")
@@ -372,10 +393,17 @@ def _recorder_for(run_id: str, question: str = "") -> RunRecorder | None:
     if recorder is None:
         try:
             recorder = RunRecorder(
-                run_id=run_id, request_id=run_id, question=question, as_of=None,
-                model="pi", provider="pi", model_parameters={},
-                agent_version="pi", prompt_version=PROMPT_VERSION,
-                tool_registry_version=TOOL_REGISTRY_VERSION, git_sha="",
+                run_id=run_id,
+                request_id=run_id,
+                question=question,
+                as_of=None,
+                model="pi",
+                provider="pi",
+                model_parameters={},
+                agent_version="pi",
+                prompt_version=PROMPT_VERSION,
+                tool_registry_version=TOOL_REGISTRY_VERSION,
+                git_sha="",
             )
             recorder.__enter__()
         except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
@@ -399,14 +427,18 @@ def _teardown_failed_run(run_id: str, *, error_type: str, error_message: str, an
     try:
         if recorder is not None and recorder.enabled:
             recorder.complete(
-                status="failed", answer=answer,
-                error_type=error_type, error_message=error_message,
+                status="failed",
+                answer=answer,
+                error_type=error_type,
+                error_message=error_message,
             )
             recorder.record_event(
                 EventType.RUN_FAILED,
                 metadata={"error_type": error_type, "error_message": error_message},
             )
-    except Exception as exc:  # observability never breaks research  # noqa: BLE001 - intentional best-effort boundary, never aborts
+    except (
+        Exception  # noqa: BLE001 - intentional best-effort boundary, never aborts
+    ) as exc:  # observability never breaks research
         logger.warning("abort_run: dropped (%s: %s)", type(exc).__name__, exc)
     finally:
         try:
@@ -484,7 +516,9 @@ def _complete_agent_end(run_id: str, request: Mapping[str, object]) -> None:
     try:
         if recorder is not None and recorder.enabled:
             _complete_agent_end_run(recorder, request)
-    except Exception as exc:  # observability never breaks research  # noqa: BLE001 - intentional best-effort boundary, never aborts
+    except (
+        Exception  # noqa: BLE001 - intentional best-effort boundary, never aborts
+    ) as exc:  # observability never breaks research
         logger.warning("pi_event: dropped (%s: %s)", type(exc).__name__, exc)
     finally:
         _close_agent_end_run(run_id, recorder)
@@ -499,37 +533,47 @@ def _pi_event_agent_end(run_id: str, request: Mapping[str, object]) -> dict[str,
         return {"ok": True}
     if _drain_futures(_run_futures(run_id)) > 0:
         _fail_agent_end(
-            run_id, "tool_drain_timeout",
+            run_id,
+            "tool_drain_timeout",
             "Tool calls did not finish before the bridge drain timeout",
-            str(request.get("answer") or ""))
+            str(request.get("answer") or ""),
+        )
         return {"error": "tool_drain_timeout"}
     _complete_agent_end(run_id, request)
     return {"ok": True}
 
 
-def _pi_event_record_tool_start(recorder: RunRecorder, request: Mapping[str, object], meta: dict[str, object] | None) -> None:
+def _pi_event_record_tool_start(
+    recorder: RunRecorder, request: Mapping[str, object], meta: dict[str, object] | None
+) -> None:
     """Tool-start observability; dropped failures stay with the caller."""
     recorder.record_event(
-        EventType.TOOL_STARTED, tool_name=str(request.get("tool") or ""),
-        arguments=request.get("arguments"), metadata=meta,
+        EventType.TOOL_STARTED,
+        tool_name=str(request.get("tool") or ""),
+        arguments=request.get("arguments"),
+        metadata=meta,
     )
 
 
-def _pi_event_record_tool_end(recorder: RunRecorder, request: Mapping[str, object], meta: dict[str, object] | None) -> None:
+def _pi_event_record_tool_end(
+    recorder: RunRecorder, request: Mapping[str, object], meta: dict[str, object] | None
+) -> None:
     """Tool-end observability; dropped failures stay with the caller."""
     recorder.record_event(
         EventType.TOOL_FAILED if request.get("is_error") else EventType.TOOL_COMPLETED,
         tool_name=str(request.get("tool") or ""),
-        success=not bool(request.get("is_error")), metadata=meta,
+        success=not bool(request.get("is_error")),
+        metadata=meta,
     )
 
 
 def _pi_event_record_model_call(recorder: RunRecorder, request: Mapping[str, object]) -> None:
     """Assistant message_end model-call observability."""
     usage = request.get("usage")
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     recorder.record_model_call(
-        round=_as_int(request.get("turn")) or 0, provider="pi",
+        round=_as_int(request.get("turn")) or 0,
+        provider="pi",
         model=str(request.get("model") or "pi"),
         started_at=str(request.get("started_at") or now),
         completed_at=str(request.get("completed_at") or now),
@@ -542,9 +586,13 @@ def _pi_event_record_security(recorder: RunRecorder, request: Mapping[str, objec
     """security_block observability; dropped failures stay with the caller."""
     raw = json.dumps([request.get("tool"), request.get("arguments")], sort_keys=True)
     recorder.record_security_event(
-        source="pi", sha256=hashlib.sha256(raw.encode()).hexdigest(),
-        score=None, verdict=None, rule_ids=None,
-        decision="denied", reason=str(request.get("reason") or "pi tool_call gate"),
+        source="pi",
+        sha256=hashlib.sha256(raw.encode()).hexdigest(),
+        score=None,
+        verdict=None,
+        rule_ids=None,
+        decision="denied",
+        reason=str(request.get("reason") or "pi tool_call gate"),
     )
 
 
@@ -553,12 +601,16 @@ def _pi_event_record_routing(recorder: RunRecorder, event: str, meta: dict[str, 
     recorder.record_event(event, metadata=meta)
 
 
-def _pi_event_record_turn(recorder: RunRecorder, event: str, request: Mapping[str, object], meta: dict[str, object] | None) -> None:
+def _pi_event_record_turn(
+    recorder: RunRecorder, event: str, request: Mapping[str, object], meta: dict[str, object] | None
+) -> None:
     """Turn lifecycle observability; dropped failures stay with the caller."""
     recorder.record_event(event, round=_as_int(request.get("turn")), metadata=meta)
 
 
-def _pi_event_record_core(recorder: RunRecorder, event: str, request: Mapping[str, object], meta: dict[str, object] | None) -> bool:
+def _pi_event_record_core(
+    recorder: RunRecorder, event: str, request: Mapping[str, object], meta: dict[str, object] | None
+) -> bool:
     """Agent/tool/security events; True when handled."""
     if event == "agent_start":
         recorder.record_event(EventType.RUN_STARTED, metadata=meta)
@@ -578,7 +630,9 @@ def _pi_event_record_core(recorder: RunRecorder, event: str, request: Mapping[st
     return False
 
 
-def _pi_event_record_aux(recorder: RunRecorder, event: str, request: Mapping[str, object], meta: dict[str, object] | None) -> bool:
+def _pi_event_record_aux(
+    recorder: RunRecorder, event: str, request: Mapping[str, object], meta: dict[str, object] | None
+) -> bool:
     """Routing/turn events; True when handled."""
     if event in ("routing_continuation", "routing_continuation_failed", "routing_metrics"):
         _pi_event_record_routing(recorder, event, meta or {})
@@ -589,7 +643,9 @@ def _pi_event_record_aux(recorder: RunRecorder, event: str, request: Mapping[str
     return False
 
 
-def _pi_event_record(recorder: RunRecorder, event: str, request: Mapping[str, object], meta: dict[str, object] | None) -> None:
+def _pi_event_record(
+    recorder: RunRecorder, event: str, request: Mapping[str, object], meta: dict[str, object] | None
+) -> None:
     """One non-lifecycle event; unknown names only warn."""
     if _pi_event_record_core(recorder, event, request, meta):
         return
@@ -627,7 +683,9 @@ def _pi_event_observe(run_id: str, event: str, request: Mapping[str, object]) ->
         meta = _observe_meta(request)
         _pi_event_record(recorder, event, request, meta or None)
         return {"ok": True}
-    except Exception as exc:  # observability never breaks research  # noqa: BLE001 - intentional best-effort boundary, never aborts
+    except (
+        Exception  # noqa: BLE001 - intentional best-effort boundary, never aborts
+    ) as exc:  # observability never breaks research
         logger.warning("pi_event: dropped (%s: %s)", type(exc).__name__, exc)
         return {"ok": True}
 
@@ -641,20 +699,22 @@ def _pi_event(request: Mapping[str, object]) -> dict[str, object]:
         return _pi_event_agent_end(run_id, request)
     return _pi_event_observe(run_id, event, request)
 
+
 def _abort_run(request: Mapping[str, object]) -> dict[str, object]:
     run_id = request.get("run_id")
     error_type = request.get("error_type")
     error_message = request.get("error_message")
     if (
-        not isinstance(run_id, str) or not run_id
-        or not isinstance(error_type, str) or not error_type
-        or not isinstance(error_message, str) or not error_message
+        not isinstance(run_id, str)
+        or not run_id
+        or not isinstance(error_type, str)
+        or not error_type
+        or not isinstance(error_message, str)
+        or not error_message
     ):
         return {"error": "missing_arg"}
     _drain_futures(_run_futures(run_id))
-    finalized = _teardown_failed_run(
-        run_id, error_type=error_type, error_message=error_message, answer=""
-    )
+    finalized = _teardown_failed_run(run_id, error_type=error_type, error_message=error_message, answer="")
     return {"ok": True, "finalized": finalized}
 
 
@@ -675,6 +735,7 @@ def _op_research_session_create(request: Mapping[str, object], protocol_id: str)
     except ValueError as exc:
         return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
     return {"id": protocol_id, "result": {"session_id": session_id}}
+
 
 def _job_start_session_id(request: Mapping[str, object], protocol_id: str) -> str | dict[str, object]:
     """session_id shape for job.start; value or an error response."""
@@ -709,8 +770,12 @@ def _job_start_budget(request: Mapping[str, object]) -> dict[str, object] | None
         return None
     return {k: v for k, v in budget.items() if isinstance(k, str)}
 
+
 def _call_job_start(
-    session_id: str, request: Mapping[str, object], wave_id: int, ctx: RequestContext,
+    session_id: str,
+    request: Mapping[str, object],
+    wave_id: int,
+    ctx: RequestContext,
 ) -> dict[str, JSONValue]:
     """service.start_job call; optional fields fall back to gateway defaults."""
     return _kernel.start_job(
@@ -740,6 +805,7 @@ def _op_research_job_start(request: Mapping[str, object], protocol_id: str) -> d
     except ValueError as exc:
         return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
     return {"id": protocol_id, "result": job}
+
 
 def _op_research_job_complete(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.job.complete -> service.complete_job."""
@@ -790,14 +856,13 @@ def _op_research_evidence_add(request: Mapping[str, object], protocol_id: str) -
         return {"id": protocol_id, "error": "invalid_arg", "detail": "'item' must be a mapping"}
     ctx = _bridge_ctx(request)
     try:
-        record = _kernel.record_evidence(
-            session_id, job_id, item, repo=ResearchRepository(data_root=ctx.data_root)
-        )
+        record = _kernel.record_evidence(session_id, job_id, item, repo=ResearchRepository(data_root=ctx.data_root))
     except _kernel.ResearchNotFound as exc:
         return _evidence_add_error(exc, protocol_id, session_id, job_id)
     except ValueError as exc:
         return {"id": protocol_id, "error": "invalid_arg", "detail": str(exc)[:500]}
     return {"id": protocol_id, "result": record}
+
 
 def _op_research_session_inspect(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.session.inspect -> service.inspect_research."""
@@ -810,6 +875,7 @@ def _op_research_session_inspect(request: Mapping[str, object], protocol_id: str
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     return {"id": protocol_id, "result": state}
+
 
 def _op_research_session_resume(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.session.resume -> service.resume_research."""
@@ -835,6 +901,7 @@ def _op_research_session_cancel(request: Mapping[str, object], protocol_id: str)
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     return {"id": protocol_id, "result": session}
+
 
 def _freeze_session_id(request: Mapping[str, object], protocol_id: str) -> str | dict[str, object]:
     """session_id shape for freeze.create; value or an error response."""
@@ -863,9 +930,7 @@ def _op_research_freeze_create(request: Mapping[str, object], protocol_id: str) 
         return wave_id
     ctx = _bridge_ctx(request)
     try:
-        freeze = _kernel.freeze_session(
-            session_id, wave_id, repo=ResearchRepository(data_root=ctx.data_root)
-        )
+        freeze = _kernel.freeze_session(session_id, wave_id, repo=ResearchRepository(data_root=ctx.data_root))
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     except ValueError as exc:
@@ -902,9 +967,7 @@ def _op_research_committee_create(request: Mapping[str, object], protocol_id: st
         return wave_id
     ctx = _bridge_ctx(request)
     try:
-        jobs = _kernel.create_committee_jobs(
-            session_id, wave_id, repo=ResearchRepository(data_root=ctx.data_root)
-        )
+        jobs = _kernel.create_committee_jobs(session_id, wave_id, repo=ResearchRepository(data_root=ctx.data_root))
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     except ValueError as exc:
@@ -929,8 +992,7 @@ def _op_research_analysis_record(request: Mapping[str, object], protocol_id: str
     if session_id is None or job_id is None or role is None:
         return {"id": protocol_id, "error": "missing_arg"}
     if role not in COMMITTEE_ROLES:
-        return {"id": protocol_id, "error": "invalid_arg",
-                "detail": "'role' must be " + "|".join(COMMITTEE_ROLES)}
+        return {"id": protocol_id, "error": "invalid_arg", "detail": "'role' must be " + "|".join(COMMITTEE_ROLES)}
     analysis = request.get("analysis")
     if not isinstance(analysis, dict):
         return {"id": protocol_id, "error": "invalid_arg", "detail": "'analysis' must be a mapping"}
@@ -961,9 +1023,7 @@ def _op_research_session_finalize(request: Mapping[str, object], protocol_id: st
         return {"id": protocol_id, "error": "claims_required"}
     ctx = _bridge_ctx(request)
     try:
-        final = _kernel.finalize_session(
-            session_id, answer, claims, repo=ResearchRepository(data_root=ctx.data_root)
-        )
+        final = _kernel.finalize_session(session_id, answer, claims, repo=ResearchRepository(data_root=ctx.data_root))
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     except ValueError as exc:
@@ -980,6 +1040,7 @@ def _source_coverage(request: Mapping[str, object]) -> dict[str, object]:
         return {}
     return {k: v for k, v in coverage.items() if isinstance(k, str)}
 
+
 def _source_str_list(request: Mapping[str, object], key: str) -> list[str]:
     """Wire string list for submit; empty when absent or malformed."""
     raw = request.get(key)
@@ -989,6 +1050,7 @@ def _source_str_list(request: Mapping[str, object], key: str) -> list[str]:
         return []
     return [v for v in raw if isinstance(v, str)]
 
+
 def _op_research_source_submit(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.source.submit -> service.submit_source_result."""
     job_id = request.get("job_id")
@@ -997,9 +1059,12 @@ def _op_research_source_submit(request: Mapping[str, object], protocol_id: str) 
     ctx = _bridge_ctx(request)
     try:
         out = _kernel.submit_source_result(
-            job_id, _source_coverage(request),
-            _source_str_list(request, "evidence_ids"), _source_str_list(request, "unresolved_questions"),
-            repo=ResearchRepository(data_root=ctx.data_root))
+            job_id,
+            _source_coverage(request),
+            _source_str_list(request, "evidence_ids"),
+            _source_str_list(request, "unresolved_questions"),
+            repo=ResearchRepository(data_root=ctx.data_root),
+        )
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
     except ValueError as exc:
@@ -1041,9 +1106,7 @@ def _op_research_events(request: Mapping[str, object], protocol_id: str) -> dict
     ctx = _bridge_ctx(request)
     job, limit, cursor = _events_paging(request)
     try:
-        out = _kernel.research_events(
-            session_id, job, limit, cursor,
-            repo=ResearchRepository(data_root=ctx.data_root))
+        out = _kernel.research_events(session_id, job, limit, cursor, repo=ResearchRepository(data_root=ctx.data_root))
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_session", "session_id": session_id}
     return {"id": protocol_id, "result": out}
@@ -1069,8 +1132,14 @@ def _invoke_sid(request: Mapping[str, object], protocol_id: object) -> str:
 
 
 def _call_tool_invoke(
-    name: str, arguments: dict[str, object], sid: str, request: Mapping[str, object],
-    protocol_id: object, queue_ms: float, data_root: str | None, as_of: str | None,
+    name: str,
+    arguments: dict[str, object],
+    sid: str,
+    request: Mapping[str, object],
+    protocol_id: object,
+    queue_ms: float,
+    data_root: str | None,
+    as_of: str | None,
 ) -> object:
     """execute_pi_tool with an ephemeral session; routing fields coerced."""
     tool_call_id = _coerce_opt_str(request.get("tool_call_id"))
@@ -1108,7 +1177,7 @@ def _decode_handle_line(line: str) -> tuple[dict[str, object], str] | dict[str, 
     """Parse + id-shape one input line; pair or an error body."""
     try:
         request = json.loads(line)
-    except (json.JSONDecodeError, ValueError):
+    except json.JSONDecodeError, ValueError:
         return {"error": "bad_request"}
     if not isinstance(request, dict):
         return {"error": "bad_request"}
@@ -1214,6 +1283,7 @@ def _handle_research_op(op: object, request: dict[str, object], protocol_id: str
     if lifecycle is not None:
         return lifecycle
     return _handle_research_committee(op, request, protocol_id)
+
 
 def _handle(line: str) -> dict[str, object] | None:
     """Route one input line. Returns a response dict, or None when the

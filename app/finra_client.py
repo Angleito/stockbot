@@ -242,9 +242,7 @@ def _dataset_rank(row: dict[str, object]) -> tuple[int, str]:
     return (-int(str(row.get("match_score", 0))), str(row.get("name", "")))
 
 
-def list_datasets(
-    group: str | None = None, search: str | None = None
-) -> dict[str, object]:
+def list_datasets(group: str | None = None, search: str | None = None) -> dict[str, object]:
     """Concise filing-cabinet catalog. Never returns data rows.
 
     search is token-based and ranked: the phrase is normalized (e.g.
@@ -270,7 +268,6 @@ def list_datasets(
             continue
         datasets.append(_list_dataset_row(entry, score))
 
-
     if tokens:
         datasets.sort(key=_dataset_rank)
         for d in datasets:
@@ -281,6 +278,7 @@ def list_datasets(
         "count": len(datasets),
         "datasets": datasets,
     }
+
 
 def _list_match_score(entry: CatalogEntry, tokens: list[str]) -> int | None:
     """Ranked match score, or None when the entry does not match."""
@@ -300,9 +298,7 @@ def _list_dataset_caps(entry: CatalogEntry) -> tuple[bool | None, bool | None]:
     supports_ticker: bool | None = None
     supports_date: bool | None = None
     if "symbol_field" in override:
-        supports_ticker = bool(override["symbol_field"]) and not override.get(
-            "market_aggregate"
-        )
+        supports_ticker = bool(override["symbol_field"]) and not override.get("market_aggregate")
     if "date_field" in override:
         supports_date = bool(override["date_field"])
     if override.get("market_aggregate"):
@@ -354,8 +350,26 @@ _SEARCH_TOKEN_VARIANTS = {
 
 # Tokens that add no topical signal (tickers, fillers, stop words).
 _SEARCH_STOP_TOKENS = {
-    "a", "an", "the", "of", "for", "and", "or", "in", "on", "to", "by",
-    "what", "is", "are", "show", "showme", "me", "values", "data", "list",
+    "a",
+    "an",
+    "the",
+    "of",
+    "for",
+    "and",
+    "or",
+    "in",
+    "on",
+    "to",
+    "by",
+    "what",
+    "is",
+    "are",
+    "show",
+    "showme",
+    "me",
+    "values",
+    "data",
+    "list",
 }
 
 
@@ -378,10 +392,7 @@ def _search_tokens(search: str | None) -> list[str]:
         return []
     for phrase, alias in _SEARCH_PHRASE_ALIASES.items():
         text = text.replace(phrase, alias)
-    return [
-        t for t in _split_words(text)
-        if t not in _SEARCH_STOP_TOKENS and len(t) >= 2
-    ]
+    return [t for t in _split_words(text) if t not in _SEARCH_STOP_TOKENS and len(t) >= 2]
 
 
 def _search_score(entry: CatalogEntry, tokens: list[str]) -> int:
@@ -394,9 +405,7 @@ def _search_score(entry: CatalogEntry, tokens: list[str]) -> int:
     if not tokens:
         return 0
     name = set(_split_words(entry.name))
-    hay = set(_split_words(entry.group)) | name | set(
-        _split_words(entry.description)
-    )
+    hay = set(_split_words(entry.group)) | name | set(_split_words(entry.description))
     score = 0
     for token in tokens:
         variants = _SEARCH_TOKEN_VARIANTS.get(token, {token})
@@ -422,6 +431,7 @@ def describe_dataset(dataset_id: str) -> dict[str, object]:
     except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return {"error": _catalog_error_message(e)}
     return _describe_result(spec, entry, _describe_field_rows(spec))
+
 
 def _describe_http_error(dataset_id: str, e: requests.HTTPError) -> dict[str, object]:
     status = e.response.status_code if e.response is not None else None
@@ -450,9 +460,7 @@ def _describe_field_rows(spec: DatasetSpec) -> list[dict[str, object]]:
     ]
 
 
-def _describe_result(
-    spec: DatasetSpec, entry: CatalogEntry, fields_out: list[dict[str, object]]
-) -> dict[str, object]:
+def _describe_result(spec: DatasetSpec, entry: CatalogEntry, fields_out: list[dict[str, object]]) -> dict[str, object]:
     result: dict[str, object] = {
         "dataset": spec.dataset_id,
         "group": spec.group,
@@ -476,13 +484,9 @@ def _describe_result(
 
 def _apply_describe_extras(result: dict[str, object], spec: DatasetSpec) -> None:
     if spec.valid_filter_values:
-        result["valid_filter_values"] = {
-            k: list(v) for k, v in spec.valid_filter_values.items()
-        }
+        result["valid_filter_values"] = {k: list(v) for k, v in spec.valid_filter_values.items()}
     if spec.default_filters:
-        result["default_filters"] = [
-            {"field": f, "value": v} for f, v in spec.default_filters
-        ]
+        result["default_filters"] = [{"field": f, "value": v} for f, v in spec.default_filters]
 
 
 def get_short_interest(ticker: str, settlement_date: str | None = None) -> dict[str, object]:
@@ -512,9 +516,7 @@ def get_reg_sho_volume(ticker: str, trade_date: str | None = None) -> dict[str, 
     )
 
 
-def get_threshold_securities(
-    ticker: str | None = None, trade_date: str | None = None
-) -> dict[str, object]:
+def get_threshold_securities(ticker: str | None = None, trade_date: str | None = None) -> dict[str, object]:
     return query_dataset(
         "otcMarket/thresholdList",
         ticker=ticker,
@@ -547,9 +549,7 @@ def _query_unexpected_error(dataset: str, e: Exception) -> dict[str, object]:
     return {"error": f"FINRA query failed: {e}"}
 
 
-def _query_effective_window(
-    payload: dict[str, object], records: list[dict[str, object]]
-) -> tuple[int, int, int]:
+def _query_effective_window(payload: dict[str, object], records: list[dict[str, object]]) -> tuple[int, int, int]:
     """(effective_limit, effective_offset, returned_count) from the payload."""
     raw_limit = payload.get("limit", DEFAULT_LIMIT)
     raw_offset = payload.get("offset", 0)
@@ -596,16 +596,11 @@ def _recovery_from_payload(
 ) -> tuple[list[dict[str, object]], dict[str, object], int, str | None, str]:
     """Final recovery tuple from walk records/headers (pagination + freshness)."""
     returned_count = len(records)
-    pagination = _parse_pagination(
-        headers, effective_offset, effective_limit, returned_count
-    )
+    pagination = _parse_pagination(headers, effective_offset, effective_limit, returned_count)
     pagination.update(
         {
             "total_records": None,
-            "may_have_more": (
-                returned_count >= effective_limit
-                and partition_queries < _MAX_PARTITION_QUERIES
-            ),
+            "may_have_more": (returned_count >= effective_limit and partition_queries < _MAX_PARTITION_QUERIES),
             "source": "partitions",
         }
     )
@@ -633,22 +628,31 @@ def _query_latest_recovery(
     selected, sort = _recovery_params(spec)
     try:
         records, headers, partition_queries, _short = _datapoints_via_partitions(
-            spec, entry, selected, ticker, None, None, None,
-            effective_limit, sort,
+            spec,
+            entry,
+            selected,
+            ticker,
+            None,
+            None,
+            None,
+            effective_limit,
+            sort,
         )
     except requests.HTTPError as e:
         return None, _http_error_result(dataset, e)
     except ValueError as e:
         return None, {"error": str(e)}
     return _recovery_from_payload(
-        spec, records, headers,
-        effective_offset, effective_limit, partition_queries,
+        spec,
+        records,
+        headers,
+        effective_offset,
+        effective_limit,
+        partition_queries,
     ), None
 
 
-def _query_analysis_warnings(
-    analysis: dict[str, object], as_of: str | None, freshness: str
-) -> list[object]:
+def _query_analysis_warnings(analysis: dict[str, object], as_of: str | None, freshness: str) -> list[object]:
     """Analysis warnings plus the stale-data warning when applicable."""
     raw_warnings: object = analysis.get("warnings")
     warnings: list[object] = list(raw_warnings) if isinstance(raw_warnings, list) else []
@@ -706,6 +710,7 @@ def _query_result_row(
         "pagination_source": pagination["source"],
     }
 
+
 def _query_apply_recovery(
     dataset: str,
     spec: DatasetSpec,
@@ -729,13 +734,23 @@ def _query_apply_recovery(
     """
     _records, _pagination, returned_count, _as_of, freshness = current
     if not _query_wants_latest_recovery(
-        spec, freshness, start_date, end_date, filter_list,
-        effective_offset, prefer_latest,
+        spec,
+        freshness,
+        start_date,
+        end_date,
+        filter_list,
+        effective_offset,
+        prefer_latest,
     ):
         return current, None
     recovered, error = _query_latest_recovery(
-        dataset, spec, entry, ticker,
-        effective_limit, effective_offset, returned_count,
+        dataset,
+        spec,
+        entry,
+        ticker,
+        effective_limit,
+        effective_offset,
+        returned_count,
     )
     if error is not None:
         return current, error
@@ -762,9 +777,7 @@ def query_dataset(
         entry = _resolve_dataset(dataset)
         spec = _get_dataset_spec(entry)
         filter_list = _filter_list(filters)
-        payload = _build_payload(
-            spec, entry, ticker, start_date, end_date, limit, filter_list, offset
-        )
+        payload = _build_payload(spec, entry, ticker, start_date, end_date, limit, filter_list, offset)
         records, headers = _cached_query(spec, payload)
     except ValueError as e:
         return {"error": str(e)}
@@ -775,28 +788,47 @@ def query_dataset(
     if not records:
         what = ticker or dataset
         return {"error": f"No data found for {what}: {spec.name}"}
-    effective_limit, effective_offset, returned_count = _query_effective_window(
-        payload, records
-    )
+    effective_limit, effective_offset, returned_count = _query_effective_window(payload, records)
     pagination = _parse_pagination(headers, effective_offset, effective_limit, returned_count)
     as_of, freshness = _freshness_status(spec, records)
     current = (records, pagination, returned_count, as_of, freshness)
     final, recovery_error = _query_apply_recovery(
-        dataset, spec, entry, ticker, start_date, end_date, filter_list,
-        effective_limit, effective_offset, prefer_latest, current,
+        dataset,
+        spec,
+        entry,
+        ticker,
+        start_date,
+        end_date,
+        filter_list,
+        effective_limit,
+        effective_offset,
+        prefer_latest,
+        current,
     )
     if recovery_error is not None:
         return recovery_error
     records, pagination, returned_count, as_of, freshness = final
     analysis = analyze_and_brief(
-        spec, records, analysis_goal, _query_cache_key(spec, payload),
+        spec,
+        records,
+        analysis_goal,
+        _query_cache_key(spec, payload),
         pagination=pagination,
     )
     return _query_result_row(
-        spec, ticker, start_date, end_date, filters, analysis,
+        spec,
+        ticker,
+        start_date,
+        end_date,
+        filters,
+        analysis,
         _query_analysis_warnings(analysis, as_of, freshness),
-        as_of, freshness, returned_count,
-        effective_limit, effective_offset, pagination,
+        as_of,
+        freshness,
+        returned_count,
+        effective_limit,
+        effective_offset,
+        pagination,
     )
 
 
@@ -811,7 +843,10 @@ def _datapoints_fetch_plan(
     sort: list[str],
     limit: int,
 ) -> tuple[
-    list[dict[str, object]], dict[str, object], int, bool,
+    list[dict[str, object]],
+    dict[str, object],
+    int,
+    bool,
     dict[str, object] | None,
 ]:
     """(records, headers, partition_queries, short_result, payload-or-None).
@@ -822,13 +857,27 @@ def _datapoints_fetch_plan(
     via = _use_partition_flow(spec, sort, ticker, start_date, end_date, filter_list)
     if via:
         records, headers, queries, short = _datapoints_via_partitions(
-            spec, entry, selected, ticker, start_date, end_date, filter_list,
-            limit, sort,
+            spec,
+            entry,
+            selected,
+            ticker,
+            start_date,
+            end_date,
+            filter_list,
+            limit,
+            sort,
         )
         return records, headers, queries, short, None
     payload = _build_payload(
-        spec, entry, ticker, start_date, end_date, limit, filter_list,
-        fields=selected, sort_fields=sort,
+        spec,
+        entry,
+        ticker,
+        start_date,
+        end_date,
+        limit,
+        filter_list,
+        fields=selected,
+        sort_fields=sort,
     )
     records, headers = _cached_query(spec, payload)
     return records, headers, 0, False, payload
@@ -845,8 +894,7 @@ def _datapoints_prepared(
     sort_fields: object,
     sort_order: str | None,
 ) -> tuple[
-    tuple[CatalogEntry, DatasetSpec, list[str], list[dict[str, object]] | None,
-          list[str], int, str],
+    tuple[CatalogEntry, DatasetSpec, list[str], list[dict[str, object]] | None, list[str], int, str],
     dict[str, object] | None,
     tuple[list[dict[str, object]], dict[str, object], int, bool],
 ]:
@@ -862,8 +910,15 @@ def _datapoints_prepared(
     sort = _validate_sort(spec, sort_fields, sort_order)
     clamped = _clamp_limit(limit, default=DATAPOINTS_DEFAULT_LIMIT, maximum=DATAPOINTS_MAX_LIMIT)
     records, headers, queries, short, payload = _datapoints_fetch_plan(
-        spec, entry, selected, ticker, start_date, end_date,
-        filter_list, sort, clamped,
+        spec,
+        entry,
+        selected,
+        ticker,
+        start_date,
+        end_date,
+        filter_list,
+        sort,
+        clamped,
     )
     plan = (entry, spec, selected, filter_list, sort, clamped, spec.dataset_id)
     fetched = (records, headers, queries, short)
@@ -878,7 +933,8 @@ def _datapoints_http_error(
 ) -> dict[str, object]:
     """Structured error for a failed exact-datapoints request."""
     return _http_error_result(
-        dataset, e,
+        dataset,
+        e,
         request_purpose="exact datapoints request (get_finra_datapoints)",
         payload=payload,
         dataset_id=dataset_id,
@@ -899,16 +955,19 @@ def _datapoints_pagination(
     # estimates: mark pagination as partition-driven.
     return {
         "total_records": None,
-        "may_have_more": (len(reduced) >= effective_limit
-                          and partition_queries > 0
-                          and partition_queries < _MAX_PARTITION_QUERIES),
+        "may_have_more": (
+            len(reduced) >= effective_limit and partition_queries > 0 and partition_queries < _MAX_PARTITION_QUERIES
+        ),
         "source": "partitions",
     }
 
 
 def _datapoints_warnings(
-    short_result: bool, reduced: list[dict[str, object]],
-    effective_limit: int, as_of: str | None, freshness: str,
+    short_result: bool,
+    reduced: list[dict[str, object]],
+    effective_limit: int,
+    as_of: str | None,
+    freshness: str,
 ) -> list[object]:
     """Stale-data plus complete-short-result warnings for datapoints."""
     stale = _stale_warning(as_of, freshness)
@@ -962,38 +1021,39 @@ def _datapoints_result_row(
         result["partition_queries"] = partition_queries
     return result
 
+
 def _datapoints_used_partitions(
-    sort: list[str], spec: DatasetSpec,
-    partition_queries: int, short_result: bool,
+    sort: list[str],
+    spec: DatasetSpec,
+    partition_queries: int,
+    short_result: bool,
     payload: dict[str, object] | None,
 ) -> bool:
     """True when the rows came from the partition-walk path."""
     if partition_queries > 0 or short_result or payload is None and sort:
-        return partition_queries > 0 or short_result or (
-            bool(sort) and sort[0][1:] == spec.date_field
-            and _date_partition_field(spec) is not None
+        return (
+            partition_queries > 0
+            or short_result
+            or (bool(sort) and sort[0][1:] == spec.date_field and _date_partition_field(spec) is not None)
         )
     return False
 
 
 def _datapoints_reduced(
-    records: list[dict[str, object]], sort: list[str],
-    selected: list[str], effective_limit: int,
+    records: list[dict[str, object]],
+    sort: list[str],
+    selected: list[str],
+    effective_limit: int,
 ) -> list[dict[str, object]]:
     """Locally ordered rows reduced to the selected fields (capped at limit)."""
     ordered = _apply_local_sort(records, sort) if sort else records
     return [_select_fields(row, selected) for row in ordered[:effective_limit]]
 
 
-def _datapoints_is_stale_short_interest(
-    spec: DatasetSpec, sort: list[str], freshness: str
-) -> bool:
+def _datapoints_is_stale_short_interest(spec: DatasetSpec, sort: list[str], freshness: str) -> bool:
     """Stale sorted short-interest requests are refused, never returned."""
-    return (
-        spec.name.casefold() == "consolidatedshortinterest"
-        and bool(sort)
-        and freshness == "stale"
-    )
+    return spec.name.casefold() == "consolidatedshortinterest" and bool(sort) and freshness == "stale"
+
 
 def get_finra_datapoints(
     dataset: str,
@@ -1026,8 +1086,15 @@ def get_finra_datapoints(
     dataset_id = dataset
     try:
         plan, payload, fetched = _datapoints_prepared(
-            dataset, fields, ticker, start_date, end_date,
-            limit, filters, sort_fields, sort_order,
+            dataset,
+            fields,
+            ticker,
+            start_date,
+            end_date,
+            limit,
+            filters,
+            sort_fields,
+            sort_order,
         )
         _entry, spec, selected, _filters, sort, clamped, dataset_id = plan
         records, headers, partition_queries, short_result = fetched
@@ -1042,20 +1109,23 @@ def get_finra_datapoints(
         return {"error": f"No data found for {what}: {spec.name}"}
     effective_limit = clamped
     reduced = _datapoints_reduced(records, sort, selected, effective_limit)
-    via_partitions = _datapoints_used_partitions(
-        sort, spec, partition_queries, short_result, payload
-    )
-    pagination = _datapoints_pagination(
-        via_partitions, headers, effective_limit, reduced, partition_queries
-    )
+    via_partitions = _datapoints_used_partitions(sort, spec, partition_queries, short_result, payload)
+    pagination = _datapoints_pagination(via_partitions, headers, effective_limit, reduced, partition_queries)
     as_of, freshness = _freshness_status(spec, records)
     if _datapoints_is_stale_short_interest(spec, sort, freshness):
         return _stale_short_interest_error(ticker or dataset, as_of)
     return _datapoints_result_row(
-        spec, selected, reduced, effective_limit, pagination,
-        as_of, freshness,
+        spec,
+        selected,
+        reduced,
+        effective_limit,
+        pagination,
+        as_of,
+        freshness,
         _datapoints_warnings(short_result, reduced, effective_limit, as_of, freshness),
-        sort, via_partitions, partition_queries,
+        sort,
+        via_partitions,
+        partition_queries,
     )
 
 
@@ -1079,8 +1149,7 @@ def _http_error_result(
     body = _sanitize_finra_body(raw_body)[:500]
     logger.exception("FINRA HTTP error for dataset %s", dataset)
     logger.debug(
-        "FINRA request failed: dataset=%s status=%s purpose=%s "
-        "payload=%s response=%s",
+        "FINRA request failed: dataset=%s status=%s purpose=%s payload=%s response=%s",
         dataset,
         status,
         request_purpose or "FINRA data request",
@@ -1103,9 +1172,7 @@ def _http_error_result(
             "available datasets, or omit this request."
         )
         return result
-    result["error"] = (
-        f"FINRA request failed ({status if status is not None else '?'}): {body}"
-    )
+    result["error"] = f"FINRA request failed ({status if status is not None else '?'}): {body}"
     return result
 
 
@@ -1120,8 +1187,6 @@ _MAX_PARTITION_QUERIES = 12
 def _sort_needs_partition_walk(spec: DatasetSpec, covered: set[str]) -> bool:
     """False when every partition field already has an EQUAL filter."""
     return not all(f in covered for f in spec.partition_fields)
-
-
 
 
 def _reject_multi_field_sort(spec: DatasetSpec, sort: list[str]) -> str:
@@ -1169,6 +1234,7 @@ def _reject_unwalkable_sort(spec: DatasetSpec, sort: list[str]) -> None:
         "Either add the required EQUAL filters or request a date-based "
         "latest/oldest sort."
     )
+
 
 def _use_partition_flow(
     spec: DatasetSpec,
@@ -1248,9 +1314,7 @@ def _equal_filter_fields(filters: list[dict[str, object]] | None) -> set[str]:
     return covered
 
 
-def _implied_single_date_field(
-    spec: DatasetSpec, start_date: str | None, end_date: str | None
-) -> str | None:
+def _implied_single_date_field(spec: DatasetSpec, start_date: str | None, end_date: str | None) -> str | None:
     """Date field implied by a single-date (or open) request, else None."""
     if not spec.date_field:
         return None
@@ -1271,6 +1335,7 @@ def _implied_symbol_field(spec: DatasetSpec, ticker: str | None) -> str | None:
         return spec.symbol_field
     return None
 
+
 def _partition_fields_with_equal(
     spec: DatasetSpec,
     ticker: str | None,
@@ -1289,23 +1354,17 @@ def _partition_fields_with_equal(
     return covered
 
 
-def _walk_range_field(
-    spec: DatasetSpec, start: str | None, end: str | None
-) -> str | None:
+def _walk_range_field(spec: DatasetSpec, start: str | None, end: str | None) -> str | None:
     """Date field to narrow the walk to, for a true start/end range."""
     if start and end and start != end:
         return spec.date_field
     return None
 
 
-def _walk_range_tuples(
-    tuples: list[dict[str, str]], range_field: str, start: str, end: str
-) -> list[dict[str, str]]:
+def _walk_range_tuples(tuples: list[dict[str, str]], range_field: str, start: str, end: str) -> list[dict[str, str]]:
     """Partition tuples whose range-field value falls inside [start, end]."""
-    return [
-        t for t in tuples
-        if t.get(range_field) and _date_in_range(t[range_field], start, end)
-    ]
+    return [t for t in tuples if t.get(range_field) and _date_in_range(t[range_field], start, end)]
+
 
 def _walk_tuples(
     spec: DatasetSpec,
@@ -1318,9 +1377,7 @@ def _walk_tuples(
     """Ordered partition tuples for the walk plus the range-narrowed field."""
     partitions = _get_partitions(spec)
     pinned = _pinned_partition_filters(spec, ticker, start_date, end_date, filters)
-    tuples = _ordered_partition_tuples(
-        spec, partitions, pinned, spec.date_field, descending
-    )
+    tuples = _ordered_partition_tuples(spec, partitions, pinned, spec.date_field, descending)
     start = _clean_date_opt(start_date)
     end = _clean_date_opt(end_date)
     range_field = _walk_range_field(spec, start, end)
@@ -1343,13 +1400,17 @@ def _walk_partition_payload(
 ) -> dict[str, object]:
     """Query payload for one partition tuple (EQUAL filters, no sortFields)."""
     extra: list[dict[str, object]] = [
-        {"field": f, "op": "EQUAL", "value": v}
-        for f, v in tuple_values.items()
-        if f != range_field
+        {"field": f, "op": "EQUAL", "value": v} for f, v in tuple_values.items() if f != range_field
     ]
     return _build_payload(
-        spec, entry, ticker, start_date, end_date, remaining,
-        list(filters or []) + extra, fields=selected,
+        spec,
+        entry,
+        ticker,
+        start_date,
+        end_date,
+        remaining,
+        list(filters or []) + extra,
+        fields=selected,
     )
 
 
@@ -1393,8 +1454,16 @@ def _walk_partitions(
         queries += 1
         remaining = limit - len(accumulated)
         payload = _walk_partition_payload(
-            spec, entry, selected, ticker, start_date, end_date,
-            filters, remaining, tuple_values, range_field,
+            spec,
+            entry,
+            selected,
+            ticker,
+            start_date,
+            end_date,
+            filters,
+            remaining,
+            tuple_values,
+            range_field,
         )
         records, error = _walk_one_partition(spec, payload)
         if error is not None:
@@ -1403,8 +1472,6 @@ def _walk_partitions(
         accumulated.extend((records or [])[:remaining])
     exhausted = queries >= _MAX_PARTITION_QUERIES and len(accumulated) < limit
     return accumulated, queries, exhausted, last_error
-
-
 
 
 def _walk_outcome(
@@ -1431,6 +1498,7 @@ def _walk_outcome(
         what = ticker or spec.dataset_id
         raise ValueError(f"No data found for {what}: {spec.name}")
     return accumulated, {}, queries, len(accumulated) < limit
+
 
 def _datapoints_via_partitions(
     spec: DatasetSpec,
@@ -1459,19 +1527,23 @@ def _datapoints_via_partitions(
     the bounded budget cannot establish the requested records.
     """
     descending = sort[0][0] == "-"
-    tuples, range_field = _walk_tuples(
-        spec, ticker, start_date, end_date, filters, descending
-    )
+    tuples, range_field = _walk_tuples(spec, ticker, start_date, end_date, filters, descending)
     accumulated, queries, exhausted, last_error = _walk_partitions(
-        spec, entry, selected, ticker, start_date, end_date,
-        filters, limit, tuples, range_field,
+        spec,
+        entry,
+        selected,
+        ticker,
+        start_date,
+        end_date,
+        filters,
+        limit,
+        tuples,
+        range_field,
     )
     return _walk_outcome(spec, ticker, limit, accumulated, queries, exhausted, last_error)
 
 
-def _pinned_equal_filters(
-    spec: DatasetSpec, filters: list[dict[str, object]] | None
-) -> dict[str, str]:
+def _pinned_equal_filters(spec: DatasetSpec, filters: list[dict[str, object]] | None) -> dict[str, str]:
     """Partition fields pinned by caller-supplied EQUAL filter values."""
     pinned: dict[str, str] = {}
     for extra in filters or []:
@@ -1540,22 +1612,18 @@ def _stale_short_interest_error(subject: str, as_of: str | None) -> dict[str, ob
     }
 
 
-def _freshness_status(
-    spec: DatasetSpec, records: list[dict[str, object]]
-) -> tuple[str | None, str]:
+def _freshness_status(spec: DatasetSpec, records: list[dict[str, object]]) -> tuple[str | None, str]:
     """as_of_date from the dataset's authoritative date_field (never derived
     from unrelated fields) plus a current/stale/unknown label."""
     if not spec.date_field or not records:
         return None, "unknown"
-    dates = [
-        d for d in (_norm_date(r.get(spec.date_field)) for r in records) if d
-    ]
+    dates = [d for d in (_norm_date(r.get(spec.date_field)) for r in records) if d]
     if not dates:
         return None, "unknown"
     as_of = max(dates)
     try:
         days = (date.today() - date.fromisoformat(as_of)).days  # noqa: DTZ011 - trading-calendar local date has no tz meaning
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return as_of, "unknown"
     return as_of, ("stale" if days > STALE_AFTER_DAYS else "current")
 
@@ -1587,8 +1655,13 @@ def _sanitize_finra_body(text: str) -> str:
         return ""
     text = re.sub(r"Bearer\s+\S+", "[REDACTED]", text)
     for key in (
-        "client_id", "client_secret", "authorization", "password",
-        "secret", "access_token", "token",
+        "client_id",
+        "client_secret",
+        "authorization",
+        "password",
+        "secret",
+        "access_token",
+        "token",
     ):
         text = re.sub(
             rf'"{key}"\s*:\s*"[^"]*"',
@@ -1608,16 +1681,11 @@ def _sanitize_payload(payload: dict[str, object] | None) -> str:
 def _validated_datapoint_name(spec: DatasetSpec, index: int, entry: object) -> str:
     """One normalized datapoint field name; raises for malformed/unknown names."""
     if not isinstance(entry, str) or not entry.strip():
-        raise ValueError(
-            f"fields #{index} is malformed: a non-empty field name is required."
-        )
+        raise ValueError(f"fields #{index} is malformed: a non-empty field name is required.")
     name = entry.strip()
     if spec.field_names and name not in spec.field_names:
         known = ", ".join(sorted(spec.field_names)[:30])
-        raise ValueError(
-            f"Dataset '{spec.dataset_id}' has no field '{name}'. "
-            f"Known fields include: {known}"
-        )
+        raise ValueError(f"Dataset '{spec.dataset_id}' has no field '{name}'. Known fields include: {known}")
     return name
 
 
@@ -1667,10 +1735,7 @@ def _check_sort_name_known(spec: DatasetSpec, name: str) -> None:
     """Raise when a sort/filter field name is absent from metadata."""
     if spec.field_names and name not in spec.field_names:
         known = ", ".join(sorted(spec.field_names)[:30])
-        raise ValueError(
-            f"Dataset '{spec.dataset_id}' has no sortable field "
-            f"'{name}'. Known fields include: {known}"
-        )
+        raise ValueError(f"Dataset '{spec.dataset_id}' has no sortable field '{name}'. Known fields include: {known}")
 
 
 def _normalize_sort_entry(spec: DatasetSpec, index: int, entry: str) -> str:
@@ -1686,6 +1751,7 @@ def _normalize_sort_entry(spec: DatasetSpec, index: int, entry: str) -> str:
     _check_sort_name_known(spec, name)
     return sign + name
 
+
 def _validate_sort(
     spec: DatasetSpec,
     sort_fields: object,
@@ -1699,9 +1765,7 @@ def _validate_sort(
     """
     if sort_order is not None:
         if sort_fields:
-            raise ValueError(
-                "Provide either 'sort_fields' or 'sort_order', not both."
-            )
+            raise ValueError("Provide either 'sort_fields' or 'sort_order', not both.")
         return [_sort_order_entry(spec, sort_order)]
     if not sort_fields:
         return []
@@ -1711,8 +1775,7 @@ def _validate_sort(
     for index, entry in enumerate(sort_fields):
         if not isinstance(entry, str) or not entry.strip():
             raise ValueError(
-                f"sort_fields #{index} is malformed: expected '+field' "
-                "(ascending) or '-field' (descending)."
+                f"sort_fields #{index} is malformed: expected '+field' (ascending) or '-field' (descending)."
             )
         normalized.append(_normalize_sort_entry(spec, index, entry))
     return normalized
@@ -1735,7 +1798,7 @@ def _apply_local_sort(rows: list[dict[str, object]], sort_fields: list[str]) -> 
             return None
         try:
             return float(str(value).replace(",", ""))
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             return str(value)
 
     def _present_key(r: dict[str, object]) -> float | str:
@@ -1792,7 +1855,7 @@ def _parse_pagination(headers: dict[str, object], offset: int, limit: int, retur
                 total = int(total_raw)
             else:
                 total = int(str(total_raw).strip())
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             total = None
     base: dict[str, object] = {
         "offset": offset,
@@ -1859,6 +1922,7 @@ def _catalog_store(cache_key: str, entries: list[CatalogEntry]) -> list[CatalogE
         _catalog_mem[_environment()] = entries
     return entries
 
+
 def _get_catalog() -> list[CatalogEntry]:
     environment = _environment()
     with _discovery_lock:
@@ -1890,6 +1954,7 @@ def _catalog_nested_rows(data: dict[str, object]) -> list[dict[str, object]] | N
         if isinstance(nested, list):
             return _catalog_dict_rows(nested)
     return None
+
 
 def _catalog_items_from_json(data: object) -> list[dict[str, object]]:
     """A JSON list of catalog dicts, unwrapping {"datasets"|"data"|"results"}."""
@@ -1938,6 +2003,7 @@ def _catalog_supports_query(item: dict[str, object], methods: tuple[str, ...]) -
 def _catalog_description(item: dict[str, object], group: str, name: str) -> str:
     """Item description, falling back to 'group/name'."""
     return str(item.get("description") or "").strip() or f"{group}/{name}"
+
 
 def _fetch_catalog_http() -> list[dict[str, object]]:
     url = f"{FINRA_API_BASE}/datasets"
@@ -2098,19 +2164,14 @@ def _scan_group_name(entries: list[CatalogEntry], raw: str) -> CatalogEntry | No
     return None
 
 
-def _resolve_group_name(
-    entries: list[CatalogEntry], by_id: dict[str, CatalogEntry], raw: str
-) -> CatalogEntry:
+def _resolve_group_name(entries: list[CatalogEntry], by_id: dict[str, CatalogEntry], raw: str) -> CatalogEntry:
     """Resolve a 'group/name' id (case-insensitive, whitespace-tolerant)."""
     if raw.lower() in by_id:
         return by_id[raw.lower()]
     match = _scan_group_name(entries, raw)
     if match is not None:
         return match
-    raise ValueError(
-        f"Unknown FINRA dataset '{raw}'. "
-        "Call list_finra_datasets to browse available datasets."
-    )
+    raise ValueError(f"Unknown FINRA dataset '{raw}'. Call list_finra_datasets to browse available datasets.")
 
 
 def _bare_name_error(dataset_id: str, by_name: dict[str, list[CatalogEntry]]) -> CatalogEntry:
@@ -2121,10 +2182,7 @@ def _bare_name_error(dataset_id: str, by_name: dict[str, list[CatalogEntry]]) ->
         return matches[0]
     if len(matches) > 1:
         ids = ", ".join(m.dataset_id for m in matches)
-        raise ValueError(
-            f"Ambiguous FINRA dataset name '{dataset_id}'. "
-            f"Specify one of: {ids}"
-        )
+        raise ValueError(f"Ambiguous FINRA dataset name '{dataset_id}'. Specify one of: {ids}")
     return _bare_name_suggestions(dataset_id, raw)
 
 
@@ -2146,12 +2204,11 @@ def _bare_name_suggestions(dataset_id: str, raw: str) -> CatalogEntry:
         "Call list_finra_datasets to browse available datasets."
     )
 
+
 def _resolve_dataset(dataset_id: str) -> CatalogEntry:
     raw = (dataset_id or "").strip()
     if not raw:
-        raise ValueError(
-            "Dataset id is required. Use list_finra_datasets to browse the catalog."
-        )
+        raise ValueError("Dataset id is required. Use list_finra_datasets to browse the catalog.")
     entries = _get_catalog()
     by_id, by_name = _catalog_index(entries)
     if "/" in raw:
@@ -2186,9 +2243,7 @@ def _get_dataset_spec(entry: CatalogEntry) -> DatasetSpec:
             "date_field": spec.date_field,
             "market_aggregate": spec.market_aggregate,
             "default_filters": [list(p) for p in spec.default_filters],
-            "valid_filter_values": {
-                k: list(v) for k, v in spec.valid_filter_values.items()
-            },
+            "valid_filter_values": {k: list(v) for k, v in spec.valid_filter_values.items()},
         },
     )
     with _discovery_lock:
@@ -2221,9 +2276,7 @@ def _get_partitions(spec: DatasetSpec) -> list[tuple[str, ...]]:
     reached.
     """
     if not spec.partition_fields:
-        raise ValueError(
-            f"Dataset '{spec.dataset_id}' has no partition fields."
-        )
+        raise ValueError(f"Dataset '{spec.dataset_id}' has no partition fields.")
     key = (_environment(), spec.dataset_id.lower())
     with _discovery_lock:
         if key in _partitions_mem:
@@ -2283,9 +2336,7 @@ def _fetch_partitions_http(group: str, name: str) -> dict[str, object]:
     return {str(k): v for k, v in data.items()}
 
 
-def _partition_dict_tuple(
-    item: dict[str, object], n: int
-) -> tuple[str, ...] | None:
+def _partition_dict_tuple(item: dict[str, object], n: int) -> tuple[str, ...] | None:
     """Tuple for a {"partitions": [...]} entry, or None when malformed."""
     values = item.get("partitions")
     if not isinstance(values, list):
@@ -2311,9 +2362,8 @@ def _partition_entry_tuple(item: object, n: int) -> tuple[str, ...] | None:
         return _partition_dict_tuple(item, n)
     return _partition_scalar_tuple(item, n)
 
-def _parse_partitions(
-    raw: dict[str, object], partition_fields: tuple[str, ...]
-) -> list[tuple[str, ...]]:
+
+def _parse_partitions(raw: dict[str, object], partition_fields: tuple[str, ...]) -> list[tuple[str, ...]]:
     """Normalize availablePartitions into ordered partition tuples.
 
     Each entry carries one value per partition field in field order (FINRA
@@ -2350,9 +2400,7 @@ def _date_partition_field(spec: DatasetSpec) -> str | None:
     """
     if spec.date_field and spec.date_field in spec.partition_fields:
         return spec.date_field
-    mapped = _DATE_PARTITION_MAPPINGS.get(
-        (spec.group.lower(), spec.name.lower())
-    )
+    mapped = _DATE_PARTITION_MAPPINGS.get((spec.group.lower(), spec.name.lower()))
     if mapped and mapped in spec.partition_fields:
         return mapped
     return None
@@ -2438,15 +2486,9 @@ def _metadata_partitions(raw: dict[str, object]) -> tuple[str, ...]:
     return tuple(str(p) for p in raw_partitions)
 
 
-def _metadata_description(
-    entry: CatalogEntry, raw: dict[str, object]
-) -> str:
+def _metadata_description(entry: CatalogEntry, raw: dict[str, object]) -> str:
     """Live description, else catalog description, else dataset id."""
-    return (
-        str(raw.get("description") or "").strip()
-        or entry.description
-        or entry.dataset_id
-    )
+    return str(raw.get("description") or "").strip() or entry.description or entry.dataset_id
 
 
 def _parse_live_methods(raw_sm: object) -> tuple[str, ...]:
@@ -2475,11 +2517,7 @@ def _pair_list(raw: object) -> tuple[tuple[str, str], ...]:
     """List of 2-element string pairs (default_filters shapes)."""
     if not isinstance(raw, (list, tuple)):
         return ()
-    return tuple(
-        (str(pair[0]), str(pair[1]))
-        for pair in raw
-        if isinstance(pair, (list, tuple)) and len(pair) == 2
-    )
+    return tuple((str(pair[0]), str(pair[1])) for pair in raw if isinstance(pair, (list, tuple)) and len(pair) == 2)
 
 
 def _str_tuple_map(raw: object) -> dict[str, tuple[str, ...]]:
@@ -2576,9 +2614,7 @@ def _symbol_like_name(f: dict[str, object]) -> str | None:
     return None
 
 
-def _date_partition_hit(
-    by_name: dict[str, dict[str, object]], partition: str
-) -> str | None:
+def _date_partition_hit(by_name: dict[str, dict[str, object]], partition: str) -> str | None:
     """Partition name when it carries (or looks like) a date, else None."""
     f = by_name.get(partition)
     if f is None:
@@ -2609,12 +2645,11 @@ def _first_date_named_field(fields: list[dict[str, object]]) -> str | None:
             return n
     return None
 
+
 def _build_spec_from_metadata(entry: CatalogEntry, raw: dict[str, object]) -> DatasetSpec:
     fields = _metadata_fields(raw)
     partition_fields = _metadata_partitions(raw)
-    symbol_field, date_field, market, defaults, valid = _override_corrections(
-        entry, fields, partition_fields
-    )
+    symbol_field, date_field, market, defaults, valid = _override_corrections(entry, fields, partition_fields)
     return DatasetSpec(
         group=entry.group,
         name=entry.name,
@@ -2695,9 +2730,7 @@ def _detect_symbol_field(fields: list[dict[str, object]]) -> str | None:
     return None
 
 
-def _detect_date_field(
-    fields: list[dict[str, object]], partition_fields: tuple[str, ...]
-) -> str | None:
+def _detect_date_field(fields: list[dict[str, object]], partition_fields: tuple[str, ...]) -> str | None:
     by_name = _field_name_set(fields)
     for p in partition_fields:
         hit = _date_partition_hit(by_name, p)
@@ -2741,9 +2774,7 @@ def _normalize_filter_name(index: int, extra: Mapping[str, object]) -> str:
     """Validated non-blank filter field name."""
     field_name = extra.get("field")
     if not isinstance(field_name, str) or not field_name.strip():
-        raise ValueError(
-            f"Filter #{index} is malformed: a non-empty 'field' is required."
-        )
+        raise ValueError(f"Filter #{index} is malformed: a non-empty 'field' is required.")
     return field_name.strip()
 
 
@@ -2751,27 +2782,24 @@ def _normalize_filter_value(field_name: str, extra: Mapping[str, object]) -> obj
     """Validated filter value (present and non-blank)."""
     value = extra.get("value")
     if value is None or (isinstance(value, str) and not value.strip()):
-        raise ValueError(
-            f"Filter for field '{field_name}' is malformed: 'value' is required."
-        )
+        raise ValueError(f"Filter for field '{field_name}' is malformed: 'value' is required.")
     return value
+
 
 def _normalize_filter_op(extra: Mapping[str, object]) -> str:
     """Validated uppercase compare op."""
     op = str(extra.get("op") or "EQUAL").upper()
     if op not in _ALLOWED_COMPARE:
-        raise ValueError(
-            f"Unsupported compare op '{op}'. Use one of: {sorted(_ALLOWED_COMPARE)}"
-        )
+        raise ValueError(f"Unsupported compare op '{op}'. Use one of: {sorted(_ALLOWED_COMPARE)}")
     return op
+
 
 def _check_filter_known(spec: DatasetSpec, field_name: str, value: object) -> None:
     """Raise for unknown filter fields or disallowed enum values."""
     if spec.field_names and field_name not in spec.field_names:
         known = ", ".join(sorted(spec.field_names)[:30])
         raise ValueError(
-            f"Dataset '{spec.dataset_id}' has no filterable field "
-            f"'{field_name}'. Known fields include: {known}"
+            f"Dataset '{spec.dataset_id}' has no filterable field '{field_name}'. Known fields include: {known}"
         )
     allowed = spec.valid_filter_values.get(field_name)
     if allowed is not None and str(value) not in allowed:
@@ -2797,9 +2825,7 @@ def _payload_filter_rows(
         op = _normalize_filter_op(extra)
         _check_filter_known(spec, field_name, value)
         explicit.add(field_name)
-        rows.append(
-            {"compareType": op, "fieldName": field_name, "fieldValue": str(value)}
-        )
+        rows.append({"compareType": op, "fieldName": field_name, "fieldValue": str(value)})
     return rows, explicit
 
 
@@ -2817,17 +2843,13 @@ def _payload_symbol_row(spec: DatasetSpec, ticker: str | None) -> dict[str, obje
     return {"compareType": "EQUAL", "fieldName": spec.symbol_field, "fieldValue": symbol}
 
 
-def _payload_default_rows(
-    spec: DatasetSpec, explicit_fields: set[str]
-) -> list[dict[str, object]]:
+def _payload_default_rows(spec: DatasetSpec, explicit_fields: set[str]) -> list[dict[str, object]]:
     """Registry default filters skipped when the caller filtered that field."""
     rows: list[dict[str, object]] = []
     for field_name, value in spec.default_filters:
         if field_name in explicit_fields:
             continue
-        rows.append(
-            {"compareType": "EQUAL", "fieldName": field_name, "fieldValue": value}
-        )
+        rows.append({"compareType": "EQUAL", "fieldName": field_name, "fieldValue": value})
     return rows
 
 
@@ -2840,9 +2862,7 @@ def _clean_date_opt(value: str | None) -> str | None:
 def _require_payload_date_field(spec: DatasetSpec) -> str:
     """Authoritative date field, or raise when the dataset has none."""
     if not spec.date_field:
-        raise ValueError(
-            f"Dataset '{spec.dataset_id}' has no date field to filter on."
-        )
+        raise ValueError(f"Dataset '{spec.dataset_id}' has no date field to filter on.")
     return spec.date_field
 
 
@@ -2854,6 +2874,7 @@ def _payload_range_filter(date_field: str, start: str, end: str) -> dict[str, ob
 def _payload_equal_date_row(date_field: str, value: object) -> dict[str, object]:
     """An EQUAL compare row for a single-date request."""
     return {"compareType": "EQUAL", "fieldName": date_field, "fieldValue": value}
+
 
 def _payload_date_parts(
     spec: DatasetSpec,
@@ -2872,6 +2893,7 @@ def _payload_date_parts(
         payload["dateRangeFilters"] = [_payload_range_filter(date_field, start, end)]
         return
     compare.append(_payload_equal_date_row(date_field, start or end))
+
 
 def _build_payload(
     spec: DatasetSpec,
@@ -2906,7 +2928,7 @@ def _clamp_limit(limit: int | None, *, default: int = DEFAULT_LIMIT, maximum: in
         return default
     try:
         n = limit
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return default
     return max(1, min(n, maximum))
 
@@ -2920,7 +2942,7 @@ def _coerce_offset(offset: object) -> int:
             return int(offset)
         if isinstance(offset, str):
             return int(offset.strip())
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         raise ValueError(f"offset must be an integer, got {offset!r}.")
     raise ValueError(f"offset must be an integer, got {offset!r}.")
 
@@ -2931,8 +2953,7 @@ def _check_offset_bounds(n: int) -> None:
         raise ValueError("offset must be >= 0.")
     if n > MAX_OFFSET:
         raise ValueError(
-            f"offset {n} exceeds FINRA's maximum of {MAX_OFFSET}. Use filters "
-            "to narrow the result set instead."
+            f"offset {n} exceeds FINRA's maximum of {MAX_OFFSET}. Use filters to narrow the result set instead."
         )
 
 
@@ -2943,6 +2964,7 @@ def _check_offset_supported(entry: CatalogEntry) -> None:
             f"Dataset '{entry.dataset_id}' does not support record offset "
             "pagination (supportsRecordOffset=false in the FINRA catalog)."
         )
+
 
 def _validate_offset(entry: CatalogEntry, offset: object) -> int:
     n = _coerce_offset(offset)
@@ -2959,10 +2981,7 @@ def _dataset_path_name(spec: DatasetSpec) -> str:
 
 def _query_cache_key(spec: DatasetSpec, payload: dict[str, object]) -> str:
     path_name = _dataset_path_name(spec)
-    return (
-        f"finra:v2:{_environment()}:query:{spec.group}:{path_name}:"
-        f"{json.dumps(payload, sort_keys=True)}"
-    )
+    return f"finra:v2:{_environment()}:query:{spec.group}:{path_name}:{json.dumps(payload, sort_keys=True)}"
 
 
 def _narrow_cached_dict_hit(hit: object) -> tuple[list[object], dict[object, object]] | None:
@@ -2995,6 +3014,7 @@ def _cached_list_hit(hit: object) -> tuple[list[dict[str, object]], dict[str, ob
         return None
     # Legacy cached plain list (pre-analysis layer): no headers.
     return [{str(k): v for k, v in r.items()} for r in hit if isinstance(r, dict)], {}
+
 
 def _cached_query(spec: DatasetSpec, payload: dict[str, object]) -> tuple[list[dict[str, object]], dict[str, object]]:
     cache_key = _query_cache_key(spec, payload)
@@ -3037,9 +3057,7 @@ def ingestion_post_query(
     )
     resp.raise_for_status()
     headers: dict[str, object] = {
-        name.lower(): value
-        for name, value in resp.headers.items()
-        if name.lower() in _RECORD_HEADERS
+        name.lower(): value for name, value in resp.headers.items() if name.lower() in _RECORD_HEADERS
     }
     # FINRA can return a successful empty response for a partition with no
     # matching rows. Continue the partition walk instead of parsing it as JSON.
@@ -3063,6 +3081,7 @@ def _nested_record_rows(data: dict[str, object]) -> list[dict[str, object]] | No
         if isinstance(nested, list):
             return _record_rows(nested)
     return None
+
 
 def _dict_envelope_rows(data: dict[str, object]) -> list[dict[str, object]]:
     """Rows from a dict payload: nested envelope, else the dict itself."""

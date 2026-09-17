@@ -11,7 +11,7 @@ from __future__ import annotations
 import hashlib
 import json
 from collections.abc import Sequence
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from operator import itemgetter
 from pathlib import Path
 from typing import Protocol
@@ -41,7 +41,7 @@ _RANK_KEYS = ("rank", "position")
 
 
 def _now_iso() -> str:
-    return datetime.now(timezone.utc).isoformat()
+    return datetime.now(UTC).isoformat()
 
 
 def _resolve_root(data_root: Path | str | None = None) -> Path:
@@ -70,9 +70,11 @@ def _is_present(item: dict[str, object]) -> bool:
 
 
 def _rank_group_key(item: dict[str, object]) -> tuple[object, object, object]:
-    return (item.get("table") or item.get("source_table"),
-            item.get("list_kind") or item.get("list"),
-            _pick(item, _GEO_KEYS))
+    return (
+        item.get("table") or item.get("source_table"),
+        item.get("list_kind") or item.get("list"),
+        _pick(item, _GEO_KEYS),
+    )
 
 
 def _rank_row(item: dict[str, object]) -> tuple[str, int] | None:
@@ -82,7 +84,7 @@ def _rank_row(item: dict[str, object]) -> tuple[str, int] | None:
         return None
     try:
         rank = as_int(rank, what="rank")
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return None
     return (str(period), rank)
 
@@ -129,8 +131,7 @@ def _score_of(item: dict[str, object]) -> float | None:
     return None
 
 
-def _blob_coverage(blob: dict[str, object], primary: str, fallback: str,
-                   what: str) -> list[str] | None:
+def _blob_coverage(blob: dict[str, object], primary: str, fallback: str, what: str) -> list[str] | None:
     raw = blob.get(primary) or blob.get(fallback)
     if raw is None:
         return None
@@ -145,14 +146,11 @@ def _blob_observations(blob: dict[str, object]) -> list[dict[str, object]]:
     return rows
 
 
-def _narrow_blob_coverage(blob: dict[str, object],
-                          periods_covered: Sequence[str] | None,
-                          geos_covered: Sequence[str] | None) -> tuple[
-                              Sequence[str] | None, Sequence[str] | None,
-                              list[dict[str, object]]]:
+def _narrow_blob_coverage(
+    blob: dict[str, object], periods_covered: Sequence[str] | None, geos_covered: Sequence[str] | None
+) -> tuple[Sequence[str] | None, Sequence[str] | None, list[dict[str, object]]]:
     if periods_covered is None:
-        parsed = _blob_coverage(blob, "periods_covered", "covered_periods",
-                                "periods_covered")
+        parsed = _blob_coverage(blob, "periods_covered", "covered_periods", "periods_covered")
         if parsed is not None:
             periods_covered = parsed
     if geos_covered is None:
@@ -162,10 +160,9 @@ def _narrow_blob_coverage(blob: dict[str, object],
     return periods_covered, geos_covered, _blob_observations(blob)
 
 
-def _row_coverage(rows: list[dict[str, object]],
-                  periods_covered: Sequence[str] | None,
-                  geos_covered: Sequence[str] | None) -> tuple[
-                      Sequence[str] | None, Sequence[str] | None]:
+def _row_coverage(
+    rows: list[dict[str, object]], periods_covered: Sequence[str] | None, geos_covered: Sequence[str] | None
+) -> tuple[Sequence[str] | None, Sequence[str] | None]:
     for row in rows:
         if periods_covered is None and isinstance(row.get("periods_covered"), list):
             periods_covered = as_str_list(row.get("periods_covered"), what="periods_covered")
@@ -174,14 +171,13 @@ def _row_coverage(rows: list[dict[str, object]],
     return periods_covered, geos_covered
 
 
-def _coerce_rows(observations: dict[str, object] | Sequence[dict[str, object]] | None,
-                 periods_covered: Sequence[str] | None,
-                 geos_covered: Sequence[str] | None) -> tuple[
-                     list[dict[str, object]],
-                     Sequence[str] | None, Sequence[str] | None]:
+def _coerce_rows(
+    observations: dict[str, object] | Sequence[dict[str, object]] | None,
+    periods_covered: Sequence[str] | None,
+    geos_covered: Sequence[str] | None,
+) -> tuple[list[dict[str, object]], Sequence[str] | None, Sequence[str] | None]:
     if isinstance(observations, dict):
-        periods_covered, geos_covered, observations = _narrow_blob_coverage(
-            observations, periods_covered, geos_covered)
+        periods_covered, geos_covered, observations = _narrow_blob_coverage(observations, periods_covered, geos_covered)
     rows: list[dict[str, object]] = [o for o in (observations or []) if isinstance(o, dict)]
     return (rows, *_row_coverage(rows, periods_covered, geos_covered))
 
@@ -190,9 +186,9 @@ def _distinct_sorted(rows: list[dict[str, object]], keys: Sequence[str]) -> list
     return sorted({str(_pick(o, keys)) for o in rows if _pick(o, keys) is not None})
 
 
-def _covered_lists(rows: list[dict[str, object]],
-                   periods_covered: Sequence[str] | None,
-                   geos_covered: Sequence[str] | None) -> tuple[list[str], list[str]]:
+def _covered_lists(
+    rows: list[dict[str, object]], periods_covered: Sequence[str] | None, geos_covered: Sequence[str] | None
+) -> tuple[list[str], list[str]]:
     covered_periods = list(periods_covered) if periods_covered else _distinct_sorted(rows, _PERIOD_KEYS)
     covered_geos = list(geos_covered) if geos_covered else _distinct_sorted(rows, _GEO_KEYS)
     return covered_periods, covered_geos
@@ -208,8 +204,7 @@ def _scored_history(present: list[dict[str, object]]) -> list[tuple[str, float]]
     return sorted(pairs, key=itemgetter(0))
 
 
-def _velocity_of(scored: list[tuple[str, float]], covered_periods: list[str],
-                 missing: dict[str, str]) -> float | None:
+def _velocity_of(scored: list[tuple[str, float]], covered_periods: list[str], missing: dict[str, str]) -> float | None:
     if not covered_periods:
         missing["velocity"] = "no coverage"
         return None
@@ -219,8 +214,7 @@ def _velocity_of(scored: list[tuple[str, float]], covered_periods: list[str],
     return (scored[-1][1] - scored[0][1]) / len(covered_periods)
 
 
-def _score_halves(scored: list[tuple[str, float]],
-                  covered_periods: list[str]) -> tuple[list[float], list[float]]:
+def _score_halves(scored: list[tuple[str, float]], covered_periods: list[str]) -> tuple[list[float], list[float]]:
     n_periods = len(covered_periods)
     edge = covered_periods[min(max(1, n_periods // 2), n_periods - 1)]
     prior = [s for p, s in scored if p < edge]
@@ -228,8 +222,9 @@ def _score_halves(scored: list[tuple[str, float]],
     return prior, recent
 
 
-def _acceleration_of(scored: list[tuple[str, float]], covered_periods: list[str],
-                     missing: dict[str, str]) -> float | None:
+def _acceleration_of(
+    scored: list[tuple[str, float]], covered_periods: list[str], missing: dict[str, str]
+) -> float | None:
     if len(scored) < 3 or len(covered_periods) < 2:
         if "velocity" not in missing:
             missing["acceleration"] = "missing score history"
@@ -241,8 +236,7 @@ def _acceleration_of(scored: list[tuple[str, float]], covered_periods: list[str]
     return (recent[-1] - recent[0]) / len(recent) - (prior[-1] - prior[0]) / len(prior)
 
 
-def _percentile_of(scored: list[tuple[str, float]],
-                   missing: dict[str, str]) -> float | None:
+def _percentile_of(scored: list[tuple[str, float]], missing: dict[str, str]) -> float | None:
     if not scored:
         missing["percentile"] = "missing score history"
         return None
@@ -250,12 +244,17 @@ def _percentile_of(scored: list[tuple[str, float]],
     return sum(1 for _, s in scored if s <= last) / len(scored)
 
 
-def _assemble_values(covered_periods: list[str], covered_geos: list[str],
-                     hit_periods: set[str], hit_geos: set[str],
-                     present: list[dict[str, object]],
-                     velocity: float | None, acceleration: float | None,
-                     percentile: float | None,
-                     missing: dict[str, str]) -> dict[str, object]:
+def _assemble_values(
+    covered_periods: list[str],
+    covered_geos: list[str],
+    hit_periods: set[str],
+    hit_geos: set[str],
+    present: list[dict[str, object]],
+    velocity: float | None,
+    acceleration: float | None,
+    percentile: float | None,
+    missing: dict[str, str],
+) -> dict[str, object]:
     latest = max(covered_periods) if covered_periods else None
     first_seen = min(hit_periods) if hit_periods else None
     values: dict[str, object] = {
@@ -267,11 +266,11 @@ def _assemble_values(covered_periods: list[str], covered_geos: list[str],
         "percentile": percentile,
         "new_entry": bool(hit_periods) and first_seen == latest,
     }
-    values["rules"] = {name: {"value": value, "rule": f"trend_{name}_v{CALC_VERSION}",
-                              "calc_version": CALC_VERSION}
-                       for name, value in values.items()}
-    values["coverage"] = {"periods_covered": covered_periods, "geos_covered": covered_geos,
-                          "missing": missing}
+    values["rules"] = {
+        name: {"value": value, "rule": f"trend_{name}_v{CALC_VERSION}", "calc_version": CALC_VERSION}
+        for name, value in values.items()
+    }
+    values["coverage"] = {"periods_covered": covered_periods, "geos_covered": covered_geos, "missing": missing}
     return values
 
 
@@ -300,47 +299,54 @@ def compute_candidate_features(
     velocity = _velocity_of(scored, covered_periods, missing)
     acceleration = _acceleration_of(scored, covered_periods, missing)
     percentile = _percentile_of(scored, missing)
-    return _assemble_values(covered_periods, covered_geos, hit_periods, hit_geos,
-                            present, velocity, acceleration, percentile, missing)
+    return _assemble_values(
+        covered_periods, covered_geos, hit_periods, hit_geos, present, velocity, acceleration, percentile, missing
+    )
 
 
-def _apply_candidate_overrides(record: dict[str, object], *, table: object = None,
-                               period: object = None, geo: object = None,
-                               term: object = None, list_kind: object = None,
-                               rank: object = None) -> dict[str, object]:
-    for key, value in (("table", table), ("period", period), ("geo", geo),
-                       ("term", term), ("list_kind", list_kind), ("rank", rank)):
+def _apply_candidate_overrides(
+    record: dict[str, object],
+    *,
+    table: object = None,
+    period: object = None,
+    geo: object = None,
+    term: object = None,
+    list_kind: object = None,
+    rank: object = None,
+) -> dict[str, object]:
+    for key, value in (
+        ("table", table),
+        ("period", period),
+        ("geo", geo),
+        ("term", term),
+        ("list_kind", list_kind),
+        ("rank", rank),
+    ):
         if value is not None:
             record[key] = value
     return record
 
 
-def _candidate_identity(record: dict[str, object]) -> tuple[
-        object, object, object, object, object, object, str]:
-    missing = [k for k in ("table", "geo", "term", "list_kind")
-               if record.get(k) is None]
+def _candidate_identity(record: dict[str, object]) -> tuple[object, object, object, object, object, object, str]:
+    missing = [k for k in ("table", "geo", "term", "list_kind") if record.get(k) is None]
     if missing:
         raise TypeError(f"normalize_candidate missing required fields: {missing}")
     table, geo, term = record["table"], record["geo"], record["term"]
     list_kind = record["list_kind"]
     period = record.get("period") or record.get("observed_at")
     rank = record.get("rank")
-    signal_id = hashlib.sha256(
-        f"{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
+    signal_id = hashlib.sha256(f"{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
     return table, geo, term, list_kind, period, rank, signal_id
 
 
-def _merged_candidate_metrics(record: dict[str, object], metrics: object,
-                              rank: object) -> dict[str, object]:
-    merged: dict[str, object] = dict(as_dict(record.get("metrics", None) or metrics or {},
-                                             what="metrics"))
+def _merged_candidate_metrics(record: dict[str, object], metrics: object, rank: object) -> dict[str, object]:
+    merged: dict[str, object] = dict(as_dict(record.get("metrics", None) or metrics or {}, what="metrics"))
     if rank is not None and "rank" not in merged:
         merged["rank"] = rank
     return merged
 
 
-def _candidate_list_field(record: dict[str, object], name: str, fallback: object,
-                          what: str) -> list[object]:
+def _candidate_list_field(record: dict[str, object], name: str, fallback: object, what: str) -> list[object]:
     value = record.get(name, None)
     if value is not None:
         return as_list(value, what=what)
@@ -360,25 +366,40 @@ def _candidate_features_field(record: dict[str, object], features: object) -> ob
     return features
 
 
-def _build_candidate(record: dict[str, object], table: object, geo: object,
-                     term: object, list_kind: object, period: object,
-                     signal_id: str, signal_type: object, source: object,
-                     source_record_id: object, observed_at: object,
-                     retrieved_at: object, known_at: object, now: str,
-                     merged_metrics: dict[str, object],
-                     entities_list: list[object], evidence_list: list[object],
-                     features_value: object) -> dict[str, object]:
+def _build_candidate(
+    record: dict[str, object],
+    table: object,
+    geo: object,
+    term: object,
+    list_kind: object,
+    period: object,
+    signal_id: str,
+    signal_type: object,
+    source: object,
+    source_record_id: object,
+    observed_at: object,
+    retrieved_at: object,
+    known_at: object,
+    now: str,
+    merged_metrics: dict[str, object],
+    entities_list: list[object],
+    evidence_list: list[object],
+    features_value: object,
+) -> dict[str, object]:
     return {
-        "signal_id": signal_id, "status": "candidate",
+        "signal_id": signal_id,
+        "status": "candidate",
         "signal_type": record.get("signal_type", signal_type),
         "source": record.get("source", source),
-        "source_record_id": _first_truthy(record.get("source_record_id"), source_record_id,
-                                          signal_id),
+        "source_record_id": _first_truthy(record.get("source_record_id"), source_record_id, signal_id),
         "observed_at": _first_truthy(record.get("observed_at"), observed_at, period),
         "known_at": _first_truthy(known_at, record.get("known_at"), now),
         "retrieved_at": _first_truthy(retrieved_at, record.get("retrieved_at"), now),
-        "term": term, "geo": geo, "table": table,
-        "list_kind": list_kind, "period": period,
+        "term": term,
+        "geo": geo,
+        "table": table,
+        "list_kind": list_kind,
+        "period": period,
         "metrics": merged_metrics,
         "entities": entities_list,
         "evidence": evidence_list,
@@ -386,31 +407,57 @@ def _build_candidate(record: dict[str, object], table: object, geo: object,
     }
 
 
-def normalize_candidate(record: dict[str, object] | None = None, *, table: object = None,
-                        period: object = None, geo: object = None,
-                        term: object = None, list_kind: object = None, rank: object = None,
-                        signal_type: object = "trend", source: object = "trends",
-                        source_record_id: object = None, observed_at: object = None,
-                        retrieved_at: object = None, known_at: object = None,
-                        entities: object = None,
-                        metrics: object = None, evidence: object = None,
-                        features: object = None, data_root: Path | str | None = None,
-                        persist: bool = True) -> dict[str, object]:
+def normalize_candidate(
+    record: dict[str, object] | None = None,
+    *,
+    table: object = None,
+    period: object = None,
+    geo: object = None,
+    term: object = None,
+    list_kind: object = None,
+    rank: object = None,
+    signal_type: object = "trend",
+    source: object = "trends",
+    source_record_id: object = None,
+    observed_at: object = None,
+    retrieved_at: object = None,
+    known_at: object = None,
+    entities: object = None,
+    metrics: object = None,
+    evidence: object = None,
+    features: object = None,
+    data_root: Path | str | None = None,
+    persist: bool = True,
+) -> dict[str, object]:
     """Build (and by default store) one candidate; identity is stable.
 
     Accepts either a record dict (keys table/period/geo/term/list_kind/rank)
     or the same fields as keywords; explicit keywords win.
     """
-    record = _apply_candidate_overrides(dict(record or {}), table=table, period=period,
-                                        geo=geo, term=term, list_kind=list_kind, rank=rank)
+    record = _apply_candidate_overrides(
+        dict(record or {}), table=table, period=period, geo=geo, term=term, list_kind=list_kind, rank=rank
+    )
     table, geo, term, list_kind, period, rank, signal_id = _candidate_identity(record)
     candidate = _build_candidate(
-        record, table, geo, term, list_kind, period, signal_id, signal_type, source,
-        source_record_id, observed_at, retrieved_at, known_at, _now_iso(),
+        record,
+        table,
+        geo,
+        term,
+        list_kind,
+        period,
+        signal_id,
+        signal_type,
+        source,
+        source_record_id,
+        observed_at,
+        retrieved_at,
+        known_at,
+        _now_iso(),
         _merged_candidate_metrics(record, metrics, rank),
         _candidate_list_field(record, "entities", entities, "entities"),
         _candidate_list_field(record, "evidence", evidence, "evidence"),
-        _candidate_features_field(record, features))
+        _candidate_features_field(record, features),
+    )
     if persist:
         _append_version(candidate, data_root)
     return candidate
@@ -432,8 +479,7 @@ def _read_prior_versions(path: Path) -> list[dict[str, object]]:
     return prior
 
 
-def _known_version(prior: list[dict[str, object]],
-                   candidate: dict[str, object]) -> dict[str, object] | None:
+def _known_version(prior: list[dict[str, object]], candidate: dict[str, object]) -> dict[str, object] | None:
     same = [d for d in prior if d.get("signal_id") == candidate["signal_id"]]
     if not same:
         return None
@@ -441,8 +487,7 @@ def _known_version(prior: list[dict[str, object]],
     return latest if _same_content(latest, candidate) else None
 
 
-def _append_version(candidate: dict[str, object],
-                    data_root: Path | str | None = None) -> dict[str, object]:
+def _append_version(candidate: dict[str, object], data_root: Path | str | None = None) -> dict[str, object]:
     root = _resolve_root(data_root) / "google_data"
     root.mkdir(parents=True, exist_ok=True)
     path = root / STORE_NAME
@@ -460,15 +505,13 @@ def _as_key(value: object) -> str | None:
         return None
     if isinstance(value, datetime):
         if value.tzinfo is None:
-            value = value.replace(tzinfo=timezone.utc)
+            value = value.replace(tzinfo=UTC)
         return value.isoformat()
     return str(value)
 
 
-def _signal_id_for(table: object, period: object, geo: object, term: object,
-                   list_kind: object) -> str:
-    return hashlib.sha256(
-        f"{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
+def _signal_id_for(table: object, period: object, geo: object, term: object, list_kind: object) -> str:
+    return hashlib.sha256(f"{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
 
 
 def _warehouse_records(data_root: Path | str | None = None) -> list[dict[str, object]]:
@@ -512,38 +555,46 @@ def _parse_jsonl_record(line: str) -> dict[str, object] | None:
     return record
 
 
-def _migration_payload(record: dict[str, object]) -> tuple[
-        dict[str, object], list[object], dict[str, object] | None]:
+def _migration_payload(record: dict[str, object]) -> tuple[dict[str, object], list[object], dict[str, object] | None]:
     metrics = record.get("metrics")
     evidence = record.get("evidence")
     raw_features = record.get("features")
-    return (metrics if isinstance(metrics, dict) else {},
-            evidence if isinstance(evidence, list) else [],
-            dict(raw_features) if isinstance(raw_features, dict) else None)
+    return (
+        metrics if isinstance(metrics, dict) else {},
+        evidence if isinstance(evidence, list) else [],
+        dict(raw_features) if isinstance(raw_features, dict) else None,
+    )
 
 
-def _migration_defaults(record: dict[str, object]) -> tuple[
-        object, object, object, object, object, object]:
-    return (record.get("table") or "trends",
-            record.get("period") or record.get("observed_at") or "",
-            record.get("geo") or "", record.get("term") or "",
-            record.get("list_kind") or "top", record.get("source") or "trends")
+def _migration_defaults(record: dict[str, object]) -> tuple[object, object, object, object, object, object]:
+    return (
+        record.get("table") or "trends",
+        record.get("period") or record.get("observed_at") or "",
+        record.get("geo") or "",
+        record.get("term") or "",
+        record.get("list_kind") or "top",
+        record.get("source") or "trends",
+    )
 
 
 def _migration_content_hash(metrics: dict[str, object], evidence: list[object]) -> str:
-    return hashlib.sha256(json.dumps(
-        {"metrics": metrics, "evidence": evidence, "collector_version": "1"},
-        sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
-
-
-def _migration_observation_id(source: object, table: object, period: object,
-                              geo: object, term: object, list_kind: object) -> str:
     return hashlib.sha256(
-        f"{source}|{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
+        json.dumps(
+            {"metrics": metrics, "evidence": evidence, "collector_version": "1"},
+            sort_keys=True,
+            separators=(",", ":"),
+            default=str,
+        ).encode()
+    ).hexdigest()
 
 
-def _migration_row(record: dict[str, object]) -> tuple[
-        dict[str, object], dict[str, object] | None]:
+def _migration_observation_id(
+    source: object, table: object, period: object, geo: object, term: object, list_kind: object
+) -> str:
+    return hashlib.sha256(f"{source}|{table}|{period}|{geo}|{term}|{list_kind}".encode()).hexdigest()
+
+
+def _migration_row(record: dict[str, object]) -> tuple[dict[str, object], dict[str, object] | None]:
     metrics, evidence, features = _migration_payload(record)
     table, period, geo, term, list_kind, source = _migration_defaults(record)
     observation_id = _migration_observation_id(source, table, period, geo, term, list_kind)
@@ -551,13 +602,18 @@ def _migration_row(record: dict[str, object]) -> tuple[
     retrieved_at = record.get("retrieved_at") or record.get("known_at") or _now_iso()
     row = {
         "observation_id": observation_id,
-        "source": source, "table": table, "term": term, "geo": geo,
-        "list_kind": list_kind, "period": period,
+        "source": source,
+        "table": table,
+        "term": term,
+        "geo": geo,
+        "list_kind": list_kind,
+        "period": period,
         "observed_at": record.get("observed_at") or period,
         "known_at": known_at,
         "retrieved_at": retrieved_at,
         "source_record_id": record.get("source_record_id") or "",
-        "content_hash": _migration_content_hash(metrics, evidence), "collector_version": "1",
+        "content_hash": _migration_content_hash(metrics, evidence),
+        "collector_version": "1",
         "calc_version": "1",
         "metrics_json": json.dumps(metrics, sort_keys=True, default=str),
         "features_json": None,
@@ -569,8 +625,7 @@ def _migration_row(record: dict[str, object]) -> tuple[
         feature_row = {
             "observation_id": observation_id,
             "feature_scope_hash": "legacy-unknown",
-            "feature_scope_json": json.dumps(
-                {"legacy": True, "reason": "pre-scope-backfill"}),
+            "feature_scope_json": json.dumps({"legacy": True, "reason": "pre-scope-backfill"}),
             "features_json": json.dumps(features, sort_keys=True, default=str),
             "calc_version": "1",
             "calculated_at": known_at,
@@ -579,8 +634,7 @@ def _migration_row(record: dict[str, object]) -> tuple[
     return row, feature_row
 
 
-def _collect_migration_rows(store: Path) -> tuple[
-        list[dict[str, object]], list[dict[str, object]]]:
+def _collect_migration_rows(store: Path) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
     rows: list[dict[str, object]] = []
     feature_rows: list[dict[str, object]] = []
     for line in store.read_text().splitlines():
@@ -594,22 +648,21 @@ def _collect_migration_rows(store: Path) -> tuple[
     return rows, feature_rows
 
 
-def _persist_migration_rows(rows: list[dict[str, object]],
-                            feature_rows: list[dict[str, object]],
-                            data_root: Path | str | None,
-                            _parquet: _ParquetWriter) -> int | None:
+def _persist_migration_rows(
+    rows: list[dict[str, object]],
+    feature_rows: list[dict[str, object]],
+    data_root: Path | str | None,
+    _parquet: _ParquetWriter,
+) -> int | None:
     written = 0
     if rows:
         try:
-            written = _parquet.write_rows(
-                "google_observations", rows, root=_resolve_root(data_root) / "parquet")
+            written = _parquet.write_rows("google_observations", rows, root=_resolve_root(data_root) / "parquet")
         except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             return None
     if feature_rows:
         try:
-            _parquet.write_rows(
-                "google_signal_features", feature_rows,
-                root=_resolve_root(data_root) / "parquet")
+            _parquet.write_rows("google_signal_features", feature_rows, root=_resolve_root(data_root) / "parquet")
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
     return written
@@ -655,23 +708,23 @@ def _signal_identity(row: dict[str, object]) -> tuple[object, object, object, ob
     return table, period, geo, term, list_kind
 
 
-def _signal_payload(row: dict[str, object]) -> tuple[
-        dict[str, object], list[object], str]:
-    metrics: dict[str, object] = as_dict(
-        json_from_text(row.get("metrics_json"), what="metrics_json"), what="metrics")
-    evidence: list[object] = as_list(
-        json_from_text(row.get("evidence_json"), what="evidence_json"), what="evidence")
+def _signal_payload(row: dict[str, object]) -> tuple[dict[str, object], list[object], str]:
+    metrics: dict[str, object] = as_dict(json_from_text(row.get("metrics_json"), what="metrics_json"), what="metrics")
+    evidence: list[object] = as_list(json_from_text(row.get("evidence_json"), what="evidence_json"), what="evidence")
     return metrics, evidence, str(row.get("collector_version") or "1")
 
 
-def _source_hash_for(metrics: dict[str, object], evidence: list[object],
-                     collector_version: str) -> str:
+def _source_hash_for(metrics: dict[str, object], evidence: list[object], collector_version: str) -> str:
     try:
-        return hashlib.sha256(json.dumps(
-            {"metrics": metrics, "evidence": evidence,
-             "collector_version": collector_version},
-            sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()
-    except (TypeError, ValueError):
+        return hashlib.sha256(
+            json.dumps(
+                {"metrics": metrics, "evidence": evidence, "collector_version": collector_version},
+                sort_keys=True,
+                separators=(",", ":"),
+                default=str,
+            ).encode()
+        ).hexdigest()
+    except TypeError, ValueError:
         return ""
 
 
@@ -680,17 +733,23 @@ def _record_to_signal(row: dict[str, object]) -> dict[str, object]:
     metrics, evidence, collector_version = _signal_payload(row)
     return {
         "signal_id": _signal_id_for(table, period, geo, term, list_kind),
-        "status": "candidate", "signal_type": "trend",
+        "status": "candidate",
+        "signal_type": "trend",
         "source": row.get("source") or "trends",
         "source_record_id": row.get("source_record_id") or "",
         "observation_id": row.get("observation_id") or "",
         "observed_at": row.get("observed_at") or period,
         "known_at": row.get("known_at") or "",
         "retrieved_at": row.get("retrieved_at") or "",
-        "term": term, "geo": geo, "table": table,
-        "list_kind": list_kind, "period": period,
-        "metrics": metrics, "entities": [],
-        "evidence": evidence, "features": None,
+        "term": term,
+        "geo": geo,
+        "table": table,
+        "list_kind": list_kind,
+        "period": period,
+        "metrics": metrics,
+        "entities": [],
+        "evidence": evidence,
+        "features": None,
         "collector_version": collector_version,
         "_source_hash": _source_hash_for(metrics, evidence, collector_version),
     }
@@ -699,12 +758,15 @@ def _record_to_signal(row: dict[str, object]) -> dict[str, object]:
 def _version_key(record: dict[str, object], row: dict[str, object]) -> tuple[str, str, str, str]:
     raw: object = record.get("metrics") or {}
     metrics: dict[str, object] = raw if isinstance(raw, dict) else {}
-    return (str(metrics.get("refresh_date") or ""), str(record.get("known_at", "")),
-            str(record.get("_source_hash") or ""), str(row.get("source_record_id") or ""))
+    return (
+        str(metrics.get("refresh_date") or ""),
+        str(record.get("known_at", "")),
+        str(record.get("_source_hash") or ""),
+        str(row.get("source_record_id") or ""),
+    )
 
 
-def _latest_versions(data_root: Path | str | None,
-                     cutoff: str | None) -> dict[str, dict[str, object]]:
+def _latest_versions(data_root: Path | str | None, cutoff: str | None) -> dict[str, dict[str, object]]:
     latest: dict[str, dict[str, object]] = {}
     keys: dict[str, tuple[str, str, str, str]] = {}
     for row in _warehouse_records(data_root):
@@ -728,9 +790,7 @@ def _load_feature_rows(data_root: Path | str | None) -> list[dict[str, object]]:
     except ImportError:
         return []
     try:
-        return _parquet_q.read_table(
-            "google_signal_features",
-            _resolve_root(data_root) / "parquet").to_pylist()
+        return _parquet_q.read_table("google_signal_features", _resolve_root(data_root) / "parquet").to_pylist()
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return []
 
@@ -749,16 +809,16 @@ def _shape_candidate(record: dict[str, object]) -> dict[str, object]:
     }
 
 
-def _shape_candidates(latest: dict[str, dict[str, object]]) -> tuple[
-        dict[str, dict[str, object]], list[dict[str, object]]]:
+def _shape_candidates(
+    latest: dict[str, dict[str, object]],
+) -> tuple[dict[str, dict[str, object]], list[dict[str, object]]]:
     shaped = {sid: _shape_candidate(record) for sid, record in latest.items()}
     return shaped, list(shaped.values())
 
 
 def _pick_feature_row(rows: list[dict[str, object]]) -> dict[str, object]:
     peak = max(str(r.get("calculated_at") or "") for r in rows)
-    return min((r for r in rows if str(r.get("calculated_at") or "") == peak),
-               key=_features_json_str)
+    return min((r for r in rows if str(r.get("calculated_at") or "") == peak), key=_features_json_str)
 
 
 def _frow_identity_ok(frow: object, oid: str) -> bool:
@@ -783,8 +843,7 @@ def _frow_cutoff_ok(frow: object, cutoff: str | None) -> bool:
     return isinstance(frow, dict) and not str(frow.get("calculated_at") or "") > cutoff
 
 
-def _feature_row_matches(frow: object, oid: str, cutoff: str | None,
-                         feature_scope_hash: str | None) -> bool:
+def _feature_row_matches(frow: object, oid: str, cutoff: str | None, feature_scope_hash: str | None) -> bool:
     if not _frow_identity_ok(frow, oid):
         return False
     if not _frow_version_ok(frow):
@@ -801,37 +860,64 @@ def _frow_scope_text(frow: dict[str, object]) -> dict[str, object] | None:
 
 class _ParquetWriter(Protocol):
     """Structural seam: storage.parquet module or test double with write_rows."""
+
     def write_rows(self, name: str, rows: list[dict[str, object]], root: Path | None = None) -> int: ...
 
 
 class _TrendsInputs(Protocol):
     """Structural seam: trends module or test double with expected_inputs_hash."""
-    def expected_inputs_hash(self, scope: dict[str, object], term: str, table: str, list_kind: str, basis: str, geo: str, candidates: list[dict[str, object]]) -> str: ...
+
+    def expected_inputs_hash(
+        self,
+        scope: dict[str, object],
+        term: str,
+        table: str,
+        list_kind: str,
+        basis: str,
+        geo: str,
+        candidates: list[dict[str, object]],
+    ) -> str: ...
 
 
-def _frow_inputs_ok(frow: dict[str, object], scope: dict[str, object],
-                    record: dict[str, object], basis: object,
-                    candidates: list[dict[str, object]], _trends_q: _TrendsInputs) -> bool:
+def _frow_inputs_ok(
+    frow: dict[str, object],
+    scope: dict[str, object],
+    record: dict[str, object],
+    basis: object,
+    candidates: list[dict[str, object]],
+    _trends_q: _TrendsInputs,
+) -> bool:
     basis_text = basis if isinstance(basis, str) else str(basis) if basis is not None else ""
     expected = _trends_q.expected_inputs_hash(
-        scope, str(record.get("term") or ""),
+        scope,
+        str(record.get("term") or ""),
         str(record.get("table") or ""),
-        str(record.get("list_kind") or ""), basis_text, str(record.get("geo") or ""), candidates)
+        str(record.get("list_kind") or ""),
+        basis_text,
+        str(record.get("geo") or ""),
+        candidates,
+    )
     return str(frow.get("inputs_hash") or "") == expected
 
 
-def _scoped_candidate(frow: dict[str, object], oid: str, cutoff: str | None,
-                      feature_scope_hash: str | None) -> dict[str, object] | None:
+def _scoped_candidate(
+    frow: dict[str, object], oid: str, cutoff: str | None, feature_scope_hash: str | None
+) -> dict[str, object] | None:
     if not _feature_row_matches(frow, oid, cutoff, feature_scope_hash):
         return None
     return _frow_scope_text(frow)
 
 
-def _scoped_feature_rows(feature_rows: list[dict[str, object]], oid: str,
-                         record: dict[str, object], basis: object,
-                         candidates: list[dict[str, object]], cutoff: str | None,
-                         feature_scope_hash: str | None, _trends_q: _TrendsInputs) -> dict[
-                             str, list[dict[str, object]]]:
+def _scoped_feature_rows(
+    feature_rows: list[dict[str, object]],
+    oid: str,
+    record: dict[str, object],
+    basis: object,
+    candidates: list[dict[str, object]],
+    cutoff: str | None,
+    feature_scope_hash: str | None,
+    _trends_q: _TrendsInputs,
+) -> dict[str, list[dict[str, object]]]:
     grouped: dict[str, list[dict[str, object]]] = {}
     for frow in feature_rows:
         scope = _scoped_candidate(frow, oid, cutoff, feature_scope_hash)
@@ -850,27 +936,29 @@ def _available_scopes(by_scope: dict[str, list[dict[str, object]]]) -> list[dict
         scope = json_from_text(rep.get("feature_scope_json"), what="feature_scope_json")
         if not isinstance(scope, dict):
             continue
-        available.append({
-            "feature_scope": scope,
-            "feature_scope_hash": str(rep.get("feature_scope_hash") or ""),
-            "feature_calculated_at": str(rep.get("calculated_at") or ""),
-            "calc_version": str(rep.get("calc_version") or ""),
-            "inputs_hash": str(rep.get("inputs_hash") or ""),
-        })
+        available.append(
+            {
+                "feature_scope": scope,
+                "feature_scope_hash": str(rep.get("feature_scope_hash") or ""),
+                "feature_calculated_at": str(rep.get("calculated_at") or ""),
+                "calc_version": str(rep.get("calc_version") or ""),
+                "inputs_hash": str(rep.get("inputs_hash") or ""),
+            }
+        )
     return available
 
 
-def _best_scoped_row(flat: list[dict[str, object]],
-                     by_scope: dict[str, list[dict[str, object]]],
-                     feature_scope_hash: str | None) -> dict[str, object] | None:
+def _best_scoped_row(
+    flat: list[dict[str, object]], by_scope: dict[str, list[dict[str, object]]], feature_scope_hash: str | None
+) -> dict[str, object] | None:
     if flat and (feature_scope_hash is not None or len(by_scope) == 1):
         return _pick_feature_row(flat)
     return None
 
 
-def _attach_features(record: dict[str, object],
-                     by_scope: dict[str, list[dict[str, object]]],
-                     feature_scope_hash: str | None) -> None:
+def _attach_features(
+    record: dict[str, object], by_scope: dict[str, list[dict[str, object]]], feature_scope_hash: str | None
+) -> None:
     flat = [r for rows in by_scope.values() for r in rows]
     best = _best_scoped_row(flat, by_scope, feature_scope_hash)
     if best is not None:
@@ -888,12 +976,14 @@ def _attach_features(record: dict[str, object],
     record["available_feature_scopes"] = _available_scopes(by_scope)
 
 
-def _apply_signal_features(latest: dict[str, dict[str, object]],
-                           shaped: dict[str, dict[str, object]],
-                           candidates: list[dict[str, object]],
-                           feature_rows: list[dict[str, object]],
-                           cutoff: str | None,
-                           feature_scope_hash: str | None) -> None:
+def _apply_signal_features(
+    latest: dict[str, dict[str, object]],
+    shaped: dict[str, dict[str, object]],
+    candidates: list[dict[str, object]],
+    feature_rows: list[dict[str, object]],
+    cutoff: str | None,
+    feature_scope_hash: str | None,
+) -> None:
     try:
         from . import trends as _trends_q
     except ImportError:
@@ -904,29 +994,41 @@ def _apply_signal_features(latest: dict[str, dict[str, object]],
         else:
             basis = _trends_q._series_basis(shaped[sid])
             by_scope = _scoped_feature_rows(
-                feature_rows, str(record.get("observation_id") or ""),
-                record, basis, candidates, cutoff, feature_scope_hash, _trends_q)
+                feature_rows,
+                str(record.get("observation_id") or ""),
+                record,
+                basis,
+                candidates,
+                cutoff,
+                feature_scope_hash,
+                _trends_q,
+            )
         _attach_features(record, by_scope, feature_scope_hash)
 
 
-def _filter_signals(rows: list[dict[str, object]], query: str | None,
-                    geo: str | None, limit: int | None) -> list[dict[str, object]]:
+def _filter_signals(
+    rows: list[dict[str, object]], query: str | None, geo: str | None, limit: int | None
+) -> list[dict[str, object]]:
     if query is not None:
         rows = [r for r in rows if query.lower() in str(r.get("term", "")).lower()]
     if geo is not None:
         rows = [r for r in rows if str(r.get("geo")) == geo]
     if limit is not None:
         try:
-            rows = rows[:max(0, limit)]
-        except (TypeError, ValueError):
+            rows = rows[: max(0, limit)]
+        except TypeError, ValueError:
             pass
     return rows
 
 
-def query_signals(query: str | None = None, geo: str | None = None,
-                  as_of: str | None = None, limit: int | None = None,
-                  data_root: Path | str | None = None,
-                  feature_scope_hash: str | None = None) -> list[dict[str, object]]:
+def query_signals(
+    query: str | None = None,
+    geo: str | None = None,
+    as_of: str | None = None,
+    limit: int | None = None,
+    data_root: Path | str | None = None,
+    feature_scope_hash: str | None = None,
+) -> list[dict[str, object]]:
     """Latest known version per signal_id, excluding anything known after as_of.
 
     Reads the ``google_observations`` warehouse (migrating legacy JSONL once);

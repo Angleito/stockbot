@@ -5,7 +5,7 @@ RUNS_DB_PATH is isolated per session by the root conftest fixture.
 
 import sqlite3
 import threading
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -24,10 +24,7 @@ from app.storage.runs import (
 def test_redact_text_units():
     assert redact_text("Authorization: Bearer abc123") == "Authorization: Bearer [REDACTED]"
     assert redact_text("key=sk-or-v1-abcdefghijklmnop end") == "key=sk-or-v1-[REDACTED] end"
-    jwt = (
-        "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0."
-        "dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
-    )
+    jwt = "eyJhbGciOiJIUzI1NiJ9.eyJzdWIiOiIxMjM0NTY3ODkwIn0.dozjgNryP4J3jVmNHl0w5N_XgL0n3I9PlFUP0THsR8U"
     assert redact_text(jwt) == "eyJ[REDACTED JWT]"
     assert redact_text("plain text") == "plain text"
     # Already-redacted output is stable under re-redaction.
@@ -63,9 +60,7 @@ def test_redact_value_units():
 
 
 def test_redact_json_units():
-    assert redact_json('{"token": "abc", "ticker": "AAPL"}') == (
-        '{"token": "[REDACTED]", "ticker": "AAPL"}'
-    )
+    assert redact_json('{"token": "abc", "ticker": "AAPL"}') == ('{"token": "[REDACTED]", "ticker": "AAPL"}')
     assert redact_json("not json") == "not json"
 
 
@@ -73,7 +68,8 @@ def test_reserve_methods_enforce_runtime():
     """Reserves refuse once elapsed runtime is gone, even with call slots left."""
     budget = ExecutionBudget(
         max_tool_calls=2,
-        max_runtime=1.0, max_evidence_tokens=48000,
+        max_runtime=1.0,
+        max_evidence_tokens=48000,
     )
     assert budget.reserve_tool_call() is True
     assert budget.reserve_search_call() is True
@@ -85,9 +81,17 @@ def test_reserve_methods_enforce_runtime():
 
 def _recorder(run_id: str) -> RunRecorder:
     return RunRecorder(
-        run_id=run_id, request_id="req", question="q", as_of=None, model="t",
-        provider="p", model_parameters={}, agent_version="0",
-        prompt_version="0", tool_registry_version="t", git_sha="g",
+        run_id=run_id,
+        request_id="req",
+        question="q",
+        as_of=None,
+        model="t",
+        provider="p",
+        model_parameters={},
+        agent_version="0",
+        prompt_version="0",
+        tool_registry_version="t",
+        git_sha="g",
     )
 
 
@@ -96,25 +100,44 @@ def test_concurrent_recorder_writes_unique_ids(tmp_path: Path, monkeypatch: pyte
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
     recorder = _recorder("run-conc-1")
     with recorder:
+
         def worker() -> None:
             for _ in range(10):
                 seq = recorder.next_tool_seq()
                 tc_id = f"{recorder.run_id}:tc:{seq}"
-                now = datetime.now(timezone.utc).isoformat()
+                now = datetime.now(UTC).isoformat()
                 recorder.record_tool_call(
-                    tool_call_id=tc_id, round=0, tool_name="search_tools",
-                    arguments_json="{}", started_at=now, completed_at=now,
-                    status="completed", result_row_count=0, returned_count=0,
-                    truncated=False, result_bytes=2, result_hash="h",
-                    source_names="[]", source_freshness="{}",
-                    as_of=None, error_type=None, error_message=None,
+                    tool_call_id=tc_id,
+                    round=0,
+                    tool_name="search_tools",
+                    arguments_json="{}",
+                    started_at=now,
+                    completed_at=now,
+                    status="completed",
+                    result_row_count=0,
+                    returned_count=0,
+                    truncated=False,
+                    result_bytes=2,
+                    result_hash="h",
+                    source_names="[]",
+                    source_freshness="{}",
+                    as_of=None,
+                    error_type=None,
+                    error_message=None,
                 )
                 recorder.record_evidence(
                     evidence_id=f"{recorder.run_id}:evid:{recorder.next_evidence_seq():04d}",
-                    run_id=recorder.run_id, tool_call_id=tc_id, round=0,
-                    tool_name="search_tools", rendered_hash="h", rendered_bytes=1,
-                    estimated_tokens=1, source_names="[]", source_freshness="{}",
-                    as_of=None, rendered_text="t",
+                    run_id=recorder.run_id,
+                    tool_call_id=tc_id,
+                    round=0,
+                    tool_name="search_tools",
+                    rendered_hash="h",
+                    rendered_bytes=1,
+                    estimated_tokens=1,
+                    source_names="[]",
+                    source_freshness="{}",
+                    as_of=None,
+                    rendered_text="t",
                 )
 
         threads = [threading.Thread(target=worker) for _ in range(8)]
@@ -154,15 +177,29 @@ def test_tool_call_telemetry_columns_migrated_and_recorded(tmp_path: Path, monke
     conn.close()
     monkeypatch.setenv("RUNS_DB_PATH", str(path))
     with _recorder("run-tel-1") as recorder:
-        now = datetime.now(timezone.utc).isoformat()
+        now = datetime.now(UTC).isoformat()
         recorder.record_tool_call(
-            tool_call_id="run-tel-1:tc:1", round=0, tool_name="search_tools",
-            arguments_json="{}", started_at=now, completed_at=now,
-            status="completed", result_row_count=0, returned_count=0,
-            truncated=False, result_bytes=2, result_hash="h",
-            source_names="[]", source_freshness="{}", as_of=None,
-            error_type=None, error_message=None, protocol_id="proto-1",
-            bridge_queue_ms=3.5, handler_ms=12.25, cache_hit=True,
+            tool_call_id="run-tel-1:tc:1",
+            round=0,
+            tool_name="search_tools",
+            arguments_json="{}",
+            started_at=now,
+            completed_at=now,
+            status="completed",
+            result_row_count=0,
+            returned_count=0,
+            truncated=False,
+            result_bytes=2,
+            result_hash="h",
+            source_names="[]",
+            source_freshness="{}",
+            as_of=None,
+            error_type=None,
+            error_message=None,
+            protocol_id="proto-1",
+            bridge_queue_ms=3.5,
+            handler_ms=12.25,
+            cache_hit=True,
             cache_type="stockbot_parsed",
         )
     # Reopen proves the migration is idempotent.
@@ -186,7 +223,10 @@ def test_execute_pi_tool_ids_and_telemetry(tmp_path: Path, monkeypatch: pytest.M
     import app.pi_gateway as gateway
 
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
-    def _fake_execute_tool(name: str, arguments: dict[str, object], model: str, *, context: RequestContext) -> dict[str, object]:
+
+    def _fake_execute_tool(
+        name: str, arguments: dict[str, object], model: str, *, context: RequestContext
+    ) -> dict[str, object]:
         return {"ok": True, "cache_hit": True, "cache_type": "unit_test"}
 
     monkeypatch.setattr(gateway, "execute_tool", _fake_execute_tool)
@@ -197,8 +237,12 @@ def test_execute_pi_tool_ids_and_telemetry(tmp_path: Path, monkeypatch: pytest.M
             fallback = gateway.execute_pi_tool("search_tools", {"query": "telemetry probe"}, session)
             assert fallback.get("content")
             correlated = gateway.execute_pi_tool(
-                "search_tools", {"query": "telemetry probe"}, session, tool_call_id="call-9",
-                protocol_id="proto-9", bridge_queue_ms=7.5,
+                "search_tools",
+                {"query": "telemetry probe"},
+                session,
+                tool_call_id="call-9",
+                protocol_id="proto-9",
+                bridge_queue_ms=7.5,
             )
             assert correlated.get("content")
             content = correlated["content"]
@@ -211,8 +255,7 @@ def test_execute_pi_tool_ids_and_telemetry(tmp_path: Path, monkeypatch: pytest.M
         rows = {
             row[0]: row[1:]
             for row in conn.execute(
-                "SELECT tool_call_id, protocol_id, bridge_queue_ms, handler_ms,"
-                " cache_hit, cache_type FROM tool_calls"
+                "SELECT tool_call_id, protocol_id, bridge_queue_ms, handler_ms, cache_hit, cache_type FROM tool_calls"
             )
         }
         seq_id, pi_id = "run-pi-1:tc:1", "run-pi-1:tc:call-9"
@@ -230,35 +273,52 @@ def test_execute_pi_tool_ids_and_telemetry(tmp_path: Path, monkeypatch: pytest.M
 def test_finalize_failed_run_reconstructs_orphan_summary(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Orphaned runs terminalize as failed with aggregates rebuilt from child rows."""
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
-    now = datetime.now(timezone.utc).isoformat()
+    now = datetime.now(UTC).isoformat()
     with _recorder("run-orphan-pop") as recorder:
-        recorder.record_model_call(round=2, provider="p", model="t", started_at=now,
-            completed_at=now, usage={"prompt_tokens": 100, "completion_tokens": 50,
-            "total_tokens": 999, "cost": 0.25})
-        recorder.record_tool_call(tool_call_id="tc-1", round=3, tool_name="t",
-            arguments_json="{}", started_at=now, completed_at=now, status="completed",
-            result_row_count=1, returned_count=1, truncated=False, result_bytes=10,
-            result_hash="h", source_names="", source_freshness="", as_of=None,
-            error_type=None, error_message=None)
+        recorder.record_model_call(
+            round=2,
+            provider="p",
+            model="t",
+            started_at=now,
+            completed_at=now,
+            usage={"prompt_tokens": 100, "completion_tokens": 50, "total_tokens": 999, "cost": 0.25},
+        )
+        recorder.record_tool_call(
+            tool_call_id="tc-1",
+            round=3,
+            tool_name="t",
+            arguments_json="{}",
+            started_at=now,
+            completed_at=now,
+            status="completed",
+            result_row_count=1,
+            returned_count=1,
+            truncated=False,
+            result_bytes=10,
+            result_hash="h",
+            source_names="",
+            source_freshness="",
+            as_of=None,
+            error_type=None,
+            error_message=None,
+        )
         recorder.record_event("turn_end", round=1)
     with _recorder("run-orphan-empty"):
         pass
-    assert finalize_failed_run("run-orphan-pop", error_type="tool_timeout",
-        error_message="boom") is True
-    assert finalize_failed_run("run-orphan-empty", error_type="tool_timeout",
-        error_message="boom") is True
+    assert finalize_failed_run("run-orphan-pop", error_type="tool_timeout", error_message="boom") is True
+    assert finalize_failed_run("run-orphan-empty", error_type="tool_timeout", error_message="boom") is True
     conn = sqlite3.connect(str(tmp_path / "runs.sqlite"))
     try:
-        cols = ("status, completed_at, duration_ms, round_count, model_call_count,"
+        cols = (
+            "status, completed_at, duration_ms, round_count, model_call_count,"
             " tool_call_count, input_tokens, output_tokens, total_tokens,"
-            " estimated_model_cost, estimated_total_cost, error_type")
-        pop = conn.execute(
-            f"SELECT {cols} FROM agent_runs WHERE run_id = ?", ("run-orphan-pop",)).fetchone()
+            " estimated_model_cost, estimated_total_cost, error_type"
+        )
+        pop = conn.execute(f"SELECT {cols} FROM agent_runs WHERE run_id = ?", ("run-orphan-pop",)).fetchone()
         assert pop[0] == "failed"
         assert pop[1] is not None and pop[2] is not None
         assert tuple(pop[3:]) == (3, 1, 1, 100, 50, 150, 0.25, 0.25, "tool_timeout")
-        empty = conn.execute(
-            f"SELECT {cols} FROM agent_runs WHERE run_id = ?", ("run-orphan-empty",)).fetchone()
+        empty = conn.execute(f"SELECT {cols} FROM agent_runs WHERE run_id = ?", ("run-orphan-empty",)).fetchone()
         assert empty[0] == "failed"
         assert tuple(empty[3:]) == (0, 0, 0, 0, 0, 0, 0.0, 0.0, "tool_timeout")
     finally:

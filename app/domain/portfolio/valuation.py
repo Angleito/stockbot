@@ -2,8 +2,8 @@
 
 from __future__ import annotations
 
+from collections.abc import Sequence
 from decimal import Decimal
-from typing import Sequence
 
 from ..market.quotes import Quote
 from ..market.securities import SecurityResolution
@@ -35,9 +35,7 @@ def valuation_price(quote: Quote | None) -> dict[str, object]:
     return {"price": None, "price_type": None}
 
 
-def position_market_value(
-    quantity: Decimal | None, price: Decimal | None
-) -> Decimal | None:
+def position_market_value(quantity: Decimal | None, price: Decimal | None) -> Decimal | None:
     """Return ``quantity * price`` when both are present, else None."""
     if quantity == 0:
         return ZERO
@@ -57,9 +55,7 @@ def unrealized_gain(
     return market_value - average_cost * quantity
 
 
-def unrealized_gain_pct(
-    gain: Decimal | None, cost_basis: Decimal | None
-) -> Decimal | None:
+def unrealized_gain_pct(gain: Decimal | None, cost_basis: Decimal | None) -> Decimal | None:
     """Return gain as a ratio of cost basis, None when either is missing or basis is zero."""
     return _ratio(gain, cost_basis)
 
@@ -79,9 +75,7 @@ def portfolio_market_value(
     return total, len(priced), len(values)
 
 
-def position_weight(
-    market_value: Decimal | None, portfolio_total: Decimal | None
-) -> Decimal | None:
+def position_weight(market_value: Decimal | None, portfolio_total: Decimal | None) -> Decimal | None:
     """Return market value as a fraction of the portfolio total, else None."""
     return _ratio(market_value, portfolio_total)
 

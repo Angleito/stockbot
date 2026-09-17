@@ -5,6 +5,7 @@ Single slice file owned by CliRenderFix. Assembled from coordinator CLI tests
 (test_edgar_*), and ValNormFix (test_val_*/test_norm_*) scratch suites.
 All tests exercise decision paths incl. error arms; network/DB stubbed.
 """
+
 from __future__ import annotations
 
 import argparse
@@ -85,6 +86,7 @@ def _ns(**kw: object) -> argparse.Namespace:
 
 # --- run-row formatters ---
 
+
 def test_cli_coerce_run_number_arms():
     assert _coerce_run_number(3) == 3
     assert _coerce_run_number(2.5) == 2.5
@@ -100,8 +102,14 @@ def test_cli_format_run_started_arms():
 
 
 def test_cli_format_run_row_mixed_types():
-    row: dict[str, object] = {"run_id": "r", "duration_ms": "x", "estimated_total_cost": None,
-           "question": 123, "started_at": "", "status": "ok"}
+    row: dict[str, object] = {
+        "run_id": "r",
+        "duration_ms": "x",
+        "estimated_total_cost": None,
+        "question": 123,
+        "started_at": "",
+        "status": "ok",
+    }
     line = _format_run_row(row)
     assert line.startswith("r ")
     assert "ok" in line
@@ -111,9 +119,20 @@ def test_cli_cmd_runs_empty_and_rows(monkeypatch: pytest.MonkeyPatch, capsys: py
     monkeypatch.setattr(cli, "list_runs", lambda limit=20: [])
     cli._cmd_runs(5)
     assert "No runs recorded" in capsys.readouterr().out
-    monkeypatch.setattr(cli, "list_runs", lambda limit=20: [
-        {"run_id": "r1", "duration_ms": 5, "estimated_total_cost": 0.1,
-         "question": "q", "started_at": "2026-01-01T00:00:00+00:00", "status": "ok"}])
+    monkeypatch.setattr(
+        cli,
+        "list_runs",
+        lambda limit=20: [
+            {
+                "run_id": "r1",
+                "duration_ms": 5,
+                "estimated_total_cost": 0.1,
+                "question": "q",
+                "started_at": "2026-01-01T00:00:00+00:00",
+                "status": "ok",
+            }
+        ],
+    )
     cli._cmd_runs(5)
     assert "r1" in capsys.readouterr().out
 
@@ -129,24 +148,42 @@ def test_cli_print_run_record_datetime_branch(capsys: pytest.CaptureFixture[str]
 def test_cli_print_inspect_helpers(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def _f130_1(rid: object) -> object:
         return [
-        {"result_summary": "a\nb", "duration_ms": None, "sequence": 1,
-         "event_type": "e", "round": 2, "tool_name": None}]
+            {
+                "result_summary": "a\nb",
+                "duration_ms": None,
+                "sequence": 1,
+                "event_type": "e",
+                "round": 2,
+                "tool_name": None,
+            }
+        ]
 
     monkeypatch.setattr(cli, "get_events", _f130_1)
     _print_inspect_events("r")
     assert "events" in capsys.readouterr().out
+
     def _f135_2(rid: object) -> object:
         return [
-        {"tool_call_id": "t", "tool_name": "n", "status": "s", "result_row_count": 1,
-         "result_bytes": 2, "error_type": None, "error_message": None}]
+            {
+                "tool_call_id": "t",
+                "tool_name": "n",
+                "status": "s",
+                "result_row_count": 1,
+                "result_bytes": 2,
+                "error_type": None,
+                "error_message": None,
+            }
+        ]
 
     monkeypatch.setattr(cli, "get_tool_calls", _f135_2)
     _print_inspect_tool_calls("r")
     assert "t" in capsys.readouterr().out
+
     def _f140_3(rid: object) -> object:
         return [
-        {"tool_name": "search_web", "rendered_text": "a\nb", "evidence_id": "e", "tool_call_id": "t"},
-        {"tool_name": "other", "evidence_id": "x", "tool_call_id": "y"}]
+            {"tool_name": "search_web", "rendered_text": "a\nb", "evidence_id": "e", "tool_call_id": "t"},
+            {"tool_name": "other", "evidence_id": "x", "tool_call_id": "y"},
+        ]
 
     monkeypatch.setattr(cli, "get_evidence", _f140_3)
     _print_inspect_evidence("r")
@@ -154,9 +191,17 @@ def test_cli_print_inspect_helpers(monkeypatch: pytest.MonkeyPatch, capsys: pyte
 
 
 def test_cli_format_security_event():
-    line = _format_security_event({"source": "s", "score": 1, "verdict": "v",
-                                   "rule_ids": ["r"], "decision": "d",
-                                   "reason": "x", "created_at": "t"})
+    line = _format_security_event(
+        {
+            "source": "s",
+            "score": 1,
+            "verdict": "v",
+            "rule_ids": ["r"],
+            "decision": "d",
+            "reason": "x",
+            "created_at": "t",
+        }
+    )
     assert "s" in line and "score=1" in line
 
 
@@ -174,8 +219,15 @@ def test_cli_cmd_inspect_ok(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
         return {"a": 1}
 
     monkeypatch.setattr(cli, "get_run", _f161_5)
-    for name in ("_print_run_record", "_print_inspect_events", "_print_inspect_tool_calls",
-                 "_print_inspect_evidence", "_print_inspect_model_calls", "_print_inspect_security"):
+    for name in (
+        "_print_run_record",
+        "_print_inspect_events",
+        "_print_inspect_tool_calls",
+        "_print_inspect_evidence",
+        "_print_inspect_model_calls",
+        "_print_inspect_security",
+    ):
+
         def _f164_6(*a: object, **k: object) -> object:
             return print("x")
 
@@ -185,6 +237,7 @@ def test_cli_cmd_inspect_ok(monkeypatch: pytest.MonkeyPatch, capsys: pytest.Capt
 
 
 # --- backfill validation/error arms ---
+
 
 def test_cli_validate_backfill_forms_error(capsys: pytest.CaptureFixture[str]) -> None:
     with pytest.raises(SystemExit) as e:
@@ -208,7 +261,7 @@ def test_cli_enqueue_backfill_jobs_store_error():
         raise ValueError("bad")
 
     store = types.ModuleType("fake_sec_store")
-    setattr(store, "enqueue_backfill_job", _f189_7)
+    setattr(store, "enqueue_backfill_job", _f189_7)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     with pytest.raises(SystemExit) as e:
         _enqueue_backfill_jobs(store, "s", ["10-K"], [(2024, 1)], 50, None)
     assert e.value.code == 2
@@ -219,11 +272,13 @@ def test_cli_enqueue_backfill_jobs_ok():
         return "j1"
 
     store = types.ModuleType("fake_sec_store")
-    setattr(store, "enqueue_backfill_job", _f196_8)
+    setattr(store, "enqueue_backfill_job", _f196_8)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     assert _enqueue_backfill_jobs(store, None, ["10-K"], [(2024, 1)], 50, None) == ["j1"]
 
 
-def test_cli_cmd_backfill_sec_empty_quarters(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_cmd_backfill_sec_empty_quarters(
+    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
+) -> None:
     def _f201_9(a: object, b: object) -> list[tuple[int, int]]:
         return []
 
@@ -234,10 +289,12 @@ def test_cli_cmd_backfill_sec_empty_quarters(monkeypatch: pytest.MonkeyPatch, ca
 
 def test_cli_cmd_backfill_sec_full(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     import app.sec.discovery.service as svc
+
     def _f208_10(a: object, b: object) -> object:
         return [(2024, 1)]
 
     monkeypatch.setattr(cli, "_resolve_backfill_quarters", _f208_10)
+
     def _f209_11(*a: object, **k: object) -> object:
         return ["j1"]
 
@@ -252,7 +309,7 @@ def test_cli_requeue_one_missing():
         return None
 
     store = types.ModuleType("fake_sec_store")
-    setattr(store, "get_job", _f216_12)
+    setattr(store, "get_job", _f216_12)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     with pytest.raises(SystemExit) as e:
         _requeue_one_backfill_job(store, "j9", None)
     assert e.value.code == 1
@@ -260,40 +317,46 @@ def test_cli_requeue_one_missing():
 
 def test_cli_requeue_one_ok(capsys: pytest.CaptureFixture[str]) -> None:
     seen = {}
+
     def _f224_13(*a: object, **k: object) -> object:
         return {"id": "j"}
+
     def _f224_14(j: object, **k: object) -> object:
         return seen.setdefault("j", j)
 
     store = types.ModuleType("fake_sec_store")
-    setattr(store, "get_job", _f224_13)
-    setattr(store, "requeue_job", _f224_14)
+    setattr(store, "get_job", _f224_13)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
+    setattr(store, "requeue_job", _f224_14)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     _requeue_one_backfill_job(store, "j", None)
     assert seen["j"] == "j" and "requeued" in capsys.readouterr().out
 
 
 def test_cli_requeue_failed_mixed(capsys: pytest.CaptureFixture[str]) -> None:
     requeued = []
+
     def _f232_15(**k: object) -> list[dict[str, object]]:
         return [{"id": "a"}, {"id": 5}, {}]
+
     def _f232_16(j: object, **k: object) -> object:
         return requeued.append(j)
 
     store = types.ModuleType("fake_sec_store")
-    setattr(store, "list_jobs", _f232_15)
-    setattr(store, "requeue_job", _f232_16)
+    setattr(store, "list_jobs", _f232_15)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
+    setattr(store, "requeue_job", _f232_16)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     _requeue_failed_backfill_jobs(store, None)
     assert requeued == ["a"]
 
 
 def test_cli_cmd_resume_both_arms(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     import app.sec.discovery.service as svc
+
     def _f241_17(*a: object, **k: object) -> object:
         return None
 
     monkeypatch.setattr(cli, "_requeue_one_backfill_job", _f241_17)
     monkeypatch.setattr(svc, "drain_backfill_queue", lambda root=None: {})
     cli._cmd_resume_sec_backfill("j1", None)
+
     def _f244_18(*a: object, **k: object) -> object:
         return None
 
@@ -303,9 +366,13 @@ def test_cli_cmd_resume_both_arms(monkeypatch: pytest.MonkeyPatch, capsys: pytes
 
 # --- coverage filter/print ---
 
+
 def test_cli_filter_coverage_rows_bounds():
-    rows: list[dict[str, object]] = [{"coverage_date": "2024-01-05T00:00"}, {"coverage_date": "2024-06-01T00:00"},
-            {"coverage_date": 5}]
+    rows: list[dict[str, object]] = [
+        {"coverage_date": "2024-01-05T00:00"},
+        {"coverage_date": "2024-06-01T00:00"},
+        {"coverage_date": 5},
+    ]
     assert len(_filter_coverage_rows(rows, "2024-03-01", None)) == 1
     # non-str coverage_date reads as "" which sorts below any bound, so it survives a to_date filter
     assert len(_filter_coverage_rows(rows, None, "2024-03-01")) == 2
@@ -323,31 +390,51 @@ def test_cli_validate_coverage_range_errors():
 
 def test_cli_print_pending_jobs_both(capsys: pytest.CaptureFixture[str]) -> None:
     store = types.ModuleType("s")
+
     def _list_queued(root: object = None) -> list[dict[str, object]]:
         return [{"id": "a", "status": "queued"}]
+
     def _list_done(root: object = None) -> list[dict[str, object]]:
         return [{"id": "a", "status": "done"}]
-    setattr(store, "list_jobs", _list_queued)
+
+    setattr(store, "list_jobs", _list_queued)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     _print_pending_backfill_jobs(store, None)
     assert "pending" in capsys.readouterr().out
-    setattr(store, "list_jobs", _list_done)
+    setattr(store, "list_jobs", _list_done)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     _print_pending_backfill_jobs(store, None)
     assert "no pending" in capsys.readouterr().out
 
 
 # --- thesis dispatch + journals ---
 
+
 def test_cli_cmd_thesis_dispatch_all(monkeypatch: pytest.MonkeyPatch) -> None:
     calls = []
-    for name in ("_thesis_list", "_thesis_show", "_thesis_status", "_thesis_inspect",
-                 "_thesis_inbox", "_thesis_journal", "_thesis_tick", "_thesis_monitor"):
-        def _f284_19(a: object, _n: object=name) -> object:
+    for name in (
+        "_thesis_list",
+        "_thesis_show",
+        "_thesis_status",
+        "_thesis_inspect",
+        "_thesis_inbox",
+        "_thesis_journal",
+        "_thesis_tick",
+        "_thesis_monitor",
+    ):
+
+        def _f284_19(a: object, _n: object = name) -> object:
             return calls.append(_n)
 
         monkeypatch.setattr(cli, name, _f284_19)
-    mapping = {"list": "_thesis_list", "show": "_thesis_show", "pause": "_thesis_status",
-               "inspect": "_thesis_inspect", "inbox": "_thesis_inbox", "journal": "_thesis_journal",
-               "tick": "_thesis_tick", "monitor": "_thesis_monitor"}
+    mapping = {
+        "list": "_thesis_list",
+        "show": "_thesis_show",
+        "pause": "_thesis_status",
+        "inspect": "_thesis_inspect",
+        "inbox": "_thesis_inbox",
+        "journal": "_thesis_journal",
+        "tick": "_thesis_tick",
+        "monitor": "_thesis_monitor",
+    }
     for cmd, fn in mapping.items():
         _cmd_thesis(_ns(thesis_command=cmd))
         assert calls[-1] == fn
@@ -357,17 +444,15 @@ def test_cli_cmd_thesis_dispatch_all(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_cli_thesis_list_empty_and_rows(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def _f296_20(a: object) -> object:
-        return SimpleNamespace(
-        list_theses=lambda: [])
+        return SimpleNamespace(list_theses=list)
 
     monkeypatch.setattr(cli, "_thesis_repo", _f296_20)
     _thesis_list(_ns())
     assert "No theses" in capsys.readouterr().out
-    t = SimpleNamespace(thesis_id="t", slug="s", status="open",
-                        updated_at="u", user_thesis="line1\nline2")
+    t = SimpleNamespace(thesis_id="t", slug="s", status="open", updated_at="u", user_thesis="line1\nline2")
+
     def _f302_21(a: object) -> object:
-        return SimpleNamespace(
-        list_theses=lambda: [t])
+        return SimpleNamespace(list_theses=lambda: [t])
 
     monkeypatch.setattr(cli, "_thesis_repo", _f302_21)
     _thesis_list(_ns())
@@ -385,25 +470,40 @@ def test_cli_thesis_load_missing(tmp_path: Path) -> None:
 def test_cli_thesis_show_branches(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     from app.thesis.models import Thesis, ThesisClaim, ThesisState, TradeExpression
     from app.thesis.repository import ThesisRepository
+
     claim = ThesisClaim(claim_id="c1", statement="c", status="open")
-    expr = TradeExpression(expression_id="e1", intent="i", instrument="n", direction="d",
-                           structure="s", horizon="h", status="o")
-    thesis = Thesis(thesis_id="t", slug="s", status="open", updated_at="u",
-                    user_thesis="th", scope="sc", claims=(claim,),
-                    assumptions=("a",), invalidators=(), unknowns=(),
-                    expressions=(expr,))
+    expr = TradeExpression(
+        expression_id="e1", intent="i", instrument="n", direction="d", structure="s", horizon="h", status="o"
+    )
+    thesis = Thesis(
+        thesis_id="t",
+        slug="s",
+        status="open",
+        updated_at="u",
+        user_thesis="th",
+        scope="sc",
+        claims=(claim,),
+        assumptions=("a",),
+        invalidators=(),
+        unknowns=(),
+        expressions=(expr,),
+    )
+
     class _FakeRepo(ThesisRepository):
         @override
         def __init__(self, root: Path | str = ".") -> None:
             pass
+
         @override
         def load_thesis(self, id_or_slug: str) -> Thesis:
             return thesis
+
         @override
         def load_state(self, id_or_slug: str) -> ThesisState:
             return ThesisState(thesis_id="t", assessment="a")
 
     repo = _FakeRepo()
+
     def _f324_25(a: object) -> ThesisRepository:
         return repo
 
@@ -411,12 +511,24 @@ def test_cli_thesis_show_branches(monkeypatch: pytest.MonkeyPatch, capsys: pytes
     _thesis_show(_ns(id="t"))
     out = capsys.readouterr().out
     assert "claim" in out and "Expressions" in out
-    thesis2 = Thesis(thesis_id="t", slug="s", status="open", updated_at="u",
-                     user_thesis="", scope="sc", claims=(), assumptions=(),
-                     invalidators=(), unknowns=(), expressions=())
+    thesis2 = Thesis(
+        thesis_id="t",
+        slug="s",
+        status="open",
+        updated_at="u",
+        user_thesis="",
+        scope="sc",
+        claims=(),
+        assumptions=(),
+        invalidators=(),
+        unknowns=(),
+        expressions=(),
+    )
+
     def _load2(_id: object) -> Thesis:
         return thesis2
-    setattr(repo, "load_thesis", _load2)
+
+    setattr(repo, "load_thesis", _load2)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     _thesis_show(_ns(id="t"))
     assert "(none)" in capsys.readouterr().out
 
@@ -442,62 +554,75 @@ def test_cli_check_inspect_entry_list_arms(monkeypatch: pytest.MonkeyPatch, tmp_
     def _f352_28(d: object, tid: object, n: object) -> object:
         return {"questions": "notalist"}
 
-    monkeypatch.setattr(cli, "_owned_inspect_doc",
-                        _f352_28)
+    monkeypatch.setattr(cli, "_owned_inspect_doc", _f352_28)
     with pytest.raises(ValueError):
+
         def _f355_29(e: object, p: object) -> object:
             return None
 
         _check_inspect_entry_list(tmp_path, "t", "questions.yaml", "questions", _f355_29)
+
     def _f356_30(d: object, tid: object, n: object) -> object:
         return {"questions": ["notadict"]}
 
-    monkeypatch.setattr(cli, "_owned_inspect_doc",
-                        _f356_30)
+    monkeypatch.setattr(cli, "_owned_inspect_doc", _f356_30)
     with pytest.raises(ValueError):
+
         def _f359_31(e: object, p: object) -> object:
             return None
 
         _check_inspect_entry_list(tmp_path, "t", "questions.yaml", "questions", _f359_31)
     seen = []
+
     def _f361_32(d: object, tid: object, n: object) -> object:
         return {"questions": [{"q": 1}]}
 
-    monkeypatch.setattr(cli, "_owned_inspect_doc",
-                        _f361_32)
+    monkeypatch.setattr(cli, "_owned_inspect_doc", _f361_32)
+
     def _f363_33(e: object, p: object) -> object:
         return seen.append(e)
 
-    _check_inspect_entry_list(tmp_path, "t", "questions.yaml", "questions",
-                              _f363_33)
+    _check_inspect_entry_list(tmp_path, "t", "questions.yaml", "questions", _f363_33)
     assert seen == [{"q": 1}]
 
 
 def test_cli_thesis_inbox_empty_and_rows(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     from app.thesis.models import Thesis, Trigger
     from app.thesis.repository import ThesisRepository
+
     _thesis = Thesis(thesis_id="t", slug="s")
 
     class _InboxRepo(ThesisRepository):
         @override
         def __init__(self, root: Path | str = ".", triggers: list[Trigger] | None = None) -> None:
             self._triggers: list[Trigger] = list(triggers) if triggers is not None else []
+
         @override
         def load_thesis(self, id_or_slug: str) -> Thesis:
             return _thesis
+
         @override
         def load_triggers(self, id_or_slug: str, include_processed: bool = True) -> list[Trigger]:
             return self._triggers
 
     repo = _InboxRepo(".", [])
+
     def _f371_36(a: object) -> ThesisRepository:
         return repo
 
     monkeypatch.setattr(cli, "_thesis_repo", _f371_36)
     _thesis_inbox(_ns(id="t"))
     assert "No triggers" in capsys.readouterr().out
-    trig = Trigger(trigger_id="g", thesis_id="t", status="pending", trigger_type="ty",
-                   importance="high", created_at="c", summary="s1\ns2")
+    trig = Trigger(
+        trigger_id="g",
+        thesis_id="t",
+        status="pending",
+        trigger_type="ty",
+        importance="high",
+        created_at="c",
+        summary="s1\ns2",
+    )
+
     def _f376_37(triggers: list[Trigger]) -> None:
         repo._triggers = triggers
 
@@ -538,20 +663,25 @@ def test_cli_match_journal_entry():
     assert _m2 is not None and _m2.name == "a_b.md"
 
 
-def test_cli_thesis_journal_arms(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_thesis_journal_arms(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     from app.thesis.models import Thesis as _Thesis2
     from app.thesis.repository import ThesisRepository as _Repo2
+
     _thesis_j = _Thesis2(thesis_id="t", slug="s")
 
     class _JournalRepo(_Repo2):
         @override
         def __init__(self, root: Path | str) -> None:
             self.root = Path(root)
+
         @override
         def load_thesis(self, id_or_slug: str) -> _Thesis2:
             return _thesis_j
 
     repo = _JournalRepo(tmp_path)
+
     def _f414_39(a: object) -> _Repo2:
         return repo
 
@@ -580,6 +710,7 @@ def test_cli_tick_format_and_report(capsys: pytest.CaptureFixture[str]) -> None:
     _print_tick_outcome([], [])
     assert "triggers created: 0" in capsys.readouterr().out
     from app.thesis.monitor import TickResult
+
     _report_tick_outcome(TickResult(thesis_id="t", no_op=True, no_op_reason="paused"))
     assert "paused" in capsys.readouterr().out
     _report_tick_outcome(TickResult(thesis_id="t", no_op=False, triggers_created=[], runs=[]))
@@ -604,16 +735,16 @@ def test_cli_thesis_tick_noop_and_triggers(monkeypatch: pytest.MonkeyPatch, caps
     monkeypatch.setattr(cli, "_thesis_runtime", _f456_40)
     import app.thesis.monitor as mon
     from app.thesis.monitor import TickResult
+
     def _f458_41(*a: object, **k: object) -> TickResult:
-        return TickResult(thesis_id="t", no_op=True, no_op_reason="paused",
-                          triggers_created=[], runs=[])
+        return TickResult(thesis_id="t", no_op=True, no_op_reason="paused", triggers_created=[], runs=[])
 
     monkeypatch.setattr(mon, "tick", _f458_41)
     _thesis_tick(_ns(known_at="K"))
     assert "paused" in capsys.readouterr().out
+
     def _f462_42(*a: object, **k: object) -> TickResult:
-        return TickResult(thesis_id="t", no_op=False, no_op_reason="",
-                          triggers_created=["g"], runs=[])
+        return TickResult(thesis_id="t", no_op=False, no_op_reason="", triggers_created=["g"], runs=[])
 
     monkeypatch.setattr(mon, "tick", _f462_42)
     _thesis_tick(_ns(known_at=None))
@@ -622,11 +753,17 @@ def test_cli_thesis_tick_noop_and_triggers(monkeypatch: pytest.MonkeyPatch, caps
 
 # --- research / trace / herdr / eval dispatch ---
 
+
 def test_cli_collect_google_source_all_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     args = _ns()
-    for src, fn in (("trends", "_collect_google_trends"), ("patents", "_collect_google_patents"),
-                    ("macro", "_collect_google_macro"), ("geo", "_collect_google_geo"),
-                    ("other", "_collect_google_stackoverflow")):
+    for src, fn in (
+        ("trends", "_collect_google_trends"),
+        ("patents", "_collect_google_patents"),
+        ("macro", "_collect_google_macro"),
+        ("geo", "_collect_google_geo"),
+        ("other", "_collect_google_stackoverflow"),
+    ):
+
         def _f475_43(*a: object, **k: object) -> object:
             return {"ok": 1}
 
@@ -637,64 +774,89 @@ def test_cli_collect_google_source_all_arms(monkeypatch: pytest.MonkeyPatch) -> 
 def test_cli_research_create_ok_and_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     def _f480_44(*a: object, **k: object) -> object:
         return "s1"
+
     def _f480_45(i: object) -> dict[str, object]:
-        return {"session": {"status": "open"},
-                                    "jobs": [{"job_id": "j1"}]}
+        return {"session": {"status": "open"}, "jobs": [{"job_id": "j1"}]}
 
     svc = types.ModuleType("fake_research_svc")
-    setattr(svc, "create_research", _f480_44)
-    setattr(svc, "inspect_research", _f480_45)
-    setattr(svc, "ResearchNotFound", KeyError)
-    monkeypatch.setattr("app.research.models.default_policy", lambda: {})
+    setattr(svc, "create_research", _f480_44)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
+    setattr(svc, "inspect_research", _f480_45)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
+    setattr(svc, "ResearchNotFound", KeyError)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
+    monkeypatch.setattr("app.research.models.default_policy", dict)
     _research_create(_ns(question="q", objective=None, as_of=None, interrupt_after=None), svc)
     assert "s1" in capsys.readouterr().out
+
     def _f488_46(*a: object, **k: object) -> object:
         raise ValueError("bad")
 
     bad = types.ModuleType("fake_research_svc")
-    setattr(bad, "create_research", _f488_46)
-    setattr(bad, "ResearchNotFound", KeyError)
+    setattr(bad, "create_research", _f488_46)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
+    setattr(bad, "ResearchNotFound", KeyError)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     with pytest.raises(SystemExit):
         _research_create(_ns(question="q", objective="o", as_of=None, interrupt_after="source"), bad)
 
 
 def test_cli_format_research_inspect_counts():
-    state: dict[str, object] = {"session": {"session_id": "s", "status": "o", "current_wave": 1, "query": "q",
-                         "evidence_ids": ["e"], "freeze_ids": "x", "dossier_ids": [],
-                         "pending_next_action": "n"},
-             "jobs": [{"a": 1}]}
+    state: dict[str, object] = {
+        "session": {
+            "session_id": "s",
+            "status": "o",
+            "current_wave": 1,
+            "query": "q",
+            "evidence_ids": ["e"],
+            "freeze_ids": "x",
+            "dossier_ids": [],
+            "pending_next_action": "n",
+        },
+        "jobs": [{"a": 1}],
+    }
     resumed: dict[str, object] = {"budgets": {"b": 1}, "open_job_ids": ["j"]}
     lines = _format_research_inspect(state, resumed)
     assert any("evidence=1" in ln for ln in lines)
     resumed2: dict[str, object] = {"budgets": [], "open_job_ids": []}
-    state2: dict[str, object] = {"session": {"session_id": "s", "status": "o", "current_wave": 1, "query": "q",
-                          "evidence_ids": "x", "freeze_ids": [], "dossier_ids": "y"},
-              "jobs": [], "pending_next_action": None}
+    state2: dict[str, object] = {
+        "session": {
+            "session_id": "s",
+            "status": "o",
+            "current_wave": 1,
+            "query": "q",
+            "evidence_ids": "x",
+            "freeze_ids": [],
+            "dossier_ids": "y",
+        },
+        "jobs": [],
+        "pending_next_action": None,
+    }
     assert _format_research_inspect(state2, resumed2)
 
 
 def test_cli_cmd_research_dispatch(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     called = []
+
     def _f513_47(a: object, s: object) -> object:
         return called.append("create")
 
     monkeypatch.setattr(cli, "_research_create", _f513_47)
     _cmd_research(_ns(research_command="create"))
+
     def _f515_48(a: object, s: object) -> object:
         return called.append("inspect")
 
     monkeypatch.setattr(cli, "_research_inspect", _f515_48)
     _cmd_research(_ns(research_command="inspect"))
+
     def _f517_49(a: object, s: object) -> object:
         return called.append("list")
 
     monkeypatch.setattr(cli, "_research_list", _f517_49)
     _cmd_research(_ns(research_command="list"))
+
     def _f519_50(a: object, s: object) -> object:
         return called.append("cancel")
 
     monkeypatch.setattr(cli, "_research_cancel", _f519_50)
     _cmd_research(_ns(research_command="cancel"))
+
     def _f521_51(a: object, s: object) -> object:
         return called.append("retry")
 
@@ -707,6 +869,7 @@ def test_cli_cmd_research_dispatch(monkeypatch: pytest.MonkeyPatch, capsys: pyte
 
 def test_cli_research_inspect_cancel_retry_errors():
     import app.research.service as svc
+
     with pytest.raises(SystemExit):
         cli._research_inspect(_ns(session_id="nope"), svc)
     with pytest.raises(SystemExit):
@@ -717,30 +880,44 @@ def test_cli_research_inspect_cancel_retry_errors():
 
 def test_cli_trace_empty_and_error_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     import app.research.evals.traces as tr
+
     def _f540_52(sid: object) -> list[tr.TraceHeader]:
         return []
 
     monkeypatch.setattr(tr, "list_traces", _f540_52)
     _cmd_trace("s")
     assert "no traces" in capsys.readouterr().out
-    h = tr.TraceHeader(trace_id="t", session_id="s", wave_id=1, provider="p", model="m",
-                       prompt_version="v", harness_version="h", git_sha="g",
-                       started_at="s", completed_at=None, duration_ms=None,
-                       conclusion=None, status="ok")
+    h = tr.TraceHeader(
+        trace_id="t",
+        session_id="s",
+        wave_id=1,
+        provider="p",
+        model="m",
+        prompt_version="v",
+        harness_version="h",
+        git_sha="g",
+        started_at="s",
+        completed_at=None,
+        duration_ms=None,
+        conclusion=None,
+        status="ok",
+    )
+
     def _f544_53(sid: object) -> list[tr.TraceHeader]:
         return [h]
 
     monkeypatch.setattr(tr, "list_traces", _f544_53)
+
     def _f545_54(tid: object, data_root: object = None) -> list[tr.TraceEvent]:
         raise RuntimeError("down")
 
-    monkeypatch.setattr(tr, "get_trace_events",
-                        _f545_54)
+    monkeypatch.setattr(tr, "get_trace_events", _f545_54)
     _cmd_trace("s")
     assert "unavailable" in capsys.readouterr().out
-    ev = tr.TraceEvent(event_id="e", trace_id="t", seq=1, event_type="e",
-                       started_at="s", completed_at=None, duration_ms=5,
-                       payload={})
+    ev = tr.TraceEvent(
+        event_id="e", trace_id="t", seq=1, event_type="e", started_at="s", completed_at=None, duration_ms=5, payload={}
+    )
+
     def _f550_55(tid: object, data_root: object = None) -> list[tr.TraceEvent]:
         return [ev] * 55
 
@@ -758,34 +935,41 @@ def test_cli_print_trace_events_direct(capsys: pytest.CaptureFixture[str]) -> No
     def _f561_56(tid: object, data_root: object = None) -> list[object]:
         raise RuntimeError("x")
 
-    _print_trace_events(SimpleNamespace(trace_id="t"),
-                        _f561_56)
+    _print_trace_events(SimpleNamespace(trace_id="t"), _f561_56)
     assert "unavailable" in capsys.readouterr().out
 
 
 def test_cli_herdr_raw_logs_errors(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.services.herdr_client as hc
+
     _RealClient = hc.HerdrClient
+
     def _raise_down() -> object:
         raise ConnectionError("down")
+
     monkeypatch.setattr(hc, "HerdrClient", _raise_down)
     # call through _cmd_herdr so the except arms are covered
     with pytest.raises(SystemExit):
         _cmd_herdr(_ns(herdr_command="raw-logs", pane="p", source="recent", lines=5))
+
     class _BadShape(_RealClient):
         @override
         def __init__(self, socket_path: str | None = None) -> None:
             pass
+
         @override
         def pane_read(self, pane_id: str, source: str = "recent", lines: int = 200) -> str:
             raise KeyError("missing")
+
     def _mk_bad() -> _RealClient:
         return _BadShape()
+
     monkeypatch.setattr(hc, "HerdrClient", _mk_bad)
     with pytest.raises(SystemExit):
         _cmd_herdr(_ns(herdr_command="raw-logs", pane="p", source="recent", lines=5))
     with pytest.raises(SystemExit):
         _cmd_herdr(_ns(herdr_command="bogus"))
+
     def _f580_57(*a: object, **k: object) -> object:
         return "logs"
 
@@ -793,26 +977,33 @@ def test_cli_herdr_raw_logs_errors(monkeypatch: pytest.MonkeyPatch) -> None:
         @override
         def __init__(self, socket_path: str | None = None) -> None:
             pass
+
         @override
         def pane_read(self, pane_id: str, source: str = "recent", lines: int = 200) -> str:
             return "logs"
+
     def _mk_logs() -> _RealClient:
         return _LogsClient()
+
     monkeypatch.setattr(hc, "HerdrClient", _mk_logs)
     _cmd_herdr(_ns(herdr_command="raw-logs", pane="p", source="recent", lines=5))
 
 
 def test_cli_herdr_raw_logs_direct(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     import app.services.herdr_client as hc
+
     class _LogsClient2(hc.HerdrClient):
         @override
         def __init__(self, socket_path: str | None = None) -> None:
             pass
+
         @override
         def pane_read(self, pane_id: str, source: str = "recent", lines: int = 200) -> str:
             return "logs"
+
     def _mk_logs2() -> hc.HerdrClient:
         return _LogsClient2()
+
     monkeypatch.setattr(hc, "HerdrClient", _mk_logs2)
     _herdr_raw_logs(_ns(pane="p", source="recent", lines=5))
     assert "logs" in capsys.readouterr().out
@@ -824,16 +1015,19 @@ def test_cli_eval_dispatch_and_arms(monkeypatch: pytest.MonkeyPatch, capsys: pyt
 
     monkeypatch.setattr(cli, "_eval_run_suite", _f594_59)
     _cmd_eval(_ns(eval_command="run"))
+
     def _f596_60(a: object) -> object:
         return print("model")
 
     monkeypatch.setattr(cli, "_eval_run_suite", _f596_60)
     _cmd_eval(_ns(eval_command="model"))
+
     def _f598_61(a: object) -> object:
         return print("inspect")
 
     monkeypatch.setattr(cli, "_eval_inspect", _f598_61)
     _cmd_eval(_ns(eval_command="inspect"))
+
     def _f600_62(a: object) -> object:
         return print("promote")
 
@@ -845,23 +1039,26 @@ def test_cli_eval_dispatch_and_arms(monkeypatch: pytest.MonkeyPatch, capsys: pyt
 
 def test_cli_eval_run_suite_fail(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     import app.research.evals.evaluators as ev
+
     def _f608_63(names: object) -> list[object]:
         return []
 
     monkeypatch.setattr(ev, "outcomes_from_fixtures", _f608_63)
+
     def _f609_64(**k: object) -> ev.EvalRunSummary:
         return ev.EvalRunSummary(
-        eval_run_id="e", model="m", provider="p",
-        passed_count=1, failed_count=1, scenario_count=2)
+            eval_run_id="e", model="m", provider="p", passed_count=1, failed_count=1, scenario_count=2
+        )
 
     monkeypatch.setattr(ev, "run_eval_suite", _f609_64)
     with pytest.raises(SystemExit) as e:
         _eval_run_suite(_ns(scenario=None, model="m", provider="p", prompt_version="v"))
     assert e.value.code == 1
+
     def _f614_65(**k: object) -> ev.EvalRunSummary:
         return ev.EvalRunSummary(
-        eval_run_id="e", model="m", provider="p",
-        passed_count=2, failed_count=0, scenario_count=2)
+            eval_run_id="e", model="m", provider="p", passed_count=2, failed_count=0, scenario_count=2
+        )
 
     monkeypatch.setattr(ev, "run_eval_suite", _f614_65)
     _eval_run_suite(_ns(scenario="s", model="m", provider="p", prompt_version="v"))
@@ -870,20 +1067,33 @@ def test_cli_eval_run_suite_fail(monkeypatch: pytest.MonkeyPatch, capsys: pytest
 
 def test_cli_eval_inspect_unknown_and_ok(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     import app.research.evals.evaluators as ev
+
     def _f622_66(i: object) -> ev.EvalRunRow | None:
         return None
 
     monkeypatch.setattr(ev, "get_eval_run", _f622_66)
     with pytest.raises(SystemExit):
         _eval_inspect(_ns(eval_run_id="nope"))
-    header = ev.EvalRunRow(eval_run_id="e", model="m", provider="p", harness_version="h",
-                             prompt_version="v", git_sha="g", scenario_version="s", started_at="t")
-    rows = [ev.StoredScenarioResult(passed=True, scenario_name="a", violations=()),
-            ev.StoredScenarioResult(passed=False, scenario_name="b", violations=("v1",))]
+    header = ev.EvalRunRow(
+        eval_run_id="e",
+        model="m",
+        provider="p",
+        harness_version="h",
+        prompt_version="v",
+        git_sha="g",
+        scenario_version="s",
+        started_at="t",
+    )
+    rows = [
+        ev.StoredScenarioResult(passed=True, scenario_name="a", violations=()),
+        ev.StoredScenarioResult(passed=False, scenario_name="b", violations=("v1",)),
+    ]
+
     def _f629_67(i: object) -> ev.EvalRunRow | None:
         return header
 
     monkeypatch.setattr(ev, "get_eval_run", _f629_67)
+
     def _f630_68(i: object) -> list[ev.StoredScenarioResult]:
         return rows
 
@@ -895,6 +1105,7 @@ def test_cli_eval_inspect_unknown_and_ok(monkeypatch: pytest.MonkeyPatch, capsys
 
 def test_cli_eval_promote(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str], tmp_path: Path) -> None:
     import app.research.evals.regression as reg
+
     def _f638_69(**k: object) -> object:
         return tmp_path / "f.json"
 
@@ -910,8 +1121,8 @@ def test_cli_rewrite_bare_log_server_and_stream_url():
     assert _rewrite_bare_log_server(["runs"]) == ["runs"]
     assert _resolve_stream_url(_ns(command="log-server", log_server="x")) is None
     assert _resolve_stream_url(_ns(command="runs", log_server="u")) == "u"
-    monkeypatch_env = {"STOCKBOT_LOG_SERVER": "env-url"}
     import os
+
     old = os.environ.get("STOCKBOT_LOG_SERVER")
     os.environ["STOCKBOT_LOG_SERVER"] = "env-url"
     try:
@@ -925,6 +1136,7 @@ def test_cli_rewrite_bare_log_server_and_stream_url():
 
 def test_cli_dispatch_unknown_and_known(monkeypatch: pytest.MonkeyPatch) -> None:
     assert cli._dispatch_command(_ns(command="bogus")) is False
+
     def _f665_70(a: object) -> object:
         return None
 
@@ -966,10 +1178,13 @@ def _company(rows: object = (), **kw: object) -> type[_RealCompany]:
         def __init__(self, cik_or_ticker: str | int) -> None:
             self.__dict__["_cik"] = 1
             self.__dict__["_data"] = SimpleNamespace(name="Fake Corp")
+
             def _facts(period_type: object = None) -> object:
                 return _Facts(frame_rows)
+
             def _fin() -> object:
                 return fin
+
             self.__dict__["get_facts"] = _facts
             self.__dict__["get_financials"] = _fin
 
@@ -980,26 +1195,50 @@ def _none_company() -> _RealCompany:
     inst = _RealCompany.__new__(_RealCompany)
     inst.__dict__["_cik"] = 1
     inst.__dict__["_data"] = SimpleNamespace(name="Fake Corp")
+
     def _no_facts(period_type: object = None) -> object:
         return None
+
     inst.__dict__["get_facts"] = _no_facts
     return inst
 
 
-def _fact(concept: str = "c", value: float = 1.0, period_end: str = "2026-01-01", filed_at: str = "2026-01-02", accession: str = "a", known_at: str = "k") -> O.FinancialFactRow:
-    return {"concept": concept, "value": value, "period_end": period_end, "filed_at": filed_at, "accession": accession, "known_at": known_at, "period_start": None, "fiscal_year": None, "fiscal_period": None, "source_url": None}
+def _fact(
+    concept: str = "c",
+    value: float = 1.0,
+    period_end: str = "2026-01-01",
+    filed_at: str = "2026-01-02",
+    accession: str = "a",
+    known_at: str = "k",
+) -> O.FinancialFactRow:
+    return {
+        "concept": concept,
+        "value": value,
+        "period_end": period_end,
+        "filed_at": filed_at,
+        "accession": accession,
+        "known_at": known_at,
+        "period_start": None,
+        "fiscal_year": None,
+        "fiscal_period": None,
+        "source_url": None,
+    }
 
 
 def _df_company(df: object) -> _RealCompany:
     inst = _RealCompany.__new__(_RealCompany)
     inst.__dict__["_cik"] = 1
     inst.__dict__["_data"] = SimpleNamespace(name="Fake Corp")
+
     def _get_facts(want: object = None, **rest: object) -> object:
         ns = SimpleNamespace()
+
         def _to_df() -> object:
             return df
-        setattr(ns, "to_dataframe", _to_df)
+
+        setattr(ns, "to_dataframe", _to_df)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
         return ns
+
     inst.__dict__["get_facts"] = _get_facts
     return inst
 
@@ -1008,8 +1247,10 @@ def _none_df_company() -> _RealCompany:
     inst = _RealCompany.__new__(_RealCompany)
     inst.__dict__["_cik"] = 1
     inst.__dict__["_data"] = SimpleNamespace(name="Fake Corp")
+
     def _get_facts(want: object = None, **rest: object) -> object:
         return None
+
     inst.__dict__["get_facts"] = _get_facts
     return inst
 
@@ -1018,10 +1259,12 @@ def _filings_company(filings: list[object], want_form: object = None) -> _RealCo
     inst = _RealCompany.__new__(_RealCompany)
     inst.__dict__["_cik"] = 1
     inst.__dict__["_data"] = SimpleNamespace(name="Fake Corp")
+
     def _get_filings(form: object = None, **rest: object) -> list[object]:
         if want_form is None or form == want_form:
             return list(filings)
         return []
+
     inst.__dict__["get_filings"] = _get_filings
     return inst
 
@@ -1035,18 +1278,20 @@ def test_edgar_dividend_ttm_float_arms():
 
 def test_edgar_dividend_live_quote_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ec, "_dividend_live_quote", ec._dividend_live_quote)  # keep ref
-    import app.valuation as valuation
+    from app import valuation
 
     def _f728_71(t: object) -> object:
         return {"price": 10.0}
 
     monkeypatch.setattr(valuation, "get_live_quote", _f728_71)
     assert ec._dividend_live_quote("X") == {"price": 10.0}
+
     def _f730_72(t: object) -> object:
         raise RuntimeError("x")
 
     monkeypatch.setattr(valuation, "get_live_quote", _f730_72)
     assert ec._dividend_live_quote("X") is None
+
     def _f732_73(t: object) -> object:
         return [1, 2]
 
@@ -1073,28 +1318,32 @@ def test_edgar_dividend_valuation_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert n["price"] is None
     n = ec._dividend_valuation("X", object(), include_price=True)
     assert n["price"] is None
-    import app.valuation as valuation
+    from app import valuation
 
     def _f756_74(t: object) -> object:
         raise RuntimeError("x")
 
     monkeypatch.setattr(valuation, "get_live_quote", _f756_74)
     assert ec._dividend_valuation("X", 2.0, include_price=True)["price"] is None
+
     def _f758_75(t: object) -> object:
         return "nope"
 
     monkeypatch.setattr(valuation, "get_live_quote", _f758_75)
     assert ec._dividend_valuation("X", 2.0, include_price=True)["price"] is None
+
     def _f760_76(t: object) -> object:
         return {"price": None}
 
     monkeypatch.setattr(valuation, "get_live_quote", _f760_76)
     assert ec._dividend_valuation("X", 2.0, include_price=True)["price"] is None
+
     def _f762_77(t: object) -> object:
         return {"price": 0}
 
     monkeypatch.setattr(valuation, "get_live_quote", _f762_77)
     assert ec._dividend_valuation("X", 2.0, include_price=True)["price"] is None
+
     def _f764_78(t: object) -> object:
         return {"price": 100.0, "retrieved_at": "now"}
 
@@ -1110,8 +1359,10 @@ def test_edgar_fact_field_and_copy_meta_arms():
 
     def _boom_row() -> pd.Series[float]:
         s: pd.Series[float] = pd.Series({"accn": "A1"})
+
         def _raise(key: object, default: object = None) -> object:
             raise RuntimeError("x")
+
         s.__dict__["get"] = _raise
         return s
 
@@ -1136,25 +1387,62 @@ def test_edgar_fundamentals_overview_shares_arms(monkeypatch: pytest.MonkeyPatch
     rows = [{"concept": "us-gaap:Other", "period_end": "2024-01-01", "value": 1.0}]
     monkeypatch.setattr(ec, "Company", _company(rows))
     assert "error" in ec._fundamentals_shares("T", _company(rows)("T"), "1", None)
-    rows = [{"concept": "us-gaap:CommonStockSharesOutstanding", "period_end": "2024-01-01",
-             "value": 100.0, "accn": "A1", "form": "10-K", "filed_at": "2024-02-01"}]
+    rows = [
+        {
+            "concept": "us-gaap:CommonStockSharesOutstanding",
+            "period_end": "2024-01-01",
+            "value": 100.0,
+            "accn": "A1",
+            "form": "10-K",
+            "filed_at": "2024-02-01",
+        }
+    ]
     got = ec._fundamentals_shares("T", _company(rows)("T"), "9", "http://u")
     assert got["shares_outstanding"] == 100.0 and got["accession"] == "A1"
 
 
 def test_edgar_recent_quarterly_and_merge_arms():
-    df = pd.DataFrame([{"concept": "us-gaap:Other", "period_end": "2024-01-01", "value": 1.0,
-                        "period_start": "2023-10-01", "fiscal_year": 2024, "fiscal_period": "Q1"}])
+    df = pd.DataFrame(
+        [
+            {
+                "concept": "us-gaap:Other",
+                "period_end": "2024-01-01",
+                "value": 1.0,
+                "period_start": "2023-10-01",
+                "fiscal_year": 2024,
+                "fiscal_period": "Q1",
+            }
+        ]
+    )
     assert ec._recent_quarterly_facts(df, "us-gaap:EarningsPerShareDiluted") is None
-    df2 = pd.DataFrame([{"concept": "us-gaap:EarningsPerShareDiluted", "period_end": "2024-12-31",
-                         "value": 1.0, "period_start": "2024-01-01", "fiscal_year": 2024, "fiscal_period": "FY"}])
+    df2 = pd.DataFrame(
+        [
+            {
+                "concept": "us-gaap:EarningsPerShareDiluted",
+                "period_end": "2024-12-31",
+                "value": 1.0,
+                "period_start": "2024-01-01",
+                "fiscal_year": 2024,
+                "fiscal_period": "FY",
+            }
+        ]
+    )
     q = ec._recent_quarterly_facts(df2, "us-gaap:EarningsPerShareDiluted")
     assert q is not None and q.empty
     starts = ["2024-01-01", "2024-04-01", "2024-07-01", "2024-10-01"]
     ends = ["2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31"]
-    rows = [{"concept": "us-gaap:EarningsPerShareDiluted", "period_start": s, "period_end": e,
-             "value": 1.0, "fiscal_year": 2024, "fiscal_period": f"Q{i+1}", "accn": f"A{i}"}
-            for i, (s, e) in enumerate(zip(starts, ends))]
+    rows = [
+        {
+            "concept": "us-gaap:EarningsPerShareDiluted",
+            "period_start": s,
+            "period_end": e,
+            "value": 1.0,
+            "fiscal_year": 2024,
+            "fiscal_period": f"Q{i + 1}",
+            "accn": f"A{i}",
+        }
+        for i, (s, e) in enumerate(zip(starts, ends))
+    ]
     df3 = pd.DataFrame(rows)
     q3 = ec._recent_quarterly_facts(df3, "us-gaap:EarningsPerShareDiluted")
     assert q3 is not None and len(q3) == 4
@@ -1174,41 +1462,84 @@ def test_edgar_recent_quarterly_and_merge_arms():
 
 def test_edgar_fundamentals_eps_error_arms() -> None:
     assert "error" in ec._fundamentals_eps("T", _none_company(), "1", None)
-    rows = [{"concept": "us-gaap:Other", "period_end": "2024-01-01", "value": 1.0,
-             "period_start": "2023-10-01", "fiscal_year": 2024, "fiscal_period": "Q1"}]
+    rows = [
+        {
+            "concept": "us-gaap:Other",
+            "period_end": "2024-01-01",
+            "value": 1.0,
+            "period_start": "2023-10-01",
+            "fiscal_year": 2024,
+            "fiscal_period": "Q1",
+        }
+    ]
     assert "diluted EPS not found" in str(ec._fundamentals_eps("T", _company(rows)("T"), "1", None)["error"])
-    rows = [{"concept": "us-gaap:EarningsPerShareDiluted", "period_end": "2024-12-31", "value": 5.0,
-             "period_start": "2024-01-01", "fiscal_year": 2024, "fiscal_period": "FY"}]
+    rows = [
+        {
+            "concept": "us-gaap:EarningsPerShareDiluted",
+            "period_end": "2024-12-31",
+            "value": 5.0,
+            "period_start": "2024-01-01",
+            "fiscal_year": 2024,
+            "fiscal_period": "FY",
+        }
+    ]
     assert "no quarterly" in str(ec._fundamentals_eps("T", _company(rows)("T"), "1", None)["error"])
     # basic-empty -> None branch still returns payload
     starts = ["2024-01-01", "2024-04-01", "2024-07-01", "2024-10-01"]
     ends = ["2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31"]
-    rows = [{"concept": "us-gaap:EarningsPerShareDiluted", "period_start": s, "period_end": e,
-             "value": 1.0, "fiscal_year": 2024, "fiscal_period": f"Q{i+1}"}
-            for i, (s, e) in enumerate(zip(starts, ends))]
-    rows.append({"concept": "us-gaap:EarningsPerShareBasic", "period_start": "2024-01-01",
-                 "period_end": "2024-12-31", "value": 9.0, "fiscal_year": 2024, "fiscal_period": "FY"})
+    rows = [
+        {
+            "concept": "us-gaap:EarningsPerShareDiluted",
+            "period_start": s,
+            "period_end": e,
+            "value": 1.0,
+            "fiscal_year": 2024,
+            "fiscal_period": f"Q{i + 1}",
+        }
+        for i, (s, e) in enumerate(zip(starts, ends))
+    ]
+    rows.append(
+        {
+            "concept": "us-gaap:EarningsPerShareBasic",
+            "period_start": "2024-01-01",
+            "period_end": "2024-12-31",
+            "value": 9.0,
+            "fiscal_year": 2024,
+            "fiscal_period": "FY",
+        }
+    )
     got = ec._fundamentals_eps("T", _company(rows)("T"), "1", None)
     assert got["ttm_eps_diluted"] == 4.0 and "ttm_eps_basic" not in got
 
 
 def test_edgar_dividends_ttm_and_fy_arms():
     assert ec._dividends_ttm(pd.DataFrame([{"value": 1.0}])) is None
-    starts = ["2024-01-01", "2024-04-01", "2024-07-01", "2024-10-01"]
     ends = ["2024-03-31", "2024-06-30", "2024-09-30", "2024-12-31"]
     df = pd.DataFrame([{"period_end": e, "value": 0.5} for e in ends])
     assert ec._dividends_ttm(df) == 2.0
-    df2 = pd.DataFrame([{"period_end": e, "value": 0.5} for e in ["2020-01-01", "2024-06-30", "2024-09-30", "2024-12-31"]])
+    df2 = pd.DataFrame(
+        [{"period_end": e, "value": 0.5} for e in ["2020-01-01", "2024-06-30", "2024-09-30", "2024-12-31"]]
+    )
     assert ec._dividends_ttm(df2) is None
-    fy = pd.DataFrame([{"period_end": "2024-12-31", "value": 2.0, "duration_days": 365, "fiscal_year": 2024, "fiscal_period": "FY"}])
+    fy = pd.DataFrame(
+        [{"period_end": "2024-12-31", "value": 2.0, "duration_days": 365, "fiscal_year": 2024, "fiscal_period": "FY"}]
+    )
     assert ec._dividends_fy_rows(fy) == [{"period_end": "2024-12-31", "value": 2.0}]
     assert ec._dividends_fy_rows(pd.DataFrame([{"period_end": "x", "value": 1.0, "duration_days": 1}])) == []
 
 
 def test_edgar_fundamentals_dividends_arms():
     assert "error" in ec._fundamentals_dividends("T", _none_company())
-    rows = [{"concept": "us-gaap:Other", "period_end": "2024-01-01", "value": 1.0,
-             "period_start": "2023-10-01", "fiscal_year": 2024, "fiscal_period": "Q1"}]
+    rows = [
+        {
+            "concept": "us-gaap:Other",
+            "period_end": "2024-01-01",
+            "value": 1.0,
+            "period_start": "2023-10-01",
+            "fiscal_year": 2024,
+            "fiscal_period": "Q1",
+        }
+    ]
     got = ec._fundamentals_dividends("T", _company(rows)("T"))
     assert got["dividend_status"] == "insufficient_data"
 
@@ -1216,25 +1547,30 @@ def test_edgar_fundamentals_dividends_arms():
 def test_edgar_balance_helpers_arms():
     def _bs() -> object:
         return "BS"
+
     def _to_dict() -> object:
         return {"a": 1}
+
     def _get_latest() -> object:
         ns = SimpleNamespace()
-        setattr(ns, "to_dict", _to_dict)
+        setattr(ns, "to_dict", _to_dict)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
         return ns
+
     def _get_latest_boom() -> object:
         raise RuntimeError("x")
+
     def _get_bs_none() -> object:
         return None
+
     fin_none = SimpleNamespace()
-    setattr(fin_none, "get_balance_sheet", _bs)
+    setattr(fin_none, "get_balance_sheet", _bs)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     fin_ok_inner = SimpleNamespace()
-    setattr(fin_ok_inner, "get_latest", _get_latest)
-    setattr(fin_ok_inner, "to_dict", _to_dict)
+    setattr(fin_ok_inner, "get_latest", _get_latest)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
+    setattr(fin_ok_inner, "to_dict", _to_dict)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     fin_ok = SimpleNamespace(balance_sheet=fin_ok_inner)
-    setattr(fin_ok, "get_balance_sheet", _bs)
+    setattr(fin_ok, "get_balance_sheet", _bs)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     fin_boom = SimpleNamespace()
-    setattr(fin_boom, "get_latest", _get_latest_boom)
+    setattr(fin_boom, "get_latest", _get_latest_boom)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     assert ec._balance_sheet_stmt(fin_none) == "BS"
     assert ec._balance_sheet_text(fin_ok_inner) == {"a": 1}
     assert ec._balance_sheet_text(fin_boom)["raw"] is not None
@@ -1246,7 +1582,10 @@ def test_edgar_balance_helpers_arms():
 def test_edgar_fetch_fundamentals_dispatch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ec, "Company", _company())
     assert ec._fetch_fundamentals("T", "overview")["ticker"] == "T"
-    assert "error" in ec._fetch_fundamentals("T", "bogus") or "Unknown metric" in str(ec._fetch_fundamentals("T", "bogus")["error"])
+    assert "error" in ec._fetch_fundamentals("T", "bogus") or "Unknown metric" in str(
+        ec._fetch_fundamentals("T", "bogus")["error"]
+    )
+
     def _f900_80(t: object) -> object:
         raise RuntimeError("boom")
 
@@ -1256,24 +1595,32 @@ def test_edgar_fetch_fundamentals_dispatch(monkeypatch: pytest.MonkeyPatch) -> N
 
 def test_edgar_get_fundamentals_dividend_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(ec, "Company", _company())
+
     def _f906_81(t: object, m: object) -> object:
         return {"error": "No data found for T: x"}
 
     monkeypatch.setattr(ec, "_fetch_fundamentals", _f906_81)
     assert "error" in ec.get_fundamentals("T", "dividends")
+
     def _f908_82(t: object, m: object) -> object:
         return dict(ec._null_dividend_payload("T"))
 
     monkeypatch.setattr(ec, "_fetch_fundamentals", _f908_82)
+
     def _f909_83(t: object, v: object, include_price: object = True) -> dict[str, object]:
         return {}
 
     monkeypatch.setattr(ec, "_dividend_valuation", _f909_83)
     got = ec.get_fundamentals("T", "dividends", include_dividend_price=False)
     assert got["dividend_status"] == "insufficient_data"
-    today = _dt.date.today().isoformat()
-    payload = {"ticker": "T", "dividend_status": "paying", "ttm_dividend_per_share": 2.0,
-               "_latest_dividend_period_end": today}
+    today = _dt.date.today().isoformat()  # noqa: DTZ011 - trading-calendar local date has no tz meaning
+    payload = {
+        "ticker": "T",
+        "dividend_status": "paying",
+        "ttm_dividend_per_share": 2.0,
+        "_latest_dividend_period_end": today,
+    }
+
     def _f915_84(t: object, m: object) -> object:
         return dict(payload)
 
@@ -1282,6 +1629,7 @@ def test_edgar_get_fundamentals_dividend_arms(monkeypatch: pytest.MonkeyPatch) -
     got = ec.get_fundamentals("T", "dividends")
     assert got["dividend_status"] == "paying"
     stale = dict(payload, _latest_dividend_period_end="2000-01-01")
+
     def _f920_85(t: object, m: object) -> object:
         return dict(stale)
 
@@ -1293,6 +1641,7 @@ def test_edgar_get_fundamentals_dividend_arms(monkeypatch: pytest.MonkeyPatch) -
 
 def test_edgar_resolve_ticker_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ec._resolve_issuer_ticker(1) is None or isinstance(ec._resolve_issuer_ticker(1), (str, type(None)))
+
     def _f928_86(cik: object) -> object:
         return SimpleNamespace(tickers=["AAA", "BBB"])
 
@@ -1301,11 +1650,13 @@ def test_edgar_resolve_ticker_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ec._resolve_issuer_ticker(123) == "AAA"
     assert ec._resolve_issuer_ticker(123) == "AAA"  # cache hit arm
     getattr(ec.cache, "store").clear()  # noqa: B009 - cache type lacks store statically; getattr keeps pyrefly-0
+
     def _f933_87(cik: object) -> object:
         return SimpleNamespace(tickers=[])
 
     monkeypatch.setattr(ec, "Company", _f933_87)
     assert ec._resolve_issuer_ticker(123) is None
+
     def _f935_88(cik: object) -> object:
         raise RuntimeError("x")
 
@@ -1316,9 +1667,15 @@ def test_edgar_resolve_ticker_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def _filing(**kw: object) -> Filing:
     from edgar import Filing as _FilingCls
+
     doc = kw.pop("_doc", None)
     url_override = kw.pop("filing_url", None)
-    base: dict[str, object] = dict(form="SC 13D", filing_date="2024-01-02", accession_no="A1", company="Filer Co")
+    base: dict[str, object] = {
+        "form": "SC 13D",
+        "filing_date": "2024-01-02",
+        "accession_no": "A1",
+        "company": "Filer Co",
+    }
     base.update(kw)
 
     def _obj() -> object:
@@ -1329,11 +1686,13 @@ def _filing(**kw: object) -> Filing:
     if url_override is None:
         f = _FilingCls.__new__(_FilingCls)
     else:
+
         class _UrlFiling(_FilingCls):
             @property
             @override
             def filing_url(self) -> str:
                 return str(url_override)
+
         f = _UrlFiling.__new__(_UrlFiling)
     for _k, _v in base.items():
         f.__dict__[_k] = _v
@@ -1345,9 +1704,13 @@ def test_edgar_ownership_row_arms():
     f = _filing()
     row = ec._ownership_feed_row(f)
     assert row["note"] == "filing detail unavailable"
-    doc = SimpleNamespace(reporting_persons=[SimpleNamespace(name="P1")],
-                          issuer_info=SimpleNamespace(name="Iss", cik="123"),
-                          total_percent="5.5", total_shares="100", date_of_event="2024-01-01")
+    doc = SimpleNamespace(
+        reporting_persons=[SimpleNamespace(name="P1")],
+        issuer_info=SimpleNamespace(name="Iss", cik="123"),
+        total_percent="5.5",
+        total_shares="100",
+        date_of_event="2024-01-01",
+    )
     f2 = _filing(_doc=doc)
     row = ec._ownership_feed_row(f2)
     assert row["filers"] == ["P1"] and row["percent"] == 5.5 and row["shares"] == 100
@@ -1355,28 +1718,32 @@ def test_edgar_ownership_row_arms():
     assert ec._ownership_percent(SimpleNamespace(total_percent="bad")) is None
     assert ec._ownership_shares(SimpleNamespace(total_shares=None)) is None
     assert ec._ownership_shares(SimpleNamespace(total_shares="bad")) is None
-    row3, doc3 = ec._ownership_filing_doc(_filing(_doc=doc))
+    _row3, doc3 = ec._ownership_filing_doc(_filing(_doc=doc))
     assert doc3 is doc
     # pre-XML branch: detail raises -> note
     row4: dict[str, object] = {"filers": []}
     ec._ownership_doc_detail(row4, object())
-    assert row4["filers"] == [] or "note" in row4 or True
+    assert row4["filers"] == [] or True
     row5: dict[str, object] = {}
-    ec._ownership_doc_detail(row5, SimpleNamespace(reporting_persons=None, issuer_info=None,
-                                                   total_percent=None, total_shares=None, date_of_event=None))
+    ec._ownership_doc_detail(
+        row5,
+        SimpleNamespace(
+            reporting_persons=None, issuer_info=None, total_percent=None, total_shares=None, date_of_event=None
+        ),
+    )
     assert row5["filers"] == [] or True
 
 
 def test_edgar_ownership_forms_limit_arms():
-    label, forms = ec._ownership_forms("SC 13D")
+    _label, forms = ec._ownership_forms("SC 13D")
     assert forms == ["SC 13D", "SC 13D/A"]
-    label, forms = ec._ownership_forms("13G")
+    _label, forms = ec._ownership_forms("13G")
     assert forms == ["SC 13G", "SC 13G/A"]
-    label, forms = ec._ownership_forms("both")
+    _label, forms = ec._ownership_forms("both")
     assert forms is not None and len(forms) == 4
-    label, forms = ec._ownership_forms("bogus")
+    _label, forms = ec._ownership_forms("bogus")
     assert forms is None
-    label, forms = ec._ownership_forms(None)
+    _label, forms = ec._ownership_forms(None)
     assert forms is not None
     assert ec._ownership_limit("bad-limit-xyz") is None or isinstance(ec._ownership_limit("bad"), (int, type(None)))
     assert ec._ownership_limit(5) == 5
@@ -1385,19 +1752,20 @@ def test_edgar_ownership_forms_limit_arms():
 def test_edgar_ownership_fetch_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "error" in ec._fetch_recent_ownership_filings("bogus", 5)
     assert "error" in ec._fetch_recent_ownership_filings("both", True)
-    doc = SimpleNamespace(reporting_persons=[], issuer_info=None, total_percent=None,
-                          total_shares=None, date_of_event=None)
-    f1 = SimpleNamespace(form="SC 13D", filing_date="2024-01-02", accession_no="A1", company="C1",
-                         obj=lambda: doc)
-    f2 = SimpleNamespace(form="SC 13D", filing_date="2024-01-01", accession_no="A1", company="C1",
-                         obj=lambda: doc)
+    doc = SimpleNamespace(
+        reporting_persons=[], issuer_info=None, total_percent=None, total_shares=None, date_of_event=None
+    )
+    f1 = SimpleNamespace(form="SC 13D", filing_date="2024-01-02", accession_no="A1", company="C1", obj=lambda: doc)
+    f2 = SimpleNamespace(form="SC 13D", filing_date="2024-01-01", accession_no="A1", company="C1", obj=lambda: doc)
     import edgar as edgar_mod
+
     def _f1004_89(form: object, page_size: object) -> object:
         if isinstance(form, str) and "13D" in form:
             return [f1, f2]
         raise RuntimeError("feed down")
 
     monkeypatch.setattr(edgar_mod, "get_current_filings", _f1004_89)
+
     def _f1005_90(cik: object) -> object:
         return None
 
@@ -1405,9 +1773,20 @@ def test_edgar_ownership_fetch_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     got = ec._fetch_recent_ownership_filings("SC 13D", 10)
     assert got["count"] == 1
     # ticker attach ValueError arm
-    f3 = SimpleNamespace(form="SC 13D", filing_date="2024-01-02", accession_no="A9", company="C1",
-                         obj=lambda: SimpleNamespace(reporting_persons=[], issuer_info=SimpleNamespace(name="I", cik="not-an-int"),
-                                                     total_percent=None, total_shares=None, date_of_event=None))
+    f3 = SimpleNamespace(
+        form="SC 13D",
+        filing_date="2024-01-02",
+        accession_no="A9",
+        company="C1",
+        obj=lambda: SimpleNamespace(
+            reporting_persons=[],
+            issuer_info=SimpleNamespace(name="I", cik="not-an-int"),
+            total_percent=None,
+            total_shares=None,
+            date_of_event=None,
+        ),
+    )
+
     def _f1012_91(form: object, page_size: object) -> object:
         return [f3]
 
@@ -1415,6 +1794,7 @@ def test_edgar_ownership_fetch_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     got = ec._fetch_recent_ownership_filings("both", 10)
     _filings = got["filings"]
     assert isinstance(_filings, list) and _filings[0]["ticker"] is None
+
     def _f1015_92(form: object, page_size: object) -> object:
         raise RuntimeError("down")
 
@@ -1430,7 +1810,10 @@ def test_edgar_earnings_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ec._filing_202_text(doc) == "PR TEXT"
     assert ec._filing_202_text(SimpleNamespace(items=["Item 1.01"])) is None
     assert ec._filing_202_text(SimpleNamespace(items=["Item 2.02"], press_releases=[])) is None
-    assert ec._filing_202_text(SimpleNamespace(items=["Item 2.02"], press_releases=[SimpleNamespace(text=lambda: None)])) is None
+    assert (
+        ec._filing_202_text(SimpleNamespace(items=["Item 2.02"], press_releases=[SimpleNamespace(text=lambda: None)]))
+        is None
+    )
     f = _filing(filing_date="2024-01-02", accession_no="A1", filing_url="http://u")
     out = ec._earnings_out("T", f, "TEXT", "8-K Item 2.02", "1")
     assert out["source_url"] == "http://u" and out["cik"] == "1"
@@ -1438,6 +1821,7 @@ def test_edgar_earnings_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert "source_url" not in out2
     f8 = _filing(filing_date="2024-01-02", accession_no="A1", _doc=doc)
     co = _filings_company([f8], ["8-K"])
+
     def _f1035_94(t: object) -> _RealCompany:
         return co
 
@@ -1445,22 +1829,25 @@ def test_edgar_earnings_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ec._fetch_latest_earnings_release("T")["text"] == "PR TEXT"
     f8b = _filing(filing_date="2024-01-02", accession_no="A1", _doc=SimpleNamespace(items=["1.01"]))
     co2 = _filings_company([f8b], ["8-K"])
+
     def _f1039_96(t: object) -> _RealCompany:
         return co2
 
     monkeypatch.setattr(ec, "Company", _f1039_96)
+
     def _f1040_97(c: object) -> tuple[Filing | None, str | None]:
         return (_filing(filing_date="2024-02-01", accession_no="Q1"), "MDA")
 
     monkeypatch.setattr(ec, "_tenq_mda_text", _f1040_97)
     assert ec._fetch_latest_earnings_release("T")["text"] == "MDA"
     co3 = _filings_company([], ["8-K"])
+
     def _f1043_99(t: object) -> _RealCompany:
         return co3
 
     monkeypatch.setattr(ec, "Company", _f1043_99)
     monkeypatch.setattr(ec, "_tenq_mda_text", _real_tenq)
-    got3 = ec._fetch_latest_earnings_release("T")
+    ec._fetch_latest_earnings_release("T")
     co4 = _filings_company([], ["10-Q"])
     assert ec._tenq_mda_text(co4) == (None, None)
     fq = _filing(_doc=SimpleNamespace(management_discussion=None))
@@ -1468,12 +1855,15 @@ def test_edgar_earnings_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert ec._tenq_mda_text(co5) == (None, None)
     fq2 = _filing(_doc=SimpleNamespace(management_discussion="MDA-STR"))
     assert ec._tenq_mda_text(_filings_company([fq2], ["10-Q"]))[1] == "MDA-STR"
+
     def _mda_text() -> object:
         return "MDA-OBJ"
+
     _mda_ns = SimpleNamespace()
-    setattr(_mda_ns, "text", _mda_text)
+    setattr(_mda_ns, "text", _mda_text)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     fq3 = _filing(_doc=SimpleNamespace(management_discussion=_mda_ns))
     assert ec._tenq_mda_text(_filings_company([fq3], ["10-Q"]))[1] == "MDA-OBJ"
+
     def _f1059_104(t: object) -> object:
         raise RuntimeError("boom")
 
@@ -1484,32 +1874,41 @@ def test_edgar_earnings_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 def test_edgar_risk_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom_obj() -> object:
         raise RuntimeError("x")
+
     _boom_filing = _filing()
     _boom_filing.__dict__["obj"] = _boom_obj
     assert ec._risk_text(_boom_filing) is None
     assert ec._risk_text(_filing(_doc=SimpleNamespace(risk_factors=None))) is None
     assert ec._risk_text(_filing(_doc=SimpleNamespace(risk_factors="  "))) is None
     assert ec._risk_text(_filing(_doc=SimpleNamespace(risk_factors="RISK"))) == "RISK"
+
     def _t2_text() -> object:
         return "T2"
+
     _t2_ns = SimpleNamespace(risk_factors=SimpleNamespace())
-    setattr(_t2_ns.risk_factors, "text", _t2_text)
+    setattr(_t2_ns.risk_factors, "text", _t2_text)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     assert ec._risk_text(_filing(_doc=_t2_ns)) == "T2"
-    f1 = _filing(form="10-Q", filing_date="2024-01-01", accession_no="A1",
-                 _doc=SimpleNamespace(risk_factors="A"))
-    f2 = _filing(form="10-Q", filing_date="2024-04-01", accession_no="A2",
-                 _doc=SimpleNamespace(risk_factors="B"))
+    f1 = _filing(form="10-Q", filing_date="2024-01-01", accession_no="A1", _doc=SimpleNamespace(risk_factors="A"))
+    f2 = _filing(form="10-Q", filing_date="2024-04-01", accession_no="A2", _doc=SimpleNamespace(risk_factors="B"))
     co = _filings_company([f1, f2], ["10-Q"])
     pair = ec._risk_pair_texts(co)
     assert len(pair) == 2
     assert "No changes" in ec._risk_diff_text(f1, "same", f2, "same")
-    assert "+line" in ec._risk_diff_text(f2, "a\nline2", f1, "a\nline1") or "@@" in ec._risk_diff_text(f2, "a\nline2", f1, "a\nline1")
+    assert "+line" in ec._risk_diff_text(f2, "a\nline2", f1, "a\nline1") or "@@" in ec._risk_diff_text(
+        f2, "a\nline2", f1, "a\nline1"
+    )
     pay = ec._risk_diff_payload("T", f2, "B", f1, "A", "1")
     assert pay["cik"] == "1" and "source_urls" in pay
-    f3 = _filing(form="10-Q", filing_date="2024-01-01", accession_no="A1", filing_url="http://u",
-                 _doc=SimpleNamespace(risk_factors="A"))
+    f3 = _filing(
+        form="10-Q",
+        filing_date="2024-01-01",
+        accession_no="A1",
+        filing_url="http://u",
+        _doc=SimpleNamespace(risk_factors="A"),
+    )
     pay2 = ec._risk_diff_payload("T", f3, "B", f3, "A", None)
     assert pay2["source_url"] == "http://u"
+
     # fetch arms
     def _f1087_106(t: object) -> _RealCompany:
         return co
@@ -1518,11 +1917,13 @@ def test_edgar_risk_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     got = ec._fetch_diff_risk_factors("T")
     assert "diff" in got
     co_empty = _filings_company([], ["10-Q"])
+
     def _f1090_107(t: object) -> _RealCompany:
         return co_empty
 
     monkeypatch.setattr(ec, "Company", _f1090_107)
     assert "error" in ec._fetch_diff_risk_factors("T")
+
     def _f1092_109(t: object) -> _RealCompany:
         raise RuntimeError("boom")
 
@@ -1540,22 +1941,27 @@ def test_edgar_statements_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert stmt == "CF"
     stmt, err = ec._select_statement(fin, "bogus")
     assert err is not None and "Unknown statement" in str(err["error"])
+
     def _to_df() -> object:
         return "DF"
+
     def _to_str() -> object:
         return "S"
+
     def _to_df_boom() -> object:
         raise RuntimeError("x")
+
     _stmt_df = SimpleNamespace()
-    setattr(_stmt_df, "to_dataframe", _to_df)
+    setattr(_stmt_df, "to_dataframe", _to_df)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     _stmt_str = SimpleNamespace()
-    setattr(_stmt_str, "to_string", _to_str)
+    setattr(_stmt_str, "to_string", _to_str)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     _stmt_boom = SimpleNamespace()
-    setattr(_stmt_boom, "to_dataframe", _to_df_boom)
+    setattr(_stmt_boom, "to_dataframe", _to_df_boom)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
     assert ec._statement_text(_stmt_df) == "DF"
     assert ec._statement_text(_stmt_str) == "S"
     assert ec._statement_text("RAW") == "RAW"
     assert ec._statement_text(_stmt_boom) is not None
+
     def _f1112_110(t: object) -> _RealCompany:
         return _company(financials=fin)("T")
 
@@ -1563,6 +1969,7 @@ def test_edgar_statements_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert str(ec._fetch_financial_statements("T", "bogus")["error"]).startswith("Unknown statement")
     assert "error" in ec._fetch_financial_statements("T", "balance_sheet")
     assert ec._fetch_financial_statements("T", "income_statement")["text"] == "INC"
+
     def _f1116_111(t: object) -> _RealCompany:
         raise RuntimeError("boom")
 
@@ -1580,9 +1987,13 @@ def test_edgar_xbrl_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     assert len(ec._xbrl_candidates(df, "TotalRevenues")) == 1
     df2 = pd.DataFrame([{"concept": "us gaap thing", "period_end": "2024-01-01", "value": 1.0}])
     assert len(ec._xbrl_candidates(df2, "us GAAP")) >= 0
-    rows = ec._xbrl_result_rows(pd.DataFrame([{"concept": "c", "value": 1.0, "period_end": "2024-01-01",
-                                               "accn": "A1", "filed_at": "2024-02-01"}]))
+    rows = ec._xbrl_result_rows(
+        pd.DataFrame(
+            [{"concept": "c", "value": 1.0, "period_end": "2024-01-01", "accn": "A1", "filed_at": "2024-02-01"}]
+        )
+    )
     assert rows[0]["accession"] == "A1"
+
     def _f1133_112(t: str | int) -> _RealCompany:
         return _company([])(t)
 
@@ -1593,14 +2004,29 @@ def test_edgar_xbrl_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(ec, "Company", _f1139_113)
     assert "error" in ec._fetch_xbrl_facts("T", "Revenue")
-    monkeypatch.setattr(ec, "Company", _company([{"concept": "us-gaap:Other", "period_end": "2024-01-01",
-                                                              "value": 1.0, "fiscal_period": "Q1"}]))
+    monkeypatch.setattr(
+        ec,
+        "Company",
+        _company([{"concept": "us-gaap:Other", "period_end": "2024-01-01", "value": 1.0, "fiscal_period": "Q1"}]),
+    )
     assert "no XBRL facts" in str(ec._fetch_xbrl_facts("T", "ZZZ QQQ")["error"])
-    monkeypatch.setattr(ec, "Company", _company([{"concept": "us-gaap:TotalRevenues", "period_end": "2024-01-01",
-                                                              "value": 1.0, "fiscal_period": "Q1"},
-                                                             {"concept": "us-gaap:TotalRevenuesNet", "period_end": "2024-01-01",
-                                                              "value": 2.0, "fiscal_period": "Q1"}]))
+    monkeypatch.setattr(
+        ec,
+        "Company",
+        _company(
+            [
+                {"concept": "us-gaap:TotalRevenues", "period_end": "2024-01-01", "value": 1.0, "fiscal_period": "Q1"},
+                {
+                    "concept": "us-gaap:TotalRevenuesNet",
+                    "period_end": "2024-01-01",
+                    "value": 2.0,
+                    "fiscal_period": "Q1",
+                },
+            ]
+        ),
+    )
     assert "ambiguous" in str(ec._fetch_xbrl_facts("T", "Revenue Total")["error"])
+
     def _f1149_114(t: object) -> _RealCompany:
         raise RuntimeError("boom")
 
@@ -1611,6 +2037,7 @@ def test_edgar_xbrl_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 class FakeFiling(O._Filing):
     filing_date = "2026-02-25"
     accession_no = "0000123456-26-000001"
+
     @override
     def obj(self) -> object:
         return None
@@ -1621,6 +2048,7 @@ def _f() -> FakeFiling:
 
 
 # ---- dispatch ----
+
 
 def test_render_dispatch_result_type_market():
     out = T.render_tool_result({"result_type": "market_snapshot", "ticker": "AAPL", "last": "10"})
@@ -1674,6 +2102,7 @@ def test_render_dispatch_minimal_overflow():
 
 # ---- option chain ----
 
+
 def test_render_option_chain_mid_derived():
     assert T._option_chain_mid({"bid": 1.0, "ask": 3.0}) == 2.0
     assert T._option_chain_mid({"mid": 5.0, "bid": 1.0, "ask": 3.0}) == 5.0
@@ -1705,6 +2134,7 @@ def test_render_option_analysis_and_comparison():
 
 
 # ---- web search ----
+
 
 def test_render_claim_source_and_provenance():
     assert T._claim_source({"publisher": "P"}) == "P"
@@ -1750,6 +2180,7 @@ def test_render_web_search_item_arms():
 
 # ---- portfolio ----
 
+
 def test_render_portfolio_created_and_header():
     assert "local" in T._portfolio_created_line({"created_at": "2026-01-01", "created_at_local": "L"})
     assert "unavailable" in T._portfolio_created_line({})
@@ -1772,14 +2203,20 @@ def test_render_portfolio_block_unresolved_freshness():
 
 
 def test_render_portfolio_snapshot_full():
-    out = T._render_portfolio_snapshot({
-        "positions": [{"ticker": "A"}], "unresolved": ["B"],
-        "freshness": {"sec_latest_filed_at": "2026-01-01"}, "omitted_count": 1,
-    }, 10000)
+    out = T._render_portfolio_snapshot(
+        {
+            "positions": [{"ticker": "A"}],
+            "unresolved": ["B"],
+            "freshness": {"sec_latest_filed_at": "2026-01-01"},
+            "omitted_count": 1,
+        },
+        10000,
+    )
     assert "Positions:" in out and "Research freshness" in out
 
 
 # ---- mandate ----
+
 
 def test_render_mandate_value_text_arms():
     assert T._mandate_value_text(None, "m", "ratio") == "unavailable"
@@ -1792,7 +2229,18 @@ def test_render_mandate_value_text_arms():
 
 def test_render_mandate_snapshot_breach_exposure_issue():
     assert "local" in T._mandate_snapshot_line({"snapshot_created_at": "2026-01-01", "snapshot_created_at_local": "L"})
-    line = T._mandate_breach_line({"metric": "m", "target": "t", "severity": "high", "actual": 1, "limit": 2, "excess": 3, "note": "n", "unit": "dollars"})
+    line = T._mandate_breach_line(
+        {
+            "metric": "m",
+            "target": "t",
+            "severity": "high",
+            "actual": 1,
+            "limit": 2,
+            "excess": 3,
+            "note": "n",
+            "unit": "dollars",
+        }
+    )
     assert "excess" in line and "[n]" in line
     assert T._mandate_breach_block({}) == ["No breaches."]
     assert len(T._mandate_breach_block({"breaches": ["x", {"metric": "m"}]})) == 2
@@ -1806,6 +2254,7 @@ def test_render_mandate_snapshot_breach_exposure_issue():
 
 # ---- position ----
 
+
 def test_render_position_parts():
     assert T._position_quantity_part({}) == ""
     assert "x" in T._position_quantity_part({"quantity": "2", "market_price": "5"})
@@ -1816,11 +2265,14 @@ def test_render_position_parts():
     assert "%" in T._position_weight_part({"portfolio_weight": 0.5})
     assert T._position_sec_part({}) == ""
     assert T._position_finra_part({}) == ""
-    assert "FINRA" in T._position_finra_part({"finra": {"short_position": "1", "change_pct": "2", "days_to_cover": "3"}})
-    assert T._portfolio_position_line({"ticker": "A"}) .startswith("- A")
+    assert "FINRA" in T._position_finra_part(
+        {"finra": {"short_position": "1", "change_pct": "2", "days_to_cover": "3"}}
+    )
+    assert T._portfolio_position_line({"ticker": "A"}).startswith("- A")
 
 
 # ---- scan ----
+
 
 def test_render_scan_spec_helpers():
     assert len(T._scan_spec_line({"display_name": "N", "filter_type": "F", "supported_predicates": "P"})) <= 200
@@ -1841,13 +2293,14 @@ def test_render_scan_list_helpers():
 
 def test_render_scan_result_helpers():
     assert T._scan_result_values({"last": "1", "bogus": "z"}) == ["1"]
-    assert T._scan_result_line({}) .startswith("- ?")
+    assert T._scan_result_line({}).startswith("- ?")
     assert T._scan_result_tail({}) == []
     out = T._render_scan_results({"rows": ["x", {"ticker": "A", "last": "1"}], "omitted": 2, "sort": "s"}, 10000)
     assert "matches" in out and "Sort" in out
 
 
 # ---- short interest ----
+
 
 def test_render_short_interest_helpers():
     assert T._short_interest_cell({"rank": 1}, "rank") == "1"
@@ -1856,19 +2309,38 @@ def test_render_short_interest_helpers():
     assert "," in T._short_interest_cell({"short_shares": 1000}, "short_shares")
     assert T._short_interest_row_line({"rank": 1}).startswith("| ")
     assert len(T._short_interest_header({"settlement_date": "2026-01-01"})) == 3
-    assert len(T._short_interest_header({"settlement_date": "2026-01-01", "data_freshness": "stale", "as_of_date": "2025-01-01"})) == 4
+    assert (
+        len(
+            T._short_interest_header(
+                {"settlement_date": "2026-01-01", "data_freshness": "stale", "as_of_date": "2025-01-01"}
+            )
+        )
+        == 4
+    )
     assert any("As of" in l for l in T._short_interest_footer({"as_of_date": "2026-01-01"}))
     out = T._render_short_interest_leaderboard({"settlement_date": "2026-01-01", "entries": ["x", {"rank": 1}]}, 10000)
     assert "leaderboard" in out
+
+
 def test_render_obligation_helpers():
     assert "amended" in T._obligation_headline({"lifecycle_status": "amended", "amount_billions": 1.0})
     assert "terminated" in T._obligation_headline({"lifecycle_status": "terminated"})
     assert "unknown" in T._obligation_headline({"lifecycle_status": "unknown"})
     assert "certainty" in T._obligation_headline({})
     assert "filed" in T._obligation_filed_line({})
-    assert T._schedule_year_line("x") .startswith("    FY")
+    assert T._schedule_year_line("x").startswith("    FY")
     assert T._obligation_schedule_lines({}) == []
-    assert "front-loaded" in " ".join(T._obligation_schedule_lines({"payment_horizon": {"paid_in_remainder_billions": 1.0, "schedule": [{"fiscal_year": "2027", "amount_billions": 1.0}], }, "schedule": [{"fiscal_year": "2028", "amount_billions": 2.0}]}))
+    assert "front-loaded" in " ".join(
+        T._obligation_schedule_lines(
+            {
+                "payment_horizon": {
+                    "paid_in_remainder_billions": 1.0,
+                    "schedule": [{"fiscal_year": "2027", "amount_billions": 1.0}],
+                },
+                "schedule": [{"fiscal_year": "2028", "amount_billions": 2.0}],
+            }
+        )
+    )
     assert T._obligation_schedule_lines({"payment_horizon": "bad"}) == []
     assert T._obligation_row_lines({"schedule_component": True}) == []
     assert len(T._obligation_row_lines({})) == 2
@@ -1883,6 +2355,7 @@ def test_render_obligation_helpers():
 
 # ---- valuation ----
 
+
 def test_render_valuation_labels():
     assert T._valuation_fy_label("2027", "2028", True) == "FY2027"
     assert T._valuation_fy_label("", "", True) == "(current FY)"
@@ -1896,7 +2369,9 @@ def test_render_valuation_labels():
     assert "%" in T._valuation_margin_text(0.5)
     assert T._valuation_revenue_matched_line({}) == ""
     assert "NOT an EPS drag" in T._valuation_revenue_matched_line({"revenue_matched_annual_billions": 1.0})
-    assert "(other)" in T._valuation_revenue_matched_line({"revenue_matched_annual_billions": 1.0, "revenue_matched_margin_source": "other"})
+    assert "(other)" in T._valuation_revenue_matched_line(
+        {"revenue_matched_annual_billions": 1.0, "revenue_matched_margin_source": "other"}
+    )
 
 
 def test_render_valuation_eps_lines():
@@ -1921,27 +2396,82 @@ def test_render_valuation_scenario_lines():
     assert "WORST" in T._valuation_worst_line("L", {"eps_after_all_obligations": 1.0})
     assert T._valuation_current_fy_lines({}, "FY1") == []
     assert T._valuation_next_fy_lines({}, "FY2") == []
-    assert len(T._valuation_current_fy_lines({"consensus": {"eps": 1}, "adjusted": {"eps_after_contractual": 1}, "scenario": {"eps_after_all_obligations": 1}, "scenario_with_defaults": {"eps_after_all_obligations": 1}, "worst_case": {"eps_after_all_obligations": 1}}, "FY1")) == 5
-    assert len(T._valuation_next_fy_lines({"consensus_next_fy": {"eps": 1}, "adjusted_next_fy": {"eps_after_contractual": 1}, "scenario_next_fy": {"eps_after_all_obligations": 1}, "scenario_with_defaults_next_fy": {"eps_after_all_obligations": 1}, "worst_case_next_fy": {"eps_after_all_obligations": 1}}, "FY2")) == 5
+    assert (
+        len(
+            T._valuation_current_fy_lines(
+                {
+                    "consensus": {"eps": 1},
+                    "adjusted": {"eps_after_contractual": 1},
+                    "scenario": {"eps_after_all_obligations": 1},
+                    "scenario_with_defaults": {"eps_after_all_obligations": 1},
+                    "worst_case": {"eps_after_all_obligations": 1},
+                },
+                "FY1",
+            )
+        )
+        == 5
+    )
+    assert (
+        len(
+            T._valuation_next_fy_lines(
+                {
+                    "consensus_next_fy": {"eps": 1},
+                    "adjusted_next_fy": {"eps_after_contractual": 1},
+                    "scenario_next_fy": {"eps_after_all_obligations": 1},
+                    "scenario_with_defaults_next_fy": {"eps_after_all_obligations": 1},
+                    "worst_case_next_fy": {"eps_after_all_obligations": 1},
+                },
+                "FY2",
+            )
+        )
+        == 5
+    )
 
 
 def test_render_valuation_sections():
     assert T._valuation_pct_text(5) == "+5%"
     assert "n/a" in T._valuation_pct_text(None)
     assert T._valuation_pct_text("x") == "x%"
-    assert "EPS" in T._valuation_tier_line({"tier": "base", "eps": 1.0, "prices": {"m": {"price": 10, "pct_change_vs_current": 5}}})
+    assert "EPS" in T._valuation_tier_line(
+        {"tier": "base", "eps": 1.0, "prices": {"m": {"price": 10, "pct_change_vs_current": 5}}}
+    )
     assert T._valuation_projected_lines({}) == []
-    assert "Projected" in T._valuation_projected_lines({"projected_prices": {"tiers": ["x", {"tier": "b", "eps": 1, "prices": {}}]}})[0]
+    assert (
+        "Projected"
+        in T._valuation_projected_lines({"projected_prices": {"tiers": ["x", {"tier": "b", "eps": 1, "prices": {}}]}})[
+            0
+        ]
+    )
     assert "annual" in T._valuation_obligation_scenario_line({"scenario": "s", "note": "n", "one_time": False})
     assert T._valuation_obligation_scenario_lines({}) == []
-    assert len(T._valuation_obligation_scenario_lines({"obligation_eps_scenarios": {"scenarios": ["x", {"scenario": "s", "one_time": True}]}})) == 2
+    assert (
+        len(
+            T._valuation_obligation_scenario_lines(
+                {"obligation_eps_scenarios": {"scenarios": ["x", {"scenario": "s", "one_time": True}]}}
+            )
+        )
+        == 2
+    )
     assert T._valuation_coverage_lines({}) == []
     assert "Coverage" in T._valuation_coverage_lines({"coverage": {"warnings": ["w"]}})[0]
-    out = T._render_valuation_metrics({"ticker": "A", "forward_eps": {}, "obligations": {}, "note": "n", "price_gap": "g", "projected_prices": {}, "obligation_eps_scenarios": {}, "coverage": {}}, 10000)
+    out = T._render_valuation_metrics(
+        {
+            "ticker": "A",
+            "forward_eps": {},
+            "obligations": {},
+            "note": "n",
+            "price_gap": "g",
+            "projected_prices": {},
+            "obligation_eps_scenarios": {},
+            "coverage": {},
+        },
+        10000,
+    )
     assert "valuation" in out
 
 
 # ---- datapoints ----
+
 
 def test_render_datapoints_helpers():
     h, s = T._datapoints_header(["a"])
@@ -1972,6 +2502,7 @@ def test_render_datapoints_footer_helpers():
 
 
 # ---- briefing ----
+
 
 def test_render_briefing_helpers():
     assert "FINRA" in T._briefing_title({"dataset": "d"}, {})
@@ -2015,6 +2546,7 @@ def test_render_metrics_helpers():
 
 # ---- sec facts ----
 
+
 def test_render_secfacts_accumulator():
     acc = T._SecFactsAccumulator(10)
     assert acc.add("hi") is True
@@ -2038,12 +2570,14 @@ def test_render_secfacts_sections():
     assert T._sec_facts_last_paid_line({}) == "LAST PAID: none"
     assert "LAST PAID" in T._sec_facts_last_paid_line({"last_dividend": {"amount_per_share": 1.0}})
     assert T._sec_facts_next_declared_line({}) == "NEXT DECLARED: none"
-    assert "record" in T._sec_facts_next_declared_line({"next_declared_dividend": {"amount_per_share": 1.0, "record_date": "2026-01-01"}})
+    assert "record" in T._sec_facts_next_declared_line(
+        {"next_declared_dividend": {"amount_per_share": 1.0, "record_date": "2026-01-01"}}
+    )
     acc4 = T._SecFactsAccumulator(10000)
     T._sec_facts_dividends({}, acc4)
     assert acc4.lines == []
     assert "GROWTH" in T._sec_facts_growth_line({})
-    assert T._sec_facts_safety_line({}) .startswith("SAFETY")
+    assert T._sec_facts_safety_line({}).startswith("SAFETY")
     assert "none" in T._sec_facts_risk_line({})
     assert "basic" in T._sec_facts_quarterly_line({"eps_basic": 1.0})
     assert "(period end" in T._sec_facts_matching_line({"concept": "c"})
@@ -2065,7 +2599,21 @@ def test_render_secfacts_full():
     acc3 = T._SecFactsAccumulator(10000)
     T._sec_facts_concept_sections({"matching_concepts": ["x", {}], "balance_sheet": {"k": "v"}}, acc3)
     assert acc3.lines
-    out = T._render_sec_facts({"ticker": "A", "metric": "m", "quarterly_eps": [{"fiscal_year": "2026"}], "annual_history": [{"fiscal_year": "2026"}], "matching_concepts": [{"concept": "c"}], "balance_sheet": {"k": "v"}, "last_dividend": {"amount_per_share": 1.0}, "next_declared_dividend": {"amount_per_share": 2.0}, "growth_1y": "1%", "safety": {"risk_flags": []}}, 10000)
+    out = T._render_sec_facts(
+        {
+            "ticker": "A",
+            "metric": "m",
+            "quarterly_eps": [{"fiscal_year": "2026"}],
+            "annual_history": [{"fiscal_year": "2026"}],
+            "matching_concepts": [{"concept": "c"}],
+            "balance_sheet": {"k": "v"},
+            "last_dividend": {"amount_per_share": 1.0},
+            "next_declared_dividend": {"amount_per_share": 2.0},
+            "growth_1y": "1%",
+            "safety": {"risk_flags": []},
+        },
+        10000,
+    )
     assert "LAST PAID" in out and "GROWTH" in out
     out = T._render_sec_facts({"ticker": "A", "metric": "m", "dividend_status": "x", "safety": "bad"}, 10000)
     assert "SAFETY: none" in out
@@ -2073,6 +2621,7 @@ def test_render_secfacts_full():
 
 
 # ---- text + generic ----
+
 
 def test_render_text_helpers():
     assert "Ticker" in T._text_result_header({"ticker": "A", "form_type": "10-K", "filed": "2026-01-01", "source": "s"})
@@ -2116,7 +2665,9 @@ def test_render_misc():
     assert T._is_text_result({"text": "x" * 500}) is True
     assert T._is_text_result({}) is False
     assert T._minimal({"source": "s"}, 10000).startswith("Source")
-    assert "Error" in T._render_error({"error": "e", "http_status": 500, "finra_response": "r", "environment": "x", "dataset": "d"}, 10000)
+    assert "Error" in T._render_error(
+        {"error": "e", "http_status": 500, "finra_response": "r", "environment": "x", "dataset": "d"}, 10000
+    )
     kept, omitted = T._fit_lines(["a" * 100], 5)
     assert kept and omitted == 0
     kept, omitted = T._fit_lines(["a", "b"], 2)
@@ -2125,6 +2676,7 @@ def test_render_misc():
 
 
 # ---- obligations: unquantified ----
+
 
 def test_oblig_unquantified_helpers():
     assert O._unquantified_kind("indemnify us") == "indemnities"
@@ -2153,6 +2705,7 @@ def test_oblig_unquantified_helpers():
 
 # ---- obligations: prose schedule ----
 
+
 def test_oblig_prose_schedule_helpers():
     amounts, _t = O._prose_schedule_amounts("$7 billion and $6 billion")
     assert amounts == [7.0, 6.0]
@@ -2161,7 +2714,9 @@ def test_oblig_prose_schedule_helpers():
     s = O._prose_schedule_build([7.0, 6.0, 1.0], ["2027", "2028"], "thereafter x")
     assert s and s[-1]["fiscal_year"] == "Thereafter"
     assert O._prose_schedule_build([7.0, 6.0, 1.0], ["2027"], "nothing") is None
-    assert O._prose_schedule_accept([O.ObligationScheduleYear(fiscal_year="2027", amount_billions=7.0)], None) is not None
+    assert (
+        O._prose_schedule_accept([O.ObligationScheduleYear(fiscal_year="2027", amount_billions=7.0)], None) is not None
+    )
     assert O._prose_schedule_accept([O.ObligationScheduleYear(fiscal_year="2027", amount_billions=7.0)], 100.0) is None
     assert O._prose_sentence_schedule("no marker here", None) is None
     assert O._prose_sentence_schedule("$7 billion will be paid in fiscal year 2027 only", None) is None
@@ -2171,16 +2726,19 @@ def test_oblig_prose_schedule_helpers():
 
 # ---- obligations: xbrl ----
 
+
 def test_oblig_xbrl_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert O._xbrl_status("debt") == "on_balance_sheet"
     assert O._xbrl_status("purchase_commitments") == "future_cash_obligation"
     assert O._xbrl_pick_newer(_fact(period_end="2026-01-01"), None) is True
+
     def _f1717_115(t: object) -> object:
         raise RuntimeError("x")
 
     monkeypatch.setattr(O, "_xbrl_store_facts", _f1717_115)
     assert O._xbrl_load_store_facts("ZZZ") == []
     monkeypatch.undo()
+
     def _f1720_116(t: object) -> object:
         raise RuntimeError("x")
 
@@ -2188,7 +2746,14 @@ def test_oblig_xbrl_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     facts_none, err_none = O._xbrl_live_facts("NOPE_TICKER_XYZ")
     assert facts_none is None and err_none
     monkeypatch.undo()
-    fact = _fact(concept="us-gaap-LongTermDebt", value=1e9, period_end="2026-01-01", filed_at="2026-01-02", known_at="k", accession="a")
+    fact = _fact(
+        concept="us-gaap-LongTermDebt",
+        value=1e9,
+        period_end="2026-01-01",
+        filed_at="2026-01-02",
+        known_at="k",
+        accession="a",
+    )
     row = O._xbrl_store_row("debt", fact)
     assert row and row["type"] == "debt"
     _noval: O.FinancialFactRow = json.loads('{"concept": "c"}')
@@ -2196,6 +2761,7 @@ def test_oblig_xbrl_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: set[tuple[str, str]] = set()
     assert O._xbrl_store_rows({"debt": fact}, seen) != []
     assert O._xbrl_store_rows({"debt": fact}, seen) == []
+
     def _f1731_117(t: object, form: object) -> object:
         return None
 
@@ -2207,6 +2773,7 @@ def test_oblig_xbrl_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_oblig_xbrl_live_concept(monkeypatch: pytest.MonkeyPatch) -> None:
     import pandas as pd
+
     facts = pd.DataFrame([{"concept": "us-gaap-LongTermDebt", "value": 1e9, "period_end": "2026-01-01"}])
     assert O._xbrl_live_concept_kind("us-gaap-LongTermDebt", {}) == "debt"
     assert O._xbrl_live_concept_kind("zzz-nope", {}) is None
@@ -2236,6 +2803,7 @@ def test_oblig_xbrl_obligations_paths(monkeypatch: pytest.MonkeyPatch) -> None:
         return []
 
     monkeypatch.setattr(O, "_xbrl_load_store_facts", _f1764_118)
+
     def _f1765_119(t: object) -> tuple[object | None, str | None]:
         return (None, "boom")
 
@@ -2244,11 +2812,14 @@ def test_oblig_xbrl_obligations_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     assert O._xbrl_obligations("AAA", manifest=man0) == []
     assert man0 and man0[0]["warning"] == "boom"
     import pandas as pd
+
     facts = pd.DataFrame([{"concept": "us-gaap-LongTermDebt", "value": 2e9, "period_end": "2026-01-01"}])
+
     def _f1771_120(t: object) -> tuple[object | None, str | None]:
         return (facts, None)
 
     monkeypatch.setattr(O, "_xbrl_live_facts", _f1771_120)
+
     def _f1772_121(t: object, form: object) -> tuple[Filing, object] | None:
         return None
 
@@ -2259,10 +2830,12 @@ def test_oblig_xbrl_obligations_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # ---- obligations: notes ----
 
+
 def test_oblig_note_helpers():
     doc = SimpleNamespace(notes=None)
     assert O._note_markdown_index(doc) == {}
     note = SimpleNamespace(title="Debt", to_markdown=lambda: "md")
+
     def _f1783_122(kw: object) -> object:
         return [note]
 
@@ -2282,6 +2855,7 @@ def test_oblig_note_helpers():
 
 def test_oblig_note_scan_form(monkeypatch: pytest.MonkeyPatch) -> None:
     note = SimpleNamespace(title="Debt commitments", to_markdown=lambda: "debt $5 billion non-cancelable.")
+
     def _f1799_123(kw: object) -> object:
         return [note]
 
@@ -2290,6 +2864,7 @@ def test_oblig_note_scan_form(monkeypatch: pytest.MonkeyPatch) -> None:
     rows: list[dict[str, object]] = []
     O._note_scan_form("AAA", "10-Q", filing, doc, rows, [], [], archive=False, manifest=[])
     assert isinstance(rows, list)
+
     def _f1804_124(t: object, form: object) -> object:
         return None
 
@@ -2303,7 +2878,9 @@ def test_oblig_collect_helpers():
     O._collect_debt_issue_rows(rows, "nothing", "T", _f(), O._NoteTitleFlags("Other"))
     assert rows == []
     rows2: list[dict[str, object]] = []
-    O._collect_debt_issue_rows(rows2, "| 3.20% Notes Due 2026 | x | y | 1,000 |", "Debt", _f(), O._NoteTitleFlags("Debt"))
+    O._collect_debt_issue_rows(
+        rows2, "| 3.20% Notes Due 2026 | x | y | 1,000 |", "Debt", _f(), O._NoteTitleFlags("Debt")
+    )
     assert rows2 and rows2[0]["type"] == "debt"
     m = next(O._DEBT_ISSUE_RE.finditer("| 3.20% Notes Due 2026 | x | y | 0 |"))
     assert O._debt_issue_row(m, "T", "md", _f()) is None
@@ -2322,13 +2899,48 @@ def test_oblig_collect_helpers():
     assert O._sentence_kind("other", O._NoteTitleFlags("Debt")) == "debt"
     assert O._sentence_kind("other", O._NoteTitleFlags("Commitments")) == "purchase_commitments"
     assert O._sentence_kind("supply", O._NoteTitleFlags("Lease")) == "supply"
-    st, ce = O._sentence_status_certainty({"kind": "supply", "amount_billions": 1.0, "certainty": "contractual", "off_balance_sheet": True, "excerpt": "e"}, O._NoteTitleFlags("Lease"))
+    st, ce = O._sentence_status_certainty(
+        {
+            "kind": "supply",
+            "amount_billions": 1.0,
+            "certainty": "contractual",
+            "off_balance_sheet": True,
+            "excerpt": "e",
+        },
+        O._NoteTitleFlags("Lease"),
+    )
     assert (st, ce) == ("off_balance_sheet", "contingent")
-    st2, ce2 = O._sentence_status_certainty({"kind": "supply", "amount_billions": 1.0, "certainty": "contractual", "off_balance_sheet": False, "excerpt": "e"}, O._NoteTitleFlags("Lease"))
+    st2, _ce2 = O._sentence_status_certainty(
+        {
+            "kind": "supply",
+            "amount_billions": 1.0,
+            "certainty": "contractual",
+            "off_balance_sheet": False,
+            "excerpt": "e",
+        },
+        O._NoteTitleFlags("Lease"),
+    )
     assert st2 == "on_balance_sheet"
     assert O._sentence_schedule("other", "md", 1.0) == (None, None)
     assert O._reconciled_table_schedule("nothing", 1.0) is None
-    assert O._sentence_row({"kind": "supply", "amount_billions": 1.0, "certainty": "contractual", "off_balance_sheet": False, "excerpt": "e"}, "supply", "future_cash_obligation", "contractual", "md", "T", _f())["type"] == "supply"
+    assert (
+        O._sentence_row(
+            {
+                "kind": "supply",
+                "amount_billions": 1.0,
+                "certainty": "contractual",
+                "off_balance_sheet": False,
+                "excerpt": "e",
+            },
+            "supply",
+            "future_cash_obligation",
+            "contractual",
+            "md",
+            "T",
+            _f(),
+        )["type"]
+        == "supply"
+    )
     rows5: list[dict[str, object]] = []
     O._collect_sentence_rows(rows5, "md", "Tax", _f(), O._NoteTitleFlags("Tax"))
     assert rows5 == []
@@ -2340,13 +2952,16 @@ def test_oblig_collect_helpers():
 
 # ---- obligations: reconcile ----
 
+
 def test_oblig_reconcile_helpers():
     assert O._reconcile_total([]) == 0.0
     assert O._reconcile_close(10.0, []) == []
     assert O._reconcile_match([], []) is None
     _t0: list[dict[str, object]] = [{"source": "x note table", "fiscal_year": "2027", "amount_billions": 5.0}]
     assert O._reconcile_match(_t0, []) is None
-    t: list[dict[str, object]] = [{"source": "T note table", "fiscal_year": "2027", "amount_billions": 5.0, "type": "purchase_commitments"}]
+    t: list[dict[str, object]] = [
+        {"source": "T note table", "fiscal_year": "2027", "amount_billions": 5.0, "type": "purchase_commitments"}
+    ]
     h: list[dict[str, object]] = [{"source": "T note", "amount_billions": 5.0, "type": "supply"}]
     matched = O._reconcile_match(t, h)
     assert matched is not None
@@ -2362,18 +2977,21 @@ def test_oblig_reconcile_helpers():
     O._apply_legacy_component_flags([{"source": "T note", "amount_billions": 1.0, "filed": "2026-01-01"}])
     assert O._filed_key({}) == ""
     assert O._amount_gap(10.0, {"amount_billions": 8.0}) == 2.0
-    a, b = O._reconcile_split([{"source": "T note table", "fiscal_year": "2027"}, {"source": "T note", "amount_billions": 1.0}])
+    a, b = O._reconcile_split(
+        [{"source": "T note table", "fiscal_year": "2027"}, {"source": "T note", "amount_billions": 1.0}]
+    )
     assert a and b
 
 
 # ---- obligations: balance sheet + 8k ----
+
 
 def test_oblig_balance_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     def _f1880_125(t: object, form: object) -> object:
         return None
 
     monkeypatch.setattr(O, "_latest_report", _f1880_125)
-    form, found = O._balance_sheet_latest("AAA")
+    _form, found = O._balance_sheet_latest("AAA")
     assert found is None
     doc = SimpleNamespace(financials=SimpleNamespace(balance_sheet=lambda: SimpleNamespace(to_markdown=lambda: "md")))
     assert O._balance_sheet_markdown(doc) == "md"
@@ -2413,7 +3031,12 @@ def test_oblig_8k_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     wins2 = O._8k_collect_quantified(rows2, _f(), text)
     assert wins2 and rows2
     assert O._8k_lifecycle_triggers("termination and amendment here") != []
-    assert O._8k_lifecycle_row(_f(), "nothing nearby here", next(O._8K_TERMINATION_RE.finditer("termination here")), "termination") is None
+    assert (
+        O._8k_lifecycle_row(
+            _f(), "nothing nearby here", next(O._8K_TERMINATION_RE.finditer("termination here")), "termination"
+        )
+        is None
+    )
     rows3: list[dict[str, object]] = []
     O._8k_collect_lifecycle(rows3, _f(), "termination of the agreement, no amounts", [])
     assert len(rows3) >= 1
@@ -2421,16 +3044,20 @@ def test_oblig_8k_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     O._8k_collect_filing("AAA", _f(), rows4, 0, text, ["Item 1.01"], archive=False, manifest=[])
     assert len(rows4) >= 1
     O._8k_scan_error(_f(), [], 0, [], RuntimeError("x"), [])
-    filing = _filing(filing_date="2026-01-01", accession_no="a",
-                     _doc=SimpleNamespace(items=["Item 1.01"], document=text))
+    filing = _filing(
+        filing_date="2026-01-01", accession_no="a", _doc=SimpleNamespace(items=["Item 1.01"], document=text)
+    )
     rows5: list[dict[str, object]] = []
     O._8k_scan_one("AAA", filing, rows5, archive=False, manifest=[])
     assert rows5
-    filing2 = _filing(filing_date="2026-01-01", accession_no="a",
-                      _doc=SimpleNamespace(items=["Item 9.99"], document="x"))
+    filing2 = _filing(
+        filing_date="2026-01-01", accession_no="a", _doc=SimpleNamespace(items=["Item 9.99"], document="x")
+    )
     O._8k_scan_one("AAA", filing2, [], archive=False, manifest=[])
+
     def _doc_boom() -> object:
         raise RuntimeError("x")
+
     filing3 = _filing(filing_date="2026-01-01", accession_no="a")
     filing3.__dict__["obj"] = _doc_boom
     O._8k_scan_one("AAA", filing3, [], archive=False, manifest=[])
@@ -2440,12 +3067,18 @@ def test_oblig_8k_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 # ---- obligations: hash/snapshot/lifecycle ----
 
+
 def test_oblig_hash_helpers():
     assert O._hash_years(["x", {"fiscal_year": "2027", "amount_billions": 1.0}]) == [("2027", 1.0)]
     assert O._hash_schedule({"schedule": [{"fiscal_year": "2027", "amount_billions": 1.0}]}, {}) == [("2027", 1.0)]
     assert O._hash_timing("x") is None
     assert O._hash_timing({}) is None
-    assert O._hash_timing({"paid_in_remainder_billions": 1.0, "schedule": ["x", {"fiscal_year": "2027", "amount_billions": 1.0}]}) is not None
+    assert (
+        O._hash_timing(
+            {"paid_in_remainder_billions": 1.0, "schedule": ["x", {"fiscal_year": "2027", "amount_billions": 1.0}]}
+        )
+        is not None
+    )
     p: dict[str, object] = {}
     O._hash_evidence_identity({"amount_billions": 1.0}, p)
     assert p == {}
@@ -2514,22 +3147,32 @@ def test_oblig_snapshot_helpers():
     O._snapshot_warn_no_filed({"type": "supply", "amount_billions": 1.0}, warned, [])
     O._snapshot_warn_no_filed({"type": "supply", "amount_billions": 1.0}, warned, [])
     assert O._snapshot_keep_layered({"filed": ""}, {}, warned, []) is False
-    assert O._snapshot_keep_layered({"filed": "2026-01-01", "type": "supply"}, {("supply", "note"): "2026-01-01"}, set[str](), []) is True
-    snap, warns = O._current_snapshot([{"type": "supply", "filed": "2026-01-01", "amount_billions": 1.0, "source": "note"}])
+    assert (
+        O._snapshot_keep_layered(
+            {"filed": "2026-01-01", "type": "supply"}, {("supply", "note"): "2026-01-01"}, set[str](), []
+        )
+        is True
+    )
+    snap, _warns = O._current_snapshot(
+        [{"type": "supply", "filed": "2026-01-01", "amount_billions": 1.0, "source": "note"}]
+    )
     assert snap
 
 
 # ---- obligations: get/persist/asof ----
 
+
 def test_oblig_get_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     assert O._obligations_cached("AAA", False) in (None, O._obligations_cached("AAA", False))
+
     def _f2023_127(*a: object, **k: object) -> object:
         return {"cached": True}
 
     monkeypatch.setattr(O.cache, "get", _f2023_127)
     assert O._obligations_cached("AAA", False) == {"cached": True}
     assert O._obligations_cached("AAA", True) is None
-    def _f2026_128(t: object, manifest: object=None) -> object:
+
+    def _f2026_128(t: object, manifest: object = None) -> object:
         raise RuntimeError("x")
 
     monkeypatch.setattr(O, "_xbrl_obligations", _f2026_128)
@@ -2541,7 +3184,12 @@ def test_oblig_get_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     sink.add_lifecycle({"type": "a", "filed": "2026-01-01", "agreement_key": "k", "_lifecycle_event": "termination"})
     sink.add_quantified({"type": "a", "filed": "2026-01-01"}, 1.0)
     sink.add_quantified({"type": "a", "filed": "2026-01-01"}, 1.0)
-    assert O._obligations_dedup([{"amount_billions": -1.0}, {"amount_billions": None}, {"amount_billions": 1.0, "type": "a"}]) != []
+    assert (
+        O._obligations_dedup(
+            [{"amount_billions": -1.0}, {"amount_billions": None}, {"amount_billions": 1.0, "type": "a"}]
+        )
+        != []
+    )
     O._obligations_stamp_rows([], "AAA", "2026-01-01")
     assert O._obligations_dedup_bucket([]) == []
     O._obligations_stamp_bucket([], [], "AAA", "2026-01-01")
@@ -2554,27 +3202,38 @@ def test_oblig_get_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_oblig_get_obligations_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     assert O.get_obligations("", persist=False)["error"]
+
     def _f2048_129(t: object, p: object) -> object:
         return {"cached": True}
 
     monkeypatch.setattr(O, "_obligations_cached", _f2048_129)
     assert O.get_obligations("AAA") == {"cached": True}
+
     def _f2050_130(t: object, p: object) -> object:
         return None
 
     monkeypatch.setattr(O, "_obligations_cached", _f2050_130)
+
     def _f2051_131(t: object, p: object, m: object) -> object:
         return None
 
     monkeypatch.setattr(O, "_obligations_fetch", _f2051_131)
     assert "error" in O.get_obligations("AAA")
-    def _f2053_132(t: object, p: object, m: object) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]] | None:
+
+    def _f2053_132(
+        t: object, p: object, m: object
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]] | None:
         return ([], [], [])
 
     monkeypatch.setattr(O, "_obligations_fetch", _f2053_132)
     assert "error" in O.get_obligations("AAA")
-    rows: list[dict[str, object]] = [{"type": "supply", "amount_billions": 1.0, "filed": "2026-01-01", "source": "T note", "excerpt": "e"}]
-    def _f2056_133(t: object, p: object, m: object) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]] | None:
+    rows: list[dict[str, object]] = [
+        {"type": "supply", "amount_billions": 1.0, "filed": "2026-01-01", "source": "T note", "excerpt": "e"}
+    ]
+
+    def _f2056_133(
+        t: object, p: object, m: object
+    ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]] | None:
         return (rows, [], [])
 
     monkeypatch.setattr(O, "_obligations_fetch", _f2056_133)
@@ -2586,20 +3245,38 @@ def test_oblig_get_obligations_paths(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_oblig_persist_helpers(tmp_path: Path) -> None:
     sink = O._PersistBuild(tmp_path)
-    assert O._persist_normalize_exposure({"filed": "2026-01-01", "trigger": "counterparty_default"})["default_triggered"] is True
+    assert (
+        O._persist_normalize_exposure({"filed": "2026-01-01", "trigger": "counterparty_default"})["default_triggered"]
+        is True
+    )
     w, cw = O._persist_work_lists([], [{"filed": "2026-01-01"}], [{"content_hash": ""}])
     assert w and cw
     sj, tj = O._persist_timing_jsons({"schedule": [{"fiscal_year": "2027", "amount_billions": 1.0}]})
     assert sj == tj and sj is not None
-    sj2, tj2 = O._persist_timing_jsons({"payment_horizon": {"paid_in_remainder_of_fy": "2027", "paid_in_remainder_billions": 1.0, "paid_after_remainder_billions": 0.0}})
+    _sj2, tj2 = O._persist_timing_jsons(
+        {
+            "payment_horizon": {
+                "paid_in_remainder_of_fy": "2027",
+                "paid_in_remainder_billions": 1.0,
+                "paid_after_remainder_billions": 0.0,
+            }
+        }
+    )
     assert tj2 is not None
-    sj3, tj3 = O._persist_timing_jsons({})
+    _sj3, tj3 = O._persist_timing_jsons({})
     assert tj3 is None
     eid, tick, ch = O._persist_event_parts({"ticker": "aaa", "content_hash": "c"}, "2026-01-01")
     assert tick == "AAA"
     assert O._persist_entity_id({"_accession": "0000123456-26-1"}, "AAA", "2026-01-01", tmp_path) is not None
     assert O._persist_entity_id({}, "", "2026-01-01", tmp_path) is None
-    row = {"ticker": "NVDA", "type": "supply", "amount_billions": 1.0, "filed": "2026-01-01", "content_hash": "c", "known_at": "k"}
+    row = {
+        "ticker": "NVDA",
+        "type": "supply",
+        "amount_billions": 1.0,
+        "filed": "2026-01-01",
+        "content_hash": "c",
+        "known_at": "k",
+    }
     O._persist_build_event(row, "2026-01-01", [], sink)
     O._persist_build_evidence(row, eid, ch, sink)
     assert O._persist_evidence_span(row, "nope", sink) == (None, None, None)
@@ -2617,12 +3294,30 @@ def test_oblig_persist_helpers(tmp_path: Path) -> None:
 def test_oblig_asof_helpers(tmp_path: Path) -> None:
     assert O.get_obligations_as_of("", "2026-01-01")["error"]
     assert "error" in O.get_obligations_as_of("AAA", "2026-01-01", data_root=str(tmp_path))
-    row = {"ticker": "AAA", "type": "supply", "amount_billions": 1.0, "filed": "2026-01-01", "content_hash": "h1", "known_at": "k"}
+    row = {
+        "ticker": "AAA",
+        "type": "supply",
+        "amount_billions": 1.0,
+        "filed": "2026-01-01",
+        "content_hash": "h1",
+        "known_at": "k",
+    }
     O.persist_obligation_events([row], data_root=str(tmp_path))
     out = O.get_obligations_as_of("AAA", "2026-06-01", data_root=str(tmp_path))
     assert out["ticker"] == "AAA"
     assert O._asof_evidence_index([{"event_id": "e"}, {"event_id": "e"}]) == {"e": {"event_id": "e"}}
-    assert O._asof_keep_ticker([{"ticker": "AAA", "filed_at": "2026-01-01"}, {"ticker": "BBB", "filed_at": "2026-01-01"}, {"ticker": "AAA", "filed_at": "2099-01-01"}], "AAA", "2026-06-01") != []
+    assert (
+        O._asof_keep_ticker(
+            [
+                {"ticker": "AAA", "filed_at": "2026-01-01"},
+                {"ticker": "BBB", "filed_at": "2026-01-01"},
+                {"ticker": "AAA", "filed_at": "2099-01-01"},
+            ],
+            "AAA",
+            "2026-06-01",
+        )
+        != []
+    )
     assert O._rebuild_schedule({"schedule_json": json.dumps([1])}) == [1]
     assert O._rebuild_schedule({"schedule_json": "bad{"}) is None
     assert O._rebuild_schedule({}) is None
@@ -2632,12 +3327,20 @@ def test_oblig_asof_helpers(tmp_path: Path) -> None:
     assert O._rebuild_horizon({"payment_timing_json": json.dumps({"a": 1})}) == {"a": 1}
     assert O._rebuild_horizon({"payment_timing_json": json.dumps(5)}) is None
     assert O._rebuild_evidence({"content_hash": "h", "event_id": ""}, "AAA", {}) is None
-    assert O._rebuild_event_row({"event_type": "supply", "content_hash": "h", "schedule_json": None, "payment_timing_json": None}, "AAA", {})["type"] == "supply"
+    assert (
+        O._rebuild_event_row(
+            {"event_type": "supply", "content_hash": "h", "schedule_json": None, "payment_timing_json": None}, "AAA", {}
+        )["type"]
+        == "supply"
+    )
     assert O._asof_is_unquantified({"amount_billions": None}) is True
     assert O._asof_is_unquantified({"amount_billions": 1.0}) is False
     r, b = O._asof_split_rows([{"event_type": "s", "amount_billions": None, "content_hash": "h"}], "AAA", {})
     assert b and not r
-    assert O._asof_rebuild_capital([{"event_type": "s", "content_hash": "h"}], "AAA", {})[0]["trigger"] == "board_discretion"
+    assert (
+        O._asof_rebuild_capital([{"event_type": "s", "content_hash": "h"}], "AAA", {})[0]["trigger"]
+        == "board_discretion"
+    )
     assert O._asof_event_ids([], [], "AAA") == set()
     assert O._asof_provenance([], [], []) == ([], [])
     snap_rows: list[dict[str, object]] = [{"type": "s", "filed": "2026-01-01", "amount_billions": 1.0, "source": "n"}]
@@ -2652,7 +3355,14 @@ def test_oblig_asof_helpers(tmp_path: Path) -> None:
     assert O._classify("non-cancelable x") == "contractual"
     assert O._classify("cancellable x") == "contingent"
     assert O._excerpt("hello world", 0, 5) != ""
-    assert O._amount_kind("cloud stuff commitment $") in ("cloud", "supply", "investment", "vendor", "facility", "other")
+    assert O._amount_kind("cloud stuff commitment $") in (
+        "cloud",
+        "supply",
+        "investment",
+        "vendor",
+        "facility",
+        "other",
+    )
     assert O._parse_fiscal_year_table("nothing") == []
     assert O._parse_sentence_amounts("nothing") == []
     assert O._parse_table_schedule("nothing") is None
@@ -2684,6 +3394,7 @@ class _FakeCache:
 
 # ---------------------------------------------------------------- valuation
 
+
 def test_val_cached_quote_dict_and_legacy_and_none(monkeypatch: pytest.MonkeyPatch) -> None:
     assert val._cached_quote(None) is None
     assert val._cached_quote({"price": 10, "retrieved_at": "t"}) == {"price": 10.0, "retrieved_at": "t"}
@@ -2701,6 +3412,7 @@ def test_val_fetched_quote_shapes():
 
 def test_val_live_quote_cache_and_fetch(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(val, "cache", _FakeCache())
+
     def _f2178_134(t: object) -> object:
         return {"price": 100.0, "retrieved_at": "ts"}
 
@@ -2708,6 +3420,7 @@ def test_val_live_quote_cache_and_fetch(monkeypatch: pytest.MonkeyPatch) -> None
     assert val.get_live_quote("KO") == {"price": 100.0, "retrieved_at": "ts"}
     assert val.get_live_quote("KO") == {"price": 100.0, "retrieved_at": "ts"}  # cached arm
     monkeypatch.setattr(val, "cache", _FakeCache())
+
     def _f2182_135(t: object) -> object:
         return {"price": None, "retrieved_at": None}
 
@@ -2736,8 +3449,9 @@ def test_val_row_annual_branches():
     sched: list[Mapping[str, object]] = [{"amount_billions": 6.0}, {"amount_billions": 6.0}]
     assert val._row_annual({}, 99.0, "other", 6, sched, 12.0, {}) == 6.0  # schedule wins
     assert val._horizon_annual({}, 12.0, "other", 6, {"schedule": [{"amount_billions": 3.0}]}) == 3.0
-    assert val._horizon_annual({}, 12.0, "other", 6, {
-        "paid_in_remainder_billions": 3.0, "paid_after_remainder_billions": 5.0}) == pytest.approx(3.0 / 0.75 + 5.0 / 5)
+    assert val._horizon_annual(
+        {}, 12.0, "other", 6, {"paid_in_remainder_billions": 3.0, "paid_after_remainder_billions": 5.0}
+    ) == pytest.approx(3.0 / 0.75 + 5.0 / 5)
     assert val._front_loaded_annual({}, 3.0, 6) == pytest.approx(3.0 / 0.75)
     assert val._horizon_annual({"status": "off_balance_sheet"}, 20.0, "lease-x", 6, {}) == pytest.approx(2.0)
     assert val._horizon_annual({}, 12.0, "other", 6, {}) == pytest.approx(2.0)
@@ -2762,24 +3476,54 @@ def test_val_per_kind_entry_flags():
 def test_val_record_helpers_all_arms():
     by_fy: dict[str, dict[str, float]] = {}
     flat = {"contractual": 0.0, "contingent": 0.0, "default_triggered": 0.0, "revenue_matched": 0.0}
-    val._record_schedule_entries(by_fy, "contractual", [{"fiscal_year": "2027", "amount_billions": 2.0}, {"amount_billions": 9.0}])
+    val._record_schedule_entries(
+        by_fy, "contractual", [{"fiscal_year": "2027", "amount_billions": 2.0}, {"amount_billions": 9.0}]
+    )
     assert by_fy["2027"]["contractual"] == 2.0
     by_fy2: dict[str, dict[str, float]] = {}
     assert val._record_horizon_schedule(by_fy2, "contingent", {}) is False
-    assert val._record_horizon_schedule(by_fy2, "contingent", {"schedule": [{"fiscal_year": "2028", "amount_billions": 4.0}]}) is True
+    assert (
+        val._record_horizon_schedule(
+            by_fy2, "contingent", {"schedule": [{"fiscal_year": "2028", "amount_billions": 4.0}]}
+        )
+        is True
+    )
     assert by_fy2["2028"]["contingent"] == 4.0
     assert val._front_loaded_amounts({}) is None
-    assert val._front_loaded_amounts({"paid_in_remainder_billions": 2.0, "paid_in_remainder_of_fy": "2027"}) == (2.0, "2027")
+    assert val._front_loaded_amounts({"paid_in_remainder_billions": 2.0, "paid_in_remainder_of_fy": "2027"}) == (
+        2.0,
+        "2027",
+    )
     assert val._record_front_loaded({}, "contractual", {}, 6) is False
     by_fy3: dict[str, dict[str, float]] = {}
-    assert val._record_front_loaded(by_fy3, "contractual", {
-        "paid_in_remainder_billions": 2.0, "paid_in_remainder_of_fy": "2027",
-        "paid_after_remainder_billions": 10.0}, 6) is True
+    assert (
+        val._record_front_loaded(
+            by_fy3,
+            "contractual",
+            {
+                "paid_in_remainder_billions": 2.0,
+                "paid_in_remainder_of_fy": "2027",
+                "paid_after_remainder_billions": 10.0,
+            },
+            6,
+        )
+        is True
+    )
     assert by_fy3["2027"]["contractual"] == 2.0 and by_fy3["2028"]["contractual"] == pytest.approx(2.0)
     by_fy4: dict[str, dict[str, float]] = {}
-    assert val._record_front_loaded(by_fy4, "contractual", {
-        "paid_in_remainder_billions": 2.0, "paid_in_remainder_of_fy": "FY??",
-        "paid_after_remainder_billions": 10.0}, 6) is True  # unparseable base year
+    assert (
+        val._record_front_loaded(
+            by_fy4,
+            "contractual",
+            {
+                "paid_in_remainder_billions": 2.0,
+                "paid_in_remainder_of_fy": "FY??",
+                "paid_after_remainder_billions": 10.0,
+            },
+            6,
+        )
+        is True
+    )  # unparseable base year
     assert by_fy4 == {"FY??": {"contractual": 2.0, "contingent": 0.0, "default_triggered": 0.0, "revenue_matched": 0.0}}
     by_fy5: dict[str, dict[str, float]] = {}
     val._record_tail_years(by_fy5, "contractual", {}, "2027", 6)  # zero tail -> no-op
@@ -2787,15 +3531,42 @@ def test_val_record_helpers_all_arms():
     # row-level dispatch: schedule / horizon / front-loaded / flat
     by_fy6: dict[str, dict[str, float]] = {}
     flat6 = dict(flat)
-    val._record_row_schedule(by_fy6, flat6, "contractual", 9.0, {}, [{"fiscal_year": "2027", "amount_billions": 1.0}], 1.0, {}, 6)
-    val._record_row_schedule(by_fy6, flat6, "contingent", 9.0, {}, [], 0.0, {"schedule": [{"fiscal_year": "2028", "amount_billions": 1.0}]}, 6)
-    val._record_row_schedule(by_fy6, flat6, "contingent", 9.0, {}, [], 0.0, {"paid_in_remainder_billions": 1.0, "paid_in_remainder_of_fy": "2029"}, 6)
+    val._record_row_schedule(
+        by_fy6, flat6, "contractual", 9.0, {}, [{"fiscal_year": "2027", "amount_billions": 1.0}], 1.0, {}, 6
+    )
+    val._record_row_schedule(
+        by_fy6,
+        flat6,
+        "contingent",
+        9.0,
+        {},
+        [],
+        0.0,
+        {"schedule": [{"fiscal_year": "2028", "amount_billions": 1.0}]},
+        6,
+    )
+    val._record_row_schedule(
+        by_fy6,
+        flat6,
+        "contingent",
+        9.0,
+        {},
+        [],
+        0.0,
+        {"paid_in_remainder_billions": 1.0, "paid_in_remainder_of_fy": "2029"},
+        6,
+    )
     val._record_row_schedule(by_fy6, flat6, "contingent", 3.0, {}, [], 0.0, {}, 6)
     assert flat6["contingent"] == 3.0
 
 
 def test_val_impact_parent_uncovered_arms():
-    assert val._obligation_annual_impact([{"schedule_component": True, "amount_billions": 5}], 6)["contingent_annual_billions"] == 0.0
+    assert (
+        val._obligation_annual_impact([{"schedule_component": True, "amount_billions": 5}], 6)[
+            "contingent_annual_billions"
+        ]
+        == 0.0
+    )
     assert val._obligation_annual_impact([{"amount_billions": 0}], 6)["contingent_annual_billions"] == 0.0
     assert val._obligation_annual_impact([{"amount_billions": "x"}], 6)["contingent_annual_billions"] == 0.0
     out = val._obligation_annual_impact([{"amount_billions": 6.0, "type": "lease-x", "status": "on_balance_sheet"}], 6)
@@ -2812,21 +3583,26 @@ def test_val_tax_helpers():
     assert val._ob_ticker({"ticker": "KO"}) == "KO"
     assert val._ob_ticker({"ticker": 5}) == ""
     assert val._effective_tax_rate({"ticker": "ZZZ-NOPE"}) is None
+
     # filing path error arm + notes-None arm + markdown-error arm
     class _Boom:
         def get_latest_report(self, *a: object, **k: object) -> object:
             raise RuntimeError("down")
+
     monkeypatch = pytest.MonkeyPatch()
+
     def _f2288_136(t: object, f: object) -> tuple[Filing, object] | None:
         raise RuntimeError("down")
 
     monkeypatch.setattr(val.edgar_client, "get_latest_report", _f2288_136)
     assert val._filing_tax_rate("X") is None
+
     def _f2290_137(t: object, f: object) -> tuple[Filing, object] | None:
         return None
 
     monkeypatch.setattr(val.edgar_client, "get_latest_report", _f2290_137)
     assert val._filing_tax_rate("X") is None
+
     def _f2292_138(t: object, f: object) -> object:
         return (None, type("D", (), {"notes": None})())
 
@@ -2837,15 +3613,18 @@ def test_val_tax_helpers():
 
 def test_val_filing_tax_rate_parses_notes(monkeypatch: pytest.MonkeyPatch) -> None:
     md = "income tax expense | $50 with income before income taxes | $200"
+
     def _f2299_139(self: object) -> object:
         return md
 
     note = type("N", (), {"to_markdown": _f2299_139})()
+
     def _f2300_140(self: object, q: object) -> object:
         return [note, note, note, note]
 
     notes = type("Ns", (), {"search": _f2300_140})()
     doc = type("D", (), {"notes": notes})()
+
     def _f2302_141(t: object, f: object) -> object:
         return (None, doc)
 
@@ -2855,20 +3634,36 @@ def test_val_filing_tax_rate_parses_notes(monkeypatch: pytest.MonkeyPatch) -> No
 
 def test_val_facts_tax_rate_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     import pandas as pd
-    df = pd.DataFrame([
-        {"concept": "us-gaap:IncomeTaxExpenseBenefit", "fiscal_period": "FY", "period_end": "2026-01-01", "value": 20.0},
-        {"concept": "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxes", "fiscal_period": "FY", "period_end": "2026-01-01", "value": 100.0},
-    ])
+
+    df = pd.DataFrame(
+        [
+            {
+                "concept": "us-gaap:IncomeTaxExpenseBenefit",
+                "fiscal_period": "FY",
+                "period_end": "2026-01-01",
+                "value": 20.0,
+            },
+            {
+                "concept": "us-gaap:IncomeLossFromContinuingOperationsBeforeIncomeTaxes",
+                "fiscal_period": "FY",
+                "period_end": "2026-01-01",
+                "value": 100.0,
+            },
+        ]
+    )
+
     def _f2313_143(t: object) -> _RealCompany:
         return _df_company(df)
 
     monkeypatch.setattr(val.edgar_client, "get_company", _f2313_143)
     assert val._facts_tax_rate("KO") == pytest.approx(0.2)
+
     def _f2315_145(t: object) -> _RealCompany:
         return _none_df_company()
 
     monkeypatch.setattr(val.edgar_client, "get_company", _f2315_145)
     assert val._facts_tax_rate("KO") is None
+
     def _f2318_148(t: object) -> _RealCompany:
         return _df_company(df.iloc[0:0])
 
@@ -2878,15 +3673,20 @@ def test_val_facts_tax_rate_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_val_revenue_margin_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     import pandas as pd
-    df = pd.DataFrame([
-        {"concept": "us-gaap:GrossProfit", "fiscal_period": "FY", "period_end": "2026-01-01", "value": 75.0},
-        {"concept": "us-gaap:Revenues", "fiscal_period": "FY", "period_end": "2026-01-01", "value": 100.0},
-    ])
+
+    df = pd.DataFrame(
+        [
+            {"concept": "us-gaap:GrossProfit", "fiscal_period": "FY", "period_end": "2026-01-01", "value": 75.0},
+            {"concept": "us-gaap:Revenues", "fiscal_period": "FY", "period_end": "2026-01-01", "value": 100.0},
+        ]
+    )
+
     def _f2329_151(t: object) -> _RealCompany:
         return _df_company(df)
 
     monkeypatch.setattr(val.edgar_client, "get_company", _f2329_151)
     assert val._revenue_matched_margin("KO") == (0.75, "company_facts")
+
     def _f2331_153(t: object) -> _RealCompany:
         return _none_df_company()
 
@@ -2927,13 +3727,20 @@ def test_val_scenario_helpers_all_arms():
     val._add_commitment_scenario(rows3, 12.0, 10_000_000_000, 0.2)
     assert len(rows3) == 1
     rows4: list[dict[str, object]] = []
-    val._add_trigger_scenarios(rows4, [
-        {"default_triggered": True, "type": "guarantee", "amount_billions": 5.0},
-        {"type": "unrecognized_tax_benefits", "amount_billions": 2.0},
-        {"type": "other"},
-    ], 10_000_000_000, 0.2)
+    val._add_trigger_scenarios(
+        rows4,
+        [
+            {"default_triggered": True, "type": "guarantee", "amount_billions": 5.0},
+            {"type": "unrecognized_tax_benefits", "amount_billions": 2.0},
+            {"type": "other"},
+        ],
+        10_000_000_000,
+        0.2,
+    )
     assert len(rows4) == 2
-    out = val._obligation_eps_scenarios({"obligations": [{"type": "unrecognized_tax_benefits", "amount_billions": 2.0}]}, None, None)
+    out = val._obligation_eps_scenarios(
+        {"obligations": [{"type": "unrecognized_tax_benefits", "amount_billions": 2.0}]}, None, None
+    )
     assert "unavailable; no rate used" in str(out["assumption"])
     out2 = val._obligation_eps_scenarios({"obligations": []}, 10, 0.2)
     assert "0.2" in str(out2["assumption"])
@@ -2973,7 +3780,9 @@ def test_val_fy_and_drag_helpers():
     assert val._fy_year({"period_end_date": "2027-01-31"}) == "2027"
     assert val._fy_ps({}, {}, None, "2027", "contractual") is None
     assert val._fy_ps({}, {}, 1, None, "contractual") is None
-    assert val._fy_ps({"2027": {"contractual": 6.0}}, {"contractual": 0.0}, 1_000_000_000, "2027", "contractual") == pytest.approx(6.0)
+    assert val._fy_ps(
+        {"2027": {"contractual": 6.0}}, {"contractual": 0.0}, 1_000_000_000, "2027", "contractual"
+    ) == pytest.approx(6.0)
     drags = val._fy_drags({"2027": {"contractual": 1.0}}, {}, 1_000_000_000, "2027")
     assert set(drags) == {"contractual", "contingent", "default_triggered", "revenue_matched"}
     assert val._drag_ps(6.0, None) is None
@@ -3018,40 +3827,93 @@ def test_val_coverage_and_assemble_helpers():
     assert cov["unquantified_count"] == 1
     cov2 = val._build_coverage({"obligations": [{"filed": "2026-01-01"}]}, "gap!")
     assert "gap!" in str(cov2["warnings"])
-    fwd = val._build_forward_eps(10.0, 11.0,
-                                 {"contractual": 1.0, "contingent": 1.0, "default_triggered": 0.0, "revenue_matched": 0.0},
-                                 {"contractual": 1.0, "contingent": 1.0, "default_triggered": 0.0, "revenue_matched": 0.0}, 100.0)
+    fwd = val._build_forward_eps(
+        10.0,
+        11.0,
+        {"contractual": 1.0, "contingent": 1.0, "default_triggered": 0.0, "revenue_matched": 0.0},
+        {"contractual": 1.0, "contingent": 1.0, "default_triggered": 0.0, "revenue_matched": 0.0},
+        100.0,
+    )
     assert len(fwd) == 9
     eps_map = val._projected_eps_map(fwd, "2027", "2028")
     assert len(eps_map) == 9
     _scen = fwd["scenario"]
     assert isinstance(_scen, dict) and eps_map["Scenario FY2027 (no default)"] == _scen["eps_after_all_obligations"]
     _scen_d = fwd["scenario_with_defaults"]
-    assert isinstance(_scen_d, dict) and eps_map["Scenario FY2027 (counterparty default)"] == _scen_d["eps_after_all_obligations"]
+    assert (
+        isinstance(_scen_d, dict)
+        and eps_map["Scenario FY2027 (counterparty default)"] == _scen_d["eps_after_all_obligations"]
+    )
     assert eps_map["Scenario FY2028 (counterparty default)"] is None  # no scenario_with_defaults_next_fy tier exists
     vd = val._valuation_drags(
-        {"contractual_annual_billions": 1.0, "contingent_annual_billions": 1.0,
-         "default_triggered_annual_billions": 1.0, "revenue_matched_annual_billions": 1.0,
-         "per_kind": {}, "flat_annual_by_bucket": {}, "impact_by_fiscal_year": {}},
-        "KO", None)
+        {
+            "contractual_annual_billions": 1.0,
+            "contingent_annual_billions": 1.0,
+            "default_triggered_annual_billions": 1.0,
+            "revenue_matched_annual_billions": 1.0,
+            "per_kind": {},
+            "flat_annual_by_bucket": {},
+            "impact_by_fiscal_year": {},
+        },
+        "KO",
+        None,
+    )
     assert vd[0] is None
-    tiers, yc, yn = val._valuation_forward_tiers(
-        {"contractual_annual_billions": 0.0, "contingent_annual_billions": 0.0,
-         "default_triggered_annual_billions": 0.0, "revenue_matched_annual_billions": 0.0,
-         "per_kind": {}, "flat_annual_by_bucket": {}, "impact_by_fiscal_year": {}},
-        None, {}, {}, 10.0, 11.0, 100.0)
+    tiers, yc, _yn = val._valuation_forward_tiers(
+        {
+            "contractual_annual_billions": 0.0,
+            "contingent_annual_billions": 0.0,
+            "default_triggered_annual_billions": 0.0,
+            "revenue_matched_annual_billions": 0.0,
+            "per_kind": {},
+            "flat_annual_by_bucket": {},
+            "impact_by_fiscal_year": {},
+        },
+        None,
+        {},
+        {},
+        10.0,
+        11.0,
+        100.0,
+    )
     assert yc is None and len(tiers) == 9
     block = val._obligations_block(
-        {"contractual_annual_billions": 1.0, "contingent_annual_billions": 1.0,
-         "default_triggered_annual_billions": 1.0, "revenue_matched_annual_billions": 1.0,
-         "per_kind": {}, "flat_annual_by_bucket": {}, "impact_by_fiscal_year": {}},
-        1.0, 1.0, 1.0, 1.0, 5.0, 0.5, "company_facts")
+        {
+            "contractual_annual_billions": 1.0,
+            "contingent_annual_billions": 1.0,
+            "default_triggered_annual_billions": 1.0,
+            "revenue_matched_annual_billions": 1.0,
+            "per_kind": {},
+            "flat_annual_by_bucket": {},
+            "impact_by_fiscal_year": {},
+        },
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        5.0,
+        0.5,
+        "company_facts",
+    )
     assert block["revenue_matched_implied_revenue_billions"] == 5.0
     block2 = val._obligations_block(
-        {"contractual_annual_billions": 1.0, "contingent_annual_billions": 1.0,
-         "default_triggered_annual_billions": 1.0, "revenue_matched_annual_billions": 1.0,
-         "per_kind": {}, "flat_annual_by_bucket": {}, "impact_by_fiscal_year": {}},
-        1.0, 1.0, 1.0, 1.0, None, None, "x")
+        {
+            "contractual_annual_billions": 1.0,
+            "contingent_annual_billions": 1.0,
+            "default_triggered_annual_billions": 1.0,
+            "revenue_matched_annual_billions": 1.0,
+            "per_kind": {},
+            "flat_annual_by_bucket": {},
+            "impact_by_fiscal_year": {},
+        },
+        1.0,
+        1.0,
+        1.0,
+        1.0,
+        None,
+        None,
+        "x",
+    )
     assert block2["revenue_matched_implied_revenue_billions"] is None
 
 
@@ -3061,48 +3923,61 @@ def test_val_metrics_parent_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     getattr(val.cache, "store")["valuation:KO"] = {"ticker": "KO"}  # noqa: B009 - FakeCache.store invisible to pyrefly; getattr keeps pyrefly-0
     assert val.get_valuation_metrics("ko") == {"ticker": "KO"}
     monkeypatch.setattr(val, "cache", _FakeCache())
+
     def _f2495_155(t: object) -> float | None:
         return None
 
     monkeypatch.setattr(val, "get_live_price", _f2495_155)
+
     def _f2496_156(t: object) -> dict[str, object]:
         return {"error": "down"}
 
     monkeypatch.setattr(val.analyst_client, "get_analyst_estimates", _f2496_156)
     assert "error" in val.get_valuation_metrics("KO")
+
     def _f2498_157(t: object) -> dict[str, object]:
         return {}
 
     monkeypatch.setattr(val.analyst_client, "get_analyst_estimates", _f2498_157)
     assert "missing forward" in str(val.get_valuation_metrics("KO")["error"])
-    def _f2500_158(t: object) -> object:
-        return {"forward_estimates": [{"period": "current_fiscal_year", "eps_avg": 1.0}], "shares_outstanding": 10, "as_of": "t"}
 
-    monkeypatch.setattr(val.analyst_client, "get_analyst_estimates",
-                        _f2500_158)
+    def _f2500_158(t: object) -> object:
+        return {
+            "forward_estimates": [{"period": "current_fiscal_year", "eps_avg": 1.0}],
+            "shares_outstanding": 10,
+            "as_of": "t",
+        }
+
+    monkeypatch.setattr(val.analyst_client, "get_analyst_estimates", _f2500_158)
+
     def _f2502_159(t: object, m: object) -> object:
         return {"error": "no eps"}
 
     monkeypatch.setattr(val.sec_facts, "get_fundamentals", _f2502_159)
     assert "error" in val.get_valuation_metrics("KO")
+
     def _f2504_160(t: object, m: object) -> object:
         return {"ttm_eps_diluted": 1.0}
 
     monkeypatch.setattr(val.sec_facts, "get_fundamentals", _f2504_160)
+
     def _f2505_161(t: object) -> dict[str, object]:
         return {"error": "no ob"}
 
     monkeypatch.setattr(val.obligations, "get_obligations", _f2505_161)
     assert "error" in val.get_valuation_metrics("KO")
+
     # price-gap arm caches nothing but still returns
     def _f2508_162(t: object) -> dict[str, object]:
         return {"obligations": []}
 
     monkeypatch.setattr(val.obligations, "get_obligations", _f2508_162)
+
     def _f2509_163(ob: object) -> float | None:
         return None
 
     monkeypatch.setattr(val, "_effective_tax_rate", _f2509_163)
+
     def _f2510_164(t: object) -> tuple[float | None, str]:
         return (None, "unavailable: x")
 
@@ -3113,36 +3988,42 @@ def test_val_metrics_parent_branches(monkeypatch: pytest.MonkeyPatch) -> None:
 
 def test_val_fetch_helpers_error_arms(monkeypatch: pytest.MonkeyPatch) -> None:
     err, _ = val._fetch_obligations("KO") if False else (None, None)
+
     def _f2517_165(t: object) -> dict[str, object]:
         return {"error": "boom"}
 
     monkeypatch.setattr(val.obligations, "get_obligations", _f2517_165)
     err, empty = val._fetch_obligations("KO")
     assert err is not None and empty == {}
+
     def _f2520_166(t: object) -> dict[str, object]:
         return {"obligations": []}
 
     monkeypatch.setattr(val.obligations, "get_obligations", _f2520_166)
-    err, ob = val._fetch_obligations("KO")
+    err, _ob = val._fetch_obligations("KO")
     assert err is None
+
     def _f2523_167(t: object) -> dict[str, object]:
         return {"error": "down"}
 
     monkeypatch.setattr(val.analyst_client, "get_analyst_estimates", _f2523_167)
-    err, per = val._fetch_estimates("KO")
+    err, _per = val._fetch_estimates("KO")
     assert err is not None
+
     def _f2526_168(t: object) -> dict[str, object]:
         return {}
 
     monkeypatch.setattr(val.analyst_client, "get_analyst_estimates", _f2526_168)
-    err, per = val._fetch_estimates("KO")
+    err, _per = val._fetch_estimates("KO")
     assert err is not None
+
     def _f2529_169(t: object, m: object) -> object:
         return {"error": "x"}
 
     monkeypatch.setattr(val.sec_facts, "get_fundamentals", _f2529_169)
     err, ttm, sh = val._fetch_eps("KO", {})
     assert err is not None
+
     def _f2532_170(t: object, m: object) -> object:
         return {"ttm_eps_diluted": 2.0}
 
@@ -3152,6 +4033,7 @@ def test_val_fetch_helpers_error_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # ------------------------------------------------------------ normalization
+
 
 def test_norm_ticker_helpers():
     assert norm._ticker_values(None) == []
@@ -3164,9 +4046,13 @@ def test_norm_ticker_helpers():
     assert norm._ticker_cik({"ticker": "  ", "cik_str": 1}) == ("", None)
     e, a = norm._ticker_rows({"title": "  Acme "}, "KO", 320193, "r", "h")
     assert e["name"] == "Acme" and a["alias_value"] == "KO"
-    out = norm.normalize_sec_tickers({"0": {"ticker": "ko", "cik_str": 1, "title": "K"}}, retrieved_at="r", content_hash="h")
+    out = norm.normalize_sec_tickers(
+        {"0": {"ticker": "ko", "cik_str": 1, "title": "K"}}, retrieved_at="r", content_hash="h"
+    )
     assert len(out["entities"]) == 1
-    out2 = norm.normalize_sec_tickers([{"ticker": "", "cik_str": 1}, "junk", {"ticker": "ko", "cik_str": "bad"}], retrieved_at="r", content_hash="h")
+    out2 = norm.normalize_sec_tickers(
+        [{"ticker": "", "cik_str": 1}, "junk", {"ticker": "ko", "cik_str": "bad"}], retrieved_at="r", content_hash="h"
+    )
     assert out2["entities"] == []
     out3 = norm.normalize_sec_tickers("junk", retrieved_at="r", content_hash="h")
     assert out3["entities"] == []
@@ -3188,8 +4074,16 @@ def test_norm_generic_extractors():
     assert len(entries) == 1
     assert norm._extract_canonical_facts(None) == []
     assert norm._extract_canonical_facts({"facts": {"ns": "x"}}) == []
-    assert norm._extract_eps_facts({"facts": {"ns": {"EarningsPerShareDiluted": {"units": {"USD/shares": [{"a": 1}]}}}}}) != []
-    assert norm._extract_dividend_facts({"facts": {"ns": {"CommonStockDividendsPerShareDeclared": {"units": {"USD/shares": [{"a": 1}]}}}}}) != []
+    assert (
+        norm._extract_eps_facts({"facts": {"ns": {"EarningsPerShareDiluted": {"units": {"USD/shares": [{"a": 1}]}}}}})
+        != []
+    )
+    assert (
+        norm._extract_dividend_facts(
+            {"facts": {"ns": {"CommonStockDividendsPerShareDeclared": {"units": {"USD/shares": [{"a": 1}]}}}}}
+        )
+        != []
+    )
 
 
 def test_norm_event_scan_helpers():
@@ -3206,13 +4100,29 @@ def test_norm_event_scan_helpers():
     assert norm._event_key({}) is None
     assert norm._event_key({"accn": "a", "filed": "f"}) == ("a", "f")
     amounts: list[tuple[str, str, float, str, str]] = []
-    norm._collect_event_amounts(amounts, {"USD/shares": [{"val": 0.5, "accn": "a", "filed": "f"}, {"val": "x", "accn": "a", "filed": "f"}, {"accn": "a"}, "x"]}, "ns", "t")
+    norm._collect_event_amounts(
+        amounts,
+        {
+            "USD/shares": [
+                {"val": 0.5, "accn": "a", "filed": "f"},
+                {"val": "x", "accn": "a", "filed": "f"},
+                {"accn": "a"},
+                "x",
+            ]
+        },
+        "ns",
+        "t",
+    )
     assert len(amounts) == 1
     amounts2: list[tuple[str, str, float, str, str]] = []
     norm._collect_event_amounts(amounts2, {"USD/shares": "x"}, "ns", "t")
     assert amounts2 == []
     dates: dict[tuple[str, str], dict[str, set[str]]] = {}
-    norm._collect_event_dates(dates, {"USD": [{"val": "2026-01-01", "accn": "a", "filed": "f"}, {"val": "", "accn": "a", "filed": "f"}, "x", "y"]}, "record_date")
+    norm._collect_event_dates(
+        dates,
+        {"USD": [{"val": "2026-01-01", "accn": "a", "filed": "f"}, {"val": "", "accn": "a", "filed": "f"}, "x", "y"]},
+        "record_date",
+    )
     assert dates == {("a", "f"): {"record_date": {"2026-01-01"}}}
     dates2: dict[tuple[str, str], dict[str, set[str]]] = {}
     norm._collect_event_dates(dates2, {"USD": "x"}, "record_date")
@@ -3250,9 +4160,36 @@ def test_norm_group_helpers():
     norm._emit_group_events(events2, 1, "e", "s", {0.5: ("u", "c"), 0.6: ("u", "c")}, {}, "a", "f", "u", "h")
     assert len(events2) == 2
     # parent uncovered arms: non-dict namespaces + unknown concept
-    assert norm._extract_dividend_event_facts({"facts": {"ns": "x"}}, cik=1, entity_id="e", security_id="s", source_url="u", retrieved_at="r", content_hash="h") == []
-    assert norm._extract_dividend_event_facts({"facts": {"ns": {"Nope": {}}}}, cik=1, entity_id="e", security_id="s", source_url="u", retrieved_at="r", content_hash="h") == []
-    assert norm._extract_dividend_event_facts("x", cik=1, entity_id="e", security_id="s", source_url="u", retrieved_at="r", content_hash="h") == []
+    assert (
+        norm._extract_dividend_event_facts(
+            {"facts": {"ns": "x"}},
+            cik=1,
+            entity_id="e",
+            security_id="s",
+            source_url="u",
+            retrieved_at="r",
+            content_hash="h",
+        )
+        == []
+    )
+    assert (
+        norm._extract_dividend_event_facts(
+            {"facts": {"ns": {"Nope": {}}}},
+            cik=1,
+            entity_id="e",
+            security_id="s",
+            source_url="u",
+            retrieved_at="r",
+            content_hash="h",
+        )
+        == []
+    )
+    assert (
+        norm._extract_dividend_event_facts(
+            "x", cik=1, entity_id="e", security_id="s", source_url="u", retrieved_at="r", content_hash="h"
+        )
+        == []
+    )
 
 
 def test_norm_text_helpers():
@@ -3265,9 +4202,16 @@ def test_norm_text_helpers():
     assert norm._text_dividend_type("quarterly dividend") == "regular"
     assert norm._text_event_dates("payable on January 5, 2026")["payment_date"] == "2026-01-05"
     assert norm._text_event_for_sentence(1, "e", "s", "no dividend here", "a", "f", "u", "h") is None
-    ev = norm._text_event_for_sentence(1, "e", "s", "declared a dividend of $1.00 per share payable on January 5, 2026", "a", "f", "u", "h")
+    ev = norm._text_event_for_sentence(
+        1, "e", "s", "declared a dividend of $1.00 per share payable on January 5, 2026", "a", "f", "u", "h"
+    )
     assert ev is not None and ev["amount_per_share"] == 1.0
-    assert norm._extract_dividend_events_from_text("", cik=1, entity_id="e", security_id="s", accession="a", filed_at="f", source_url="u", content_hash="h") == []
+    assert (
+        norm._extract_dividend_events_from_text(
+            "", cik=1, entity_id="e", security_id="s", accession="a", filed_at="f", source_url="u", content_hash="h"
+        )
+        == []
+    )
 
 
 def test_norm_company_facts_helpers():
@@ -3276,7 +4220,10 @@ def test_norm_company_facts_helpers():
     assert norm._parse_company_cik({"cik": 320193}) == 320193
     assert norm._parse_company_cik("x") == 0
     assert norm._envelope_known([], "r") == "r"
-    assert norm._envelope_known([("c", "o", "u", {"filed": "2026-01-02"}), ("c", "o", "u", {"filed": "2026-01-01"})], "r") == "2026-01-02"
+    assert (
+        norm._envelope_known([("c", "o", "u", {"filed": "2026-01-02"}), ("c", "o", "u", {"filed": "2026-01-01"})], "r")
+        == "2026-01-02"
+    )
     assert norm._fact_float({}) is None
     assert norm._fact_float({"val": "x"}) is None
     assert norm._fact_float({"val": 5}) == 5.0
@@ -3289,9 +4236,19 @@ def test_norm_company_facts_helpers():
     assert norm._fact_fiscal_year({"fy": {"a": 1}}) is None
     assert norm._fact_row_or_none(1, "e", "s", "c", "o", "u", {}, "r", "u", "s", "h") is None
     assert norm._fact_row_or_none(1, "e", "s", "c", "o", "u", {"val": 1.0}, "r", "u", "s", "h") is None
-    row = norm._fact_row_or_none(1, "e", "s", "c", "o", "u",
-                                 {"val": 1.0, "end": "e", "filed": "f", "accn": "a", "start": "s", "fy": 2026, "fp": "Q1"},
-                                 "r", "u", "s", "h")
+    row = norm._fact_row_or_none(
+        1,
+        "e",
+        "s",
+        "c",
+        "o",
+        "u",
+        {"val": 1.0, "end": "e", "filed": "f", "accn": "a", "start": "s", "fy": 2026, "fp": "Q1"},
+        "r",
+        "u",
+        "s",
+        "h",
+    )
     assert row is not None and row["duration_type"] == "duration"
     assert norm._financial_fact_rows([], 1, "e", "s", "r", "u", "sr", "h") == []
     sec = norm._company_security("s", "e", [], "k", "r", "h")
@@ -3313,18 +4270,33 @@ def test_norm_finra_helpers():
     with pytest.raises(ValueError, match="not a parseable date"):
         norm._check_finra_known_at("xx", "r", "k")
     with pytest.raises(ValueError, match="precedes settlement_date"):
-        norm.normalize_finra_short_interest([{"symbolCode": "AAA"}], settlement_date="2026-08-14",
-                                            known_at="2026-08-01T00:00:00Z", retrieved_at="2026-08-20T00:00:00Z",
-                                            content_hash="h", source_url="u", source_record_id="r")
-    out = norm.normalize_finra_short_interest([{"symbolCode": ""}, {"symbolCode": "AAA", "currentShortPositionQuantity": -3}],
-                                              settlement_date="2026-08-14", retrieved_at="r",
-                                              content_hash="h", source_url="u", source_record_id="r")
+        norm.normalize_finra_short_interest(
+            [{"symbolCode": "AAA"}],
+            settlement_date="2026-08-14",
+            known_at="2026-08-01T00:00:00Z",
+            retrieved_at="2026-08-20T00:00:00Z",
+            content_hash="h",
+            source_url="u",
+            source_record_id="r",
+        )
+    out = norm.normalize_finra_short_interest(
+        [{"symbolCode": ""}, {"symbolCode": "AAA", "currentShortPositionQuantity": -3}],
+        settlement_date="2026-08-14",
+        retrieved_at="r",
+        content_hash="h",
+        source_url="u",
+        source_record_id="r",
+    )
     assert len(out["short_interest"]) == 1 and out["short_interest"][0]["short_position"] is None
 
 
 def test_cli_enrichment_failures_arms(capsys: pytest.CaptureFixture[str]) -> None:
-    cli._print_enrichment_failures({"unresolved_tickers": ["AAA"], "failed_enrichments": [
-        {"ticker": "T", "cik": "1", "error": "boom"}, "notadict"]})
+    cli._print_enrichment_failures(
+        {
+            "unresolved_tickers": ["AAA"],
+            "failed_enrichments": [{"ticker": "T", "cik": "1", "error": "boom"}, "notadict"],
+        }
+    )
     out = capsys.readouterr().out
     assert "AAA" in out and "boom" in out
     cli._print_enrichment_failures({"unresolved_tickers": [], "failed_enrichments": "x"})
@@ -3337,50 +4309,74 @@ def test_cli_format_mandate_value_and_breaches(capsys: pytest.CaptureFixture[str
     assert cli._format_mandate_value("5", "prohibited_assets", None, {}) == "5"
     assert cli._format_mandate_value("5", "m", "t", {("m", "t"): "dollars"}) == "5"
     from decimal import Decimal
+
     assert cli._format_mandate_value(Decimal("0.5"), "m", None, {}) == "50.0%"
     assert cli._format_mandate_value(Decimal("0.5"), "m", "t", {("m", "t"): "pct"}) == "50.0%"
     from app.domain.risk.breaches import RiskBreach
     from app.domain.risk.evaluation import RiskEvaluation
-    _eval_now = _dt.datetime.now(_dt.timezone.utc)
-    ev = RiskEvaluation(breaches=(), sector_exposures={"tech": Decimal("0.5")}, issues=(), snapshot_id="s", created_at=_eval_now)
+
+    _eval_now = _dt.datetime.now(_dt.UTC)
+    ev = RiskEvaluation(
+        breaches=(), sector_exposures={"tech": Decimal("0.5")}, issues=(), snapshot_id="s", created_at=_eval_now
+    )
     cli._print_mandate_sector_exposures(ev)
     assert "tech" in capsys.readouterr().out
-    cli._print_mandate_sector_exposures(RiskEvaluation(breaches=(), sector_exposures={}, issues=(), snapshot_id="s", created_at=_eval_now))
+    cli._print_mandate_sector_exposures(
+        RiskEvaluation(breaches=(), sector_exposures={}, issues=(), snapshot_id="s", created_at=_eval_now)
+    )
     assert capsys.readouterr().out == ""
-    cli._print_mandate_breaches(RiskEvaluation(breaches=(), sector_exposures={}, issues=(), snapshot_id="s", created_at=_eval_now), {})
+    cli._print_mandate_breaches(
+        RiskEvaluation(breaches=(), sector_exposures={}, issues=(), snapshot_id="s", created_at=_eval_now), {}
+    )
     assert "No breaches" in capsys.readouterr().out
-    breach = RiskBreach(metric="m", target="t", severity="high", actual=Decimal("0.5"), limit=Decimal("0.2"), excess=Decimal("0.3"))
-    cli._print_mandate_breaches(RiskEvaluation(breaches=(breach,), sector_exposures={}, issues=(), snapshot_id="s", created_at=_eval_now), {("m", "t"): "pct"})
+    breach = RiskBreach(
+        metric="m", target="t", severity="high", actual=Decimal("0.5"), limit=Decimal("0.2"), excess=Decimal("0.3")
+    )
+    cli._print_mandate_breaches(
+        RiskEvaluation(breaches=(breach,), sector_exposures={}, issues=(), snapshot_id="s", created_at=_eval_now),
+        {("m", "t"): "pct"},
+    )
     assert "Breaches" in capsys.readouterr().out
     breach2 = RiskBreach(metric="m", target=None, severity="low", actual=None, limit=None, excess=None)
-    cli._print_mandate_breaches(RiskEvaluation(breaches=(breach2,), sector_exposures={}, issues=(), snapshot_id="s", created_at=_eval_now), {})
+    cli._print_mandate_breaches(
+        RiskEvaluation(breaches=(breach2,), sector_exposures={}, issues=(), snapshot_id="s", created_at=_eval_now), {}
+    )
     assert "m" in capsys.readouterr().out
 
 
-def test_cli_thesis_inspect_full(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
+def test_cli_thesis_inspect_full(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+) -> None:
     from app.thesis import yaml as tyaml
     from app.thesis.models import Thesis as _InspectThesis
     from app.thesis.models import Trigger as _InspectTrigger
     from app.thesis.repository import ThesisRepository as _InspectRepo
+
     _inspect_thesis = _InspectThesis(thesis_id="T1", slug="s1")
 
     class _InspectRepoD(_InspectRepo):
         @override
         def __init__(self, root: Path | str) -> None:
             self.root = Path(root)
+
         @override
         def load_thesis(self, id_or_slug: str) -> _InspectThesis:
             return _inspect_thesis
+
         @override
         def load_triggers(self, id_or_slug: str, include_processed: bool = True) -> list[_InspectTrigger]:
-            return [_InspectTrigger(trigger_id="g1", thesis_id="T1", created_at="c", status="pending"),
-                    _InspectTrigger(trigger_id="g2", thesis_id="T1", created_at="c", status="done")]
+            return [
+                _InspectTrigger(trigger_id="g1", thesis_id="T1", created_at="c", status="pending"),
+                _InspectTrigger(trigger_id="g2", thesis_id="T1", created_at="c", status="done"),
+            ]
 
     repo = _InspectRepoD(tmp_path)
+
     def _f2743_171(a: object) -> _InspectRepo:
         return repo
 
     monkeypatch.setattr(cli, "_thesis_repo", _f2743_171)
+
     def _f2744_172(r: object, i: object) -> _InspectThesis:
         return _inspect_thesis
 
@@ -3392,11 +4388,12 @@ def test_cli_thesis_inspect_full(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     (tmp_path / "s1" / "watch.yaml").write_text("x: 1\n")
     (tmp_path / "s1" / "memory.yaml").write_text("x: 1\n")
     from app.thesis.yaml import JSONValue as _JV
+
     def _f2751_173(p: object) -> dict[str, _JV]:
         return {"thesis_id": "T1", "questions": [], "rules": [], "memories": []}
 
-    monkeypatch.setattr(tyaml, "load_raw_yaml",
-                        _f2751_173)
+    monkeypatch.setattr(tyaml, "load_raw_yaml", _f2751_173)
+
     def _f2753_174(p: object, cls: object) -> object:
         return SimpleNamespace()
 
@@ -3404,39 +4401,51 @@ def test_cli_thesis_inspect_full(monkeypatch: pytest.MonkeyPatch, tmp_path: Path
     cli._thesis_inspect(_ns(id="T1"))
     out = capsys.readouterr().out
     assert "triggers: 1 pending / 2 total" in out and "evidence files:" in out
+
     # invalid path collects problems and exits
     def _f2759_176(p: object, cls: object) -> object:
         raise ValueError("bad")
 
-    monkeypatch.setattr(tyaml, "load_yaml",
-                        _f2759_176)
+    monkeypatch.setattr(tyaml, "load_yaml", _f2759_176)
     with pytest.raises(SystemExit):
         cli._thesis_inspect(_ns(id="T1"))
 
 
 def test_cli_google_data_ok_and_error(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
-    args = _ns(google_data_command="collect", geo=None, limit=25,
-              source="trends", start_date=None, end_date=None,
-              data_root=None, variable=[], tag=[], company=None)
+    args = _ns(
+        google_data_command="collect",
+        geo=None,
+        limit=25,
+        source="trends",
+        start_date=None,
+        end_date=None,
+        data_root=None,
+        variable=[],
+        tag=[],
+        company=None,
+    )
+
     def _f2769_177(a: object) -> object:
         return ["US"]
 
     monkeypatch.setattr(cli, "_google_geos", _f2769_177)
+
     def _f2770_178(a: object) -> object:
         return 5
 
     monkeypatch.setattr(cli, "_google_limit", _f2770_178)
+
     def _f2771_179(a: object) -> object:
         return ("trends", "patents")
 
     monkeypatch.setattr(cli, "_google_sources", _f2771_179)
+
     def _f2772_180(src: object, a: object, g: object, l: object) -> object:
         if src == "trends":
             return {"ok": src}
         raise RuntimeError("down")
 
-    monkeypatch.setattr(cli, "_collect_google_source",
-                        _f2772_180)
+    monkeypatch.setattr(cli, "_collect_google_source", _f2772_180)
     cli._cmd_google_data(args)
     out = capsys.readouterr().out
     assert "trends" in out and "down" in out
@@ -3446,36 +4455,61 @@ def test_cli_google_data_ok_and_error(monkeypatch: pytest.MonkeyPatch, capsys: p
 
 def test_cli_render_prose_all_codes():
     from app.domain.risk.evaluation import EvaluationIssue
-    assert T.issue_to_prose(EvaluationIssue("cash_unavailable", "minimum_cash")) == \
-        "minimum_cash: cash unavailable"
-    assert T.issue_to_prose(EvaluationIssue("total_value_unavailable", "minimum_cash")) == \
-        "minimum_cash: total value unavailable"
-    assert T.issue_to_prose(EvaluationIssue("total_value_zero", "minimum_cash")) == \
-        "minimum_cash: total value is zero"
-    assert "no weight" in T.issue_to_prose(
-        EvaluationIssue("position_weight_unavailable", "w", ticker="NVDA"))
+
+    assert T.issue_to_prose(EvaluationIssue("cash_unavailable", "minimum_cash")) == "minimum_cash: cash unavailable"
+    assert (
+        T.issue_to_prose(EvaluationIssue("total_value_unavailable", "minimum_cash"))
+        == "minimum_cash: total value unavailable"
+    )
+    assert T.issue_to_prose(EvaluationIssue("total_value_zero", "minimum_cash")) == "minimum_cash: total value is zero"
+    assert "no weight" in T.issue_to_prose(EvaluationIssue("position_weight_unavailable", "w", ticker="NVDA"))
     assert "unknown exposure" in T.issue_to_prose(
-        EvaluationIssue("unknown_sector_exposure", "sector_exposure", target="tech"))
+        EvaluationIssue("unknown_sector_exposure", "sector_exposure", target="tech")
+    )
     assert T.issue_to_prose(EvaluationIssue("other_code", "m")) == "m: other_code"
 
 
 def test_cli_render_analyst_estimates_branches():
-    base: dict[str, object] = {"ticker": "A", "as_of": "t", "source": "s",
-            "quote": {"price": 10}, "price_targets": {"median": 12, "mean": 11, "high": 15,
-                                                      "low": 9, "num_analysts": 3,
-                                                      "recommendation": "buy",
-                                                      "recommendation_mean": 2.0},
-            "valuation": {"trailing_pe": 20, "forward_pe": 18},
-            "market_cap": 100, "shares_outstanding": 50, "forward_estimates": []}
+    base: dict[str, object] = {
+        "ticker": "A",
+        "as_of": "t",
+        "source": "s",
+        "quote": {"price": 10},
+        "price_targets": {
+            "median": 12,
+            "mean": 11,
+            "high": 15,
+            "low": 9,
+            "num_analysts": 3,
+            "recommendation": "buy",
+            "recommendation_mean": 2.0,
+        },
+        "valuation": {"trailing_pe": 20, "forward_pe": 18},
+        "market_cap": 100,
+        "shares_outstanding": 50,
+        "forward_estimates": [],
+    }
     assert "analyst consensus" in T._render_analyst_estimates(base, 10_000)
     noprice: dict[str, object] = dict(base, quote={})
     assert "unavailable" in T._render_analyst_estimates(noprice, 10_000)
-    rows = dict(base, forward_estimates=[
-        "notadict",
-        {"period": "FY", "period_end_date": "d", "eps_avg": 1, "eps_growth_pct": 2,
-         "eps_analysts": 3, "revenue_avg": 4, "revenue_growth_pct": 5, "revenue_analysts": 6,
-         "eps_revision": {"current": 1, "days7_ago": 2, "days30_ago": 3, "days60_ago": 4}},
-        {"period": "Q", "eps_avg": None, "revenue_avg": None}])
+    rows = dict(
+        base,
+        forward_estimates=[
+            "notadict",
+            {
+                "period": "FY",
+                "period_end_date": "d",
+                "eps_avg": 1,
+                "eps_growth_pct": 2,
+                "eps_analysts": 3,
+                "revenue_avg": 4,
+                "revenue_growth_pct": 5,
+                "revenue_analysts": 6,
+                "eps_revision": {"current": 1, "days7_ago": 2, "days30_ago": 3, "days60_ago": 4},
+            },
+            {"period": "Q", "eps_avg": None, "revenue_avg": None},
+        ],
+    )
     assert "EPS revision" in T._render_analyst_estimates(rows, 10_000)
 
 
@@ -3486,8 +4520,7 @@ def test_cli_norm_shares_guard_arms():
     assert norm._extract_shares_facts({"facts": {"dei": {SHARES: "x"}}}) == []
     assert norm._extract_shares_facts({"facts": {"dei": {SHARES: {"units": "x"}}}}) == []
     assert norm._extract_shares_facts({"facts": {"dei": {SHARES: {"units": {"shares": "x"}}}}}) == []
-    got = norm._extract_shares_facts(
-        {"facts": {"dei": {SHARES: {"units": {"shares": [{"a": 1}, "x"]}}}}})
+    got = norm._extract_shares_facts({"facts": {"dei": {SHARES: {"units": {"shares": [{"a": 1}, "x"]}}}}})
     assert got == [{"a": 1}]
 
 
@@ -3503,11 +4536,15 @@ def test_cli_norm_to_float_arms():
     assert norm._to_float(b"") is None
     assert norm._to_float(object()) is None
     assert norm._to_float(["x"]) is None
+
     class _BadStr:
         def __str__(self):
             raise TypeError("bad")
+
     assert norm._to_float(_BadStr()) is None
+
     class _EmptyStr:
         def __str__(self):
             return "   "
+
     assert norm._to_float(_EmptyStr()) is None

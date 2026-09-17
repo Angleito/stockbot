@@ -12,9 +12,14 @@ from app.storage import raw_archive
 URL = "https://www.sec.gov/Archives/edgar/data/1234567/000000000025000001/"
 
 
-def _filing(accession: str, form: str = "10-K", filed_at: str = "2024-02-01",
-            known_at: str = "2024-02-01", amendment_of: str | None = None,
-            is_amendment: bool = False) -> Filing:
+def _filing(
+    accession: str,
+    form: str = "10-K",
+    filed_at: str = "2024-02-01",
+    known_at: str = "2024-02-01",
+    amendment_of: str | None = None,
+    is_amendment: bool = False,
+) -> Filing:
     return Filing(
         accession_no=accession,
         form=form,
@@ -53,24 +58,25 @@ def test_rearchive_same_bytes_is_idempotent(tmp_path: Path) -> None:
 def test_store_two_accessions_and_point_in_time(tmp_path: Path) -> None:
     raw_root = tmp_path / "raw"
     original = _filing("0000000000-25-000001", filed_at="2024-02-01", known_at="2024-02-01")
-    amendment = _filing("0000000000-25-000002", form="10-K/A", filed_at="2024-03-01",
-                        known_at="2024-03-01", is_amendment=True,
-                        amendment_of="0000000000-25-000001")
+    amendment = _filing(
+        "0000000000-25-000002",
+        form="10-K/A",
+        filed_at="2024-03-01",
+        known_at="2024-03-01",
+        is_amendment=True,
+        amendment_of="0000000000-25-000001",
+    )
 
     recs = archive_sec_filing(original, {"primary": b"v1"}, url=URL, root=raw_root)
-    assert store_filing(original, raw_primary_path=recs["primary"].payload_path,
-                         root=tmp_path) == 1
+    assert store_filing(original, raw_primary_path=recs["primary"].payload_path, root=tmp_path) == 1
     # Deterministic rerun writes nothing.
-    assert store_filing(original, raw_primary_path=recs["primary"].payload_path,
-                         root=tmp_path) == 0
+    assert store_filing(original, raw_primary_path=recs["primary"].payload_path, root=tmp_path) == 0
 
     recs_a = archive_sec_filing(amendment, {"primary": b"v2"}, url=URL, root=raw_root)
-    assert store_filing(amendment, raw_primary_path=recs_a["primary"].payload_path,
-                         root=tmp_path) == 1
+    assert store_filing(amendment, raw_primary_path=recs_a["primary"].payload_path, root=tmp_path) == 1
 
     rows = query_filings(root=tmp_path)
-    assert [r["accession"] for r in rows] == [
-        "0000000000-25-000002", "0000000000-25-000001"]  # newest first
+    assert [r["accession"] for r in rows] == ["0000000000-25-000002", "0000000000-25-000001"]  # newest first
     assert rows[0]["amendment_of"] == "0000000000-25-000001"
     assert rows[0]["is_amendment"] is True
 
@@ -102,8 +108,7 @@ def test_archive_document_revisions_retained(tmp_path: Path) -> None:
     assert first.sha256 != second.sha256
     from app.sec.archive import DOCUMENT_KIND, _document_key
 
-    revisions = list(raw_archive.iter_archive(
-        "sec", DOCUMENT_KIND, _document_key(acc, doc), root=root))
+    revisions = list(raw_archive.iter_archive("sec", DOCUMENT_KIND, _document_key(acc, doc), root=root))
     assert {r.sha256 for r in revisions} == {first.sha256, second.sha256}
     assert find_archived_document(acc, doc, root=root) is not None
     # Identical bytes re-archive cleanly (no new revision, no warning).
@@ -128,22 +133,41 @@ def test_search_ledger_round_trip(tmp_path: Path) -> None:
 
     request = SECSearchRequest(query="Acme", as_of="2024-06-01")
     attempt = SearchAttempt(
-        attempt_id="s9-efts-1", search_id="s9", backend="efts",
-        query="Acme", status="complete", results_reported=1,
-        results_retrieved=1, pages_retrieved=1, pit_basis="known_at",
+        attempt_id="s9-efts-1",
+        search_id="s9",
+        backend="efts",
+        query="Acme",
+        status="complete",
+        results_reported=1,
+        results_retrieved=1,
+        pages_retrieved=1,
+        pit_basis="known_at",
     )
     hit = SECTextHit(
-        search_id="s9", attempt_id="s9-efts-1", query="Acme",
-        accession_no="0000000000-25-000001", form="10-K",
-        filed_at="2024-02-01", filer_cik=1234567,
-        filer_name="Test Co", matched_document="primary.htm", score=1.0,
+        search_id="s9",
+        attempt_id="s9-efts-1",
+        query="Acme",
+        accession_no="0000000000-25-000001",
+        form="10-K",
+        filed_at="2024-02-01",
+        filer_cik=1234567,
+        filer_name="Test Co",
+        matched_document="primary.htm",
+        score=1.0,
     )
     written = persist_search_ledger(
-        search_id="s9", request=request, text_hits=(hit,),
-        attempts=(attempt,), coverage_status="complete",
-        sources_attempted=("efts",), sources_completed=("efts",),
-        results_reported=1, results_retrieved=1, pages=1,
-        pending_backfill_jobs=("job-1",), root=tmp_path,
+        search_id="s9",
+        request=request,
+        text_hits=(hit,),
+        attempts=(attempt,),
+        coverage_status="complete",
+        sources_attempted=("efts",),
+        sources_completed=("efts",),
+        results_reported=1,
+        results_retrieved=1,
+        pages=1,
+        pending_backfill_jobs=("job-1",),
+        root=tmp_path,
     )
     assert written == {"searches": 1, "attempts": 1, "hits": 1}
     search = query_search("s9", root=tmp_path)
@@ -168,8 +192,7 @@ def test_coverage_partition_lifecycle(tmp_path: Path) -> None:
         store_coverage,
     )
 
-    assert store_coverage("sec-global", "10-K", "2024-Q1", "complete",
-                          root=tmp_path) == 1
+    assert store_coverage("sec-global", "10-K", "2024-Q1", "complete", root=tmp_path) == 1
     assert is_partition_covered("sec-global", "10-K", "2024-Q1", root=tmp_path)
     assert not is_partition_covered("sec-global", "10-K", "2024-Q2", root=tmp_path)
     rows = query_coverage(source="sec-global", form="10-K", root=tmp_path)
@@ -187,10 +210,8 @@ def test_backfill_jobs_idempotent_queue_and_resume(tmp_path: Path) -> None:
         requeue_job,
     )
 
-    first = enqueue_backfill_job("sec-global", "10-K", "2024-01-01", "2024-03-31",
-                                 root=tmp_path)
-    assert enqueue_backfill_job("sec-global", "10-K", "2024-01-01", "2024-03-31",
-                                root=tmp_path) == first
+    first = enqueue_backfill_job("sec-global", "10-K", "2024-01-01", "2024-03-31", root=tmp_path)
+    assert enqueue_backfill_job("sec-global", "10-K", "2024-01-01", "2024-03-31", root=tmp_path) == first
     assert [j["id"] for j in list_jobs(root=tmp_path)] == [first]
     claimed = claim_job(root=tmp_path)
     assert claimed is not None and claimed["status"] == "running"
@@ -211,14 +232,30 @@ def test_document_text_literal_and_term_paths(tmp_path: Path) -> None:
         store_document_text,
     )
 
-    assert store_document_text("ACC:doc1", "Risk Factors: supply chainoso disruption",
-                               accession="ACC", document_name="doc1",
-                               filed_at="2024-02-01", known_at="2024-02-01",
-                               root=tmp_path) == 1
-    assert store_document_text("ACC:doc2", "UnrelatedMD&A prose here",
-                               accession="ACC", document_name="doc2",
-                               filed_at="2024-05-01", known_at="2024-05-01",
-                               root=tmp_path) == 1
+    assert (
+        store_document_text(
+            "ACC:doc1",
+            "Risk Factors: supply chainoso disruption",
+            accession="ACC",
+            document_name="doc1",
+            filed_at="2024-02-01",
+            known_at="2024-02-01",
+            root=tmp_path,
+        )
+        == 1
+    )
+    assert (
+        store_document_text(
+            "ACC:doc2",
+            "UnrelatedMD&A prose here",
+            accession="ACC",
+            document_name="doc2",
+            filed_at="2024-05-01",
+            known_at="2024-05-01",
+            root=tmp_path,
+        )
+        == 1
+    )
     literal = search_document_text("supply chainoso", literal=True, root=tmp_path)
     assert [r["document_name"] for r in literal] == ["doc1"]
     terms = search_document_text("supply disruption", root=tmp_path)
@@ -235,19 +272,30 @@ def test_typed_rows_pit_exclusion(tmp_path: Path) -> None:
         store_beneficial_ownership,
     )
 
-    assert store_beneficial_ownership({
-        "accession": "0000000000-25-000009", "form": "SC 13D",
-        "subject_cik": 320193, "subject_name": "Subject Co",
-        "filer_cik": 999999, "filer_name": "Owner LP",
-        "shares": 100, "percent": 6.0, "known_at": "2024-06-01",
-    }, root=tmp_path) == 1
+    assert (
+        store_beneficial_ownership(
+            {
+                "accession": "0000000000-25-000009",
+                "form": "SC 13D",
+                "subject_cik": 320193,
+                "subject_name": "Subject Co",
+                "filer_cik": 999999,
+                "filer_name": "Owner LP",
+                "shares": 100,
+                "percent": 6.0,
+                "known_at": "2024-06-01",
+            },
+            root=tmp_path,
+        )
+        == 1
+    )
     assert query_beneficial_ownership(subject_cik=320193, root=tmp_path)
-    assert query_beneficial_ownership(
-        subject_cik=320193, as_of="2024-01-01", root=tmp_path) == []
+    assert query_beneficial_ownership(subject_cik=320193, as_of="2024-01-01", root=tmp_path) == []
 
 
 def test_query_filings_date_bounds_before_limit(tmp_path: Path) -> None:
     from app.sec.store import query_filings, store_filing
+
     # Newer Form 4s plus one older 2024-Q1 row; limit=1 must still return Q1 when bounded.
     for i, day in enumerate(["2024-06-15", "2024-06-10", "2024-05-20"]):
         store_filing(_filing(f"0000000000-25-00010{i}", form="4", filed_at=day, known_at=day), root=tmp_path)

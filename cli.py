@@ -7,7 +7,7 @@ import json
 import os
 import sys
 from collections.abc import Callable
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal
 from pathlib import Path
 from types import FrameType, ModuleType
@@ -17,6 +17,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 @runtime_checkable
 class _HasRunId(Protocol):
     """Structural seam: RunOutcome or test double with run_id."""
+
     run_id: str
 
 
@@ -50,9 +51,21 @@ from app.tool_render import issue_to_prose
 from app.tools import authorize_robinhood_browser
 
 _LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
-_SUBCOMMANDS = ("runs", "inspect", "refresh-data", "log-server", "robinhood-login",
-                "backfill-sec", "resume-sec-backfill", "sec-coverage", "thesis", "google-data",
-                "research", "trace", "eval")
+_SUBCOMMANDS = (
+    "runs",
+    "inspect",
+    "refresh-data",
+    "log-server",
+    "robinhood-login",
+    "backfill-sec",
+    "resume-sec-backfill",
+    "sec-coverage",
+    "thesis",
+    "google-data",
+    "research",
+    "trace",
+    "eval",
+)
 
 
 def _as_data_root(data_root: str | Path | None) -> Path | None:
@@ -106,10 +119,7 @@ def _cmd_runs(limit: int) -> None:
     if not rows:
         print("No runs recorded.")
         return
-    print(
-        f"{'run_id':<38} {'started_at':<26} {'status':<16} {'duration_ms':>10} "
-        f"{'cost':>9}  question"
-    )
+    print(f"{'run_id':<38} {'started_at':<26} {'status':<16} {'duration_ms':>10} {'cost':>9}  question")
     for row in rows:
         print(_format_run_row(row))
 
@@ -155,11 +165,14 @@ def _print_leaderboard_entries(result: dict[str, object]) -> None:
     print(f"Leaderboard entries: {_leaderboard_tickers(entries)}")
 
 
-def _cmd_refresh_data(settlement_date: str, tickers: list[str], ciks: list[int], data_root: str | Path | None = None) -> None:
+def _cmd_refresh_data(
+    settlement_date: str, tickers: list[str], ciks: list[int], data_root: str | Path | None = None
+) -> None:
     root = _as_data_root(data_root)
     summary = prepare_short_interest_data(settlement_date, tickers=tickers, ciks=ciks, data_root=root)
     print(json.dumps(summary, indent=2))
     from app.analytics.screens import materialize_short_interest_screen
+
     result = materialize_short_interest_screen(settlement_date, data_root=root)
     if result.get("error"):
         print(f"Leaderboard error: {result['error']}")
@@ -180,6 +193,8 @@ def _cmd_refresh_obligations(ticker: str) -> None:
 
     result = obligations.get_obligations(ticker, persist=True)
     print(json.dumps(result, indent=2))
+
+
 def _cmd_robinhood_login() -> None:
     print("Starting Robinhood authorization...")
     if authorize_robinhood_browser():
@@ -315,13 +330,13 @@ def _format_mandate_value(value: _MandateValue, metric: str, target: str | None,
         return str(value)
     return f"{float(value) * 100:.1f}%"
 
+
 def _print_mandate_sector_exposures(evaluation: RiskEvaluation) -> None:
     if evaluation.sector_exposures:
         print(
             "Sector exposures: "
             + ", ".join(
-                f"{sector} {float(weight) * 100:.1f}%"
-                for sector, weight in evaluation.sector_exposures.items()
+                f"{sector} {float(weight) * 100:.1f}%" for sector, weight in evaluation.sector_exposures.items()
             )
         )
 
@@ -373,9 +388,14 @@ def _resolve_backfill_quarters(from_date: str, to_date: str) -> list[tuple[int, 
     return quarters
 
 
-def _enqueue_backfill_jobs(sec_store: ModuleType, source: str | None, forms: list[str],
-                           quarters: list[tuple[int, int]], batch_size: int,
-                           data_root: str | None) -> list[str]:
+def _enqueue_backfill_jobs(
+    sec_store: ModuleType,
+    source: str | None,
+    forms: list[str],
+    quarters: list[tuple[int, int]],
+    batch_size: int,
+    data_root: str | None,
+) -> list[str]:
     """Enqueue one job per form/quarter; exit 2 when the store rejects input."""
     from app.sec.discovery.service import BACKFILL_SOURCE, _quarter_dates
 
@@ -384,9 +404,11 @@ def _enqueue_backfill_jobs(sec_store: ModuleType, source: str | None, forms: lis
         for year, quarter in quarters:
             qs, qe = _quarter_dates(year, quarter)
             try:
-                ids.append(sec_store.enqueue_backfill_job(
-                    source or BACKFILL_SOURCE, form, qs, qe,
-                    batch_size=batch_size, root=data_root))
+                ids.append(
+                    sec_store.enqueue_backfill_job(
+                        source or BACKFILL_SOURCE, form, qs, qe, batch_size=batch_size, root=data_root
+                    )
+                )
             except ValueError as exc:
                 print(f"error: {exc}", file=sys.stderr)
                 raise SystemExit(2)
@@ -406,21 +428,20 @@ def _drain_backfill_inline(ids: list[str], data_root: str | None) -> None:
     print(json.dumps({"jobs": ids, **drain_backfill_queue(data_root)}, indent=2))
 
 
-def _cmd_backfill_sec(source: str | None, forms: list[str], from_date: str,
-                      to_date: str, batch_size: int,
-                      data_root: str | None) -> None:
+def _cmd_backfill_sec(
+    source: str | None, forms: list[str], from_date: str, to_date: str, batch_size: int, data_root: str | None
+) -> None:
     """Enqueue bounded quarterly/form jobs for the range, then drain inline."""
     from app.sec import store as sec_store
+
     _validate_backfill_forms(forms)
     quarters = _resolve_backfill_quarters(from_date, to_date)
     if not quarters:
-        print("no quarterly partitions in range "
-              "(before 1993 global indexes or current quarter only); "
-              "nothing to backfill")
+        print(
+            "no quarterly partitions in range (before 1993 global indexes or current quarter only); nothing to backfill"
+        )
         return
-    _drain_backfill_inline(
-        _enqueue_backfill_jobs(sec_store, source, forms, quarters, batch_size, data_root),
-        data_root)
+    _drain_backfill_inline(_enqueue_backfill_jobs(sec_store, source, forms, quarters, batch_size, data_root), data_root)
 
 
 def _requeue_one_backfill_job(sec_store: ModuleType, job_id: str, data_root: str | None) -> None:
@@ -440,11 +461,11 @@ def _requeue_failed_backfill_jobs(sec_store: ModuleType, data_root: str | None) 
     print(f"requeued {len(failed)} failed job(s)")
 
 
-def _cmd_resume_sec_backfill(job_id: str | None,
-                             data_root: str | None) -> None:
+def _cmd_resume_sec_backfill(job_id: str | None, data_root: str | None) -> None:
     """Requeue one (or all) interrupted jobs and drain the queue inline."""
     from app.sec import store as sec_store
     from app.sec.discovery.service import drain_backfill_queue
+
     if job_id:
         _requeue_one_backfill_job(sec_store, job_id, data_root)
     else:
@@ -456,10 +477,9 @@ def _validate_coverage_date(label: str, value: str | None) -> None:
     if value is None:
         return
     try:
-        datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=timezone.utc)
+        datetime.strptime(value, "%Y-%m-%d").replace(tzinfo=UTC)
     except ValueError:
-        print(f"error: --{label} must be YYYY-MM-DD, got {value!r}",
-              file=sys.stderr)
+        print(f"error: --{label} must be YYYY-MM-DD, got {value!r}", file=sys.stderr)
         raise SystemExit(2)
 
 
@@ -468,7 +488,9 @@ def _validate_coverage_range(from_date: str | None, to_date: str | None) -> None
         _validate_coverage_date(label, value)
 
 
-def _filter_coverage_rows(rows: list[dict[str, object]], from_date: str | None, to_date: str | None) -> list[dict[str, object]]:
+def _filter_coverage_rows(
+    rows: list[dict[str, object]], from_date: str | None, to_date: str | None
+) -> list[dict[str, object]]:
     if from_date:
         rows = [r for r in rows if _coverage_date_str(r) >= from_date]
     if to_date:
@@ -478,27 +500,29 @@ def _filter_coverage_rows(rows: list[dict[str, object]], from_date: str | None, 
 
 def _print_coverage_rows(rows: list[dict[str, object]]) -> None:
     for row in rows:
-        print(f"{row.get('source')} {row.get('form')} "
-              f"{row.get('date_partition')} {row.get('status')} "
-              f"count={row.get('accession_count')} last={row.get('last_key')}")
+        print(
+            f"{row.get('source')} {row.get('form')} "
+            f"{row.get('date_partition')} {row.get('status')} "
+            f"count={row.get('accession_count')} last={row.get('last_key')}"
+        )
     if not rows:
         print("no coverage rows")
 
 
 def _print_pending_backfill_jobs(sec_store: ModuleType, data_root: str | None) -> None:
-    pending = [j for j in sec_store.list_jobs(root=data_root)
-               if j["status"] in ("queued", "running", "failed")]
+    pending = [j for j in sec_store.list_jobs(root=data_root) if j["status"] in ("queued", "running", "failed")]
     if pending:
         print(f"pending jobs: {[j['id'] for j in pending]}")
     else:
         print("no pending backfill jobs")
 
 
-def _cmd_sec_coverage(source: str | None, form: str | None,
-                      from_date: str | None, to_date: str | None,
-                      data_root: str | None) -> None:
+def _cmd_sec_coverage(
+    source: str | None, form: str | None, from_date: str | None, to_date: str | None, data_root: str | None
+) -> None:
     """Show ingestion coverage rows plus pending backfill jobs."""
     from app.sec import store as sec_store
+
     _validate_coverage_range(from_date, to_date)
     rows = sec_store.query_coverage(source=source, form=form, root=data_root)
     rows = _filter_coverage_rows(rows, from_date, to_date)
@@ -510,6 +534,7 @@ def _thesis_repo(args: argparse.Namespace) -> ThesisRepository:
     """Thesis root via the existing data-root mechanism (<root>/thesis)."""
     from app.config import get_data_root
     from app.thesis.repository import ThesisRepository
+
     raw_root = getattr(args, "data_root", None)
     override = raw_root if isinstance(raw_root, str) else None
     base = Path(override) if override else get_data_root()
@@ -552,14 +577,12 @@ def _thesis_show(args: argparse.Namespace) -> None:
     if not thesis.expressions:
         print("  (none)")
     for e in thesis.expressions:
-        print(f"  - {e.intent} {e.instrument}/{e.direction} "
-              f"({e.structure}, {e.horizon}) [{e.status}]")
+        print(f"  - {e.intent} {e.instrument}/{e.direction} ({e.structure}, {e.horizon}) [{e.status}]")
 
 
 def _thesis_status(args: argparse.Namespace) -> None:
     repo = _thesis_repo(args)
-    op = {"pause": repo.pause_thesis, "resume": repo.resume_thesis,
-          "close": repo.close_thesis}[args.thesis_command]
+    op = {"pause": repo.pause_thesis, "resume": repo.resume_thesis, "close": repo.close_thesis}[args.thesis_command]
     try:
         updated = op(str(args.id))
     except (KeyError, ValueError) as exc:
@@ -597,6 +620,7 @@ def _check_inspect_entry_list(d: Path, thesis_id: str, name: str, key: str, from
             raise ValueError(f"{d / name}: {key.rstrip('s')} entry must be a mapping")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
         from_dict(entry, str(d / name))
 
+
 def _thesis_inspect(args: argparse.Namespace) -> None:
     from app.thesis.models import (
         Checkpoint,
@@ -607,6 +631,7 @@ def _thesis_inspect(args: argparse.Namespace) -> None:
         WatchRule,
     )
     from app.thesis.yaml import load_yaml
+
     repo = _thesis_repo(args)
     thesis = _thesis_load(repo, str(args.id))
     d = repo.root / thesis.slug
@@ -677,8 +702,7 @@ def _mtime(p: Path) -> float:
 def _list_journal_files(jdir: Path) -> list[Path]:
     if not jdir.is_dir():
         return []
-    return sorted((p for p in jdir.glob("*.md") if p.is_file()),
-                  key=_mtime, reverse=True)
+    return sorted((p for p in jdir.glob("*.md") if p.is_file()), key=_mtime, reverse=True)
 
 
 def _journal_entry_matches(path: Path, norm: str, sel: str) -> bool:
@@ -740,21 +764,22 @@ def _thesis_runtime(args: argparse.Namespace, what: str = "thesis tick"):
 def _format_tick_no_op(no_op_reason: str | None) -> str:
     return "no meaningful change" + (f": {no_op_reason}" if no_op_reason else "")
 
+
 def _print_tick_outcome(triggers_created: list[str], runs: object, *, flush: bool = False) -> None:
     items: list[object] = list(runs) if isinstance(runs, list) else []
     run_ids = [r.run_id for r in items if isinstance(r, _HasRunId)]
-    print(f"triggers created: {len(triggers_created)}"
-          + (f" ({', '.join(triggers_created)})" if triggers_created else ""),
-          flush=flush)
-    print(f"runs: {len(run_ids)}"
-          + (f" ({', '.join(run_ids)})" if run_ids else ""),
-          flush=flush)
+    print(
+        f"triggers created: {len(triggers_created)}"
+        + (f" ({', '.join(triggers_created)})" if triggers_created else ""),
+        flush=flush,
+    )
+    print(f"runs: {len(run_ids)}" + (f" ({', '.join(run_ids)})" if run_ids else ""), flush=flush)
 
 
 def _resolve_tick_known_at(args: argparse.Namespace) -> str:
-    from datetime import datetime, timezone
+    from datetime import datetime
 
-    return getattr(args, "known_at", None) or datetime.now(timezone.utc).isoformat(timespec="seconds")
+    return getattr(args, "known_at", None) or datetime.now(UTC).isoformat(timespec="seconds")
 
 
 def _thesis_tick(args: argparse.Namespace) -> None:
@@ -767,6 +792,7 @@ def _thesis_tick(args: argparse.Namespace) -> None:
         print(_format_tick_no_op(result.no_op_reason))
         return
     _print_tick_outcome(result.triggers_created, result.runs)
+
 
 def _validate_monitor_interval(interval: int) -> None:
     if interval <= 0:
@@ -798,11 +824,15 @@ def _thesis_monitor(args: argparse.Namespace) -> None:
 
     signal.signal(signal.SIGINT, _stop)
     signal.signal(signal.SIGTERM, _stop)
-    monitor_loop(repository=repo, thesis_id=thesis_id, interval_seconds=args.interval_seconds,
-                 source_services=services,
-                 known_at_fn=(lambda: fixed_known_at) if fixed_known_at else None,
-                 stop_event=stop, on_tick=_report_tick_outcome)
-
+    monitor_loop(
+        repository=repo,
+        thesis_id=thesis_id,
+        interval_seconds=args.interval_seconds,
+        source_services=services,
+        known_at_fn=(lambda: fixed_known_at) if fixed_known_at else None,
+        stop_event=stop,
+        on_tick=_report_tick_outcome,
+    )
 
 
 def _cmd_thesis(args: argparse.Namespace) -> None:
@@ -824,10 +854,7 @@ def _cmd_thesis(args: argparse.Namespace) -> None:
     elif cmd == "monitor":
         _thesis_monitor(args)
     else:
-        raise SystemExit(
-            "thesis: choose from list, show, pause, resume, close, "
-            "inspect, inbox, journal, tick, monitor"
-        )
+        raise SystemExit("thesis: choose from list, show, pause, resume, close, inspect, inbox, journal, tick, monitor")
 
 
 def _google_geos(args: argparse.Namespace) -> list[str]:
@@ -849,42 +876,57 @@ def _google_sources(args: argparse.Namespace) -> tuple[str, ...]:
 
 def _collect_google_trends(args: argparse.Namespace, geos: list[str], limit: int):
     from app.google_data import trends as _trends
+
     return _trends.collect_trends(
-        start_date=args.start_date, end_date=args.end_date,
-        geos=list(geos), limit=limit, data_root=args.data_root or None)
+        start_date=args.start_date,
+        end_date=args.end_date,
+        geos=list(geos),
+        limit=limit,
+        data_root=args.data_root or None,
+    )
 
 
 def _collect_google_patents(args: argparse.Namespace, limit: int):
     if not args.company:
-        return {"status": "error", "source": "patents",
-                "error": "company id required (--company) for patents collection"}
+        return {
+            "status": "error",
+            "source": "patents",
+            "error": "company id required (--company) for patents collection",
+        }
     from app.google_data import patents as _patents
+
     return _patents.search_company_patents(
-        args.company, start_date=args.start_date, end_date=args.end_date,
-        limit=min(limit, 20))
+        args.company, start_date=args.start_date, end_date=args.end_date, limit=min(limit, 20)
+    )
 
 
 def _collect_google_macro(args: argparse.Namespace, geos: list[str], limit: int):
     from app.google_data import datacommons as _dc
+
     variables = list(args.variable or [])
     return _dc.get_macro_context(
-        list(geos), variables,
-        start_date=args.start_date, end_date=args.end_date, limit=min(limit, 100))
+        list(geos), variables, start_date=args.start_date, end_date=args.end_date, limit=min(limit, 100)
+    )
 
 
 def _collect_google_geo(args: argparse.Namespace, geos: list[str], limit: int):
     from app.google_data import geo_context as _geo
+
     return _geo.get_geo_context(
-        list(geos), variables=list(args.variable or []),
-        start_date=args.start_date, end_date=args.end_date,
-        limit=min(limit, 100))
+        list(geos),
+        variables=list(args.variable or []),
+        start_date=args.start_date,
+        end_date=args.end_date,
+        limit=min(limit, 100),
+    )
 
 
 def _collect_google_stackoverflow(args: argparse.Namespace, limit: int):
     from app.google_data import stackoverflow as _so
+
     return _so.get_tag_activity(
-        list(args.tag or []), start_date=args.start_date,
-        end_date=args.end_date, limit=min(limit, 100))
+        list(args.tag or []), start_date=args.start_date, end_date=args.end_date, limit=min(limit, 100)
+    )
 
 
 def _collect_google_source(src: str, args: argparse.Namespace, geos: list[str], limit: int):
@@ -917,14 +959,15 @@ def _cmd_google_data(args: argparse.Namespace) -> None:
 
 def _research_create(args: argparse.Namespace, service: ModuleType) -> None:
     from app.research.models import default_policy
+
     policy = default_policy()
     if args.interrupt_after is not None:
         # ponytail: test hook recorded on the session; the wave runner honors it when it lands.
         policy["interrupt_after"] = args.interrupt_after
     try:
         session_id = service.create_research(
-            args.question, args.objective or args.question,
-            as_of=args.as_of, policy=policy)
+            args.question, args.objective or args.question, as_of=args.as_of, policy=policy
+        )
         state = service.inspect_research(session_id)
     except ValueError as exc:
         raise SystemExit(f"research: {exc}") from None
@@ -1047,8 +1090,10 @@ def _print_trace_event(evt: object) -> None:
     seq = getattr(evt, "seq", None)
     event_type = getattr(evt, "event_type", None)
     duration_ms = getattr(evt, "duration_ms", None)
-    if isinstance(seq, int) and isinstance(event_type, str) and (
-        duration_ms is None or isinstance(duration_ms, (int, float))
+    if (
+        isinstance(seq, int)
+        and isinstance(event_type, str)
+        and (duration_ms is None or isinstance(duration_ms, (int, float)))
     ):
         print(f"    {seq} {event_type} {duration_ms}")
     else:
@@ -1102,25 +1147,31 @@ def _cmd_herdr(args: argparse.Namespace) -> None:
 
 def _eval_run_suite(args: argparse.Namespace) -> None:
     from app.research.evals.evaluators import outcomes_from_fixtures, run_eval_suite
+
     names = [args.scenario] if args.scenario else None
     outcomes = outcomes_from_fixtures(names)
     summary = run_eval_suite(
-        model=args.model, provider=args.provider,
-        prompt_version=args.prompt_version, outcomes=outcomes)
-    print(f"eval run {summary.eval_run_id}:"
-          f" {summary.passed_count}/{summary.scenario_count} passed (model={summary.model})")
+        model=args.model, provider=args.provider, prompt_version=args.prompt_version, outcomes=outcomes
+    )
+    print(
+        f"eval run {summary.eval_run_id}:"
+        f" {summary.passed_count}/{summary.scenario_count} passed (model={summary.model})"
+    )
     if summary.failed_count:
         raise SystemExit(1)
 
 
 def _eval_inspect(args: argparse.Namespace) -> None:
     from app.research.evals.evaluators import get_eval_results, get_eval_run
+
     header = get_eval_run(args.eval_run_id)
     if header is None:
         raise SystemExit(f"eval: unknown run {args.eval_run_id}")
-    print(f"eval run {header.eval_run_id} model={header.model} provider={header.provider}"
-          f" harness={header.harness_version} prompt={header.prompt_version}"
-          f" git={header.git_sha} scenarios={header.scenario_version} at={header.started_at}")
+    print(
+        f"eval run {header.eval_run_id} model={header.model} provider={header.provider}"
+        f" harness={header.harness_version} prompt={header.prompt_version}"
+        f" git={header.git_sha} scenarios={header.scenario_version} at={header.started_at}"
+    )
     for row in get_eval_results(args.eval_run_id):
         verdict = "PASS" if row.passed else f"FAIL {','.join(row.violations)}"
         print(f"  {verdict} {row.scenario_name}")
@@ -1128,9 +1179,10 @@ def _eval_inspect(args: argparse.Namespace) -> None:
 
 def _eval_promote(args: argparse.Namespace) -> None:
     from app.research.evals.regression import promote_to_fixture
+
     path = promote_to_fixture(
-        session_id=args.session_id, scenario_name=args.scenario_name,
-        question=args.question, as_of=args.as_of)
+        session_id=args.session_id, scenario_name=args.scenario_name, question=args.question, as_of=args.as_of
+    )
     print(str(path))
 
 
@@ -1161,111 +1213,145 @@ def _build_parser() -> argparse.ArgumentParser:
     runs_parser.add_argument("--limit", type=int, default=20, help="max rows (default 20)")
     inspect_parser = subparsers.add_parser("inspect", help="show one run's record")
     inspect_parser.add_argument("run_id", help="run id, e.g. run:20260829T123456789012")
-    refresh_parser = subparsers.add_parser("refresh-data", help="fetch + normalize SEC/FINRA research data into the Parquet store")
+    refresh_parser = subparsers.add_parser(
+        "refresh-data", help="fetch + normalize SEC/FINRA research data into the Parquet store"
+    )
     refresh_parser.add_argument("--settlement-date", required=True, help="FINRA settlement date YYYY-MM-DD")
-    refresh_parser.add_argument("--ticker", action="append", default=[], help="enrich SEC facts for this ticker (repeatable; optional)")
-    refresh_parser.add_argument("--cik", type=int, action="append", default=[], help="enrich SEC facts for this CIK (repeatable; optional)")
-    refresh_parser.add_argument("--data-root", default=None, help="data root directory (default: $STOCKBOT_DATA_DIR or repo data/)")
-    subparsers.add_parser("replay-sec-facts", help="replay archived SEC companyfacts payloads into the Parquet store (offline)")
-    obligations_parser = subparsers.add_parser("refresh-obligations", help="extract obligations for a ticker and persist events/evidence into the store")
+    refresh_parser.add_argument(
+        "--ticker", action="append", default=[], help="enrich SEC facts for this ticker (repeatable; optional)"
+    )
+    refresh_parser.add_argument(
+        "--cik", type=int, action="append", default=[], help="enrich SEC facts for this CIK (repeatable; optional)"
+    )
+    refresh_parser.add_argument(
+        "--data-root", default=None, help="data root directory (default: $STOCKBOT_DATA_DIR or repo data/)"
+    )
+    subparsers.add_parser(
+        "replay-sec-facts", help="replay archived SEC companyfacts payloads into the Parquet store (offline)"
+    )
+    obligations_parser = subparsers.add_parser(
+        "refresh-obligations", help="extract obligations for a ticker and persist events/evidence into the store"
+    )
     obligations_parser.add_argument("ticker", help="ticker, e.g. NVDA")
-    mandate_parser = subparsers.add_parser("evaluate-mandate", help="evaluate the mandate JSON against the latest portfolio snapshot")
+    mandate_parser = subparsers.add_parser(
+        "evaluate-mandate", help="evaluate the mandate JSON against the latest portfolio snapshot"
+    )
     mandate_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
     log_server_parser = subparsers.add_parser(
         "log-server", help="receive and print log lines from CLI/Pi-bridge clients (Ctrl-C to stop)"
     )
     log_server_parser.add_argument(
-        "--port", type=int, default=DEFAULT_LOG_SERVER_PORT,
+        "--port",
+        type=int,
+        default=DEFAULT_LOG_SERVER_PORT,
         help=f"port to listen on (default {DEFAULT_LOG_SERVER_PORT})",
     )
     subparsers.add_parser("robinhood-login", help="authorize Robinhood OAuth deliberately (opens browser)")
     backfill_parser = subparsers.add_parser(
         "backfill-sec",
-        help="enqueue bounded SEC quarterly/form backfill jobs, then drain inline (dates required; no all-history default)")
+        help="enqueue bounded SEC quarterly/form backfill jobs, then drain inline (dates required; no all-history default)",
+    )
     backfill_parser.add_argument("--source", default="sec-global", help="coverage source (default sec-global)")
-    backfill_parser.add_argument("--form", action="append", default=[], help="SEC form, e.g. 10-K (repeatable; required)")
+    backfill_parser.add_argument(
+        "--form", action="append", default=[], help="SEC form, e.g. 10-K (repeatable; required)"
+    )
     backfill_parser.add_argument("--from", dest="from_date", required=True, help="range start YYYY-MM-DD (required)")
     backfill_parser.add_argument("--to", dest="to_date", required=True, help="range end YYYY-MM-DD (required)")
     backfill_parser.add_argument("--batch-size", type=int, default=50, help="filings per job batch (default 50)")
     backfill_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
     resume_parser = subparsers.add_parser(
-        "resume-sec-backfill",
-        help="requeue interrupted SEC backfill jobs and drain the queue inline")
-    resume_parser.add_argument("job_id", nargs="?", default=None, help="one job ID to resume (default: all queued/failed)")
+        "resume-sec-backfill", help="requeue interrupted SEC backfill jobs and drain the queue inline"
+    )
+    resume_parser.add_argument(
+        "job_id", nargs="?", default=None, help="one job ID to resume (default: all queued/failed)"
+    )
     resume_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
     coverage_parser = subparsers.add_parser(
-        "sec-coverage", help="show SEC ingestion coverage plus pending backfill jobs")
+        "sec-coverage", help="show SEC ingestion coverage plus pending backfill jobs"
+    )
     coverage_parser.add_argument("--source", default=None, help="filter by coverage source")
     coverage_parser.add_argument("--form", default=None, help="filter by SEC form")
     coverage_parser.add_argument("--from", dest="from_date", default=None, help="coverage on/after YYYY-MM-DD")
     coverage_parser.add_argument("--to", dest="to_date", default=None, help="coverage on/before YYYY-MM-DD")
     coverage_parser.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
     gd_parser = subparsers.add_parser(
-        "google-data", help="manual Google public-data collection (optional; never affects SEC/FINRA)")
+        "google-data", help="manual Google public-data collection (optional; never affects SEC/FINRA)"
+    )
     gd_sub = gd_parser.add_subparsers(dest="google_data_command")
     gd_collect = gd_sub.add_parser("collect", help="collect one Google source (manual only)")
-    gd_collect.add_argument("--source", required=True,
-                            choices=["trends", "patents", "macro", "geo", "stackoverflow", "all"],
-                            help="source to collect")
+    gd_collect.add_argument(
+        "--source",
+        required=True,
+        choices=["trends", "patents", "macro", "geo", "stackoverflow", "all"],
+        help="source to collect",
+    )
     gd_collect.add_argument("--start-date", default=None, help="range start YYYY-MM-DD")
     gd_collect.add_argument("--end-date", default=None, help="range end YYYY-MM-DD")
-    gd_collect.add_argument("--geo", action="append", default=None,
-                            help="geography, e.g. US (repeatable; default US)")
-    gd_collect.add_argument("--company", default=None,
-                            help="documented assignee for --source patents")
-    gd_collect.add_argument("--variable", action="append", default=[],
-                            help="Data Commons variable ID for --source macro, census column or weather hint for --source geo (repeatable)")
-    gd_collect.add_argument("--tag", action="append", default=[],
-                            help="Stack Overflow tag for --source stackoverflow (repeatable)")
-    gd_collect.add_argument("--limit", type=int, default=25,
-                            help="max rows (default 25, capped at 1000)")
+    gd_collect.add_argument("--geo", action="append", default=None, help="geography, e.g. US (repeatable; default US)")
+    gd_collect.add_argument("--company", default=None, help="documented assignee for --source patents")
+    gd_collect.add_argument(
+        "--variable",
+        action="append",
+        default=[],
+        help="Data Commons variable ID for --source macro, census column or weather hint for --source geo (repeatable)",
+    )
+    gd_collect.add_argument(
+        "--tag", action="append", default=[], help="Stack Overflow tag for --source stackoverflow (repeatable)"
+    )
+    gd_collect.add_argument("--limit", type=int, default=25, help="max rows (default 25, capped at 1000)")
     gd_collect.add_argument("--data-root", default=None, help="data root directory (default: repo data/)")
     thesis_common = argparse.ArgumentParser(add_help=False)
-    thesis_common.add_argument("--data-root", default=argparse.SUPPRESS,
-                               help="data root directory (default: $STOCKBOT_DATA_DIR or repo data/)")
-    thesis_parser = subparsers.add_parser("thesis", parents=[thesis_common],
-                                          help="persistent thesis management")
+    thesis_common.add_argument(
+        "--data-root", default=argparse.SUPPRESS, help="data root directory (default: $STOCKBOT_DATA_DIR or repo data/)"
+    )
+    thesis_parser = subparsers.add_parser("thesis", parents=[thesis_common], help="persistent thesis management")
     thesis_sub = thesis_parser.add_subparsers(dest="thesis_command")
     thesis_sub.add_parser("list", parents=[thesis_common], help="list theses")
-    show_parser = thesis_sub.add_parser("show", parents=[thesis_common],
-                                        help="show thesis and assessment")
+    show_parser = thesis_sub.add_parser("show", parents=[thesis_common], help="show thesis and assessment")
     show_parser.add_argument("id", help="thesis ID or slug")
     for _name in ("pause", "resume", "close"):
         _p = thesis_sub.add_parser(_name, parents=[thesis_common], help=f"{_name} a thesis")
         _p.add_argument("id", help="thesis ID or slug")
-    inspect_parser = thesis_sub.add_parser("inspect", parents=[thesis_common],
-                                           help="validate thesis files and show counts")
+    inspect_parser = thesis_sub.add_parser(
+        "inspect", parents=[thesis_common], help="validate thesis files and show counts"
+    )
     inspect_parser.add_argument("id", help="thesis ID or slug")
-    inbox_parser = thesis_sub.add_parser("inbox", parents=[thesis_common],
-                                         help="list triggers and their state")
+    inbox_parser = thesis_sub.add_parser("inbox", parents=[thesis_common], help="list triggers and their state")
     inbox_parser.add_argument("id", help="thesis ID or slug")
-    journal_parser = thesis_sub.add_parser("journal", parents=[thesis_common],
-                                           help="list journal entries (newest first)")
+    journal_parser = thesis_sub.add_parser(
+        "journal", parents=[thesis_common], help="list journal entries (newest first)"
+    )
     journal_parser.add_argument("id", help="thesis ID or slug")
-    journal_parser.add_argument("entry", nargs="?", default=None,
-                                help="print one entry without loading all")
-    tick_parser = thesis_sub.add_parser("tick", parents=[thesis_common],
-                                        help="run one deterministic monitor tick")
+    journal_parser.add_argument("entry", nargs="?", default=None, help="print one entry without loading all")
+    tick_parser = thesis_sub.add_parser("tick", parents=[thesis_common], help="run one deterministic monitor tick")
     tick_parser.add_argument("id", help="thesis ID or slug")
-    tick_parser.add_argument("--known-at", default=None,
-                             help="PIT upper bound ISO timestamp (default: now UTC)")
-    monitor_parser = thesis_sub.add_parser("monitor", parents=[thesis_common],
-                                           help="loop ticks until stopped; paused sleeps without "
-                                           "querying, closed exits 0")
+    tick_parser.add_argument("--known-at", default=None, help="PIT upper bound ISO timestamp (default: now UTC)")
+    monitor_parser = thesis_sub.add_parser(
+        "monitor",
+        parents=[thesis_common],
+        help="loop ticks until stopped; paused sleeps without querying, closed exits 0",
+    )
     monitor_parser.add_argument("id", help="thesis ID or slug")
-    monitor_parser.add_argument("--interval-seconds", type=int, default=900,
-                                help="seconds between ticks (default 900; must be > 0)")
-    monitor_parser.add_argument("--known-at", default=None,
-                                help="PIT upper bound ISO timestamp (default: now UTC per tick)")
-    research_parser = subparsers.add_parser("research", help="create/inspect/list/cancel/retry a research session (state only)")
+    monitor_parser.add_argument(
+        "--interval-seconds", type=int, default=900, help="seconds between ticks (default 900; must be > 0)"
+    )
+    monitor_parser.add_argument(
+        "--known-at", default=None, help="PIT upper bound ISO timestamp (default: now UTC per tick)"
+    )
+    research_parser = subparsers.add_parser(
+        "research", help="create/inspect/list/cancel/retry a research session (state only)"
+    )
     research_sub = research_parser.add_subparsers(dest="research_command")
     research_create = research_sub.add_parser("create", help="create a session and enqueue its first job")
     research_create.add_argument("--question", required=True, help="research question")
     research_create.add_argument("--objective", default=None, help="objective (default: question)")
     research_create.add_argument("--as-of", default=None, help="PIT upper bound ISO timestamp")
-    research_create.add_argument("--interrupt-after", default=None,
-                              choices=["source", "freeze", "one-committee"],
-                              help="test hook recorded on the session so resume can be exercised")
+    research_create.add_argument(
+        "--interrupt-after",
+        default=None,
+        choices=["source", "freeze", "one-committee"],
+        help="test hook recorded on the session so resume can be exercised",
+    )
     research_inspect = research_sub.add_parser("inspect", help="show a research session")
     research_inspect.add_argument("session_id", help="session id")
     research_list = research_sub.add_parser("list", help="list recent research sessions")
@@ -1282,9 +1368,12 @@ def _build_parser() -> argparse.ArgumentParser:
     raw_logs = herdr_sub.add_parser("raw-logs", help="print a pane's recent output (RAW LOGS)")
     raw_logs.add_argument("pane", help="pane id, e.g. wC:p1")
     raw_logs.add_argument("--lines", type=int, default=200, help="max lines (default 200)")
-    raw_logs.add_argument("--source", default="recent",
-                          choices=["visible", "recent", "recent-unwrapped"],
-                          help="terminal snapshot source (default: recent)")
+    raw_logs.add_argument(
+        "--source",
+        default="recent",
+        choices=["visible", "recent", "recent-unwrapped"],
+        help="terminal snapshot source (default: recent)",
+    )
 
     eval_common = argparse.ArgumentParser(add_help=False)
     eval_common.add_argument("--scenario", default=None, help="one scenario (default: all)")
@@ -1300,8 +1389,7 @@ def _build_parser() -> argparse.ArgumentParser:
     eval_inspect.add_argument("eval_run_id", help="eval run id, e.g. eval:abc123")
     eval_promote = eval_sub.add_parser("promote", help="promote a session to a regression fixture")
     eval_promote.add_argument("session_id", help="session id")
-    eval_promote.add_argument("--scenario-name", required=True,
-                              help="scenario, e.g. factual-nvda-datacenter-growth")
+    eval_promote.add_argument("--scenario-name", required=True, help="scenario, e.g. factual-nvda-datacenter-growth")
     eval_promote.add_argument("--question", default=None, help="override the scenario question")
     eval_promote.add_argument("--as-of", default=None, help="override the scenario as_of")
     return parser
@@ -1313,7 +1401,7 @@ def _rewrite_bare_log_server(argv: list[str]) -> list[str]:
     URL so the subcommand still parses and dispatches."""
     for i, arg in enumerate(argv[:-1]):
         if arg == "--log-server" and argv[i + 1] in _SUBCOMMANDS:
-            return argv[:i] + [f"--log-server={_LOG_SERVER_DEFAULT_URL}"] + argv[i + 1:]
+            return argv[:i] + [f"--log-server={_LOG_SERVER_DEFAULT_URL}"] + argv[i + 1 :]
     return argv
 
 
@@ -1349,10 +1437,7 @@ def _run_refresh_obligations(args: argparse.Namespace) -> None:
 
 def _run_evaluate_mandate(args: argparse.Namespace) -> None:
     data_root = args.data_root or None
-    mandate_path = (
-        Path(args.mandate) if args.mandate
-        else Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
-    )
+    mandate_path = Path(args.mandate) if args.mandate else Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
     _cmd_evaluate_mandate(mandate_path, data_root)
 
 
@@ -1361,8 +1446,7 @@ def _run_log_server(args: argparse.Namespace) -> None:
 
 
 def _run_backfill_sec(args: argparse.Namespace) -> None:
-    _cmd_backfill_sec(args.source, args.form, args.from_date, args.to_date,
-                      args.batch_size, args.data_root or None)
+    _cmd_backfill_sec(args.source, args.form, args.from_date, args.to_date, args.batch_size, args.data_root or None)
 
 
 def _run_resume_sec_backfill(args: argparse.Namespace) -> None:
@@ -1370,8 +1454,7 @@ def _run_resume_sec_backfill(args: argparse.Namespace) -> None:
 
 
 def _run_sec_coverage(args: argparse.Namespace) -> None:
-    _cmd_sec_coverage(args.source, args.form, args.from_date, args.to_date,
-                      args.data_root or None)
+    _cmd_sec_coverage(args.source, args.form, args.from_date, args.to_date, args.data_root or None)
 
 
 def _run_trace(args: argparse.Namespace) -> None:

@@ -4,7 +4,7 @@ from __future__ import annotations
 
 from collections.abc import Mapping
 from dataclasses import asdict, dataclass
-from datetime import datetime, timezone
+from datetime import UTC, datetime
 from decimal import Decimal, InvalidOperation
 
 from app.thesis.models import JSONValue
@@ -15,7 +15,7 @@ def _decimal(value: object) -> Decimal | None:
         return None
     try:
         return Decimal(str(value))
-    except (InvalidOperation, ValueError, TypeError):
+    except InvalidOperation, ValueError, TypeError:
         return None
 
 
@@ -42,13 +42,13 @@ def _coerce_retrieved_at(payload: Mapping[str, object], explicit: datetime | Non
     else:
         retrieved = _first_present(payload, "retrieved_at", "retrievedAt", "updated_at", "updatedAt")
         if isinstance(retrieved, str):
-            value = datetime.fromisoformat(retrieved.replace("Z", "+00:00"))
+            value = datetime.fromisoformat(retrieved)
         elif isinstance(retrieved, datetime):
             value = retrieved
         else:
-            value = datetime.now(timezone.utc)
+            value = datetime.now(UTC)
     if value.tzinfo is None:
-        value = value.replace(tzinfo=timezone.utc)
+        value = value.replace(tzinfo=UTC)
     return value
 
 
@@ -134,12 +134,16 @@ def normalize_cash_balance(
     payload: Mapping[str, object], *, account_id: str | None = None, retrieved_at: datetime | None = None
 ) -> CashBalance:
     """Normalize a get_portfolio entry while keeping absent values nullable."""
-    resolved_account_id: object = account_id or _first_present(payload, "account_id", "id", "accountNumber", "account_number", "accountId")
+    resolved_account_id: object = account_id or _first_present(
+        payload, "account_id", "id", "accountNumber", "account_number", "accountId"
+    )
     if resolved_account_id is None:
         raise ValueError("Account response is missing account_id")
     return CashBalance(
         account_id=str(resolved_account_id),
-        cash=_decimal(_first_present(payload, "cash", "cash_available", "cashAvailable", "available_cash", "availableCash")),
+        cash=_decimal(
+            _first_present(payload, "cash", "cash_available", "cashAvailable", "available_cash", "availableCash")
+        ),
         buying_power=_decimal(
             _unwrap_nested(
                 payload,
@@ -165,7 +169,9 @@ def normalize_position(
 ) -> BrokeragePosition:
     """Normalize a get_equity_positions entry while keeping absent values nullable."""
     position_id = str(_first_present(payload, "position_id", "id", "positionId") or "")
-    resolved_account_id: object = account_id or _first_present(payload, "account_id", "accountId", "account_number", "accountNumber")
+    resolved_account_id: object = account_id or _first_present(
+        payload, "account_id", "accountId", "account_number", "accountNumber"
+    )
     if resolved_account_id is None:
         raise ValueError("Position response is missing account_id")
     ticker = str(_first_present(payload, "ticker", "symbol", "instrument_symbol", "instrumentSymbol") or "").upper()

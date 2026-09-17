@@ -11,7 +11,7 @@ from __future__ import annotations
 import os
 import re
 from collections.abc import Callable
-from datetime import datetime, timedelta, timezone
+from datetime import UTC, datetime, timedelta
 from pathlib import Path
 from typing import Protocol
 
@@ -26,8 +26,10 @@ _MAX_STATS = 100
 _DEFAULT_COUNTRIES = ("US",)
 _DATE_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
+
 class _Submitter(Protocol):
     """Anything submit_template-compatible: the real client or a test double."""
+
     def submit_template(self, template: str, params: dict[str, object]) -> dict[str, object]: ...
 
 
@@ -40,18 +42,20 @@ def _data_enabled() -> bool:
 
 def _submit_failure(exc: Exception) -> dict[str, object]:
     """Fixed-shape executor failure; LedgerCorrupt is never wrapped here."""
-    return {"status": "error", "source": SOURCE,
-            "error": f"{SOURCE} query failed: {exc}", "error_type": "executor_error"}
+    return {
+        "status": "error",
+        "source": SOURCE,
+        "error": f"{SOURCE} query failed: {exc}",
+        "error_type": "executor_error",
+    }
 
 
-def _submit_via_client(template: str, params: dict[str, object],
-                       data_root: Path | None) -> dict[str, object]:
+def _submit_via_client(template: str, params: dict[str, object], data_root: Path | None) -> dict[str, object]:
     """Submit through the real BigQuery client; import failure stays fixed-shape."""
     try:
         from . import bigquery_client as _bq
     except ImportError:
-        return {"error": "bigquery client unavailable",
-                "error_type": "source_unavailable", "source": "bigquery"}
+        return {"error": "bigquery client unavailable", "error_type": "source_unavailable", "source": "bigquery"}
     try:
         return _bq.submit_template(template, params, data_root=data_root)
     except Exception as exc:
@@ -60,8 +64,7 @@ def _submit_via_client(template: str, params: dict[str, object],
         return _submit_failure(exc)
 
 
-def _direct_submit(template: str, params: dict[str, object],
-                   executor: _Executor) -> dict[str, object]:
+def _direct_submit(template: str, params: dict[str, object], executor: _Executor) -> dict[str, object]:
     """Submit through a caller-provided callable or test-double client."""
     try:
         if callable(executor):
@@ -73,16 +76,25 @@ def _direct_submit(template: str, params: dict[str, object],
         return _submit_failure(exc)
 
 
-def _submit(template: str, params: dict[str, object], executor: _Executor | None,
-            data_root: Path | None) -> dict[str, object]:
+def _submit(
+    template: str, params: dict[str, object], executor: _Executor | None, data_root: Path | None
+) -> dict[str, object]:
     if executor is None:
         return _submit_via_client(template, params, data_root)
     return _direct_submit(template, params, executor)
 
 
-_UNAVAILABLE = frozenset({"billing_enabled", "billing_unknown", "cost_limit_exceeded",
-                          "monthly_limit_exceeded", "daily_limit_exceeded",
-                          "source_unavailable", "ledger_corrupt"})
+_UNAVAILABLE = frozenset(
+    {
+        "billing_enabled",
+        "billing_unknown",
+        "cost_limit_exceeded",
+        "monthly_limit_exceeded",
+        "daily_limit_exceeded",
+        "source_unavailable",
+        "ledger_corrupt",
+    }
+)
 
 
 def _wrap_error(result: dict[str, object]) -> dict[str, object]:
@@ -100,9 +112,12 @@ def _date_error(label: str, value: str | None) -> dict[str, object] | None:
     if value is None:
         return None
     if not isinstance(value, str) or not _DATE_RE.match(value):
-        return {"status": "error", "source": SOURCE,
-                "error": f"invalid {label}: {value!r} (YYYY-MM-DD)",
-                "error_type": "invalid_params"}
+        return {
+            "status": "error",
+            "source": SOURCE,
+            "error": f"invalid {label}: {value!r} (YYYY-MM-DD)",
+            "error_type": "invalid_params",
+        }
     return None
 
 
@@ -113,17 +128,26 @@ def _check_dates(
     if start_date is None and end_date is None:
         return None, None, None
     if (start_date is None) != (end_date is None):
-        return ({"status": "error", "source": SOURCE,
-                 "error": "start_date and end_date must both be set or both omitted (YYYY-MM-DD)",
-                 "error_type": "invalid_params"}, None, None)
+        return (
+            {
+                "status": "error",
+                "source": SOURCE,
+                "error": "start_date and end_date must both be set or both omitted (YYYY-MM-DD)",
+                "error_type": "invalid_params",
+            },
+            None,
+            None,
+        )
     for label, value in (("start_date", start_date), ("end_date", end_date)):
         err = _date_error(label, value)
         if err is not None:
             return err, None, None
     if start_date and end_date and start_date > end_date:
-        return ({"status": "error", "source": SOURCE,
-                 "error": "start_date after end_date", "error_type": "invalid_params"},
-                None, None)
+        return (
+            {"status": "error", "source": SOURCE, "error": "start_date after end_date", "error_type": "invalid_params"},
+            None,
+            None,
+        )
     return None, start_date, end_date
 
 
@@ -138,13 +162,22 @@ def _company_error(
 ) -> tuple[dict[str, object] | None, list[str]]:
     """Invalid-params error plus cleaned assignee aliases, else (None, aliases)."""
     if not company_id or not company_id.strip():
-        return ({"status": "error", "source": SOURCE,
-                 "error": "company_id is required", "error_type": "invalid_params"}, [])
+        return (
+            {"status": "error", "source": SOURCE, "error": "company_id is required", "error_type": "invalid_params"},
+            [],
+        )
     cleaned = _clean_list(assignees) + _clean_list(aliases)
     if not cleaned:
-        return ({"status": "unavailable", "source": SOURCE,
-                 "reason": "documented assignee aliases required; never inferred",
-                 "error": "assignees required", "error_type": "source_unavailable"}, [])
+        return (
+            {
+                "status": "unavailable",
+                "source": SOURCE,
+                "reason": "documented assignee aliases required; never inferred",
+                "error": "assignees required",
+                "error_type": "source_unavailable",
+            },
+            [],
+        )
     return None, cleaned
 
 
@@ -167,8 +200,7 @@ def _project_name() -> str | None:
 
 def _disabled_error() -> dict[str, object]:
     """Fixed-shape error when google data is off or no project is set."""
-    return {"status": "disabled", "source": SOURCE,
-            "reason": "google data disabled or no BigQuery project"}
+    return {"status": "disabled", "source": SOURCE, "reason": "google data disabled or no BigQuery project"}
 
 
 def _project_error() -> dict[str, object] | None:
@@ -184,27 +216,33 @@ def _clamp_limit(limit: int, cap: int) -> tuple[dict[str, object] | None, int]:
     """Clamped limit or (invalid-params error, cap)."""
     try:
         return None, max(1, min(limit, cap))
-    except (TypeError, ValueError):
-        return ({"status": "error", "source": SOURCE,
-                 "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"}, cap)
+    except TypeError, ValueError:
+        return (
+            {"status": "error", "source": SOURCE, "error": f"invalid limit: {limit!r}", "error_type": "invalid_params"},
+            cap,
+        )
 
 
-def _trailing_window(
-    start_date: str | None, end_date: str | None
-) -> tuple[str | None, str | None]:
+def _trailing_window(start_date: str | None, end_date: str | None) -> tuple[str | None, str | None]:
     """Dateless pair becomes the bounded trailing 5-year window."""
     if start_date is None and end_date is None:
-        today = datetime.now(timezone.utc).date()
+        today = datetime.now(UTC).date()
         start = (today - timedelta(days=1825)).isoformat()
         return start, today.isoformat()
     return start_date, end_date
 
 
-def _patent_params(assignees: list[str], countries: list[str], limit: int,
-                   start_date: str | None, end_date: str | None) -> dict[str, object]:
+def _patent_params(
+    assignees: list[str], countries: list[str], limit: int, start_date: str | None, end_date: str | None
+) -> dict[str, object]:
     """Executor params with YYYYMMDD bounds only when dated."""
-    params: dict[str, object] = {"assignees": assignees, "country_codes": countries,
-                                 "limit": limit, "collector_version": "1", "sql_version": "1"}
+    params: dict[str, object] = {
+        "assignees": assignees,
+        "country_codes": countries,
+        "limit": limit,
+        "collector_version": "1",
+        "sql_version": "1",
+    }
     if start_date is not None:
         params["start_yyyymmdd"] = int(start_date.replace("-", ""))
     if end_date is not None:
@@ -251,17 +289,20 @@ def _stats_year(row: object) -> tuple[str, int]:
         return "gap", 0
     try:
         return "ok", int(raw)
-    except (TypeError, ValueError):
+    except TypeError, ValueError:
         return "gap", 0
 
 
 def _add_counts(bucket: dict[str, object], row: dict[str, object]) -> None:
     """Accumulate pub/family/citation counts; bad values keep the bucket."""
-    for key, field in (("pub_count", "pub_count"), ("family_count", "family_count"),
-                       ("total_citations", "total_citations")):
+    for key, field in (
+        ("pub_count", "pub_count"),
+        ("family_count", "family_count"),
+        ("total_citations", "total_citations"),
+    ):
         try:
             bucket[field] = as_int(bucket.get(field, 0), what=field) + as_int(row.get(key) or 0, what=key)
-        except (TypeError, ValueError):
+        except TypeError, ValueError:
             pass
 
 
@@ -292,8 +333,7 @@ def _add_cpc(bucket: dict[str, object], row: dict[str, object]) -> None:
 def _top_cpc(bucket: dict[str, object]) -> str:
     """Highest-count inventive CPC or __NONE__ when the bucket has none."""
     counts = _clean_cpc_counts(bucket.get("cpc_counts"))
-    ranked = sorted(((n, c) for c, n in counts.items() if c != "__NONE__"),
-                    reverse=True)
+    ranked = sorted(((n, c) for c, n in counts.items() if c != "__NONE__"), reverse=True)
     return ranked[0][1] if ranked else "__NONE__"
 
 
@@ -302,10 +342,15 @@ def _summarize_years(by_year: dict[int, dict[str, object]]) -> list[dict[str, ob
     years: list[dict[str, object]] = []
     for year in sorted(by_year):
         bucket = by_year[year]
-        years.append({"pub_year": year, "pub_count": bucket["pub_count"],
-                      "family_count": bucket["family_count"],
-                      "total_citations": bucket["total_citations"],
-                      "top_cpc": _top_cpc(bucket)})
+        years.append(
+            {
+                "pub_year": year,
+                "pub_count": bucket["pub_count"],
+                "family_count": bucket["family_count"],
+                "total_citations": bucket["total_citations"],
+                "top_cpc": _top_cpc(bucket),
+            }
+        )
     return years
 
 
@@ -324,21 +369,24 @@ def _accumulate_stats(
             continue
         if not isinstance(row, dict):
             continue
-        bucket = by_year.setdefault(year, {"pub_count": 0, "family_count": 0,
-                                           "total_citations": 0, "cpc_counts": {}})
+        bucket = by_year.setdefault(year, {"pub_count": 0, "family_count": 0, "total_citations": 0, "cpc_counts": {}})
         _add_counts(bucket, row)
         _add_cpc(bucket, row)
     return by_year, gaps
 
 
-
-def search_company_patents(company_id: str, *, start_date: str | None = None,
-                           end_date: str | None = None, limit: int = 20,
-                           assignees: list[str] | None = None,
-                           aliases: list[str] | None = None,
-                           country_codes: list[str] | None = None,
-                           executor: _Executor | None = None,
-                           data_root: Path | None = None) -> dict[str, object]:
+def search_company_patents(
+    company_id: str,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    limit: int = 20,
+    assignees: list[str] | None = None,
+    aliases: list[str] | None = None,
+    country_codes: list[str] | None = None,
+    executor: _Executor | None = None,
+    data_root: Path | None = None,
+) -> dict[str, object]:
     """Publications for documented assignee aliases; empty aliases refuse."""
     comp_err, names = _company_error(company_id, assignees, aliases)
     if comp_err is not None:
@@ -359,17 +407,26 @@ def search_company_patents(company_id: str, *, start_date: str | None = None,
     if not isinstance(result, dict) or "error" in result:
         return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
     publications = _collect_publications(result_rows(result), limit)
-    return {"status": "ok", "source": SOURCE, "company_id": company_id.strip(),
-            "publications": publications, "count": len(publications)}
+    return {
+        "status": "ok",
+        "source": SOURCE,
+        "company_id": company_id.strip(),
+        "publications": publications,
+        "count": len(publications),
+    }
 
 
-def get_assignee_stats(company_id: str, *, start_date: str | None = None,
-                       end_date: str | None = None,
-                       assignees: list[str] | None = None,
-                       aliases: list[str] | None = None,
-                       country_codes: list[str] | None = None,
-                       executor: _Executor | None = None,
-                       data_root: Path | None = None) -> dict[str, object]:
+def get_assignee_stats(
+    company_id: str,
+    *,
+    start_date: str | None = None,
+    end_date: str | None = None,
+    assignees: list[str] | None = None,
+    aliases: list[str] | None = None,
+    country_codes: list[str] | None = None,
+    executor: _Executor | None = None,
+    data_root: Path | None = None,
+) -> dict[str, object]:
     """Yearly publication/family/citation aggregates plus top inventive CPC.
 
     Null publication dates become gaps (excluded, counted); null citations
@@ -392,5 +449,4 @@ def get_assignee_stats(company_id: str, *, start_date: str | None = None,
         return _wrap_error(result if isinstance(result, dict) else {"error": "bad executor result"})
     by_year, gaps = _accumulate_stats(result_rows(result))
     years = _summarize_years(by_year)
-    return {"status": "ok", "source": SOURCE, "company_id": company_id.strip(),
-            "years": years, "gaps": gaps}
+    return {"status": "ok", "source": SOURCE, "company_id": company_id.strip(), "years": years, "gaps": gaps}

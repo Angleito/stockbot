@@ -83,7 +83,14 @@ def _solo_line(label: str, ids: list[str]) -> str | None:
     return f"{label}-only evidence: {', '.join(ids[:5])}"
 
 
-def _stance_lines(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis, stock_refs: list[str], bull_refs: list[str], bear_refs: list[str]) -> tuple[list[str], list[str]]:
+def _stance_lines(
+    stock: StockbotAnalysis,
+    bull: BullAnalysis,
+    bear: BearAnalysis,
+    stock_refs: list[str],
+    bull_refs: list[str],
+    bear_refs: list[str],
+) -> tuple[list[str], list[str]]:
     disagreement = [
         f"bull ({bull.stance}) vs bear ({bear.stance}) on: {stock.question}",
         f"base cites {len(stock_refs)} items; bull {len(bull_refs)}; bear {len(bear_refs)}",
@@ -97,9 +104,7 @@ def _stance_lines(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysi
     return _shared_lines(stock_refs, bull_refs, bear_refs), disagreement
 
 
-def _merge_requests(
-    stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis
-) -> list[ResearchRequest]:
+def _merge_requests(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis) -> list[ResearchRequest]:
     seen: dict[str, ResearchRequest] = {}
     for request in (*stock.research_requests, *bull.research_requests, *bear.research_requests):
         prior = seen.get(request.question)
@@ -163,21 +168,43 @@ def _channel_conflicts(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAn
 
 
 _SPLIT_SIDES: tuple[tuple[str, tuple[str, ...], str, str], ...] = (
-    ("bullish", ("executive_view", "bull_case"), "bullish read stands on bull-only evidence", "bearish read disputes the bullish read"),
-    ("bearish", ("executive_view", "bear_case"), "bullish read disputes the bearish read", "bearish read stands on bear-only evidence"),
+    (
+        "bullish",
+        ("executive_view", "bull_case"),
+        "bullish read stands on bull-only evidence",
+        "bearish read disputes the bullish read",
+    ),
+    (
+        "bearish",
+        ("executive_view", "bear_case"),
+        "bullish read disputes the bearish read",
+        "bearish read stands on bear-only evidence",
+    ),
 )
 
 
-def _critical_split(stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis, bull_refs: list[str], bear_refs: list[str]) -> list[CriticalDisagreement]:
+def _critical_split(
+    stock: StockbotAnalysis, bull: BullAnalysis, bear: BearAnalysis, bull_refs: list[str], bear_refs: list[str]
+) -> list[CriticalDisagreement]:
     """One preserved split per bull/bear-only evidence branch (empty when stances fully overlap)."""
-    only = {"bullish": [eid for eid in bull_refs if eid not in bear_refs], "bearish": [eid for eid in bear_refs if eid not in bull_refs]}
+    only = {
+        "bullish": [eid for eid in bull_refs if eid not in bear_refs],
+        "bearish": [eid for eid in bear_refs if eid not in bull_refs],
+    }
     views = {"bullish": _member_view(bull, _SPLIT_SIDES[0][1]), "bearish": _member_view(bear, _SPLIT_SIDES[1][1])}
     out: list[CriticalDisagreement] = []
     for stance, keys, bull_fallback, bear_fallback in _SPLIT_SIDES:
         ids = only[stance]
         if ids:
             view = views[stance]
-            out.append(CriticalDisagreement(question=f"How far does the {stance} read of {stock.question} hold?", bull=view or bull_fallback, bear=view or bear_fallback, evidence_ids=ids[:10]))
+            out.append(
+                CriticalDisagreement(
+                    question=f"How far does the {stance} read of {stock.question} hold?",
+                    bull=view or bull_fallback,
+                    bear=view or bear_fallback,
+                    evidence_ids=ids[:10],
+                )
+            )
     return out
 
 

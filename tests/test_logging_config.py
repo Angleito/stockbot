@@ -55,26 +55,35 @@ def test_stream_url_configures_debug_and_stream_handler():
         assert len(stream_handlers) == 1
 
 
-def test_security_event_logged_at_info(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture):
+def test_security_event_logged_at_info(
+    monkeypatch: pytest.MonkeyPatch, tmp_path: Path, caplog: pytest.LogCaptureFixture
+):
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
     recorder = RunRecorder(
-        run_id="run-log-sec-1", request_id="req", question="q", as_of=None,
-        model="test", provider="p", model_parameters={}, agent_version="0.1",
-        prompt_version="2", tool_registry_version="x", git_sha="s",
+        run_id="run-log-sec-1",
+        request_id="req",
+        question="q",
+        as_of=None,
+        model="test",
+        provider="p",
+        model_parameters={},
+        agent_version="0.1",
+        prompt_version="2",
+        tool_registry_version="x",
+        git_sha="s",
         data_root=tmp_path,
     )
-    with recorder:
-        with caplog.at_level(logging.INFO):
-            recorder.record_security_event(
-                source="sec", sha256="h", score=0, verdict="ALLOW",
-                rule_ids=["sec"], decision="allowed", reason="ok",
-            )
-    matches = [
-        r.getMessage()
-        for r in caplog.records
-        if r.getMessage().startswith("security event:")
-    ]
+    with recorder, caplog.at_level(logging.INFO):
+        recorder.record_security_event(
+            source="sec",
+            sha256="h",
+            score=0,
+            verdict="ALLOW",
+            rule_ids=["sec"],
+            decision="allowed",
+            reason="ok",
+        )
+    matches = [r.getMessage() for r in caplog.records if r.getMessage().startswith("security event:")]
     assert len(matches) == 1
     assert "decision=allowed" in matches[0]
     assert "source=sec" in matches[0]
-

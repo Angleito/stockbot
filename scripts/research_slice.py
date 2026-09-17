@@ -18,9 +18,21 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.analytics import screens  # noqa: E402
+from app.analytics import screens
 
-TABLE_HEADERS = ("Rank", "Ticker", "Short now", "Short prior", "Short chg %", "SI % now", "SI % prior", "PP chg", "Shares now", "Shares prior", "Shares chg %")
+TABLE_HEADERS = (
+    "Rank",
+    "Ticker",
+    "Short now",
+    "Short prior",
+    "Short chg %",
+    "SI % now",
+    "SI % prior",
+    "PP chg",
+    "Shares now",
+    "Shares prior",
+    "Shares chg %",
+)
 
 
 def _fmt(value: object) -> str:  # object: screen rows are untyped app-side dicts; display-only, never flows back
@@ -55,10 +67,16 @@ def extract_entries(result: dict[str, object]) -> list[dict[str, object]]:
 def build_rows(entries: list[dict[str, object]]) -> list[tuple[str, ...]]:
     return [
         (
-            str(e["rank"]), str(e["ticker"]), _fmt(e["short_shares_current"]), _fmt(e["short_shares_prior"]),
-            _fmt(e["short_change_pct"]), _fmt(e["short_interest_percent_current"]),
-            _fmt(e["short_interest_percent_prior"]), _fmt(e["si_pp_change"]),
-            _fmt(e["shares_outstanding_current"]), _fmt(e["shares_outstanding_prior"]),
+            str(e["rank"]),
+            str(e["ticker"]),
+            _fmt(e["short_shares_current"]),
+            _fmt(e["short_shares_prior"]),
+            _fmt(e["short_change_pct"]),
+            _fmt(e["short_interest_percent_current"]),
+            _fmt(e["short_interest_percent_prior"]),
+            _fmt(e["si_pp_change"]),
+            _fmt(e["shares_outstanding_current"]),
+            _fmt(e["shares_outstanding_prior"]),
             _fmt(e["shares_change_pct"]),
         )
         for e in entries
@@ -104,9 +122,13 @@ def format_evidence(entries: list[dict[str, object]]) -> str:
         lines.append(f"  {e['ticker']}:")
         lines.append(f"    FINRA snapshot: {e['finra_source_url']} (settlement {e['settlement_current']})")
         if e["sec_accession_current"]:
-            lines.append(f"    Shares fact (now): {e['sec_source_url_current']} accession {e['sec_accession_current']} filed {e['sec_filed_at_current']}")
+            lines.append(
+                f"    Shares fact (now): {e['sec_source_url_current']} accession {e['sec_accession_current']} filed {e['sec_filed_at_current']}"
+            )
         if e["sec_accession_prior"]:
-            lines.append(f"    Shares fact (prior): {e['sec_source_url_prior']} accession {e['sec_accession_prior']} filed {e['sec_filed_at_prior']}")
+            lines.append(
+                f"    Shares fact (prior): {e['sec_source_url_prior']} accession {e['sec_accession_prior']} filed {e['sec_filed_at_prior']}"
+            )
     return "\n".join(lines)
 
 

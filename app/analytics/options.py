@@ -2,14 +2,15 @@
 
 from __future__ import annotations
 
-from datetime import date, datetime, timezone
+from collections.abc import Iterable
+from datetime import UTC, date, datetime
 from decimal import Decimal
-from typing import Iterable
 
 from ..robinhood.options import OptionQuote
 
 ZERO = Decimal(0)
 CONTRACT_MULTIPLIER = Decimal(100)
+
 
 def _ratio(numerator: Decimal | None, denominator: Decimal | None) -> Decimal | None:
     if numerator is None or denominator is None or denominator == ZERO:
@@ -19,7 +20,7 @@ def _ratio(numerator: Decimal | None, denominator: Decimal | None) -> Decimal | 
 
 def _as_of(value: date | datetime | None) -> date:
     if value is None:
-        return datetime.now(timezone.utc).date()
+        return datetime.now(UTC).date()
     return value.date() if isinstance(value, datetime) else value
 
 
@@ -54,7 +55,9 @@ def _intrinsic_value(quote: OptionQuote) -> Decimal | None:
 
 
 def _payoff_grade(
-    quote: OptionQuote, mid: Decimal | None, premium_per_contract: Decimal | None,
+    quote: OptionQuote,
+    mid: Decimal | None,
+    premium_per_contract: Decimal | None,
     target_price: Decimal | int | str | None,
 ) -> dict[str, object]:
     """Target-price payoff block (existing section boundary)."""
@@ -98,7 +101,9 @@ def _s(value: object) -> str | None:
     return str(value) if value is not None else None
 
 
-def _observable_fields(quote: OptionQuote, dte: int, mid: Decimal | None, spread: Decimal | None, spread_pct: Decimal | None) -> dict[str, object]:
+def _observable_fields(
+    quote: OptionQuote, dte: int, mid: Decimal | None, spread: Decimal | None, spread_pct: Decimal | None
+) -> dict[str, object]:
     """Quote passthrough + expiry/spread block (existing section boundary)."""
     return {
         "contract_id": quote.contract_id,
@@ -125,7 +130,13 @@ def _observable_fields(quote: OptionQuote, dte: int, mid: Decimal | None, spread
     }
 
 
-def _derived_fields(quote: OptionQuote, intrinsic: Decimal | None, extrinsic: Decimal | None, breakeven: Decimal | None, premium_per_contract: Decimal | None) -> dict[str, object]:
+def _derived_fields(
+    quote: OptionQuote,
+    intrinsic: Decimal | None,
+    extrinsic: Decimal | None,
+    breakeven: Decimal | None,
+    premium_per_contract: Decimal | None,
+) -> dict[str, object]:
     """Derived value block (existing section boundary)."""
     distance = quote.strike - quote.underlying_price if quote.underlying_price is not None else None
     return {
@@ -137,6 +148,7 @@ def _derived_fields(quote: OptionQuote, intrinsic: Decimal | None, extrinsic: De
         "retrieved_at": quote.retrieved_at.isoformat(),
         "source": quote.source,
     }
+
 
 def analyze_option(
     quote: OptionQuote,

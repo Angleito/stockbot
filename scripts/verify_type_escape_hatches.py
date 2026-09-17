@@ -1,5 +1,6 @@
 #!/usr/bin/env python3
 """Zero-tolerance tripwire for type-escape hatches."""
+
 import ast
 import re
 from pathlib import Path
@@ -29,10 +30,12 @@ def _iter_scan_dir(root: Path, name: str):
             continue
         yield p
 
+
 def _iter_scan_file(root: Path, name: str):
     p = root / name
     if p.is_file():
         yield p
+
 
 def _iter_files(root: Path):
     for name in SCAN_DIRS:
@@ -94,6 +97,7 @@ def _bind_star_alias(bindings: _TypeBindings) -> None:
     bindings.any_names.add("Any")
     bindings.ntc_names.add("no_type_check")
 
+
 def _bind_named_alias(alias: ast.alias, bound: str, bindings: _TypeBindings) -> bool:
     if alias.name == "cast":
         bindings.cast_names.add(bound)
@@ -105,9 +109,8 @@ def _bind_named_alias(alias: ast.alias, bound: str, bindings: _TypeBindings) -> 
         return False
     return True
 
-def _bind_from_alias(
-    alias: ast.alias, bindings: _TypeBindings, collector: _FileHits, lineno: int
-) -> None:
+
+def _bind_from_alias(alias: ast.alias, bindings: _TypeBindings, collector: _FileHits, lineno: int) -> None:
     bound = alias.asname if alias.asname is not None else alias.name
     if alias.name == "*":
         _bind_star_alias(bindings)
@@ -129,6 +132,7 @@ def _bind_from_import(node: ast.ImportFrom, bindings: _TypeBindings, collector: 
     for alias in node.names:
         _bind_from_alias(alias, bindings, collector, node.lineno)
 
+
 def _bind_imports(tree: ast.AST, bindings: _TypeBindings, collector: _FileHits) -> None:
     for node in ast.walk(tree):
         if isinstance(node, ast.ImportFrom):
@@ -144,6 +148,7 @@ def _flag_namespaced_cast(func: ast.Attribute, bindings: _TypeBindings, collecto
     if isinstance(target, ast.Name) and target.id in bindings.mod_aliases:
         collector.flag(lineno)
 
+
 def _flag_call(node: ast.Call, bindings: _TypeBindings, collector: _FileHits) -> None:
     func = node.func
     if isinstance(func, ast.Name):
@@ -158,9 +163,7 @@ def _flag_name(node: ast.Name, bindings: _TypeBindings, collector: _FileHits) ->
         collector.flag(node.lineno)
 
 
-def _flag_namespaced_decorator(
-    dec: ast.Attribute, bindings: _TypeBindings, collector: _FileHits
-) -> None:
+def _flag_namespaced_decorator(dec: ast.Attribute, bindings: _TypeBindings, collector: _FileHits) -> None:
     if dec.attr != "no_type_check":
         return
     target = dec.value
@@ -194,12 +197,11 @@ def _flag_any_attr(node: ast.Attribute, bindings: _TypeBindings, collector: _Fil
 
 
 def _flag_assign_sub(sub: ast.AST, collector: _FileHits, lineno: int) -> None:
-    if isinstance(sub, ast.Name):
-        if sub.id == "__no_type_check__":
-            collector.flag(lineno)
-    elif isinstance(sub, ast.Attribute):
-        if sub.attr == "__no_type_check__":
-            collector.flag(lineno)
+    is_name = isinstance(sub, ast.Name) and sub.id == "__no_type_check__"
+    is_attr = isinstance(sub, ast.Attribute) and sub.attr == "__no_type_check__"
+    if is_name or is_attr:
+        collector.flag(lineno)
+
 
 def _flag_assign_target(target: ast.expr, collector: _FileHits, lineno: int) -> None:
     for sub in ast.walk(target):
@@ -223,6 +225,7 @@ def _flag_one_usage(node: ast.AST, bindings: _TypeBindings, collector: _FileHits
         _flag_any_attr(node, bindings, collector)
     elif isinstance(node, (ast.Assign, ast.AnnAssign)):
         _flag_assignment(node, collector)
+
 
 def _flag_usages(tree: ast.AST, bindings: _TypeBindings, collector: _FileHits) -> None:
     for node in ast.walk(tree):
@@ -249,6 +252,7 @@ def _scan_one(root: Path, path: Path, found: list[str]) -> None:
     if text is None:
         return
     _scan_text(path.relative_to(root).as_posix(), text, found)
+
 
 def scan(root: Path) -> list[str]:
     found: list[str] = []
