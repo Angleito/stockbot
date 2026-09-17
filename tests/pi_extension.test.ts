@@ -602,8 +602,9 @@ import {
 	type YoutubeAnalyticsRequest,
 } from "../.omp/lib/youtube-analytics.ts";
 import {
-	normalizeAccession,
 	advanceOnAgentEnd,
+	normalizeAccession,
+	validateProvenance,
 	pitUnverified,
 	pitViolated,
 	planTaskCall,
@@ -2920,6 +2921,19 @@ test("Accession parity mirrors kernel normalization", () => {
 	}), { seed: 42 });
 	// Shared-corpus differential 2026-09-17: agree=3 pinned-diverge=9 bad=0 total=12
 	// (pinned: Python raises on non-canonical, TS null=no-verdict; kernel authoritative).
+});
+test("Provenance parity mirrors kernel shape validation", () => {
+	expect(validateProvenance({})).toEqual({});
+	expect(validateProvenance({ kind: "none" })).toEqual({ kind: "none" });
+	expect(validateProvenance({ kind: "search_run", search_id: "s1", query: "NVDA filings" })).toEqual({ kind: "search_run", search_id: "s1", query: "NVDA filings" });
+	const sec = validateProvenance({ kind: "sec_source", accession_no: "000032019325000079", document_name: "10-K", passage: "revenue rose" });
+	expect(sec).toEqual({ kind: "sec_source", accession_no: "0000320193-25-000079", document_name: "10-K", passage: "revenue rose", source_uri: null });
+	for (const bad of [null, undefined, 42, "x", [], { kind: "bogus" }, { kind: "search_run", search_id: "", query: "q" }, { kind: "search_run", search_id: "s" }, { kind: "sec_source", accession_no: "bad", document_name: "d", passage: "p" }, { kind: "sec_source", accession_no: "0000320193-25-000079", document_name: "", passage: "p" }, { kind: "sec_source", accession_no: "0000320193-25-000079", document_name: "d" }]) {
+		expect(validateProvenance(bad)).toBeNull();
+	}
+	// Shared-corpus differential 2026-09-17: pinned raise-vs-null (Python raises
+	// EvidenceIntegrityError, TS null=no-verdict; kernel authoritative).
+	// Cross-checked 2026-09-17: agree=6 pinned-diverge=13 bad=0 total=19.
 });
 
 test("committee results record three analyses", async () => {

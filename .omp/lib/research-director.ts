@@ -319,6 +319,38 @@ export function normalizeAccession(value: unknown): string | null {
  const text = /^\d{18}$/.test(text0) ? `${text0.slice(0, 10)}-${text0.slice(10, 12)}-${text0.slice(12)}` : text0;
  return ACCESSION_RE.test(text) ? text : null;
 }
+// Provenance parity mirror (kernel stays authoritative): pure shape mirror of
+// app/research/evidence.py validate_provenance + sec_source_ref/search_run_ref.
+// Export + test only, never called in prod paths. Python RAISES
+// EvidenceIntegrityError on bad shape; this mirror returns null instead
+// ("no verdict", never "valid"). A TS consumer must treat null as invalid.
+const PROVENANCE_KINDS: Record<string, true> = { sec_source: true, search_run: true, none: true };
+function provStr(v: unknown): string | null {
+ return typeof v === "string" && v.trim() ? v : null;
+}
+export function validateProvenance(value: unknown): Json | null {
+ if (value === null || value === undefined || typeof value !== "object" || Array.isArray(value)) return null;
+ const prov = value as Json;
+ const keys = Object.keys(prov);
+ if (keys.length === 0) return {};
+ const kind = prov.kind;
+ if (typeof kind !== "string" || !PROVENANCE_KINDS[kind]) return null;
+ if (kind === "none") return { kind: "none" };
+ if (kind === "search_run") {
+  const sid = provStr(prov.search_id);
+  const query = provStr(prov.query);
+  if (sid === null || query === null) return null;
+  return { kind: "search_run", search_id: sid.trim(), query: query.trim() };
+ }
+ const acc = normalizeAccession(prov.accession_no);
+ const doc = provStr(prov.document_name);
+ const passage = provStr(prov.passage);
+ if (acc === null || doc === null || passage === null) return null;
+ const out: Json = { kind: "sec_source", accession_no: acc, document_name: doc.trim(), passage: passage.trim() };
+ if (typeof prov.source_uri === "string" && prov.source_uri.trim()) out.source_uri = prov.source_uri.trim();
+ else out.source_uri = null;
+ return out;
+}
 
 async function inspect(sessionId: string, dataRoot?: string, asOf?: string): Promise<InspectSnapshot> {
  const res = await rpc("research.session.inspect", { session_id: sessionId }, dataRoot, asOf);
