@@ -242,8 +242,7 @@ def run_trigger(
     rid = new_run_id()
     prompt = _build_prompt(thesis_id=tid, trigger=trigger, data_cutoff=known_at, ctx=ctx, run_id=rid)
     try:
-        run_thesis_omp(thesis_id=tid, trigger_id=trigger.trigger_id,
-                       prompt=prompt, data_root=data_root, run_id=rid)
+        run_thesis_omp(thesis_id=tid, trigger_id=trigger.trigger_id, prompt=prompt, data_root=data_root, run_id=rid)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
         if not repository.has_journal_for_trigger(tid, trigger.trigger_id, run_id=rid):
             raise RuntimeError(
