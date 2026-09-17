@@ -43,7 +43,7 @@ from scripts.verify_tool_registry import (
     tool_schema_name,
 )
 
-EXTENSION = ".stockbot/omp/index.ts"
+EXTENSION = ".stockbot/omp"
 # Duration evidence (2026-09-09 matrix): every recorded tool handler completes
 # in seconds (slowest singles: search_sec_filings 39s, search_sec_relationships
 # 25s; SEC per-filing sweeps ~0.6s each warm). The 180s kills all landed

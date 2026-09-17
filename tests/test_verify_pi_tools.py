@@ -420,7 +420,7 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
     assert len(captured_cmds) == 2
     for cmd in captured_cmds:
         assert "--config" in cmd
-        assert ".omp/stockbot.yml" in cmd
+        assert ".stockbot/omp/stockbot.yml" in cmd
         assert "--no-extensions" in cmd
         assert "--no-skills" in cmd
         assert "--no-rules" in cmd
@@ -431,7 +431,7 @@ def test_per_attempt_env_carries_distinct_stores(tmp_path: Path, monkeypatch: py
         assert cmd.index("--no-rules") < cmd.index("--")
         assert cmd[-2] == "--"
         assert cmd[-1] == "prompt"
-        assert cmd[:11] == ["omp", "-p", "--config", ".omp/stockbot.yml", "--no-session", "--no-extensions",
+        assert cmd[:11] == ["omp", "-p", "--config", ".stockbot/omp/stockbot.yml", "--no-session", "--no-extensions",
                            "--no-skills", "--no-rules", "--no-tools", "--extension", v.EXTENSION]
 
 

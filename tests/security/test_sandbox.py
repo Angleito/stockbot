@@ -10,6 +10,8 @@ from pathlib import Path
 import pytest
 import yaml
 
+import app.thesis.omp_runner as omp_runner
+
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "docker-compose.yml"
 SPEC = ROOT / "sandbox" / "stockbot" / "spec.yaml"
@@ -151,15 +153,16 @@ def test_egress_allowlist_no_forbidden():
 def test_tool_gate_flags():
     stockbot = json.loads(PACKAGE_JSON.read_text())["scripts"]["stockbot"]
     assert stockbot.split()[0] == "omp", "stockbot script must launch the OMP binary"
-    for flag in ("--config", ".omp/stockbot.yml", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--tools=task",
-                 "-e .omp/extensions/stockbot.ts"):
+    for flag in ("--config", ".stockbot/omp/stockbot.yml", "--no-extensions", "--no-skills", "--no-rules", "--no-lsp", "--tools=task",
+                 "-e .stockbot/omp"):
         assert flag in stockbot, f"missing from stockbot script: {flag}"
+    assert ".stockbot/omp/index.ts" not in stockbot, f"file-path extension root drops agents/ surface: {stockbot!r}"
     for stale in ("--no-builtin-tools", "--no-prompt-templates", "--no-context-files", "STOCKBOT_PI_"):
         assert stale not in stockbot, f"stale Pi flag in stockbot script: {stale}"
     # Barebones yml: --tools=task gates the registry but goal/hub/memory/learn/
     # checkpoint/MCP re-add tools outside the allowlist, so the overlay must
     # pin every bypass key. Typo'd keys fail silent — assert exact YAML text.
-    overlay = (ROOT / ".omp" / "stockbot.yml").read_text()
+    overlay = (ROOT / ".stockbot" / "omp" / "stockbot.yml").read_text()
     for key in ("goal:\n  enabled: false", "todo:\n  enabled: false", 'backend: "off"',
                 "autolearn:\n  enabled: false", "checkpoint:\n  enabled: false",
                 "enableProjectConfig: false", "ttsr:\n  enabled: false",
@@ -167,7 +170,7 @@ def test_tool_gate_flags():
                 "ask:\n  enabled: false", "bash:\n  enabled: false",
                 "browser:\n  enabled: false", "computer:\n  enabled: false",
                 "eval:\n  js: false", "github:\n  enabled: false"):
-        assert key in overlay, f"missing from .omp/stockbot.yml: {key!r}"
+        assert key in overlay, f"missing from .stockbot/omp/stockbot.yml: {key!r}"
 
 def test_kit_create_docs():
     text = HOST_SETUP.read_text()
@@ -196,3 +199,25 @@ def test_opencode_secret_rejects_indirection(tmp_path: Path) -> None:
             assert proc.stdout.strip() == key
         else:
             assert proc.returncode != 0, key
+
+
+def test_stockbot_runtime_lives_in_private_package() -> None:
+    """Namespace boundary: ambient `.omp/` carries no Stockbot runtime; the
+    stockbot script and the thesis launcher point at `.stockbot/omp/`."""
+    for sub in ("extensions", "agents"):
+        area = ROOT / ".omp" / sub
+        leftovers = (
+            sorted(p.relative_to(ROOT).as_posix() for p in area.rglob("*") if p.is_file())
+            if area.exists()
+            else []
+        )
+        assert not leftovers, f"Stockbot runtime under ambient .omp/{sub}: {leftovers!r}"
+    stockbot = json.loads(PACKAGE_JSON.read_text())["scripts"]["stockbot"]
+    assert "-e .stockbot/omp" in stockbot or "--extension .stockbot/omp" in stockbot
+    assert ".stockbot/omp/index.ts" not in stockbot
+    assert ".stockbot/omp/stockbot.yml" in stockbot
+    assert ".omp/extensions/" not in stockbot
+    assert omp_runner._EXTENSION == ".stockbot/omp"
+    cmd = omp_runner._omp_cmd("probe")
+    assert cmd[cmd.index("--config") + 1] == ".stockbot/omp/stockbot.yml"
+    assert cmd[cmd.index("--extension") + 1] == ".stockbot/omp"

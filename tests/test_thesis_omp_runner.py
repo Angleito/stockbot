@@ -108,8 +108,8 @@ def _run(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, prompt: str, mode: str
 def test_builds_canonical_command_with_tool_restrictions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cap = _run(monkeypatch, tmp_path, "Do research")
     cmd = _as_list(cap["cmd"])
-    assert cmd == ["omp", "-p", "--config", ".omp/stockbot.yml", "--no-session", "--no-extensions", "--no-skills", "--no-rules",
-                   "--tools=task", "--extension", ".omp/extensions/stockbot.ts", "--", "Do research"]
+    assert cmd == ["omp", "-p", "--config", ".stockbot/omp/stockbot.yml", "--no-session", "--no-extensions", "--no-skills", "--no-rules",
+                   "--tools=task", "--extension", ".stockbot/omp", "--", "Do research"]
     assert "--no-builtin-tools" not in cmd
 
     assert cap["cwd"] == str(omp_runner._repo_root())
@@ -122,9 +122,9 @@ def test_provider_model_flags_inserted_before_separator(monkeypatch: pytest.Monk
     monkeypatch.setattr(subprocess, "Popen", fake)
     run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1", prompt="Do research",
                   data_root=tmp_path / "data", run_id="run:test")
-    assert _as_list(_as_dict(fake.captured)["cmd"]) == ["omp", "-p", "--config", ".omp/stockbot.yml", "--no-session",
+    assert _as_list(_as_dict(fake.captured)["cmd"]) == ["omp", "-p", "--config", ".stockbot/omp/stockbot.yml", "--no-session",
         "--no-extensions", "--no-skills", "--no-rules", "--tools=task",
-        "--extension", ".omp/extensions/stockbot.ts", "--provider", "openai", "--model", "gpt-4o", "--", "Do research"]
+        "--extension", ".stockbot/omp", "--provider", "openai", "--model", "gpt-4o", "--", "Do research"]
 
 
 def test_empty_provider_model_adds_no_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -135,9 +135,9 @@ def test_empty_provider_model_adds_no_flags(monkeypatch: pytest.MonkeyPatch, tmp
     monkeypatch.setattr(subprocess, "Popen", fake)
     run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1", prompt="Do research",
                   data_root=tmp_path / "data", run_id="run:test")
-    assert _as_list(_as_dict(fake.captured)["cmd"]) == ["omp", "-p", "--config", ".omp/stockbot.yml", "--no-session",
+    assert _as_list(_as_dict(fake.captured)["cmd"]) == ["omp", "-p", "--config", ".stockbot/omp/stockbot.yml", "--no-session",
         "--no-extensions", "--no-skills", "--no-rules", "--tools=task",
-        "--extension", ".omp/extensions/stockbot.ts", "--", "Do research"]
+        "--extension", ".stockbot/omp", "--", "Do research"]
 
 
 def test_binds_env_not_prompt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:

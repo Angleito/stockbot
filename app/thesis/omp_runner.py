@@ -15,7 +15,7 @@ from pathlib import Path
 
 from app.config import get_data_root
 
-_EXTENSION = ".stockbot/omp/index.ts"
+_EXTENSION = ".stockbot/omp"
 
 _RECORDER_GRACE_S = 15.0
 

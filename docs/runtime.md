@@ -10,7 +10,7 @@ Binary (`which omp`, `omp --version`): `omp/18.2.3`.
 Launch: `bun run stockbot` runs
 
 ```text
-omp --config .stockbot/omp/stockbot.yml --no-extensions --no-skills --no-rules --no-lsp --tools=task -e .stockbot/omp/index.ts
+omp --config .stockbot/omp/stockbot.yml --no-extensions --no-skills --no-rules --no-lsp --tools=task -e .stockbot/omp
 ```
 
 Native `task` stays enabled: it is the only child-agent execution mechanism

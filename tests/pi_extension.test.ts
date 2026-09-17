@@ -11,8 +11,8 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { mkdtempSync, readFileSync, existsSync, statSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import stockbotExtension from "../.omp/extensions/stockbot.ts";
-import * as stockbotNS from "../.omp/extensions/stockbot.ts";
+import stockbotExtension from "../.stockbot/omp/index.ts";
+import * as stockbotNS from "../.stockbot/omp/index.ts";
 import {
 	createBridgeClient,
 	bridgeModelText,
@@ -20,7 +20,7 @@ import {
 	payloadMeta,
 	toolCallRequest,
 	type Json,
-} from "../.omp/extensions/stockbot.ts";
+} from "../.stockbot/omp/index.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -600,7 +600,7 @@ import {
 	registerYoutubeAnalytics,
 	fetchYoutubeAnalytics,
 	type YoutubeAnalyticsRequest,
-} from "../.omp/lib/youtube-analytics.ts";
+} from "../.stockbot/omp/lib/youtube-analytics.ts";
 import {
 	advanceOnAgentEnd,
 	checkFreezeDrift,
@@ -615,7 +615,7 @@ import {
 	setResearchBridge,
 	stageBlockReasonForTest,
 	startResearch,
-} from "../.omp/lib/research-director.ts";
+} from "../.stockbot/omp/lib/research-director.ts";
 
 const YT_MARKER = "ZxqUniqueTitleMarker";
 const YT_SECRET = "ZxqSecretKeyMaterial";
