@@ -351,6 +351,24 @@ export function validateProvenance(value: unknown): Json | null {
  else out.source_uri = null;
  return out;
 }
+// Freeze parity mirror (kernel stays authoritative): pure mirrors of
+// app/research/freeze.py freeze_content_hash + verify_freeze id-set/drift
+// checks. Export + test only, never called in prod paths. Python RAISES
+// FreezeIntegrityError on violation; these return null/error-string instead
+// ("no verdict", never "valid"). Hash uses WebCrypto SHA-256 (Bun + OMP
+// runtime) to match Python hashlib.sha256 hex.
+export interface FreezeRecord { evidence_id: string; content_hash: string }
+export async function freezeContentHash(records: FreezeRecord[]): Promise<string> {
+ const body = [...records].sort((a, b) => (a.evidence_id < b.evidence_id ? -1 : a.evidence_id > b.evidence_id ? 1 : 0)).map((r) => `${r.evidence_id}:${r.content_hash}`).join("\n");
+ const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(body));
+ return [...new Uint8Array(digest)].map((b) => b.toString(16).padStart(2, "0")).join("");
+}
+export function checkFreezeDrift(freezeId: string, frozenIds: string[], records: FreezeRecord[]): string | null {
+ const have = new Set(records.map((r) => r.evidence_id));
+ if (have.size !== records.length) return `freeze ${freezeId}: duplicate evidence ids`;
+ if (have.size !== frozenIds.length || frozenIds.some((id) => !have.has(id))) return `freeze ${freezeId}: evidence id set drifted`;
+ return null;
+}
 
 async function inspect(sessionId: string, dataRoot?: string, asOf?: string): Promise<InspectSnapshot> {
  const res = await rpc("research.session.inspect", { session_id: sessionId }, dataRoot, asOf);

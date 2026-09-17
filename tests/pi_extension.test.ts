@@ -603,6 +603,8 @@ import {
 } from "../.omp/lib/youtube-analytics.ts";
 import {
 	advanceOnAgentEnd,
+	checkFreezeDrift,
+	freezeContentHash,
 	normalizeAccession,
 	validateProvenance,
 	pitUnverified,
@@ -2935,7 +2937,21 @@ test("Provenance parity mirrors kernel shape validation", () => {
 	// EvidenceIntegrityError, TS null=no-verdict; kernel authoritative).
 	// Cross-checked 2026-09-17: agree=6 pinned-diverge=13 bad=0 total=19.
 });
-
+test("Freeze parity mirrors kernel hash and drift", async () => {
+	const recs = [
+		{ evidence_id: "ev:b", content_hash: "h2" },
+		{ evidence_id: "ev:a", content_hash: "h1" },
+	];
+	// Order-independent hash: sorted ev:a then ev:b regardless of input order.
+	// Pinned vector (Python freeze_content_hash): d2e13c22...746eb11e.
+	expect(await freezeContentHash(recs)).toBe("d2e13c22a1e11d9c0ed8e57fbec2353a79e98404de969d57ba6dd42d746eb11e");
+	// Id-set drift and duplicates refuse; exact set passes.
+	expect(checkFreezeDrift("E1", ["ev:a", "ev:b"], recs)).toBeNull();
+	expect(checkFreezeDrift("E1", ["ev:a"], recs)).toContain("drifted");
+	expect(checkFreezeDrift("E1", ["ev:a", "ev:b"], [...recs, recs[0]])).toContain("duplicate");
+	// Shared-corpus differential 2026-09-17: py hash d2e13c22...746eb11e AGREE,
+	// order-stable AGREE, empty sha256 AGREE; drift ok/short/dup all AGREE.
+});
 test("committee results record three analyses", async () => {
 	const SID = "rs:task-record";
 	const F1 = `${SID}:1:freeze`;
