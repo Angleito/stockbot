@@ -165,6 +165,14 @@ def test_tool_gate_flags():
     assert ".stockbot/omp/index.ts" not in stockbot, f"file-path extension root drops agents/ surface: {stockbot!r}"
     assert "--provider" in stockbot, f"missing provider passthrough in stockbot script: {stockbot!r}"
     assert "${STOCKBOT_PROVIDER:+--provider" in stockbot, f"missing provider expansion in stockbot script: {stockbot!r}"
+    assert "${STOCKBOT_MODEL:+--model" in stockbot, f"missing model expansion in stockbot script: {stockbot!r}"
+    for stale in (
+        "--no-builtin-tools",
+        "--no-prompt-templates",
+        "--no-context-files",
+        "STOCKBOT_PI_",
+    ):
+        assert stale not in stockbot, f"stale Pi flag in stockbot script: {stale}"
     # Barebones yml: --tools=task gates the registry but goal/hub/memory/learn/
     # checkpoint/MCP re-add tools outside the allowlist, so the overlay must
     # pin every bypass key. Typo'd keys fail silent — assert exact YAML text.
