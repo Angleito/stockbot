@@ -2903,6 +2903,8 @@ test("PIT parity mirrors kernel gates", () => {
 	expect(pitViolated("2025-06-30", "garbage")).toBe(false);
 	// Unbounded as_of never violates, for any known_at string.
 	fc.assert(fc.property(fc.string(), (known) => pitViolated("unbounded", known) === false), { seed: 42 });
+	// Shared-corpus differential 2026-09-17: agree=11 pinned-diverge=2 bad=0 total=13
+	// (pinned: Python raises on garbage->PROVENANCE_FAILURE, TS false=no-verdict).
 });
 test("Accession parity mirrors kernel normalization", () => {
 	expect(normalizeAccession("0000320193-25-000079")).toBe("0000320193-25-000079");
@@ -2916,6 +2918,8 @@ test("Accession parity mirrors kernel normalization", () => {
 		const out = normalizeAccession(text);
 		return out === null || /^\d{10}-\d{2}-\d{6}$/.test(out);
 	}), { seed: 42 });
+	// Shared-corpus differential 2026-09-17: agree=3 pinned-diverge=9 bad=0 total=12
+	// (pinned: Python raises on non-canonical, TS null=no-verdict; kernel authoritative).
 });
 
 test("committee results record three analyses", async () => {
