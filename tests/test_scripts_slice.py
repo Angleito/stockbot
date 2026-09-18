@@ -64,15 +64,9 @@ class FakeRepo(ResearchRepository):
     ) -> None:
         self._sess = sess
         self._jobs: list[Job] = jobs if jobs is not None else []
-        self._evidence: list[dict[str, JSONValue]] = (
-            evidence if evidence is not None else []
-        )
-        self._freezes: dict[str, dict[str, JSONValue]] = (
-            freezes if freezes is not None else {}
-        )
-        self._dossiers: list[dict[str, JSONValue]] = (
-            dossiers if dossiers is not None else []
-        )
+        self._evidence: list[dict[str, JSONValue]] = evidence if evidence is not None else []
+        self._freezes: dict[str, dict[str, JSONValue]] = freezes if freezes is not None else {}
+        self._dossiers: list[dict[str, JSONValue]] = dossiers if dossiers is not None else []
         self._raise_session = raise_session
         self._raise_jobs = raise_jobs
         self._raise_evidence = raise_evidence
@@ -307,9 +301,7 @@ def test_job_row_variants():
     r = exh_viewer._job_row(_job())
     assert r["failureCategory"] is None and r["assignmentId"] == "a1"
     fail = SimpleNamespace(category="timeout", message="slow")
-    r2 = exh_viewer._job_row(
-        _job(failure=fail, diagnostics={"assignment_id": 5, "role": None})
-    )
+    r2 = exh_viewer._job_row(_job(failure=fail, diagnostics={"assignment_id": 5, "role": None}))
     assert r2["failureCategory"] == "timeout" and r2["failureMessage"] == "slow"
     assert r2["assignmentId"] is None and r2["role"] is None
     r3 = exh_viewer._job_row(_job(diagnostics=None))
@@ -340,9 +332,7 @@ def _write_disk_error(*a: object, **k: object) -> object:
     raise OSError("disk")
 
 
-def _no_fixture(
-    tool: str, schemas: dict[str, dict[str, object]] | None = None
-) -> dict[str, object]:
+def _no_fixture(tool: str, schemas: dict[str, dict[str, object]] | None = None) -> dict[str, object]:
     raise LookupError("no fixture")
 
 
@@ -464,9 +454,7 @@ def _make_eval_db(path: Path) -> None:
         )
         conn.execute("INSERT INTO eval_runs VALUES ('r1','m','p','h','pv','g','2026-01-01','sv')")
         conn.execute("INSERT INTO eval_scenario_results VALUES ('r1','s-pass',1,'[]')")
-        conn.execute(
-            "INSERT INTO eval_scenario_results VALUES ('r1','s-fail',0,'not-json')"
-        )
+        conn.execute("INSERT INTO eval_scenario_results VALUES ('r1','s-fail',0,'not-json')")
         conn.execute("INSERT INTO failure_records VALUES ('f1','r1','s-fail','v')")
 
 
@@ -477,9 +465,7 @@ def test_read_eval_db_ok_and_bad_violations(tmp_path: Path):
     assert len(runs) == 1 and runs[0]["passed"] == 0
     by_name = {r["scenarioName"]: r for r in results}
     assert by_name["s-pass"]["passed"] is True and by_name["s-pass"]["violations"] == []
-    assert by_name["s-fail"]["passed"] is False and by_name["s-fail"]["violations"] == [
-        "not-json"
-    ]
+    assert by_name["s-fail"]["passed"] is False and by_name["s-fail"]["violations"] == ["not-json"]
     assert fails == [
         {
             "failureId": "f1",
@@ -504,9 +490,7 @@ def test_attach_pass_fail_counts():
 
 
 def test_build_projection_and_render_shape():
-    proj = exh_viewer.build_projection(
-        [{"a": 1}], [{"b": 2}], [{"c": 3}], [], [{"d": 4}]
-    )
+    proj = exh_viewer.build_projection([{"a": 1}], [{"b": 2}], [{"c": 3}], [], [{"d": 4}])
     assert set(proj) == {
         "researchRuns",
         "evalRuns",
@@ -531,9 +515,7 @@ class _NS:
     pass
 
 
-def _ns(
-    provider: object = None, model: object = None, scenario: object = None
-) -> argparse.Namespace:
+def _ns(provider: object = None, model: object = None, scenario: object = None) -> argparse.Namespace:
     return argparse.Namespace(provider=provider, model=model, scenario=scenario)
 
 
@@ -554,9 +536,7 @@ def test_resolve_falls_back_to_env():
 def test_resolve_defaults_to_pi_cli_when_unset():
     """No flag and no env means Pi's own CLI default: resolved as ("", ""), never a hard failure."""
     assert vas.resolve_provider_model(None, None, {}) == ("", "")
-    assert vas.resolve_provider_model(
-        "  ", "", {"STOCKBOT_PROVIDER": "", "STOCKBOT_MODEL": None}
-    ) == ("", "")
+    assert vas.resolve_provider_model("  ", "", {"STOCKBOT_PROVIDER": "", "STOCKBOT_MODEL": None}) == ("", "")
 
 
 def test_lookup_env_value_narrows_strings():
@@ -899,20 +879,10 @@ def test_build_success_failure_bucket_statuses():
 
     for status in ("failed", "cancelled", "timed_out"):
         assert vas._job_failed(_job("j", status)) is True
-        assert (
-            vas._build_success_input(
-                sc, "ans", ["t"], [_job("j", status)], "failed", (), 1.0
-            ).failed_count
-            == 1
-        )
+        assert vas._build_success_input(sc, "ans", ["t"], [_job("j", status)], "failed", (), 1.0).failed_count == 1
     for status in ("completed", "running", "queued"):
         assert vas._job_failed(_job("j", status)) is False
-        assert (
-            vas._build_success_input(
-                sc, "ans", ["t"], [_job("j", status)], "completed", (), 1.0
-            ).failed_count
-            == 0
-        )
+        assert vas._build_success_input(sc, "ans", ["t"], [_job("j", status)], "completed", (), 1.0).failed_count == 0
 
 
 # ---- slice_judge_tests.py ----
@@ -1036,15 +1006,9 @@ def _eval(t: J.Trace) -> tuple[bool, str]:
 
 # --- _walk: echo keys ignored, recursion guard, list payloads ---
 def test_walk_ignores_asof_echo_and_reads_known():
-    assert (
-        J._extract_known_at({"as_of": "2026-09-01", "known_at": "2024-05-01"})
-        == "2024-05-01"
-    )
+    assert J._extract_known_at({"as_of": "2026-09-01", "known_at": "2024-05-01"}) == "2024-05-01"
     assert J._extract_known_at({"tool_calls": {"as_of": "2026-09-01"}}) == ""
-    assert (
-        J._extract_known_at([{"known_at": "2023-01-02"}, {"known_at": "2024-06-07"}])
-        == "2024-06-07"
-    )
+    assert J._extract_known_at([{"known_at": "2023-01-02"}, {"known_at": "2024-06-07"}]) == "2024-06-07"
 
 
 def test_walk_recursion_guard():
@@ -1099,9 +1063,7 @@ def test_within_two_pct_zero():
 
 def test_equation_hit_bad_operands_and_zero_div():
     m1 = J._EQUATION_RE.search("xx / 2 = 1")
-    assert (
-        m1 is None
-    )  # unparseable lhs never matches: same None outcome as bad operands
+    assert m1 is None  # unparseable lhs never matches: same None outcome as bad operands
     m2 = J._EQUATION_RE.search("4 / 0 = 0")
     assert m2 is not None
     assert J._equation_hit(m2, {"4", "0"}, set()) is None
@@ -1118,9 +1080,7 @@ class _FakeMatch:
 
 
 def test_subtraction_bad_numbers():
-    match = re.search(
-        r"(?P<x>bogus) - \((?P<terms>1\+2)\) = (?P<r>3)", "bogus - (1+2) = 3"
-    )
+    match = re.search(r"(?P<x>bogus) - \((?P<terms>1\+2)\) = (?P<r>3)", "bogus - (1+2) = 3")
     assert match is not None
     try:
         J._subtraction_operands(match)
@@ -1165,10 +1125,7 @@ def test_supplied_and_hedged_branches():
 def test_window_framed_variants():
     ctx = J._ValueContext("a", "p", [], None, set())
     assert J._value_window_framed("see item 5", "5", 9, 10, set(), ctx) is True
-    assert (
-        J._accession_prefix_match("x 0000000000 y", 2, 12, {"0000000000-26-000000"})
-        is True
-    )
+    assert J._accession_prefix_match("x 0000000000 y", 2, 12, {"0000000000-26-000000"}) is True
     assert J._accession_prefix_match("x 12345 y", 2, 7, set()) is False
     assert J._value_window_framed("cost ~5 dollars", "5", 6, 7, set(), ctx) is True
 
@@ -1177,10 +1134,7 @@ def test_value_excused_paths():
     ctx = J._ValueContext("EPS $5.20", "What is EPS?", ["EPS $5.20"], None, None)
     pcts, rng = J._answer_pct_norms("up 75%"), J._range_pct_norms("14.3 - 19.3%")
     assert J._value_excused("EPS $5.20", "5.20", 4, 8, ctx, pcts, rng) is True
-    assert (
-        J._unsubstantiated_values("EPS $5.20.", "What is EPS?", ["EPS $5.20 reported."])
-        == []
-    )
+    assert J._unsubstantiated_values("EPS $5.20.", "What is EPS?", ["EPS $5.20 reported."]) == []
 
 
 # --- _check gates ---
@@ -1222,9 +1176,7 @@ def test_gate_pit_and_kinds():
     )
     base_sc = t2["scenario"]
     assert base_sc is not None and isinstance(base_sc, dict)
-    t2["scenario"] = _scenario(
-        id=str(base_sc.get("id", "nvda_eps")), acceptable_domains=["fundamentals"]
-    )
+    t2["scenario"] = _scenario(id=str(base_sc.get("id", "nvda_eps")), acceptable_domains=["fundamentals"])
     ok2, reason2 = _eval(t2)
     assert not ok2 and ("missing evidence" in reason2 or "no relevant" in reason2)
 
@@ -1280,9 +1232,7 @@ def test_collect_telemetry_bad_path_and_fallback(tmp_path: Path):
     assert tel["search_count"] == 0
     db = tmp_path / "t.db"
     conn = sqlite3.connect(str(db))
-    conn.execute(
-        "CREATE TABLE tool_calls (tool_name TEXT, error_type TEXT, result_row_count INT, run_id TEXT)"
-    )
+    conn.execute("CREATE TABLE tool_calls (tool_name TEXT, error_type TEXT, result_row_count INT, run_id TEXT)")
     conn.execute("INSERT INTO tool_calls VALUES ('search_tools', NULL, 4, 'r1')")
     conn.execute("INSERT INTO tool_calls VALUES ('browse_tools', 'boom', NULL, 'r1')")
     conn.execute("INSERT INTO tool_calls VALUES ('call_tool', NULL, NULL, 'r1')")
@@ -1310,11 +1260,7 @@ def test_collect_telemetry_tally_branches():
     J._tally_telemetry_row(tel, "search_tools", None, "not-int")
     J._tally_telemetry_row(tel, "describe_tool", "e", None)
     J._tally_telemetry_row(tel, "call_tool", None, None)
-    assert (
-        tel["search_count"] == 1
-        and tel["browse_count"] == 1
-        and tel["research_count"] == 0
-    )
+    assert tel["search_count"] == 1 and tel["browse_count"] == 1 and tel["research_count"] == 0
 
 
 # --- build_trace fallbacks ---
@@ -1347,12 +1293,8 @@ def test_build_trace_bad_path_and_empty_db(tmp_path: Path):
         "INSERT INTO tool_calls VALUES ('t3', 'get_x', 'failed', 'capability denied', '', 0, 'denied', '{}', NULL, 'r1')"
     )
     conn.execute("INSERT INTO evidence VALUES ('d1', '3 candidates found', 'r1')")
-    conn.execute(
-        "INSERT INTO evidence VALUES ('t1', 'NVDA EPS $5.20 filed 2026-08-01 ' || 'x', 'r1')"
-    )
-    conn.execute(
-        "INSERT INTO security_events VALUES ('deny', 'blocked', 'policy deny', 'r1')"
-    )
+    conn.execute("INSERT INTO evidence VALUES ('t1', 'NVDA EPS $5.20 filed 2026-08-01 ' || 'x', 'r1')")
+    conn.execute("INSERT INTO security_events VALUES ('deny', 'blocked', 'policy deny', 'r1')")
     conn.commit()
     conn.close()
     t = J.build_trace(db2, sc, "NVDA EPS is $5.20.")
@@ -1373,9 +1315,7 @@ def test_truncate_and_limits():
 
 
 # --- persist/self-check/main/live branches ---
-def test_persist_answer_truncation_and_error(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_persist_answer_truncation_and_error(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     dest = J.persist_answer(tmp_path / "run.db", "r1", "nvda_eps", "hello")
     assert dest is not None and dest.exists()
     big = J.persist_answer(tmp_path / "run.db", None, "nvda_eps", "y" * 70000)
@@ -1393,9 +1333,7 @@ def test_run_attempts_seeded_error_and_read_run_id(tmp_path: Path):
     assert not ok and "unknown evaluator" in reason
 
 
-def test_main_helpers(
-    capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch
-):
+def test_main_helpers(capsys: pytest.CaptureFixture[str], monkeypatch: pytest.MonkeyPatch):
     assert J._print_scenario_table() == 0
     args = argparse.Namespace(all=False, scenario="nope")
     assert J._select_wanted(args) is None
@@ -1408,10 +1346,7 @@ def test_main_helpers(
     f = J._collect_one(_BoomFuture(), 1, [_scenario(id="s1")])
     reason = f.get("reason")
     assert f["ok"] is False and isinstance(reason, str) and "worker raised" in reason
-    assert (
-        J._split_families([{"id": "pit_filing"}, {"id": "nvda_eps"}])[0][0]["id"]
-        == "pit_filing"
-    )
+    assert J._split_families([{"id": "pit_filing"}, {"id": "nvda_eps"}])[0][0]["id"] == "pit_filing"
     assert J._passed_count([{"ok": True}, {"ok": False}]) == 1
     assert J._passed_count([]) == 0
 
@@ -1444,16 +1379,8 @@ def test_check_head_and_helpers():
     rel = J._check_head(t, sc, 1, [])
     assert isinstance(rel, tuple) and len(rel) == 2
     assert J._first_gate([None, (False, "x")]) == (False, "x")
-    assert (
-        J._missing_limitation(["options greeks unavailable"], "greeks unavailable here")
-        is None
-    )
-    assert (
-        J._scope_refusal_ok(
-            ["outside scope"], "I can only help with investment questions"
-        )
-        is True
-    )
+    assert J._missing_limitation(["options greeks unavailable"], "greeks unavailable here") is None
+    assert J._scope_refusal_ok(["outside scope"], "I can only help with investment questions") is True
     assert J._relevant_kind_set([_call()]) == {"metric_snapshot"}
     t3 = _trace()
     t3["scenario"] = sc
@@ -1604,9 +1531,7 @@ def test_reachability_tool_branches(tmp_path: Path):
         "INSERT INTO tool_calls (tool_call_id, run_id, tool_name, started_at, error_type) VALUES ('t1','r1','get_x','t',NULL)"
     )
     conn.commit()
-    assert (
-        v._reachability_tool_success(conn, "get_x", attempt=1) == "no completed event"
-    )
+    assert v._reachability_tool_success(conn, "get_x", attempt=1) == "no completed event"
     assert v._tool_call_arg_sets(conn, "get_x") is not None
     conn.close()
 
@@ -1615,9 +1540,7 @@ def test_normalize_args_fallbacks():
     assert v._normalize_args(None) == "{}"
     assert v._normalize_args("") == "{}"
     assert v._normalize_str_arg("{bad json") == "{bad json"
-    assert v._normalize_str_arg(json.dumps({"b": 1, "a": 2})) == json.dumps(
-        {"a": 2, "b": 1}
-    )
+    assert v._normalize_str_arg(json.dumps({"b": 1, "a": 2})) == json.dumps({"a": 2, "b": 1})
     assert v._normalize_args({"b": 1, "a": 2}) == json.dumps({"a": 2, "b": 1})
     assert v._normalize_jsonable(object()) is not None  # str() fallback path
 
@@ -1638,9 +1561,7 @@ def test_call_tool_inner_name_shapes():
     assert v._call_tool_inner_name("{bad") is None
     assert v._call_tool_inner_name(json.dumps([1])) is None
     assert v._call_tool_inner_name(json.dumps({"name": "get_x"})) == "get_x"
-    assert (
-        v._call_tool_inner_name(json.dumps({"arguments": {"name": "get_y"}})) == "get_y"
-    )
+    assert v._call_tool_inner_name(json.dumps({"arguments": {"name": "get_y"}})) == "get_y"
     assert v._call_tool_inner_name(json.dumps({"arguments": {}})) is None
     assert v._decode_call_tool_payload(None) is None
 
@@ -1664,9 +1585,7 @@ def test_research_counts_empty_and_names():
 
 
 def test_run_confusion_group_and_evidence(tmp_path: Path):
-    cases: list[v.ConfusionCase] = [
-        {"expected_tool": "a", "prompt": "p", "arguments": {}, "pair": ["b", "a"]}
-    ]
+    cases: list[v.ConfusionCase] = [{"expected_tool": "a", "prompt": "p", "arguments": {}, "pair": ["b", "a"]}]
     grouped = v._group_confusion_by_pair(cases)
     assert ("a", "b") in grouped
     assert v._confusion_db_evidence(tmp_path / "missing.sqlite") == (None, [])
@@ -1682,16 +1601,12 @@ def test_holdout_read_failures(tmp_path: Path):
     assert v._read_holdout_cases(str(empty)) is None
 
 
-def test_holdout_case_and_verdict_helpers(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_holdout_case_and_verdict_helpers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     import scripts.verify_pi_tools as vv
 
     monkeypatch.setattr(vv, "resolve_arguments", _no_fixture)
     assert vv._holdout_lookup_args({"expected_tool": "t", "prompt": "p"}, {}) is None
-    r = vv.AttemptResult(
-        "t", 1, True, "pass", 0, "", 0.0, False, True, "pass", True, "pass"
-    )
+    r = vv.AttemptResult("t", 1, True, "pass", 0, "", 0.0, False, True, "pass", True, "pass")
     assert vv._holdout_verdicts(r, Path("x"), "t")[0] is True
 
 
@@ -1744,9 +1659,7 @@ def test_job_start_missing_and_invalid_wave(monkeypatch: pytest.MonkeyPatch):
         "error": "missing_arg",
     }
     for bad in (True, 0, -1, "2", 1.5):
-        resp = pi_bridge._op_research_job_start(
-            {"session_id": "s", "wave_id": bad}, "p1"
-        )
+        resp = pi_bridge._op_research_job_start({"session_id": "s", "wave_id": bad}, "p1")
         assert resp["error"] == "invalid_arg", bad
 
 
@@ -1787,11 +1700,7 @@ def test_job_start_value_error(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pi_bridge, "_kernel", K())
     resp = pi_bridge._op_research_job_start({"session_id": "s"}, "p1")
     detail = resp.get("detail")
-    assert (
-        resp["error"] == "invalid_arg"
-        and isinstance(detail, str)
-        and "bad budget" in detail
-    )
+    assert resp["error"] == "invalid_arg" and isinstance(detail, str) and "bad budget" in detail
 
 
 def test_tool_invoke_shape_and_dispatch(monkeypatch: pytest.MonkeyPatch):
@@ -1919,10 +1828,7 @@ def test_source_submit_branches(monkeypatch: pytest.MonkeyPatch):
             raise ValueError("bad coverage")
 
     monkeypatch.setattr(pi_bridge, "_kernel", K2())
-    assert (
-        pi_bridge._op_research_source_submit({"job_id": "j"}, "p")["error"]
-        == "invalid_arg"
-    )
+    assert pi_bridge._op_research_source_submit({"job_id": "j"}, "p")["error"] == "invalid_arg"
 
     class K3(K):
         @override
@@ -1948,10 +1854,7 @@ def test_freeze_create_branches(monkeypatch: pytest.MonkeyPatch):
             raise K.ResearchNotFound()
 
     monkeypatch.setattr(pi_bridge, "_kernel", K())
-    assert (
-        pi_bridge._op_research_freeze_create({"session_id": "s"}, "p")["error"]
-        == "unknown_session"
-    )
+    assert pi_bridge._op_research_freeze_create({"session_id": "s"}, "p")["error"] == "unknown_session"
 
     class K2(K):
         @override
@@ -1959,10 +1862,7 @@ def test_freeze_create_branches(monkeypatch: pytest.MonkeyPatch):
             raise ValueError("bad wave")
 
     monkeypatch.setattr(pi_bridge, "_kernel", K2())
-    assert (
-        pi_bridge._op_research_freeze_create({"session_id": "s"}, "p")["error"]
-        == "invalid_arg"
-    )
+    assert pi_bridge._op_research_freeze_create({"session_id": "s"}, "p")["error"] == "invalid_arg"
 
     class K3(K):
         @override
@@ -1996,9 +1896,7 @@ def test_committee_create_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     from app.research.repository import ResearchRepository
 
     repo = ResearchRepository(data_root=tmp_path)
-    sid = svc.create_research(
-        "NVDA demand?", "o", as_of="2026-01-02T00:00:00+00:00", repo=repo
-    )
+    sid = svc.create_research("NVDA demand?", "o", as_of="2026-01-02T00:00:00+00:00", repo=repo)
     svc.complete_job(repo.list_jobs(sid)[0].job_id, {}, repo=repo)
     wire: dict[str, object] = {"session_id": sid, "data_root": str(tmp_path)}
     assert _dispatch({**wire, "session_id": "nope"}) == {"id": "c0", "error": "unknown_session", "session_id": "nope"}
@@ -2014,9 +1912,7 @@ def test_committee_create_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     assert result["freeze_id"] == froze["freeze_id"] == f"{sid}:1:freeze"
     pending = result["pending_next_action"]
     assert isinstance(pending, dict)
-    assert (
-        pending["freeze_id"] == result["freeze_id"] and "freeze_pending" not in pending
-    )
+    assert pending["freeze_id"] == result["freeze_id"] and "freeze_pending" not in pending
     job_ids = result["jobs"]
     assert isinstance(job_ids, list) and len(job_ids) == 3
     jobs = [repo.get_job(str(jid)) for jid in job_ids]
@@ -2045,10 +1941,7 @@ def test_research_events_branches(monkeypatch: pytest.MonkeyPatch):
             raise K.ResearchNotFound()
 
     monkeypatch.setattr(pi_bridge, "_kernel", K())
-    assert (
-        pi_bridge._op_research_events({"session_id": "s"}, "p")["error"]
-        == "unknown_session"
-    )
+    assert pi_bridge._op_research_events({"session_id": "s"}, "p")["error"] == "unknown_session"
 
     class K2(K):
         @override
@@ -2195,9 +2088,7 @@ def test_session_cancel_resume_branches(monkeypatch: pytest.MonkeyPatch):
 def test_tool_call_worker_validates_shape(monkeypatch: pytest.MonkeyPatch):
     responses = _capture(monkeypatch)
     pi_bridge._run_tool_call({"id": "w1", "name": "", "arguments": {}, "run_id": "r"})
-    pi_bridge._run_tool_call(
-        {"id": "w2", "name": "x", "arguments": {}, "run_id": "nope"}
-    )
+    pi_bridge._run_tool_call({"id": "w2", "name": "x", "arguments": {}, "run_id": "nope"})
     assert responses == [
         {"id": "w1", "error": "missing_arg"},
         {"id": "w2", "error": "unknown_run"},
@@ -2239,9 +2130,7 @@ def test_staged_context_applies_per_call(monkeypatch: pytest.MonkeyPatch):
 
 
 def _ctx(tmp_path: Path) -> RequestContext:
-    return RequestContext(
-        "slice-health", frozenset({Capability.RESEARCH}), data_root=tmp_path
-    )
+    return RequestContext("slice-health", frozenset({Capability.RESEARCH}), data_root=tmp_path)
 
 
 def _deny(tmp_path: Path) -> RequestContext:
@@ -2277,9 +2166,7 @@ def test_value_for_branches() -> None:
         "settlementDate",
         "currentShortPositionQuantity",
     ]
-    assert vth._value_for("tags", {"type": "array", "items": {"type": "string"}}) == [
-        "health-check"
-    ]
+    assert vth._value_for("tags", {"type": "array", "items": {"type": "string"}}) == ["health-check"]
     assert vth._value_for("tags", {"type": "array"}) == ["health-check"]
     assert vth._value_for("cfg", {"type": "object"}) == {}
     nested = {"properties": {"a": {"type": "string"}}, "required": ["a", "zzz"]}
@@ -2291,21 +2178,16 @@ def test_value_for_branches() -> None:
 def test_fixture_for_branches() -> None:
     assert vth.fixture_for({}) == {}
     assert vth.fixture_for({"properties": "nope", "required": "nope"}) == {}
-    assert vth.fixture_for(
-        {"properties": {"a": {"type": "string"}}, "required": ["a", 5]}
-    ) == {"a": "health-check"}
+    assert vth.fixture_for({"properties": {"a": {"type": "string"}}, "required": ["a", 5]}) == {"a": "health-check"}
 
 
 def test_schema_branches() -> None:
     assert vth.check_schema("t", {}) == "schema missing description"
     assert vth.check_schema("t", {"description": "  "}) == "schema missing description"
-    assert (
-        vth.check_schema("t", {"description": "d"})
-        == "parameters must be a type:object dict"
+    assert vth.check_schema("t", {"description": "d"}) == "parameters must be a type:object dict"
+    assert vth.check_schema("t", {"description": "d", "parameters": {"type": "object"}}) == (
+        "parameters.properties must be a dict"
     )
-    assert vth.check_schema(
-        "t", {"description": "d", "parameters": {"type": "object"}}
-    ) == ("parameters.properties must be a dict")
 
 
 def test_schema_real_tool_pass_and_parity(tmp_path: Path) -> None:
@@ -2318,15 +2200,11 @@ def test_schema_real_tool_pass_and_parity(tmp_path: Path) -> None:
         "description": "d",
         "parameters": {"type": "object", "properties": dict[str, object]()},
     }
-    assert "required without properties" in (
-        vth.check_schema("search_web", bad_required) or ""
-    )
+    assert "required without properties" in (vth.check_schema("search_web", bad_required) or "")
 
 
 def test_dispatch_no_owner(tmp_path: Path) -> None:
-    assert "no handler" in (
-        vth.check_dispatch("no_such_tool_xyz", {}, _ctx(tmp_path)) or ""
-    )
+    assert "no handler" in (vth.check_dispatch("no_such_tool_xyz", {}, _ctx(tmp_path)) or "")
 
 
 def test_handler_owner_tables() -> None:
@@ -2337,87 +2215,56 @@ def test_handler_owner_tables() -> None:
 def test_envelope_branches() -> None:
     assert "not a dict" in (vth._evaluate_envelope("nope") or "")
     assert "unknown reason" in (vth._evaluate_envelope({"worker_ok": False}) or "")
-    assert "not a dict" in (
-        vth._evaluate_envelope({"worker_ok": True, "result": []}) or ""
-    )
-    assert "JSON-serializable" in (
-        vth._evaluate_envelope({"worker_ok": True, "result": {"x": object()}}) or ""
-    )
-    assert "non-empty string" in (
-        vth._evaluate_envelope({"worker_ok": True, "result": {"error": " "}}) or ""
-    )
+    assert "not a dict" in (vth._evaluate_envelope({"worker_ok": True, "result": []}) or "")
+    assert "JSON-serializable" in (vth._evaluate_envelope({"worker_ok": True, "result": {"x": object()}}) or "")
+    assert "non-empty string" in (vth._evaluate_envelope({"worker_ok": True, "result": {"error": " "}}) or "")
     assert "error_type" in (
-        vth._evaluate_envelope(
-            {"worker_ok": True, "result": {"error": "boom", "error_type": 5}}
-        )
-        or ""
+        vth._evaluate_envelope({"worker_ok": True, "result": {"error": "boom", "error_type": 5}}) or ""
     )
     assert vth._evaluate_envelope({"worker_ok": True, "result": {"ok": True}}) is None
 
 
-def _exec_boom(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> dict[str, object]:
+def _exec_boom(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
     raise RuntimeError("boom")
 
 
-def _exec_not_a_dict(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> object:
+def _exec_not_a_dict(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> object:
     return ["not-a-dict"]
 
 
-def _exec_x_obj(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> dict[str, object]:
+def _exec_x_obj(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
     return {"x": object()}
 
 
-def _exec_err_empty(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> dict[str, object]:
+def _exec_err_empty(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
     return {"error": "", "error_type": "x"}
 
 
-def _exec_err_int(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> dict[str, object]:
+def _exec_err_int(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
     return {"error": "e", "error_type": 5}
 
 
-def _exec_ok(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> dict[str, object]:
+def _exec_ok(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
     return {"ok": True}
 
 
-def _exec_err_nope(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> dict[str, object]:
+def _exec_err_nope(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
     return {"error": "e", "error_type": "nope", "tool": "search_web"}
 
 
-def _exec_err_other(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> dict[str, object]:
+def _exec_err_other(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
     return {"error": "e", "error_type": "invalid_tool_arguments", "tool": "other"}
 
 
-def _exec_err_search(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> dict[str, object]:
+def _exec_err_search(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
     return {"error": "e", "error_type": "invalid_tool_arguments", "tool": "search_web"}
 
 
-def _exec_nope_list(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> object:
+def _exec_nope_list(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> object:
     return ["nope"]
 
 
-def _exec_thesis_abc(
-    name: str, arguments: dict[str, object], model: str, *a: object, **k: object
-) -> dict[str, object]:
+def _exec_thesis_abc(name: str, arguments: dict[str, object], model: str, *a: object, **k: object) -> dict[str, object]:
     return {"thesis_id": "abc"}
 
 
@@ -2439,15 +2286,11 @@ def _validate_need_obj(name: str, arguments: object) -> str | None:
     return "need object"
 
 
-def _check_none(
-    name: str, fixture: dict[str, object], ctx: RequestContext, *a: object, **k: object
-) -> None:
+def _check_none(name: str, fixture: dict[str, object], ctx: RequestContext, *a: object, **k: object) -> None:
     return None
 
 
-def _dispatch_boom(
-    name: str, fixture: dict[str, object], ctx: RequestContext, *a: object, **k: object
-) -> str | None:
+def _dispatch_boom(name: str, fixture: dict[str, object], ctx: RequestContext, *a: object, **k: object) -> str | None:
     return "boom"
 
 
@@ -2455,9 +2298,7 @@ def _schema_empty(name: str) -> tuple[dict[str, object], list[str], list[str]]:
     return (dict[str, object](), list[str](), list[str]())
 
 
-def _verify_none(
-    name: str, function: dict[str, object], *a: object, **k: object
-) -> list[str]:
+def _verify_none(name: str, function: dict[str, object], *a: object, **k: object) -> list[str]:
     return []
 
 
@@ -2469,25 +2310,15 @@ def test_live_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _ctx(tmp_path)
     with concurrent.futures.ThreadPoolExecutor(max_workers=1) as pool:
         monkeypatch.setattr(vth, "execute_tool", _exec_boom)
-        assert "raised RuntimeError" in (
-            vth.check_live("search_web", {"query": "q"}, ctx, pool) or ""
-        )
+        assert "raised RuntimeError" in (vth.check_live("search_web", {"query": "q"}, ctx, pool) or "")
         monkeypatch.setattr(vth, "execute_tool", _exec_not_a_dict)
-        assert "not a dict" in (
-            vth.check_live("search_web", {"query": "q"}, ctx, pool) or ""
-        )
+        assert "not a dict" in (vth.check_live("search_web", {"query": "q"}, ctx, pool) or "")
         monkeypatch.setattr(vth, "execute_tool", _exec_x_obj)
-        assert "JSON-serializable" in (
-            vth.check_live("search_web", {"query": "q"}, ctx, pool) or ""
-        )
+        assert "JSON-serializable" in (vth.check_live("search_web", {"query": "q"}, ctx, pool) or "")
         monkeypatch.setattr(vth, "execute_tool", _exec_err_empty)
-        assert "non-empty string" in (
-            vth.check_live("search_web", {"query": "q"}, ctx, pool) or ""
-        )
+        assert "non-empty string" in (vth.check_live("search_web", {"query": "q"}, ctx, pool) or "")
         monkeypatch.setattr(vth, "execute_tool", _exec_err_int)
-        assert "error_type" in (
-            vth.check_live("search_web", {"query": "q"}, ctx, pool) or ""
-        )
+        assert "error_type" in (vth.check_live("search_web", {"query": "q"}, ctx, pool) or "")
         monkeypatch.setattr(vth, "execute_tool", _exec_ok)
         assert vth.check_live("search_web", {"query": "q"}, ctx, pool) is None
 
@@ -2507,23 +2338,17 @@ def test_live_timeout_branch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) ->
 
     monkeypatch.setattr(cf.ThreadPoolExecutor, "submit", _submit_hung)
     with cf.ThreadPoolExecutor(max_workers=1) as pool:
-        assert "exceeded" in (
-            vth.check_live("search_web", {"query": "q"}, ctx, pool) or ""
-        )
+        assert "exceeded" in (vth.check_live("search_web", {"query": "q"}, ctx, pool) or "")
     monkeypatch.undo()
     assert real_submit is not None
 
 
 def test_security_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx, deny = _ctx(tmp_path), _deny(tmp_path)
-    assert "want RESEARCH" in (
-        vth.check_security("no_such_tool_xyz", {}, ctx, deny) or ""
-    )
+    assert "want RESEARCH" in (vth.check_security("no_such_tool_xyz", {}, ctx, deny) or "")
     monkeypatch.setattr(vth, "tool_is_permitted", _perm_deny)
     names = vth.research_names()
-    assert "denied under RESEARCH" in (
-        vth.check_security(names[0], {}, ctx, deny) or ""
-    )
+    assert "denied under RESEARCH" in (vth.check_security(names[0], {}, ctx, deny) or "")
     monkeypatch.undo()
     monkeypatch.setattr(vth, "execute_tool", _exec_ok)
     assert "not denied" in (vth.check_security(names[0], {}, ctx, deny) or "")
@@ -2532,9 +2357,7 @@ def test_security_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> N
 def test_errors_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx = _ctx(tmp_path)
     monkeypatch.setattr(vth, "execute_tool", _exec_ok)
-    assert "no structured error" in (
-        vth.check_errors("search_web", {"required": ["query"]}, ctx) or ""
-    )
+    assert "no structured error" in (vth.check_errors("search_web", {"required": ["query"]}, ctx) or "")
     monkeypatch.setattr(vth, "execute_tool", _exec_err_nope)
     assert "error_type" in (vth.check_errors("search_web", {"required": ["query"]}, ctx) or "")
     monkeypatch.setattr(vth, "execute_tool", _exec_err_other)
@@ -2572,9 +2395,7 @@ def test_verify_one_schema_shortcircuit(tmp_path: Path) -> None:
         assert out == ["schema: schema missing description"]
 
 
-def test_verify_one_full_with_fakes(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_verify_one_full_with_fakes(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     ctx, deny = _ctx(tmp_path), _deny(tmp_path)
     monkeypatch.setattr(vth, "check_handler", _check_none)
     monkeypatch.setattr(vth, "check_dispatch", _check_none)
@@ -2603,9 +2424,7 @@ def test_parse_and_select_args() -> None:
     assert args.list is False
 
 
-def test_selected_names_unknown(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_selected_names_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(vth, "research_names", _research_a)
     selected, unknown = vth._selected_names(argparse.Namespace(tool=["a", "zzz"]))
     assert selected == ["a", "zzz"]
@@ -2618,9 +2437,7 @@ def test_main_list_and_unknown(capsys: pytest.CaptureFixture[str]) -> None:
     assert vth.main(["--tool", "no-such-tool"]) == 2
 
 
-def test_main_json_smoke(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-) -> None:
+def test_main_json_smoke(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]) -> None:
     monkeypatch.setattr(vth, "research_names", _research_thesis)
     monkeypatch.setattr(vth, "verify_one", _verify_none)
     monkeypatch.setattr(vth, "_check_unknown_tool", _unknown_false)
@@ -2650,9 +2467,7 @@ def _result(entries: list[dict[str, object]]) -> dict[str, object]:
     }
 
 
-def _entry(
-    ticker: str = "AAPL", now: bool = True, prior: bool = True
-) -> dict[str, object]:
+def _entry(ticker: str = "AAPL", now: bool = True, prior: bool = True) -> dict[str, object]:
     e: dict[str, object] = {
         "rank": 1,
         "ticker": ticker,
@@ -2721,11 +2536,7 @@ def test_format_table_empty_entries():
 
 def test_format_evidence_both_and_neither():
     both = rs.format_evidence([_entry()])
-    assert (
-        "FINRA snapshot" in both
-        and "Shares fact (now)" in both
-        and "Shares fact (prior)" in both
-    )
+    assert "FINRA snapshot" in both and "Shares fact (now)" in both and "Shares fact (prior)" in both
     neither = rs.format_evidence([_entry(now=False, prior=False)])
     assert "FINRA snapshot" in neither and "Shares fact" not in neither
     assert rs.format_evidence([]) == "\nEvidence links:"
@@ -2739,17 +2550,13 @@ def _screen_ok(args: argparse.Namespace) -> dict[str, object]:
     return _result([_entry()])
 
 
-def test_main_error_path(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_main_error_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(rs, "fetch_screen", _screen_boom)
     assert rs.main(["--as-of", "2026-08-14"]) == 1
     assert "boom" in capsys.readouterr().err
 
 
-def test_main_ok_path(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_main_ok_path(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(rs, "fetch_screen", _screen_ok)
     assert rs.main(["--as-of", "2026-08-14"]) == 0
     out = capsys.readouterr().out
@@ -2807,9 +2614,7 @@ def test_find_candidates_case_insensitive():
     assert "get_accounts" not in rt.find_candidates(["get_accounts"])
 
 
-def test_robinhood_main_json_and_text(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_robinhood_main_json_and_text(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     tools: list[dict[str, object]] = [{"name": "get_accounts", "description": "d"}]
 
     def _connect_tools(server_url: str) -> list[dict[str, object]]:
@@ -2822,9 +2627,7 @@ def test_robinhood_main_json_and_text(
     assert "tools discovered: 1" in capsys.readouterr().out
 
 
-def test_robinhood_main_failure(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_robinhood_main_failure(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     def _boom(url: str) -> object:
         raise RuntimeError("nope")
 
@@ -2943,9 +2746,7 @@ def test_smoke_list_names_and_chain(monkeypatch: pytest.MonkeyPatch):
     assert smoke.run_chain(C2(), args) == "CHAIN"
 
 
-def test_smoke_main_paths(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_smoke_main_paths(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     from app.thesis.models import JSONValue as ThesisJSON2
 
     class C(RobinhoodClient):
@@ -2957,9 +2758,7 @@ def test_smoke_main_paths(
             return [{"name": "t1"}]
 
         @override
-        def call_tool(
-            self, name: str, arguments: dict[str, object] | None = None
-        ) -> ThesisJSON2:
+        def call_tool(self, name: str, arguments: dict[str, object] | None = None) -> ThesisJSON2:
             return {"result": name}
 
     def _connect_c(server_url: str) -> object:
@@ -3046,13 +2845,8 @@ def test_doctor_run_all_aggregator():
     assert doc.run_all([_ok, _fail_exit]) == 1
     assert doc.run_all([_boom]) == 1
     assert doc.run_all([_fail_exit, _boom, _ok]) == 2
-    assert {c.__name__ for c in doc.selected_checks(doc.parse_args([]))} == {
-        c.__name__ for c in doc.CHECKS.values()
-    }
-    assert doc.selected_checks(doc.parse_args(["--check", "env"])) == [
-        doc.check_calling_env
-    ]
-
+    assert {c.__name__ for c in doc.selected_checks(doc.parse_args([]))} == {c.__name__ for c in doc.CHECKS.values()}
+    assert doc.selected_checks(doc.parse_args(["--check", "env"])) == [doc.check_calling_env]
 
 
 def test_doctor_network_branches(monkeypatch: pytest.MonkeyPatch):
@@ -3179,9 +2973,7 @@ def test_harness_subsequence_and_decode():
     assert harness._decode_inner(None) is None
     names, bad = harness._parse_dispatched(harness._trace_rows(["a", "b"]))
     assert names == ["a", "b"] and bad == 0
-    names, bad = harness._parse_dispatched(
-        [{"tool_name": "call_tool", "arguments": "zzz"}]
-    )
+    names, bad = harness._parse_dispatched([{"tool_name": "call_tool", "arguments": "zzz"}])
     assert bad == 1
 
 
@@ -3193,9 +2985,7 @@ def test_harness_verdict_branches():
         "ok",
     )
     bad_rows = harness._trace_rows(["get_reg_sho_volume"])
-    passed, excused, reason = harness.strict_verdict(
-        ["get_short_interest"], [], bad_rows
-    )
+    passed, excused, reason = harness.strict_verdict(["get_short_interest"], [], bad_rows)
     assert (passed, excused) == (False, False) and "missing" in reason
     passed, excused, _ = harness.strict_verdict(
         ["get_short_interest"], [], bad_rows, infra_error_names=(("get_short_interest", "ratelimit 429"),)
@@ -3234,25 +3024,19 @@ def test_harness_fixture_and_report():
     assert harness.parse_args([]) is not None
 
 
-def test_harness_main_ok(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_harness_main_ok(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(harness, "_dispatch_real", _dispatch_passthrough)
     assert harness.main([]) == 0
     assert "strict_routing_accuracy" in capsys.readouterr().out
 
 
-def test_harness_main_drift(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_harness_main_drift(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(harness, "_fixture_ground_truth", _ground_empty)
     assert harness.main([]) == 2
     assert "drift" in capsys.readouterr().err
 
 
-def test_harness_main_probe_fail(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_harness_main_probe_fail(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(harness, "_dispatch_real", _dispatch_passthrough)
     monkeypatch.setattr(harness, "run_probes", _probes_boom)
     assert harness.main([]) == 2
@@ -3300,31 +3084,18 @@ def test_expected_args_none_is_false(tmp_path: Path):
 def test_expected_args_match_and_mismatch(tmp_path: Path):
     conn = _mismatch_conn(tmp_path / "m.sqlite")
     try:
-        assert (
-            v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "AAPL"})
-            is False
-        )
-        assert (
-            v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "MSFT"})
-            is True
-        )
-        assert (
-            v._expected_args_mismatch(conn, "absent_tool", {"ticker": "AAPL"}) is False
-        )
+        assert v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "AAPL"}) is False
+        assert v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "MSFT"}) is True
+        assert v._expected_args_mismatch(conn, "absent_tool", {"ticker": "AAPL"}) is False
     finally:
         conn.close()
 
 
-def test_expected_args_normalize_raises_is_false(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_expected_args_normalize_raises_is_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     conn = _mismatch_conn(tmp_path / "m.sqlite")
     monkeypatch.setattr(v, "_normalize_args", _normalize_bad)
     try:
-        assert (
-            v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "AAPL"})
-            is False
-        )
+        assert v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "AAPL"}) is False
     finally:
         conn.close()
 
@@ -3332,14 +3103,10 @@ def test_expected_args_normalize_raises_is_false(
 def test_expected_args_db_error_is_false(tmp_path: Path):
     conn = _mismatch_conn(tmp_path / "m.sqlite")
     conn.close()
-    assert (
-        v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "AAPL"}) is False
-    )
+    assert v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "AAPL"}) is False
 
 
-def test_expected_args_row_normalize_raises_is_false(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_expected_args_row_normalize_raises_is_false(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     conn = _mismatch_conn(tmp_path / "m.sqlite")
     calls = {"n": 0}
 
@@ -3351,10 +3118,7 @@ def test_expected_args_row_normalize_raises_is_false(
 
     monkeypatch.setattr(v, "_normalize_args", fake)
     try:
-        assert (
-            v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "AAPL"})
-            is False
-        )
+        assert v._expected_args_mismatch(conn, "get_fundamentals", {"ticker": "AAPL"}) is False
     finally:
         conn.close()
 
@@ -3369,9 +3133,7 @@ def test_reachability_dict_branches():
     assert v.evaluate_reachability_tool([{"ok": True}]) is True
     assert v.evaluate_reachability_tool([{"ok": False}]) is False
     assert v.evaluate_reachability_tool([{}]) is False
-    assert (
-        v.evaluate_reachability_tool([{"reach_ok": True}, {"reach_ok": False}]) is False
-    )
+    assert v.evaluate_reachability_tool([{"reach_ok": True}, {"reach_ok": False}]) is False
 
 
 def test_reachability_object_branches():
@@ -3426,9 +3188,7 @@ def _popen_factory(
         def wait(self, timeout: float | None = None) -> int:
             self.waits += 1
             if fail_all_waits or (fail_first_wait and self.waits == 1):
-                raise subprocess.TimeoutExpired(
-                    "pi_bridge", timeout if timeout is not None else 0.0
-                )
+                raise subprocess.TimeoutExpired("pi_bridge", timeout if timeout is not None else 0.0)
             return 0
 
     return _Popen
@@ -3474,9 +3234,7 @@ def test_discover_double_wait_timeout_kills(monkeypatch: pytest.MonkeyPatch):
 
 
 class _Proc:
-    def __init__(
-        self, poll_val: object, wait_val: int = 0, wait_raises: bool = False
-    ) -> None:
+    def __init__(self, poll_val: object, wait_val: int = 0, wait_raises: bool = False) -> None:
         self._poll = poll_val
         self.pid = 1234567
         self._wait_val = wait_val
@@ -3524,15 +3282,11 @@ def test_verification_args_finra_seed(tmp_path: Path, monkeypatch: pytest.Monkey
         seen.append((store, durable))
 
     monkeypatch.setattr(v, "seed_finra_fixture", _seed_finra)
-    out = v._verification_args(
-        "get_short_interest_leaderboard", {"a": 1}, tmp_path, tmp_path / "d"
-    )
+    out = v._verification_args("get_short_interest_leaderboard", {"a": 1}, tmp_path, tmp_path / "d")
     assert out == {"a": 1} and len(seen) == 1
 
 
-def test_verification_args_research_fixture(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_verification_args_research_fixture(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(v, "ensure_research_fixture", _ensure_sess)
     base = {"session_id": "research-session-placeholder", "other": 1}
     out = v._verification_args("research_status", base, tmp_path, tmp_path / "d")
@@ -3562,9 +3316,7 @@ def test_research_call_count_normal(tmp_path: Path):
         conn.close()
 
 
-def test_research_call_count_registry_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_research_call_count_registry_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     def _boom():
         raise RuntimeError("no registry")
 
@@ -3576,9 +3328,7 @@ def test_research_call_count_registry_error(
         conn.close()
 
 
-def test_research_call_count_no_research_names(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_research_call_count_no_research_names(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     monkeypatch.setattr(v, "get_registry_sets", _registry_discovery_only)
     conn = _research_conn(tmp_path / "r.sqlite", ["search_tools"])
     try:
@@ -3677,9 +3427,7 @@ def test_run_confusion_case_pass(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     assert rec["surfaced"] is None and rec["dispatched"] == []
 
 
-def test_run_confusion_case_exec_failure_counts_as_selection(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_run_confusion_case_exec_failure_counts_as_selection(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(v, "run_verification_attempt", _res_false)
     monkeypatch.setattr(v, "_confusion_category", _cat_exec)
     monkeypatch.setattr(v, "_confusion_db_evidence", _db_ev_tool_a)
@@ -3690,9 +3438,7 @@ def test_run_confusion_case_exec_failure_counts_as_selection(
     assert rec["surfaced"] == ["tool-a"]
 
 
-def test_run_confusion_case_selection_failure(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-):
+def test_run_confusion_case_selection_failure(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(v, "run_verification_attempt", _res_false)
     monkeypatch.setattr(v, "_confusion_category", _cat_sel)
     c = {"expected_tool": "tool-a", "prompt": "p", "arguments": {}, "pair": ["a", "b"]}
@@ -3767,9 +3513,7 @@ def test_run_confusion_success_paths(
 
 def test_run_holdout_case_invalid(tmp_path: Path):
     assert v._run_holdout_case("nope", 0, {}, tmp_path, tmp_path, tmp_path) == (1, 1)
-    assert v._run_holdout_case(
-        {"prompt": 1, "expected_tool": "t"}, 1, {}, tmp_path, tmp_path, tmp_path
-    ) == (1, 1)
+    assert v._run_holdout_case({"prompt": 1, "expected_tool": "t"}, 1, {}, tmp_path, tmp_path, tmp_path) == (1, 1)
 
 
 def test_run_holdout_case_lookup_miss(tmp_path: Path):
@@ -3793,9 +3537,7 @@ def test_run_holdout_case_success(tmp_path: Path, monkeypatch: pytest.MonkeyPatc
         seen.append(a)
 
     monkeypatch.setattr(v, "_report_holdout_case", _report_seen)
-    assert v._run_holdout_case(
-        {"prompt": "p", "expected_tool": "t"}, 0, {}, tmp_path, tmp_path, tmp_path
-    ) == (0, 1)
+    assert v._run_holdout_case({"prompt": "p", "expected_tool": "t"}, 0, {}, tmp_path, tmp_path, tmp_path) == (0, 1)
     assert seen == [("prompt-p", "tool-t", True, "rok", False, "fok", 2.0)]
 
 
@@ -3804,9 +3546,7 @@ def test_run_holdout_no_cases(monkeypatch: pytest.MonkeyPatch):
     assert v.run_holdout("whatever.json") == 1
 
 
-def test_run_holdout_loop(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_run_holdout_loop(tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(v, "_read_holdout_cases", _read_two)
     monkeypatch.setattr(v, "tool_schemas", _schemas_empty)
     monkeypatch.setattr(v, "_batch_id", _batch_tb)
@@ -3832,18 +3572,9 @@ def test_run_holdout_loop(
 
 def test_select_matrix_tools_branches():
     assert v._select_matrix_tools(argparse.Namespace(tool="nope"), ["a"]) is None
-    assert (
-        v._select_matrix_tools(
-            argparse.Namespace(tool="browse_tools"), ["browse_tools", "a"]
-        )
-        is None
-    )
-    assert v._select_matrix_tools(
-        argparse.Namespace(tool="a"), ["a", "browse_tools"]
-    ) == ["a"]
-    assert v._select_matrix_tools(
-        argparse.Namespace(tool=None), ["a", "browse_tools"]
-    ) == ["a"]
+    assert v._select_matrix_tools(argparse.Namespace(tool="browse_tools"), ["browse_tools", "a"]) is None
+    assert v._select_matrix_tools(argparse.Namespace(tool="a"), ["a", "browse_tools"]) == ["a"]
+    assert v._select_matrix_tools(argparse.Namespace(tool=None), ["a", "browse_tools"]) == ["a"]
 
 
 # ---- _attempt_record / _report_attempt / _collect_matrix_results (cc5/cc8/cc4) ----
@@ -3873,9 +3604,7 @@ def _int_kw(kw: dict[str, object], key: str) -> int:
     return value
 
 
-def _attempt(
-    tool: str = "t", attempt: int = 1, ok: bool = True, **kw: object
-) -> v.AttemptResult:
+def _attempt(tool: str = "t", attempt: int = 1, ok: bool = True, **kw: object) -> v.AttemptResult:
     reason = kw.pop("reason", "r")
     assert isinstance(reason, str)
     exit_code = kw.pop("exit", 0)
@@ -3906,13 +3635,9 @@ def _attempt(
 
 
 def test_attempt_record_fallbacks_and_search_queries():
-    rec, route, reach = v._attempt_record(
-        _attempt(ok=True, reach_ok=None, routing_ok=True)
-    )
+    rec, route, reach = v._attempt_record(_attempt(ok=True, reach_ok=None, routing_ok=True))
     assert (route, reach) == (True, True) and "searchQueries" not in rec
-    rec2, route2, reach2 = v._attempt_record(
-        _attempt(ok=False, reach_ok=False, routing_ok=None)
-    )
+    rec2, route2, reach2 = v._attempt_record(_attempt(ok=False, reach_ok=False, routing_ok=None))
     assert (route2, reach2) == (False, False) and rec2["searchQueries"] == []
 
 
@@ -3950,9 +3675,7 @@ def test_collect_matrix_results_counts(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(v, "_report_attempt", _report_seen_tool)
     r1 = _attempt("t", 1, True, reach_ok=True, routing_ok=True)
     r2 = _attempt("t", 2, False, reach_ok=False, routing_ok=False)
-    results, total, passed_routing, passed_reach = v._collect_matrix_results(
-        [r1, r2], 3
-    )
+    results, total, passed_routing, passed_reach = v._collect_matrix_results([r1, r2], 3)
     assert total == 2 and passed_routing == 1 and passed_reach == 1
     assert len(results["t"]) == 2 and seen == [("t", 3), ("t", 3)]
 
@@ -3973,9 +3696,7 @@ def test_sweep_matrix_tools_four_verdicts(tmp_path: Path, monkeypatch: pytest.Mo
         "t3": [{"reach_ok": False, "routing_ok": True, "ok": True}],
         "t4": [{"reach_ok": True, "routing_ok": False, "ok": True}],
     }
-    failed_routing, failed_reach = v._sweep_matrix_tools(
-        ["t1", "t2", "t3", "t4"], results, [], tmp_path
-    )
+    failed_routing, failed_reach = v._sweep_matrix_tools(["t1", "t2", "t3", "t4"], results, [], tmp_path)
     assert failed_routing == ["t2", "t4"] and failed_reach == ["t2", "t3"]
     assert pruned == ["t1"]
 
@@ -3985,9 +3706,7 @@ def test_print_matrix_aggregates_with_and_without_cats(
 ):
     v._print_matrix_aggregates({}, 2, 3.0)
     assert "Failure categories: none" in capsys.readouterr().out
-    v._print_matrix_aggregates(
-        {"failure_category_counts": {"SELECTION_FAILURE": 2}}, 2, 3.0
-    )
+    v._print_matrix_aggregates({"failure_category_counts": {"SELECTION_FAILURE": 2}}, 2, 3.0)
     assert "SELECTION_FAILURE=2" in capsys.readouterr().out
 
 
@@ -4127,9 +3846,7 @@ def _run_live_sess(**k: object) -> dict[str, object]:
     return {"session_id": "s"}
 
 
-def _eval_in(
-    scenario: object, out: dict[str, object], wall: float, cap: int = 0
-) -> object:
+def _eval_in(scenario: object, out: dict[str, object], wall: float, cap: int = 0) -> object:
     return "IN"
 
 
@@ -4264,9 +3981,7 @@ def _sr(passed: bool) -> ScenarioResult:
     )
 
 
-def test_suite_info_records_flagless_default(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_suite_info_records_flagless_default(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     """A flag-less live run still tallies and records its git sha: there is no model flag to gate on."""
     monkeypatch.setattr(vas.subprocess, "check_output", _check_out_abc)
     summary: dict[str, object] = {}
@@ -4286,9 +4001,7 @@ def test_suite_info_ok(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFi
     assert summary["git_sha"] == "abc123"
 
 
-def test_suite_info_git_fails(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_suite_info_git_fails(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     def _boom(*a: object, **k: object) -> object:
         raise OSError("no git")
 
@@ -4330,9 +4043,7 @@ def test_agent_run_cli_list(monkeypatch: pytest.MonkeyPatch):
     assert vas._run_cli(_g2_ns(list=True)) == 7
 
 
-def test_agent_run_cli_skip(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_agent_run_cli_skip(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     def _boom(args: argparse.Namespace) -> object:
         raise RuntimeError("no model")
 
@@ -4341,18 +4052,14 @@ def test_agent_run_cli_skip(
     assert "SKIP live scenarios" in capsys.readouterr().err
 
 
-def test_agent_run_cli_unknown(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_agent_run_cli_unknown(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(vas, "_prepare_provider_model", _prep_pm)
     monkeypatch.setattr(vas, "_scenario_map", _scenario_a)
     assert vas._run_cli(_g2_ns(scenario="zzz")) == 2
     assert "unknown scenario" in capsys.readouterr().err
 
 
-def test_agent_run_cli_success(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_agent_run_cli_success(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(vas, "_prepare_provider_model", _prep_pm)
     monkeypatch.setattr(vas, "_scenario_map", _scenario_a)
     r1 = SimpleNamespace(scenario_name="a", passed=True, violations=())
@@ -4408,9 +4115,7 @@ def test_cli_prereqs_resolves_flagless_default(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(vas, "_check_pi_ready", _probe)
     provider, model, timeout_s, names, by_name = _cli_tuple(_g2_ns())
     assert (provider, model) == ("", "")
-    assert timeout_s == vas._PI_CALL_TIMEOUT_DEFAULT_S and probed == [
-        ("", "", vas._PI_CALL_TIMEOUT_DEFAULT_S)
-    ]
+    assert timeout_s == vas._PI_CALL_TIMEOUT_DEFAULT_S and probed == [("", "", vas._PI_CALL_TIMEOUT_DEFAULT_S)]
     assert "gs-openai-sec-only" in names
     for carrier in (
         "spacex-openai-bankruptcy-sec-only-live-run",
@@ -4421,9 +4126,7 @@ def test_cli_prereqs_resolves_flagless_default(monkeypatch: pytest.MonkeyPatch):
     assert _cli_tuple(_g2_ns(model_timeout="45"))[2] == 45
     monkeypatch.setenv("STOCKBOT_MODEL_TIMEOUT", "77")
     assert _cli_tuple(_g2_ns())[2] == 77
-    assert _cli_tuple(_g2_ns(scenario="gs-openai-sec-only-live-run"))[3] == [
-        "gs-openai-sec-only-live-run"
-    ]
+    assert _cli_tuple(_g2_ns(scenario="gs-openai-sec-only-live-run"))[3] == ["gs-openai-sec-only-live-run"]
 
 
 # ---- verify_agent_scenarios._run_live_scenario (cc4, needs >=28%) ----
@@ -4447,9 +4150,7 @@ def test_live_kwargs_shape_and_default_label(monkeypatch: pytest.MonkeyPatch):
     assert seen == [("", "", 275)]
     untickered = vas._live_kwargs(_g2_scenario(ticker=None, notes=""), "p", "m", 300)
     assert untickered["tickers"] == [] and untickered["provider"] == "p"
-    assert (
-        untickered["objective"] == "What drove NVDA?"
-    )  # no notes: the question carries the objective
+    assert untickered["objective"] == "What drove NVDA?"  # no notes: the question carries the objective
 
 
 def _omp_sid_ok(*a: object, **k: object) -> str:
@@ -4470,9 +4171,7 @@ def test_run_live_scenario_passes_the_timeout_knob(monkeypatch: pytest.MonkeyPat
     """The resolved per-call budget reaches the OMP research spawn."""
     seen: list[tuple[object, ...]] = []
 
-    def _capture(
-        scenario: object, provider: object, model: object, timeout: object, tmp: object
-    ) -> str:
+    def _capture(scenario: object, provider: object, model: object, timeout: object, tmp: object) -> str:
         seen.append((provider, model, timeout))
         return "run:t1"
 
@@ -4512,9 +4211,7 @@ class _FakeRepo:
         return []
 
 
-def _eval_patient(
-    monkeypatch: pytest.MonkeyPatch, traces: list[TraceHeader], sess: ResearchSession
-):
+def _eval_patient(monkeypatch: pytest.MonkeyPatch, traces: list[TraceHeader], sess: ResearchSession):
     import app.research.evals.traces as traces_mod
     import app.research.repository as repo_mod
 
@@ -4603,9 +4300,7 @@ def test_evaluate_and_record_no_trace(monkeypatch: pytest.MonkeyPatch):
 
 
 def _fake_dirs(root: Path):
-    def _dirs(
-        batch_root: Path, tool: str, attempt: int, retry: int = 0
-    ) -> tuple[Path, Path]:
+    def _dirs(batch_root: Path, tool: str, attempt: int, retry: int = 0) -> tuple[Path, Path]:
         d = Path(batch_root) / tool / f"a{attempt}r{retry}"
         return (d / "runs.sqlite", d / "store")
 
@@ -4620,9 +4315,7 @@ def _research_thesis() -> list[str]:
     return ["thesis_create"]
 
 
-def _seed_ctx(
-    scenario: J.Scenario, store: Path, prompt: str
-) -> tuple[str, dict[str, object] | None]:
+def _seed_ctx(scenario: J.Scenario, store: Path, prompt: str) -> tuple[str, dict[str, object] | None]:
     return (prompt + " ctx", None)
 
 
@@ -4646,15 +4339,11 @@ def _batch_b1() -> str:
     return "b1"
 
 
-def _sel_true(
-    wanted: list[J.Scenario], root: Path, cwd: Path
-) -> list[dict[str, object]]:
+def _sel_true(wanted: list[J.Scenario], root: Path, cwd: Path) -> list[dict[str, object]]:
     return [{"id": "x", "ok": True}]
 
 
-def _sel_false(
-    wanted: list[J.Scenario], root: Path, cwd: Path
-) -> list[dict[str, object]]:
+def _sel_false(wanted: list[J.Scenario], root: Path, cwd: Path) -> list[dict[str, object]]:
     return [{"id": "x", "ok": False}]
 
 
@@ -4754,15 +4443,11 @@ def test_judge_run_attempts_seeded_ok(monkeypatch: pytest.MonkeyPatch, tmp_path:
         seen.append(prompt)
         return (0, False, "o", "", True)
 
-    _, _, _, code = J._run_attempts(
-        sc, tmp_path, tmp_path, 1, run_pi, _fake_dirs(tmp_path)
-    )
+    _, _, _, code = J._run_attempts(sc, tmp_path, tmp_path, 1, run_pi, _fake_dirs(tmp_path))
     assert code == 0 and seen == ["p ctx"]
 
 
-def test_judge_run_attempts_seeded_error(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_judge_run_attempts_seeded_error(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     sc = _scenario(id="watch_vs_journal", prompt="p")
     err: dict[str, object] = {
         "id": "watch_vs_journal",
@@ -4775,9 +4460,7 @@ def test_judge_run_attempts_seeded_error(
         "duration_s": 0.0,
     }
 
-    def _seed_err(
-        scenario: J.Scenario, store: Path, prompt: str
-    ) -> tuple[str, dict[str, object] | None]:
+    def _seed_err(scenario: J.Scenario, store: Path, prompt: str) -> tuple[str, dict[str, object] | None]:
         return (prompt, err)
 
     monkeypatch.setattr(J, "_seeded_prompt", _seed_err)
@@ -4815,9 +4498,7 @@ def test_judge_run_scenario_live_ok(monkeypatch: pytest.MonkeyPatch, tmp_path: P
     assert isinstance(answer_file, str) and answer_file.endswith("a.md")
 
 
-def test_judge_run_scenario_live_seed_dict(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-):
+def test_judge_run_scenario_live_seed_dict(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
     sc = _scenario(id="s1", prompt="p", evaluator="e")
     err: dict[str, object] = {
         "id": "s1",
@@ -4921,9 +4602,7 @@ def _proc(code: int = 0, out: str = "", err: str = ""):
     return SimpleNamespace(returncode=code, stdout=out, stderr=err)
 
 
-def test_doctor_policy_locked_down(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_doctor_policy_locked_down(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(doc, "run", _run_locked)
     called: list[int] = []
 
@@ -4947,9 +4626,7 @@ def test_doctor_policy_ls_fails(monkeypatch: pytest.MonkeyPatch):
         raise AssertionError("should fail")
 
 
-def test_doctor_policy_behavioral_ok(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_doctor_policy_behavioral_ok(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(doc, "run", _run_rules)
     monkeypatch.setattr(doc, "_behavioral_policy_ok", _behavioral_true)
     doc.check_policy()
@@ -5145,9 +4822,7 @@ def test_registry_expected_pages_shape():
     assert all(isinstance(v, str) and v for v in expected.values())
 
 
-def test_registry_main_paths(
-    monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
-):
+def test_registry_main_paths(monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]):
     monkeypatch.setattr(reg, "get_registry_sets", _reg_a)
     monkeypatch.setattr(reg, "_report_registry", _rep_false_s)
     monkeypatch.setattr(reg, "_report_catalog", _rep_false)
@@ -5213,9 +4888,7 @@ def test_escape_namespaced_decorator_branches():
 
     # wrong attr -> no flag
     b, c = _col()
-    _flag_namespaced_decorator(
-        _dec("import typing\n@typing.other\ndef f(): pass"), b, c
-    )
+    _flag_namespaced_decorator(_dec("import typing\n@typing.other\ndef f(): pass"), b, c)
     assert c.hits == []
     # bound alias -> flag
     b, c = _col()
@@ -5227,9 +4900,7 @@ def test_escape_namespaced_decorator_branches():
     assert c.hits == []
     # non-Name target (a.b.no_type_check) -> no flag
     b, c = _col()
-    _flag_namespaced_decorator(
-        _dec("import a\n@a.b.no_type_check\ndef f(): pass"), b, c
-    )
+    _flag_namespaced_decorator(_dec("import a\n@a.b.no_type_check\ndef f(): pass"), b, c)
     assert c.hits == []
 
 
@@ -5238,9 +4909,7 @@ def test_build_success_does_not_invent_a_budget_cap():
     from app.research.evals.evaluators import evaluate
 
     sc = _g2_scenario(name="n", as_of="2024-01-01", requires_evidence=True)
-    deep = vas._build_success_input(
-        sc, "ans", ["get_sec_document"] * 100, [], "completed", ("e",), 1.0
-    )
+    deep = vas._build_success_input(sc, "ans", ["get_sec_document"] * 100, [], "completed", ("e",), 1.0)
     assert deep.budget_used == 100 and deep.budget_cap == 0
     assert "budget-violation" not in evaluate(deep).violations
     # A cap the run was actually given still trips the rule.
@@ -5250,9 +4919,7 @@ def test_build_success_does_not_invent_a_budget_cap():
     assert "budget-violation" in evaluate(capped).violations
 
 
-def test_live_trace_fields_reach_the_evaluator(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
-) -> None:
+def test_live_trace_fields_reach_the_evaluator(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A live verdict must see the run's real trace: branch coverage, opened docs, ledger kinds."""
     from app.research.director import DirectorBudgets
     from app.research.evals.scenarios import get_scenario
@@ -5266,17 +4933,13 @@ def test_live_trace_fields_reach_the_evaluator(
     )
     sid = run._create_session("q?", "2026-08-10", None)
     for eid, kind in (("ev:1", "evidence"), ("ev:2", "discovery")):
-        repo.save_evidence(
-            {"evidence_id": eid, "session_id": sid, "wave_id": 1, "record_kind": kind}
-        )
+        repo.save_evidence({"evidence_id": eid, "session_id": sid, "wave_id": 1, "record_kind": kind})
     scenario = get_scenario("msft-openai-bankruptcy-sec-only")
     # Only ids the run advertises for citation count as raw: the trace gate compares
     # them against the same advertised set, so a wider ledger read would fail it falsely.
     trace = vas._live_trace(scenario, repo, sid, repo.list_jobs(sid), ("ev:1", "ev:2"))
     assert trace["requires_trace"] is True
-    assert trace["raw_evidence_ids"] == ("ev:1",) and trace[
-        "navigation_evidence_ids"
-    ] == ("ev:2",)
+    assert trace["raw_evidence_ids"] == ("ev:1",) and trace["navigation_evidence_ids"] == ("ev:2",)
     assert vas._live_trace(scenario, repo, sid, [], ("ev:2",))["raw_evidence_ids"] == ()
     built = vas._build_success_input(
         scenario, "answer", ["get_sec_document"], repo.list_jobs(sid), "researching", ("ev:1",), 1.0, 0, trace
@@ -5292,25 +4955,10 @@ def test_live_trace_fields_reach_the_evaluator(
 def test_row_provenance_narrows_raw_rows():
     """Only an evidence row with a real accession is provenance for an opened filing."""
     assert vas._row_provenance("not-a-row") is None
-    assert (
-        vas._row_provenance(
-            {"record_kind": "discovery", "metadata": {"accession_no": "1"}}
-        )
-        is None
-    )
+    assert vas._row_provenance({"record_kind": "discovery", "metadata": {"accession_no": "1"}}) is None
     assert vas._row_provenance({"record_kind": "evidence", "metadata": "junk"}) is None
-    assert (
-        vas._row_provenance(
-            {"record_kind": "evidence", "metadata": {"accession_no": ""}}
-        )
-        is None
-    )
-    assert (
-        vas._row_provenance(
-            {"record_kind": "evidence", "metadata": {"accession_no": 7}}
-        )
-        is None
-    )
+    assert vas._row_provenance({"record_kind": "evidence", "metadata": {"accession_no": ""}}) is None
+    assert vas._row_provenance({"record_kind": "evidence", "metadata": {"accession_no": 7}}) is None
     assert vas._row_provenance(
         {"record_kind": "evidence", "metadata": {"accession_no": "1", "document_name": "d.htm"}}
     ) == ("1", "d.htm")

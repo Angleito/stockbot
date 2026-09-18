@@ -8,7 +8,7 @@ from typing import ClassVar
 
 import pytest
 
-import app.thesis.omp_runner as omp_runner
+from app.thesis import omp_runner
 from app.thesis.omp_runner import _done_complete, _run_complete, run_thesis_omp
 
 
@@ -102,6 +102,7 @@ def _run(
 
     def _which(_name: str) -> str | None:
         return "/bin/omp"
+
     monkeypatch.setattr(omp_runner.shutil, "which", _which)
     monkeypatch.setattr(subprocess, "Popen", fake)
     monkeypatch.delenv("STOCKBOT_PROVIDER", raising=False)
@@ -117,8 +118,21 @@ def _run(
 def test_builds_canonical_command_with_tool_restrictions(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     cap = _run(monkeypatch, tmp_path, "Do research")
     cmd = _as_list(cap["cmd"])
-    assert cmd == ["omp", "-p", "--config", ".stockbot/omp/stockbot.yml", "--no-session", "--no-extensions", "--no-skills", "--no-rules",
-                   "--tools=task", "--extension", ".stockbot/omp", "--", "Do research"]
+    assert cmd == [
+        "omp",
+        "-p",
+        "--config",
+        ".stockbot/omp/stockbot.yml",
+        "--no-session",
+        "--no-extensions",
+        "--no-skills",
+        "--no-rules",
+        "--tools=task",
+        "--extension",
+        ".stockbot/omp",
+        "--",
+        "Do research",
+    ]
     assert "--no-builtin-tools" not in cmd
 
     assert cap["cwd"] == str(omp_runner._repo_root())
@@ -130,11 +144,32 @@ def test_provider_model_flags_inserted_before_separator(monkeypatch: pytest.Monk
     fake = _fake_proc("ok")
     monkeypatch.setattr(omp_runner.shutil, "which", _which_omp)
     monkeypatch.setattr(subprocess, "Popen", fake)
-    run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1", prompt="Do research",
-                  data_root=tmp_path / "data", run_id="run:test")
-    assert _as_list(_as_dict(fake.captured)["cmd"]) == ["omp", "-p", "--config", ".stockbot/omp/stockbot.yml", "--no-session",
-        "--no-extensions", "--no-skills", "--no-rules", "--tools=task",
-        "--extension", ".stockbot/omp", "--provider", "openai", "--model", "gpt-4o", "--", "Do research"]
+    run_thesis_omp(
+        thesis_id="thesis:t",
+        trigger_id="trigger:1",
+        prompt="Do research",
+        data_root=tmp_path / "data",
+        run_id="run:test",
+    )
+    assert _as_list(_as_dict(fake.captured)["cmd"]) == [
+        "omp",
+        "-p",
+        "--config",
+        ".stockbot/omp/stockbot.yml",
+        "--no-session",
+        "--no-extensions",
+        "--no-skills",
+        "--no-rules",
+        "--tools=task",
+        "--extension",
+        ".stockbot/omp",
+        "--provider",
+        "openai",
+        "--model",
+        "gpt-4o",
+        "--",
+        "Do research",
+    ]
 
 
 def test_empty_provider_model_adds_no_flags(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -143,11 +178,28 @@ def test_empty_provider_model_adds_no_flags(monkeypatch: pytest.MonkeyPatch, tmp
     fake = _fake_proc("ok")
     monkeypatch.setattr(omp_runner.shutil, "which", _which_omp)
     monkeypatch.setattr(subprocess, "Popen", fake)
-    run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1", prompt="Do research",
-                  data_root=tmp_path / "data", run_id="run:test")
-    assert _as_list(_as_dict(fake.captured)["cmd"]) == ["omp", "-p", "--config", ".stockbot/omp/stockbot.yml", "--no-session",
-        "--no-extensions", "--no-skills", "--no-rules", "--tools=task",
-        "--extension", ".stockbot/omp", "--", "Do research"]
+    run_thesis_omp(
+        thesis_id="thesis:t",
+        trigger_id="trigger:1",
+        prompt="Do research",
+        data_root=tmp_path / "data",
+        run_id="run:test",
+    )
+    assert _as_list(_as_dict(fake.captured)["cmd"]) == [
+        "omp",
+        "-p",
+        "--config",
+        ".stockbot/omp/stockbot.yml",
+        "--no-session",
+        "--no-extensions",
+        "--no-skills",
+        "--no-rules",
+        "--tools=task",
+        "--extension",
+        ".stockbot/omp",
+        "--",
+        "Do research",
+    ]
 
 
 def test_binds_env_not_prompt(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -183,11 +235,17 @@ def test_raises_on_nonzero_exit(monkeypatch: pytest.MonkeyPatch, tmp_path: Path)
 
     def _which_ok(_name: str) -> str | None:
         return "/bin/omp"
+
     monkeypatch.setattr(omp_runner.shutil, "which", _which_ok)
     monkeypatch.setattr(subprocess, "Popen", fake)
     with pytest.raises(RuntimeError, match="exit 1"):
-        run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1",
-                       prompt="Do research", data_root=tmp_path / "data", run_id="run:test")
+        run_thesis_omp(
+            thesis_id="thesis:t",
+            trigger_id="trigger:1",
+            prompt="Do research",
+            data_root=tmp_path / "data",
+            run_id="run:test",
+        )
 
 
 def test_raises_on_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -195,20 +253,28 @@ def test_raises_on_timeout(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> N
 
     def _which_ok2(_name: str) -> str | None:
         return "/bin/omp"
+
     monkeypatch.setattr(omp_runner.shutil, "which", _which_ok2)
     monkeypatch.setattr(subprocess, "Popen", fake)
     with pytest.raises(RuntimeError, match="timed out"):
-        run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1",
-                       prompt="Do research", data_root=tmp_path / "data", timeout_s=1, run_id="run:test")
+        run_thesis_omp(
+            thesis_id="thesis:t",
+            trigger_id="trigger:1",
+            prompt="Do research",
+            data_root=tmp_path / "data",
+            timeout_s=1,
+            run_id="run:test",
+        )
 
 
 def test_raises_without_omp_binary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     def _which_missing(_name: str) -> str | None:
         return None
+
     monkeypatch.setattr(omp_runner.shutil, "which", _which_missing)
     with pytest.raises(RuntimeError, match="not found"):
-        run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1",
-                       prompt="Do research", data_root=tmp_path / "data")
+        run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1", prompt="Do research", data_root=tmp_path / "data")
+
 
 def test_lingering_omp_after_completion_counts_as_success(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     # omp -p stays alive after answering; the SIGKILL is linger cleanup.
@@ -223,11 +289,13 @@ def test_failed_run_after_completed_run_still_raises(monkeypatch: pytest.MonkeyP
 
     def _which_ok(_name: str) -> str | None:
         return "/bin/omp"
+
     monkeypatch.setattr(omp_runner.shutil, "which", _which_ok)
     monkeypatch.setattr(subprocess, "Popen", fake)
     with pytest.raises(RuntimeError, match="exit 1"):
-        run_thesis_omp(thesis_id="thesis:t", trigger_id="trigger:1",
-                       prompt="Do research", data_root=data_root, run_id="run:two")
+        run_thesis_omp(
+            thesis_id="thesis:t", trigger_id="trigger:1", prompt="Do research", data_root=data_root, run_id="run:two"
+        )
 
 
 @pytest.mark.parametrize("mode", ["done_only", "done_failed_row"])

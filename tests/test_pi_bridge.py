@@ -1007,41 +1007,53 @@ def test_analysis_record_reaches_committee_analysis(
     assert recorded.result is not None
     assert recorded.result["role"] == "stockbot"
     assert recorded.result["executive_view"] == "NVDA demand is supported by the filed evidence."
-    assert repo.get_session(sid).committee_runs == [
-        {"freeze_id": fid, "wave_id": 1, "jobs": [jid]}]
+    assert repo.get_session(sid).committee_runs == [{"freeze_id": fid, "wave_id": 1, "jobs": [jid]}]
 
 
 def test_research_job_runtime_wire_op(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """research.job.runtime: arg shapes, then runtime identity merged into the persisted job."""
     from app.research import service as _svc
     from app.research.repository import ResearchRepository
+
     monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
 
     def _dispatch(request: dict[str, object]) -> dict[str, object]:
-        out = pi_bridge._handle(json.dumps(
-            {"id": "a0", "op": "research.job.runtime", **request}))
+        out = pi_bridge._handle(json.dumps({"id": "a0", "op": "research.job.runtime", **request}))
         assert isinstance(out, dict)
         return out
 
     assert _dispatch({"runtime": "omp"}) == {"id": "a0", "error": "missing_arg"}
     assert _dispatch({"job_id": "nope", "runtime": "omp", "data_root": str(tmp_path)}) == {
-        "id": "a0", "error": "unknown_job", "job_id": "nope"}
+        "id": "a0",
+        "error": "unknown_job",
+        "job_id": "nope",
+    }
 
     repo = ResearchRepository(data_root=tmp_path)
     sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
     jid = repo.list_jobs(sid)[0].job_id
-    first = _dispatch({"job_id": jid, "runtime": "omp", "runtime_agent_id": "agent-1",
-                       "data_root": str(tmp_path)})
+    first = _dispatch({"job_id": jid, "runtime": "omp", "runtime_agent_id": "agent-1", "data_root": str(tmp_path)})
     partial = first["result"]
     assert isinstance(partial, dict)
     assert partial["diagnostics"] == {"runtime": "omp", "runtime_agent_id": "agent-1"}
-    second = _dispatch({"job_id": jid, "runtime_task_call_id": "call-7",
-                        "runtime_session_file": "/tmp/s.jsonl", "data_root": str(tmp_path)})
+    second = _dispatch(
+        {
+            "job_id": jid,
+            "runtime_task_call_id": "call-7",
+            "runtime_session_file": "/tmp/s.jsonl",
+            "data_root": str(tmp_path),
+        }
+    )
     stored = ResearchRepository(data_root=tmp_path).get_job(jid).diagnostics
-    assert stored == {"runtime": "omp", "runtime_agent_id": "agent-1",
-                      "runtime_task_call_id": "call-7", "runtime_session_file": "/tmp/s.jsonl"}
+    assert stored == {
+        "runtime": "omp",
+        "runtime_agent_id": "agent-1",
+        "runtime_task_call_id": "call-7",
+        "runtime_session_file": "/tmp/s.jsonl",
+    }
     done = second["result"]
     assert isinstance(done, dict)
     assert done["diagnostics"] == stored
@@ -1049,17 +1061,27 @@ def test_research_job_runtime_wire_op(
 
 
 def test_research_job_start_records_omp_owner(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """OMP job creation records owner=omp through the existing budget.owner override."""
     from app.research import service as _svc
     from app.research.repository import ResearchRepository
+
     monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
     repo = ResearchRepository(data_root=tmp_path)
     sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
-    out = pi_bridge._handle(json.dumps({
-        "id": "a0", "op": "research.job.start", "session_id": sid,
-        "budget": {"owner": "omp"}, "data_root": str(tmp_path)}))
+    out = pi_bridge._handle(
+        json.dumps(
+            {
+                "id": "a0",
+                "op": "research.job.start",
+                "session_id": sid,
+                "budget": {"owner": "omp"},
+                "data_root": str(tmp_path),
+            }
+        )
+    )
     assert isinstance(out, dict)
     result = out["result"]
     assert isinstance(result, dict)
@@ -1068,11 +1090,13 @@ def test_research_job_start_records_omp_owner(
 
 
 def test_research_job_fail_cancel_wire_ops(
-    tmp_path: Path, monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """research.job.fail/cancel: arg shapes, invalid category, happy paths incl. terminal no-op."""
     from app.research import service as _svc
     from app.research.repository import ResearchRepository
+
     monkeypatch.delenv("RESEARCH_DB_PATH", raising=False)
 
     def _dispatch(op: str, request: dict[str, object]) -> dict[str, object]:
@@ -1083,14 +1107,19 @@ def test_research_job_fail_cancel_wire_ops(
     assert _dispatch("research.job.fail", {}) == {"id": "a0", "error": "missing_arg"}
     assert _dispatch("research.job.fail", {"job_id": "j"}) == {"id": "a0", "error": "missing_arg"}
     assert _dispatch("research.job.fail", {"job_id": "j", "category": "timeout"}) == {
-        "id": "a0", "error": "missing_arg"}
+        "id": "a0",
+        "error": "missing_arg",
+    }
     assert _dispatch("research.job.cancel", {}) == {"id": "a0", "error": "missing_arg"}
     assert _dispatch(
         "research.job.fail",
         {"job_id": "nope", "category": "timeout", "message": "m", "data_root": str(tmp_path)},
     ) == {"id": "a0", "error": "unknown_job", "job_id": "nope"}
     assert _dispatch("research.job.cancel", {"job_id": "nope", "data_root": str(tmp_path)}) == {
-        "id": "a0", "error": "unknown_job", "job_id": "nope"}
+        "id": "a0",
+        "error": "unknown_job",
+        "job_id": "nope",
+    }
 
     repo = ResearchRepository(data_root=tmp_path)
     sid = _svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
@@ -1157,7 +1186,8 @@ def test_pi_event_subagent_lifecycle_persists() -> None:
         assert isinstance(metadata, dict)
         assert metadata["agent"] == "sec-agent"
         event_type, _ = _routing_event_roundtrip(
-            run_id, "subagent_finished",
+            run_id,
+            "subagent_finished",
             {"runtime_id": "p.c1", "agent": "sec-agent", "status": "completed"},
         )
         assert event_type == "subagent_finished"

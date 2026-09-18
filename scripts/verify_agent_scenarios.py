@@ -106,14 +106,10 @@ def _lookup_env_value(lookup: object, key: str) -> str | None:
     return None
 
 
-def resolve_provider_model(
-    provider_arg: str | None, model_arg: str | None, env: object = None
-) -> tuple[str, str]:
+def resolve_provider_model(provider_arg: str | None, model_arg: str | None, env: object = None) -> tuple[str, str]:
     """Explicit flag, then env, then "" — meaning "let OMP use its CLI default"."""
     lookup: object = os.environ if env is None else env
-    provider = _clean(provider_arg) or _clean(
-        _lookup_env_value(lookup, "STOCKBOT_PROVIDER")
-    )
+    provider = _clean(provider_arg) or _clean(_lookup_env_value(lookup, "STOCKBOT_PROVIDER"))
     model = _clean(model_arg) or _clean(_lookup_env_value(lookup, "STOCKBOT_MODEL"))
     return provider, model
 
@@ -125,17 +121,13 @@ def _resolve_provider_model(args: argparse.Namespace) -> tuple[str, str]:
 def resolve_model_timeout(timeout_arg: str | None, env: object = None) -> int:
     """Per-call model timeout seconds: flag, then STOCKBOT_MODEL_TIMEOUT, then the default."""
     lookup: object = os.environ if env is None else env
-    raw = _clean(timeout_arg) or _clean(
-        _lookup_env_value(lookup, "STOCKBOT_MODEL_TIMEOUT")
-    )
+    raw = _clean(timeout_arg) or _clean(_lookup_env_value(lookup, "STOCKBOT_MODEL_TIMEOUT"))
     if not raw:
         return _PI_CALL_TIMEOUT_DEFAULT_S
     try:
         seconds = int(raw)
     except ValueError as exc:
-        raise RuntimeError(
-            f"invalid model timeout {raw!r}: expected whole seconds > 0"
-        ) from exc
+        raise RuntimeError(f"invalid model timeout {raw!r}: expected whole seconds > 0") from exc
     if seconds <= 0:
         raise RuntimeError(f"invalid model timeout {raw!r}: expected whole seconds > 0")
     return seconds
@@ -163,9 +155,7 @@ def _check_pi_ready(provider: str, model: str, timeout_s: int) -> None:
         ) from exc
     if probe.returncode != 0:
         err = (probe.stderr or probe.stdout or "").strip()[:500]
-        raise RuntimeError(
-            f"missing prerequisite: Pi not ready for {_model_label(provider, model)}: {err}"
-        )
+        raise RuntimeError(f"missing prerequisite: Pi not ready for {_model_label(provider, model)}: {err}")
 
 
 def _clean_prompt(prompt: str) -> str:
@@ -173,9 +163,7 @@ def _clean_prompt(prompt: str) -> str:
     return prompt.replace("\x00", "")
 
 
-def _pi_model_callable(
-    provider: str, model: str, timeout_s: int
-) -> Callable[[str], str]:
+def _pi_model_callable(provider: str, model: str, timeout_s: int) -> Callable[[str], str]:
     label = _model_label(provider, model)
 
     def _call(prompt: str) -> str:
@@ -199,19 +187,14 @@ def _pi_model_callable(
     return _call
 
 
-_SEARCH_EXCLUDE = frozenset(
-    {"browse_tools", "search_tools", "describe_tool", "list_tool_domains", "call_tool"}
-)
+_SEARCH_EXCLUDE = frozenset({"browse_tools", "search_tools", "describe_tool", "list_tool_domains", "call_tool"})
 
 
 def _search_tool_names(sec_tools: object) -> list[str]:
     """Sorted SEC tool names excluding discovery primitives."""
     if not isinstance(sec_tools, Iterable):
         return []
-    return sorted(
-        t for t in sec_tools if isinstance(t, str) and t not in _SEARCH_EXCLUDE
-    )
-
+    return sorted(t for t in sec_tools if isinstance(t, str) and t not in _SEARCH_EXCLUDE)
 
 
 def _search_tool_matches(query: object, sec_tools: object) -> list[str]:
@@ -223,9 +206,7 @@ def _search_tool_matches(query: object, sec_tools: object) -> list[str]:
     return (hits or base)[:12]
 
 
-def _dispatch_search_tools(
-    args: dict[str, object], sec_tools: object
-) -> dict[str, object]:
+def _dispatch_search_tools(args: dict[str, object], sec_tools: object) -> dict[str, object]:
     query = args.get("query", "") if isinstance(args, dict) else ""
     return {"matches": [{"name": t} for t in _search_tool_matches(query, sec_tools)]}
 
@@ -258,10 +239,7 @@ def _make_tool_context(make_ctx: object, research: object) -> object:
     """Construct the harness context without static call typing."""
     if not callable(make_ctx):
         raise TypeError(f"tool context not callable: {type(make_ctx).__name__}")
-    return make_ctx(
-        principal_id="verify-agent-scenarios", capabilities=frozenset({research})
-    )
-
+    return make_ctx(principal_id="verify-agent-scenarios", capabilities=frozenset({research}))
 
 
 def _build_tool_context(harness: _ToolHarness) -> tuple[object | None, str]:
@@ -295,9 +273,7 @@ def _run_tool_exec(
     ctx: object,
 ) -> dict[str, object]:
     try:
-        result = _call_tool_exec(
-            exec_fn, inner_name, inner_args, f"{provider}/{model}", ctx
-        )
+        result = _call_tool_exec(exec_fn, inner_name, inner_args, f"{provider}/{model}", ctx)
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return {"error": f"{type(exc).__name__}: {exc}"}
     if isinstance(result, dict):
@@ -306,9 +282,7 @@ def _run_tool_exec(
     return {"content": str(result)}
 
 
-def _dispatch_call_tool(
-    args: dict[str, object], provider: str, model: str
-) -> dict[str, object]:
+def _dispatch_call_tool(args: dict[str, object], provider: str, model: str) -> dict[str, object]:
     from app.research.agents.source_agent import is_sec_tool
 
     inner_name, inner_args = _extract_call_tool_request(args)
@@ -323,9 +297,7 @@ def _dispatch_call_tool(
     return _run_tool_exec(harness[0], inner_name, inner_args, provider, model, ctx)
 
 
-def _pi_dispatch_callable(
-    provider: str, model: str
-) -> Callable[[str, dict[str, object]], dict[str, object]]:
+def _pi_dispatch_callable(provider: str, model: str) -> Callable[[str, dict[str, object]], dict[str, object]]:
     from app.research.agents.source_agent import SEC_TOOLS
 
     def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
@@ -436,9 +408,7 @@ def _extract_answer(final: object, out: dict[str, object]) -> str:
     return ""
 
 
-def _is_completed(
-    sess_status: object, answer: object, evidence_ids: tuple[str, ...]
-) -> bool:
+def _is_completed(sess_status: object, answer: object, evidence_ids: tuple[str, ...]) -> bool:
     if sess_status != "completed":
         return False
     if not isinstance(answer, str) or not answer.strip():
@@ -479,9 +449,7 @@ def _row_provenance(row: object) -> tuple[str, object] | None:
     return accession, meta.get("document_name")
 
 
-def _ledger_documents(
-    repo: ResearchRepository, session_id: str
-) -> tuple[tuple[str, ...], tuple[str, ...]]:
+def _ledger_documents(repo: ResearchRepository, session_id: str) -> tuple[tuple[str, ...], tuple[str, ...]]:
     """(filings, documents) actually opened, from the raw-source rows' own provenance.
 
     The runner journals no telemetry payload, so the ledger is the only real
@@ -503,9 +471,7 @@ def _ledger_documents(
     return tuple(filings), tuple(documents)
 
 
-def _ledger_ids(
-    repo: ResearchRepository, session_id: str, record_kind: str
-) -> tuple[str, ...]:
+def _ledger_ids(repo: ResearchRepository, session_id: str, record_kind: str) -> tuple[str, ...]:
     """Ledger evidence ids of one record kind: raw-source rows vs navigation artifacts."""
     out: list[str] = []
     for row in repo.list_evidence(session_id):
@@ -638,9 +604,7 @@ class _LiveKwargs(TypedDict):
     model_name: str
 
 
-def _live_kwargs(
-    scenario: Scenario, provider: str, model: str, timeout_s: int
-) -> _LiveKwargs:
+def _live_kwargs(scenario: Scenario, provider: str, model: str, timeout_s: int) -> _LiveKwargs:
     """Retired run_live shim: question/tickers/labels only; dispatch/model unused by OMP path."""
     _ = timeout_s
     tickers: list[str] = [scenario.ticker] if scenario.ticker else []
@@ -660,6 +624,7 @@ def _invoke_live(kwargs: _LiveKwargs) -> tuple[dict[str, object] | None, float, 
     """Retired run_live shim (test helper only): crash-reporting contract preserved."""
     from app.research.director import DirectorBudgets
     from app.research.runner import run_live
+
     t0 = time.monotonic()
     try:
         out = run_live(**kwargs, repo=ResearchRepository(), budgets=DirectorBudgets())
@@ -680,18 +645,13 @@ def _omp_env(provider: str, model: str, timeout_s: int) -> dict[str, str]:
     return env
 
 
-def _run_omp_research(
-    scenario: Scenario, provider: str, model: str, timeout_s: int, tmp: str
-) -> str:
+def _run_omp_research(scenario: Scenario, provider: str, model: str, timeout_s: int, tmp: str) -> str:
     """Launch production OMP Stockbot on one scenario; return the run id for state reads."""
     from app.thesis.omp_runner import _await_omp, _prepare_launch, _spawn_omp, _verdict
 
     run_id = f"eval-{scenario.name}"
     data_root = str(Path(tmp) / "data")
-    old_model = {
-        k: os.environ.get(k)
-        for k in ("STOCKBOT_PROVIDER", "STOCKBOT_MODEL", "STOCKBOT_MODEL_TIMEOUT")
-    }
+    old_model = {k: os.environ.get(k) for k in ("STOCKBOT_PROVIDER", "STOCKBOT_MODEL", "STOCKBOT_MODEL_TIMEOUT")}
     os.environ.update(_omp_env(provider, model, timeout_s))
     try:
         launch = _prepare_launch(scenario.question, data_root, scenario.as_of, run_id)
@@ -720,9 +680,7 @@ def _read_omp_session_id(run_id: str, tmp: str) -> str:
     return sid if isinstance(sid, str) else ""
 
 
-def _run_omp_scenario(
-    scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int
-) -> EvalInput:
+def _run_omp_scenario(scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int) -> EvalInput:
     """Production-path live eval: OMP + extension + Director + task subagents + kernel."""
     _ = prompt_version  # stamp recorded in the run summary only
     t0 = time.monotonic()
@@ -747,9 +705,7 @@ def _run_omp_scenario(
             restore_env(old)
 
 
-def _run_live_scenario(
-    scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int
-) -> EvalInput:
+def _run_live_scenario(scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int) -> EvalInput:
     """Live eval entrypoint: production OMP path only (run_live retired, see runner.py)."""
     return _run_omp_scenario(scenario, provider, model, prompt_version, timeout_s)
 
@@ -773,8 +729,7 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model-timeout",
         default=None,
-        help="per-call OMP model timeout seconds (or STOCKBOT_MODEL_TIMEOUT; "
-        f"default {_PI_CALL_TIMEOUT_DEFAULT_S})",
+        help=f"per-call OMP model timeout seconds (or STOCKBOT_MODEL_TIMEOUT; default {_PI_CALL_TIMEOUT_DEFAULT_S})",
     )
     parser.add_argument("--prompt-version", default="v1", help="prompt version stamp (default v1)")
     parser.add_argument(
@@ -826,10 +781,7 @@ def _run_all_scenarios(
     prompt_version: str,
     timeout_s: int,
 ) -> list[ScenarioResult]:
-    return [
-        _eval_one_scenario(name, by_name, provider, model, prompt_version, timeout_s)
-        for name in names
-    ]
+    return [_eval_one_scenario(name, by_name, provider, model, prompt_version, timeout_s) for name in names]
 
 
 def _failed_results(results: list[ScenarioResult]) -> list[ScenarioResult]:
@@ -847,14 +799,10 @@ def _print_results(results: list[ScenarioResult], provider: str, model: str) -> 
         if result.passed:
             print(f"PASS {result.scenario_name} (live via Pi {label})")
         else:
-            print(
-                f"FAIL {result.scenario_name} (live via Pi {label}): {', '.join(result.violations)}"
-            )
+            print(f"FAIL {result.scenario_name} (live via Pi {label}): {', '.join(result.violations)}")
 
 
-def _build_summary(
-    provider: str, model: str, prompt_version: str, results: list[ScenarioResult]
-) -> dict[str, object]:
+def _build_summary(provider: str, model: str, prompt_version: str, results: list[ScenarioResult]) -> dict[str, object]:
     return {
         "provider": provider or _DEFAULT_MODEL_LABEL,
         "model": model or _DEFAULT_MODEL_LABEL,
@@ -873,9 +821,7 @@ def _maybe_print_suite_info(
 ) -> None:
     """Tally + git sha of a finished live run; the sha is recorded on the summary here only."""
     try:
-        git_sha = subprocess.check_output(
-            ["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5
-        ).strip()
+        git_sha = subprocess.check_output(["git", "rev-parse", "--short", "HEAD"], text=True, timeout=5).strip()
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         git_sha = "unknown"
     # Passed/failed counts come from eval results, not from static fixtures.
@@ -930,9 +876,7 @@ def _run_cli(args: argparse.Namespace) -> int:
     if isinstance(prereqs, int):
         return prereqs
     provider, model, timeout_s, names, by_name = prereqs
-    results = _run_all_scenarios(
-        names, by_name, provider, model, args.prompt_version, timeout_s
-    )
+    results = _run_all_scenarios(names, by_name, provider, model, args.prompt_version, timeout_s)
     summary = _build_summary(provider, model, args.prompt_version, results)
     return _report_cli_run(args, provider, model, results, summary)
 
