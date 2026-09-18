@@ -21,14 +21,13 @@ export function resolveClaim(results: JudgmentMap, actionable: boolean): ClaimRe
 export type CoverageVerdict = "COMPLETE" | "INCOMPLETE_ACTIONABLE" | "INCOMPLETE_NONACTIONABLE";
 
 export function judgeCoverage(results: JudgmentMap, actionable: boolean): CoverageVerdict {
- const complete = isYes(results, "V01") && isYes(results, "V19") && isYes(results, "V20");
+ const complete = Array.from({ length: 20 }, (_, i) => `V${String(i + 1).padStart(2, "0")}`).every((id) => isYes(results, id));
  if (complete) return "COMPLETE";
  return actionable ? "INCOMPLETE_ACTIONABLE" : "INCOMPLETE_NONACTIONABLE";
 }
 
-export function judgeContinuation(results: JudgmentMap, hasCandidate: boolean): { decision: "continue" | "stop" } {
- if (isYes(results, "N01") && isYes(results, "N03")) return { decision: "continue" };
- if (isYes(results, "N05") && isYes(results, "N06") && !hasCandidate) return { decision: "stop" };
+export function judgeContinuation(results: JudgmentMap): { decision: "continue" | "stop" } {
+ if (isYes(results, "N01") && isYes(results, "N02") && isYes(results, "N03") && isYes(results, "N04")) return { decision: "continue" };
  return { decision: "stop" };
 }
 

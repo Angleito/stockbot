@@ -9,16 +9,16 @@ const SIZES: Record<string, number> = {
 	continuation: 6,
 	candidate: 6,
 	common: 18,
-	stockbot: 6,
+	stockbot: 5,
 	bull: 6,
 	bear: 6,
-	committee: 8,
+	committee: 9,
 	final: 4,
 	final_extended: 16,
 };
 
-test("bank version is 2", () => {
-	expect(QUESTION_BANK_VERSION).toBe("2");
+test("bank version is 3", () => {
+	expect(QUESTION_BANK_VERSION).toBe("3");
 });
 
 test("pack sizes match the plan", () => {
@@ -62,7 +62,7 @@ test("critical sets match the plan", () => {
 	const crit = (ids: readonly string[]) => ids.filter((id) => QUESTION_BANK[id].critical).sort();
 	expect(crit(PACKS.evidence)).toEqual(["E01", "E02", "E14", "E16"]);
 	expect(crit(PACKS.claim)).toEqual(["C01", "C02", "C03", "C06", "C13"]);
-	expect(crit(PACKS.coverage)).toEqual(["V01", "V19", "V20"]);
+	expect(crit(PACKS.coverage)).toEqual(["V01", "V02", "V03", "V04", "V05", "V06", "V07", "V08", "V09", "V10", "V11", "V12", "V13", "V14", "V15", "V16", "V17", "V18", "V19", "V20"]);
 	expect(crit(PACKS.continuation)).toHaveLength(6);
 	expect(crit(PACKS.candidate)).toEqual(["N07", "N08", "N09", "N10", "N12"]);
 	expect(crit(PACKS.common)).toEqual([
@@ -71,7 +71,7 @@ test("critical sets match the plan", () => {
 	for (const pack of [PACKS.stockbot, PACKS.bull, PACKS.bear]) {
 		expect(pack.filter((id) => !QUESTION_BANK[id].critical)).toEqual([]);
 	}
-	expect(crit(PACKS.committee)).toEqual(["F01", "F02", "F03", "F04", "F05", "F06", "F07"]);
+	expect(crit(PACKS.committee)).toEqual(["F01", "F02", "F03", "F04", "F05", "F06", "F07", "S03"]);
 	expect(crit(PACKS.final)).toHaveLength(4);
 });
 

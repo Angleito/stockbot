@@ -11,7 +11,7 @@
  */
 
 import type { ExtensionAPI, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { type AuthKind, hashAction, issueAuthorization, issueRoleAccept } from "../lib/research-control.ts";
+import { type AuthKind, finalizeActionHash, hashAction, issueAuthorization, issueRoleAccept } from "../lib/research-control.ts";
 import { buildAudit } from "../lib/typesafe/audit.ts";
 import { reviewCommittee, reviewFinal, reviewRoleOutput } from "../lib/typesafe/decisions.ts";
 import { TypeSafeEvaluator } from "../lib/typesafe/evaluator.ts";
@@ -28,6 +28,7 @@ export interface ReviewToolDeps {
   role?: (sessionId: string, freezeId: string, roleJobId: string) => Promise<{ role: string; objective: string; evidence: unknown; output: unknown; freezeId: string; freezeEvidenceIds: string[]; freezeEvidenceHash: string }>;
   committee?: (sessionId: string, freezeId: string) => Promise<{ objective: string; evidence: unknown; stockbot: unknown; bullbot: unknown; bearbot: unknown; freezeHash: string }>;
   final?: (sessionId: string, freezeId: string) => Promise<{ objective: string; evidence: unknown; committee: unknown }>;
+  freeze?: (sessionId: string, freezeId: string) => Promise<void>;
  };
 }
 
@@ -104,15 +105,16 @@ async function committeeTool(args: unknown, deps: ReviewToolDeps): Promise<Nativ
  try {
   const runId = requireRunId(deps);
   const bag = toolBag(args);
+  const sessionId = idOf(bag, "research_session_id");
   const freezeId = idOf(bag, "freeze_id");
   const load = deps.stateLoader?.committee ?? loadCommitteeState;
-  const st = await load(idOf(bag, "research_session_id"), freezeId);
+  const st = await load(sessionId, freezeId);
   const evaluator = deps.evaluator ?? new TypeSafeEvaluator();
   const res = await evaluator.evaluate({ objective: st.objective, evidence: st.evidence, stockbot: st.stockbot, bullbot: st.bullbot, bearbot: st.bearbot }, packQuestions(PACKS.committee));
   const results = packResults(res.results, PACKS.committee);
   const { verdict, failed } = reviewCommittee(results, packQuestions(PACKS.committee));
   const audit = buildAudit({ runId, phase: "committee", questions: results, result: verdict, model: res.model ?? deps.model });
-  const auth = verdict === "PASS" ? issueAuthorization(runId, "committee_accepted", hashAction({ freezeId })) : undefined;
+  const auth = verdict === "PASS" ? issueAuthorization(runId, "committee_accepted", hashAction({ sessionId, freezeId })) : undefined;
   const authJson = auth ? { authorization_id: auth.id, kind: auth.kind satisfies AuthKind } : undefined;
   return { text: verdict === "PASS" ? "committee PASS" : `committee BLOCK: ${failed.map((f) => `${f.id}=${f.p_yes}`).join(", ")}`, details: { verdict, failed, questions: results, audit, ...(authJson ? { authorization: authJson } : {}) } };
  } catch {
@@ -126,14 +128,17 @@ async function finalTool(args: unknown, deps: ReviewToolDeps): Promise<NativeToo
   const bag = toolBag(args);
   const answer = bag.answer;
   if (typeof answer !== "string" || answer.length === 0) throw new Error("typesafe_missing_id");
+  const sessionId = idOf(bag, "research_session_id");
+  const freezeId = idOf(bag, "freeze_id");
   const load = deps.stateLoader?.final ?? loadFinalState;
-  const st = await load(idOf(bag, "research_session_id"), idOf(bag, "freeze_id"));
+  const st = await load(sessionId, freezeId);
   const evaluator = deps.evaluator ?? new TypeSafeEvaluator();
   const res = await evaluator.evaluate({ objective: st.objective, evidence: st.evidence, committee: st.committee, answer }, packQuestions(PACKS.final_extended));
   const results = packResults(res.results, PACKS.final_extended);
   const { verdict, failed } = reviewFinal(results, packQuestions(PACKS.final_extended));
   const audit = buildAudit({ runId, phase: "final", questions: results, result: verdict, model: res.model ?? deps.model });
-  const auth = verdict === "PASS" ? issueAuthorization(runId, "finalize", hashAction({ answer })) : undefined;
+  const trio = st.committee as { stockbot: unknown; bullbot: unknown; bearbot: unknown };
+  const auth = verdict === "PASS" ? issueAuthorization(runId, "finalize", finalizeActionHash(answer, { sessionId, freezeId, stockbotHash: hashAction(trio.stockbot), bullbotHash: hashAction(trio.bullbot), bearbotHash: hashAction(trio.bearbot) })) : undefined;
   const authJson = auth ? { authorization_id: auth.id, kind: auth.kind satisfies AuthKind } : undefined;
   return { text: verdict === "PASS" ? "final PASS: answer may be published" : `final BLOCK: ${failed.map((f) => `${f.id}=${f.p_yes}`).join(", ")}`, details: { verdict, failed, questions: results, audit, ...(authJson ? { authorization: authJson } : {}) } };
  } catch {

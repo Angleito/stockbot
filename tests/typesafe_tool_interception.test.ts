@@ -1,10 +1,15 @@
 import { expect, test } from "bun:test";
 import {
 	authorizationStore,
+	candidateTaskHash,
 	consumeAuthorization,
+	consumeCandidateBatch,
+	consumeFinalizeBundle,
+	consumeLaunchForFreeze,
 	consumeMatchingAuth,
 	consumeOpenRoleAccepts,
 	drainCommitteeAccepts,
+	drainFinalize,
 	drainRoleAccepts,
 	finalizeActionHash,
 	hashAction,
@@ -13,6 +18,7 @@ import {
 	isExactRepeat,
 	issueAuthorization,
 	issueRoleAccept,
+	launchCommitteeHash,
 } from "../.stockbot/omp/lib/research-control.ts";
 import { reviewCommittee, reviewFinal } from "../.stockbot/omp/lib/typesafe/decisions.ts";
 import {
@@ -79,7 +85,7 @@ test("wrong-kind or wrong-action auth does not authorize", () => {
 	}
 });
 
-test("committee launch before coverage completes is blocked", async () => {
+test("ledger-only: committee launch before coverage completes is blocked", async () => {
 	const store = new Map<string, { consumed: boolean }>();
 	expect(gate(store, undefined)).toContain("blocked");
 	const { results } = await judged([...PACKS.committee], { F01: 0.2 });
@@ -139,11 +145,25 @@ test("blocked reasons never carry key material or transcripts", () => {
 });
 
 test("finalize binds to the reviewed answer: draft B needs its own PASS", () => {
-	const a = issueAuthorization("run-gate-1", "finalize", finalizeActionHash("draft A"));
+	const ctx = { sessionId: "sess-a", freezeId: "freeze-a", stockbotHash: hashAction({ t: "s" }), bullbotHash: hashAction({ t: "b" }), bearbotHash: hashAction({ t: "r" }) };
+	const a = issueAuthorization("run-gate-1", "finalize", finalizeActionHash("draft A", ctx));
 	try {
-		expect(consumeMatchingAuth(authorizationStore, "run-gate-1", "finalize", finalizeActionHash("draft B"))).toBe(false);
-		expect(consumeMatchingAuth(authorizationStore, "run-gate-1", "finalize", finalizeActionHash("draft A"))).toBe(true);
-		expect(consumeMatchingAuth(authorizationStore, "run-gate-1", "finalize", finalizeActionHash("draft A"))).toBe(false);
+		expect(consumeMatchingAuth(authorizationStore, "run-gate-1", "finalize", finalizeActionHash("draft B", ctx))).toBe(false);
+		expect(consumeMatchingAuth(authorizationStore, "run-gate-1", "finalize", finalizeActionHash("draft A", ctx))).toBe(true);
+		expect(consumeMatchingAuth(authorizationStore, "run-gate-1", "finalize", finalizeActionHash("draft A", ctx))).toBe(false);
+	} finally {
+		authorizationStore.delete(a.id);
+	}
+});
+
+test("v1-final approval never authorizes the v2 trio", () => {
+	const run = `run-v12-${Date.now()}`;
+	const freeze = "freeze-v12-1";
+	const mkCtx = (suffix: string) => ({ sessionId: "sess-v12", freezeId: freeze, stockbotHash: hashAction({ t: `s-${suffix}` }), bullbotHash: hashAction({ t: "b" }), bearbotHash: hashAction({ t: "r" }) });
+	const a = issueAuthorization(run, "finalize", finalizeActionHash("answer", mkCtx("v1")));
+	try {
+		expect(consumeMatchingAuth(authorizationStore, run, "finalize", finalizeActionHash("answer", mkCtx("v2")))).toBe(false);
+		expect(consumeMatchingAuth(authorizationStore, run, "finalize", finalizeActionHash("answer", mkCtx("v1")))).toBe(true);
 	} finally {
 		authorizationStore.delete(a.id);
 	}
@@ -259,10 +279,35 @@ test("mismatched output hash does not consume: partial sets burn nothing", () =>
 
 test("candidate-A auth does not authorize candidate-B", () => {
 	const run = `run-cand-${Date.now()}`;
-	const a = issueAuthorization(run, "continue_research", hashAction({ candidate: { q: "A" } }));
+	const task = "fetch exhibits for gap g";
+	const a = issueAuthorization(run, "continue_research", candidateTaskHash({ q: "A" }, task));
 	try {
-		expect(consumeMatchingAuth(authorizationStore, run, "continue_research", hashAction({ candidate: { q: "B" } }))).toBe(false);
-		expect(consumeMatchingAuth(authorizationStore, run, "continue_research", hashAction({ candidate: { q: "A" } }))).toBe(true);
+		expect(consumeCandidateBatch(authorizationStore, run, [candidateTaskHash({ q: "B" }, task)])).toBe(false);
+		expect(consumeCandidateBatch(authorizationStore, run, [candidateTaskHash({ q: "A" }, task)])).toBe(true);
+	} finally {
+		authorizationStore.delete(a.id);
+	}
+});
+
+test("candidate+task swap is rejected: same candidate, different task", () => {
+	const run = `run-candtask-${Date.now()}`;
+	const candidate = { q: "A" };
+	const a = issueAuthorization(run, "continue_research", candidateTaskHash(candidate, "fetch exhibits"));
+	try {
+		expect(consumeCandidateBatch(authorizationStore, run, [candidateTaskHash(candidate, "fetch revenue instead")])).toBe(false);
+		expect(consumeCandidateBatch(authorizationStore, run, [candidateTaskHash(candidate, "fetch exhibits")])).toBe(true);
+	} finally {
+		authorizationStore.delete(a.id);
+	}
+});
+
+test("candidate batch partial failure burns nothing", () => {
+	const run = `run-candbatch-${Date.now()}`;
+	const good = candidateTaskHash({ q: "A" }, "task-a");
+	const a = issueAuthorization(run, "continue_research", good);
+	try {
+		expect(consumeCandidateBatch(authorizationStore, run, [good, candidateTaskHash({ q: "B" }, "task-b")])).toBe(false);
+		expect(consumeCandidateBatch(authorizationStore, run, [good])).toBe(true);
 	} finally {
 		authorizationStore.delete(a.id);
 	}
@@ -270,23 +315,25 @@ test("candidate-A auth does not authorize candidate-B", () => {
 
 test("committee skip blocks finalize: committee_accepted is required", () => {
 	const run = `run-commskip-${Date.now()}`;
+	const sessionId = "sess-commskip";
 	const freeze = "freeze-commskip-1";
 	const exp = {
 		stockbot: { roleJobId: "job-s", outputHash: hashAction({ t: "s" }), freezeHash: hashAction(["e1"]) },
 		bullbot: { roleJobId: "job-b", outputHash: hashAction({ t: "b" }), freezeHash: hashAction(["e1"]) },
 		bearbot: { roleJobId: "job-r", outputHash: hashAction({ t: "r" }), freezeHash: hashAction(["e1"]) },
 	};
+	const ctx = { sessionId, freezeId: freeze, stockbotHash: exp.stockbot.outputHash, bullbotHash: exp.bullbot.outputHash, bearbotHash: exp.bearbot.outputHash };
+	const committeeHash = hashAction({ sessionId, freezeId: freeze });
+	const finalizeHash = finalizeActionHash("answer", ctx);
 	const roles = (["stockbot", "bullbot", "bearbot"] as const).map((role) => issueRoleAccept(run, { runId: run, freezeId: freeze, role, ...exp[role] }));
-	const fin = issueAuthorization(run, "finalize", finalizeActionHash("answer"));
+	const fin = issueAuthorization(run, "finalize", finalizeHash);
 	try {
-		// No committee_accepted issued: the gate's committee consume must fail.
-		expect(consumeMatchingAuth(authorizationStore, run, "committee_accepted", hashAction({ freezeId: freeze }))).toBe(false);
-		const comm = issueAuthorization(run, "committee_accepted", hashAction({ freezeId: freeze }));
+		// No committee_accepted issued: the bundle consume must fail and burn nothing.
+		expect(consumeFinalizeBundle(authorizationStore, { runId: run, freezeId: freeze, expected: exp, committeeHash, finalizeHash })).toBe(false);
+		const comm = issueAuthorization(run, "committee_accepted", committeeHash);
 		try {
 			expect(hasOpenRoleAccepts(authorizationStore, run, freeze)).toBe(true);
-			expect(consumeMatchingAuth(authorizationStore, run, "committee_accepted", hashAction({ freezeId: freeze }))).toBe(true);
-			expect(consumeMatchingAuth(authorizationStore, run, "finalize", finalizeActionHash("answer"))).toBe(true);
-			expect(consumeOpenRoleAccepts(authorizationStore, run, freeze, exp)).toBe(true);
+			expect(consumeFinalizeBundle(authorizationStore, { runId: run, freezeId: freeze, expected: exp, committeeHash, finalizeHash })).toBe(true);
 		} finally {
 			authorizationStore.delete(comm.id);
 		}
@@ -296,17 +343,57 @@ test("committee skip blocks finalize: committee_accepted is required", () => {
 	}
 });
 
+test("finalize bundle trio mismatch burns nothing: committee and finalize stay open", () => {
+	const run = `run-bundle-${Date.now()}`;
+	const sessionId = "sess-bundle";
+	const freeze = "freeze-bundle-1";
+	const good = {
+		stockbot: { roleJobId: "job-s", outputHash: hashAction({ t: "s" }), freezeHash: hashAction(["e1"]) },
+		bullbot: { roleJobId: "job-b", outputHash: hashAction({ t: "b" }), freezeHash: hashAction(["e1"]) },
+		bearbot: { roleJobId: "job-r", outputHash: hashAction({ t: "r" }), freezeHash: hashAction(["e1"]) },
+	};
+	const goodCtx = { sessionId, freezeId: freeze, stockbotHash: good.stockbot.outputHash, bullbotHash: good.bullbot.outputHash, bearbotHash: good.bearbot.outputHash };
+	const committeeHash = hashAction({ sessionId, freezeId: freeze });
+	const goodFinalize = finalizeActionHash("answer", goodCtx);
+	const roles = (["stockbot", "bullbot", "bearbot"] as const).map((role) => issueRoleAccept(run, { runId: run, freezeId: freeze, role, ...good[role] }));
+	const comm = issueAuthorization(run, "committee_accepted", committeeHash);
+	const fin = issueAuthorization(run, "finalize", goodFinalize);
+	try {
+		const wrong = { ...good, bearbot: { ...good.bearbot, outputHash: hashAction({ t: "tampered" }) } };
+		const wrongCtx = { sessionId, freezeId: freeze, stockbotHash: wrong.stockbot.outputHash, bullbotHash: wrong.bullbot.outputHash, bearbotHash: wrong.bearbot.outputHash };
+		expect(consumeFinalizeBundle(authorizationStore, { runId: run, freezeId: freeze, expected: wrong, committeeHash, finalizeHash: finalizeActionHash("answer", wrongCtx) })).toBe(false);
+		expect(hasOpenAuth(authorizationStore, run, "committee_accepted")).toBe(true);
+		expect(hasOpenAuth(authorizationStore, run, "finalize")).toBe(true);
+		expect(consumeFinalizeBundle(authorizationStore, { runId: run, freezeId: freeze, expected: good, committeeHash, finalizeHash: goodFinalize })).toBe(true);
+	} finally {
+		for (const a of roles) authorizationStore.delete(a.id);
+		authorizationStore.delete(comm.id);
+		authorizationStore.delete(fin.id);
+	}
+});
+
 test("stale committee grades drained on relaunch do not finalize", () => {
 	const run = `run-commdrain-${Date.now()}`;
-	const freeze = "freeze-commdrain-1";
-	const comm = issueAuthorization(run, "committee_accepted", hashAction({ freezeId: freeze }));
+	const comm = issueAuthorization(run, "committee_accepted", hashAction({ sessionId: "s", freezeId: "freeze-commdrain-1" }));
 	try {
 		expect(hasOpenAuth(authorizationStore, run, "committee_accepted")).toBe(true);
 		drainCommitteeAccepts(authorizationStore, run);
 		expect(hasOpenAuth(authorizationStore, run, "committee_accepted")).toBe(false);
-		expect(consumeMatchingAuth(authorizationStore, run, "committee_accepted", hashAction({ freezeId: freeze }))).toBe(false);
+		expect(consumeMatchingAuth(authorizationStore, run, "committee_accepted", hashAction({ sessionId: "s", freezeId: "freeze-commdrain-1" }))).toBe(false);
 	} finally {
 		authorizationStore.delete(comm.id);
+	}
+});
+
+test("allowed committee launch drains stale finalize grades", () => {
+	const run = `run-findrain-${Date.now()}`;
+	const fin = issueAuthorization(run, "finalize", finalizeActionHash("draft", { sessionId: "s", freezeId: "f", stockbotHash: hashAction({ t: "s" }), bullbotHash: hashAction({ t: "b" }), bearbotHash: hashAction({ t: "r" }) }));
+	try {
+		expect(hasOpenAuth(authorizationStore, run, "finalize")).toBe(true);
+		drainFinalize(authorizationStore, run);
+		expect(hasOpenAuth(authorizationStore, run, "finalize")).toBe(false);
+	} finally {
+		authorizationStore.delete(fin.id);
 	}
 });
 
@@ -346,7 +433,7 @@ test("fabricated coverage cannot yield launch_committee", async () => {
 	const { yes: y } = await import("../.stockbot/omp/lib/typesafe/thresholds.ts");
 	const judgments = Object.fromEntries(P.coverage.map((id) => [id, { p_yes: 0.9, yes: y(0.9) }]));
 	// Loader throws (untrusted/missing record) -> blocked, no auth ever issued.
-	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "s", branch_map_id: "made-up" }, {
+	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "s", freeze_id: "f", branch_map_id: "made-up" }, {
 		evaluator: new FakeEvaluator(judgments),
 		getRunId: () => "run-fabricated",
 		stateLoader: { coverage: async () => { throw new Error("typesafe_untrusted_state"); } },
@@ -354,6 +441,111 @@ test("fabricated coverage cannot yield launch_committee", async () => {
 	expect(out?.isError).toBe(true);
 	expect(out?.details.authorization).toBeUndefined();
 	expect(hasOpenAuth(authorizationStore, "run-fabricated", "launch_committee")).toBe(false);
+});
+
+test("coverage COMPLETE issues launch_committee bound to session/freeze/dossier", async () => {
+	const { PACKS: P } = await import("../.stockbot/omp/lib/typesafe/questions.ts");
+	const { runJudgeTool } = await import("../.stockbot/omp/tools/research-judge-tools.ts");
+	const { FakeEvaluator } = await import("../.stockbot/omp/lib/typesafe/evaluator.ts");
+	const { yes: y } = await import("../.stockbot/omp/lib/typesafe/thresholds.ts");
+	const judgments = Object.fromEntries(P.coverage.map((id) => [id, { p_yes: 0.9, yes: y(0.9) }]));
+	const run = `run-covbind-${Date.now()}`;
+	const branchMap = { roots: ["ownership"] };
+	const coverage = { ownership: "searched" };
+	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "sess-cov", freeze_id: "freeze-cov", branch_map_id: "dossier-1" }, {
+		evaluator: new FakeEvaluator(judgments),
+		getRunId: () => run,
+		stateLoader: {
+			coverage: async () => ({ objective: "o", branch_map: branchMap, coverage, claim_states: [], actionable: true }),
+			freeze: async () => { },
+		},
+	});
+	try {
+		expect(out?.isError).toBeUndefined();
+		expect(out?.details.verdict).toBe("COMPLETE");
+		const auth = out?.details.authorization as { authorization_id?: string } | undefined;
+		expect(typeof auth?.authorization_id).toBe("string");
+		const stored = authorizationStore.get(String(auth?.authorization_id));
+		expect(stored?.kind).toBe("launch_committee");
+		const parsed = JSON.parse(String(stored?.actionHash)) as Record<string, unknown>;
+		expect(parsed.sessionId).toBe("sess-cov");
+		expect(parsed.freezeId).toBe("freeze-cov");
+		expect(parsed.dossierId).toBe("dossier-1");
+		expect(parsed.coverageHash).toBe(hashAction({ branch_map: branchMap, coverage }));
+		expect(consumeLaunchForFreeze(authorizationStore, run, "sess-cov", "freeze-cov")).toBe(true);
+	} finally {
+		for (const [id, a] of authorizationStore) if (a.runId === run) authorizationStore.delete(id);
+	}
+});
+
+test("coverage with a middle-V failure issues no launch_committee", async () => {
+	const { PACKS: P } = await import("../.stockbot/omp/lib/typesafe/questions.ts");
+	const { runJudgeTool } = await import("../.stockbot/omp/tools/research-judge-tools.ts");
+	const { FakeEvaluator } = await import("../.stockbot/omp/lib/typesafe/evaluator.ts");
+	const { yes: y } = await import("../.stockbot/omp/lib/typesafe/thresholds.ts");
+	const judgments = Object.fromEntries(P.coverage.map((id) => [id, { p_yes: id === "V09" ? 0.2 : 0.9, yes: y(id === "V09" ? 0.2 : 0.9) }]));
+	const run = `run-covmid-${Date.now()}`;
+	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "sess-cov", freeze_id: "freeze-cov", branch_map_id: "dossier-1" }, {
+		evaluator: new FakeEvaluator(judgments),
+		getRunId: () => run,
+		stateLoader: {
+			coverage: async () => ({ objective: "o", branch_map: {}, coverage: {}, claim_states: [], actionable: true }),
+			freeze: async () => { },
+		},
+	});
+	try {
+		expect(out?.details.verdict).not.toBe("COMPLETE");
+		expect(out?.details.authorization).toBeUndefined();
+		expect(hasOpenAuth(authorizationStore, run, "launch_committee")).toBe(false);
+	} finally {
+		for (const [id, a] of authorizationStore) if (a.runId === run) authorizationStore.delete(id);
+	}
+});
+
+test("continuation continue carries no authorization", async () => {
+	const { PACKS: P } = await import("../.stockbot/omp/lib/typesafe/questions.ts");
+	const { runJudgeTool } = await import("../.stockbot/omp/tools/research-judge-tools.ts");
+	const { FakeEvaluator } = await import("../.stockbot/omp/lib/typesafe/evaluator.ts");
+	const { yes: y } = await import("../.stockbot/omp/lib/typesafe/thresholds.ts");
+	const judgments = Object.fromEntries(P.continuation.map((id) => [id, { p_yes: ["N01", "N02", "N03", "N04"].includes(id) ? 0.9 : 0.2, yes: y(["N01", "N02", "N03", "N04"].includes(id) ? 0.9 : 0.2) }]));
+	const run = `run-contnoauth-${Date.now()}`;
+	const out = await runJudgeTool("research_judge_continuation", { research_session_id: "s" }, {
+		evaluator: new FakeEvaluator(judgments),
+		getRunId: () => run,
+		stateLoader: { continuation: async () => ({ objective: "o", coverage: {}, open_questions: [], current_conclusions: [] }) },
+	});
+	expect(out?.details.decision).toBe("continue");
+	expect(out?.details.authorization).toBeUndefined();
+	expect(hasOpenAuth(authorizationStore, run, "continue_research")).toBe(false);
+});
+
+test("candidate without task is blocked and issues no authorization", async () => {
+	const { PACKS: P } = await import("../.stockbot/omp/lib/typesafe/questions.ts");
+	const { runJudgeTool } = await import("../.stockbot/omp/tools/research-judge-tools.ts");
+	const { FakeEvaluator } = await import("../.stockbot/omp/lib/typesafe/evaluator.ts");
+	const { yes: y } = await import("../.stockbot/omp/lib/typesafe/thresholds.ts");
+	const judgments = Object.fromEntries(P.candidate.map((id) => [id, { p_yes: 0.9, yes: y(0.9) }]));
+	const run = `run-candnotask-${Date.now()}`;
+	const out = await runJudgeTool("research_judge_candidate", { research_session_id: "s", gap_id: "g", candidate: { q: "A" } }, {
+		evaluator: new FakeEvaluator(judgments),
+		getRunId: () => run,
+		stateLoader: { candidate: async () => ({ objective: "o", gap: "g" }) },
+	});
+	expect(out?.isError).toBe(true);
+	expect(out?.details.authorization).toBeUndefined();
+	expect(hasOpenAuth(authorizationStore, run, "continue_research")).toBe(false);
+});
+
+test("launch bound to session/freeze: wrong freeze does not consume", () => {
+	const run = `run-launchbind-${Date.now()}`;
+	const covHash = hashAction({ branch_map: {}, coverage: {} });
+	const a = issueAuthorization(run, "launch_committee", launchCommitteeHash({ sessionId: "sess-1", freezeId: "freeze-1", dossierId: "d1", coverageHash: covHash }));
+	try {
+		expect(consumeLaunchForFreeze(authorizationStore, run, "sess-1", "freeze-2")).toBe(false);
+		expect(consumeLaunchForFreeze(authorizationStore, run, "sess-1", "freeze-1")).toBe(true);
+	} finally {
+		authorizationStore.delete(a.id);
+	}
 });
 
 test("retry after failure with identical text is allowed; only successful settles mark repeats", async () => {

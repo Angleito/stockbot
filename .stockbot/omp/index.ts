@@ -10,11 +10,11 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, peekTaskFingerprint, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
+import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, peekLatestFreeze, peekTaskFingerprint, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
 import { registerYoutubeAnalytics } from "./lib/youtube-analytics.ts";
 import { Text, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
-import { authorizationStore, consumeMatchingAuth, consumeOpenRoleAccepts, drainCommitteeAccepts, drainRoleAccepts, finalizeActionHash, hasOpenAuth, hasOpenRoleAccepts, hashAction, isExactRepeat } from "./lib/research-control.ts";
+import { authorizationStore, candidateTaskHash, consumeCandidateBatch, consumeFinalizeBundle, consumeLaunchForFreeze, drainCommitteeAccepts, drainFinalize, drainRoleAccepts, finalizeActionHash, hasOpenRoleAccepts, hashAction, isExactRepeat } from "./lib/research-control.ts";
 import { JUDGE_TOOL_NAMES, registerResearchJudgeTools } from "./tools/research-judge-tools.ts";
 import { REVIEW_TOOL_NAMES, registerOutputReviewTools } from "./tools/output-review-tools.ts";
 import { loadCommitteeState } from "./lib/typesafe/state.ts";
@@ -670,7 +670,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
  // depend on Python either way. Committee agents never receive them (see
  // agents/*.md).
  {
-  const toolDeps = { getRunId: () => runId, hasOpenAuth: (id: string, kind: Parameters<typeof hasOpenAuth>[2]) => hasOpenAuth(authorizationStore, id, kind) };
+  const toolDeps = { getRunId: () => runId };
   registerResearchJudgeTools(pi, toolDeps);
   registerOutputReviewTools(pi, { getRunId: () => runId });
  }
@@ -728,8 +728,10 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
  // block); call_tool remains the active fallback. Non-research host tools
  // keep the pre-existing RESEARCH-only block.
  // sec-agent rounds per binding run: the first source wave is free; each
- // further round needs a one-time continue_research authorization from a
- // judge tool. Declared before the handler so no task call can hit the TDZ.
+ // further round needs a candidate+task-bound continue_research authorization
+ // from research_judge_candidate, and committee launch needs a
+ // launch_committee authorization from research_judge_coverage. Declared
+ // before the handler so no task call can hit the TDZ.
  const sourceSpawns = new Map<string, number>();
  const taskHashes = new Map<string, Set<string>>();
  function seenHashes(currentRunId: string): Set<string> {
@@ -785,23 +787,28 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
        return { block: true, reason };
       }
      }
-     const allBound = secItems.length > 0 && secItems.every((item) => (item as Json).candidate !== undefined);
-     let authed = false;
-     if (allBound) {
-      // Per-item binding: each echoed candidate consumes its own approval.
-      // consumeMatchingAuth finds one unconsumed matching auth per call, so
-      // distinct sec-agent items need distinct approvals; a miss here means
-      // the batch already spent one below and blocks (no partial retry: the
-      // spent approvals stay spent, fail-closed).
-      authed = true;
-      for (const item of secItems) {
-       if (!consumeMatchingAuth(authorizationStore, runId, "continue_research", hashAction({ candidate: (item as Json).candidate }))) { authed = false; break; }
-      }
-     } else {
-      authed = consumeMatchingAuth(authorizationStore, runId, "continue_research");
+     const bound = secItems.length > 0 && secItems.every((item) => {
+      const cand = (item as Json).candidate;
+      const t = (item as Json).task;
+      return !!cand && typeof cand === "object" && !Array.isArray(cand) && typeof t === "string" && t.length > 0;
+     });
+     const reason = "Another source-agent round needs a TypeSafe candidate authorization; call research_judge_candidate with the exact gap, candidate, and full task text, then echo both verbatim under item.candidate and item.task.";
+     if (!bound) {
+      emit({ event: "security_block", tool: event.toolName, reason });
+      blocks++;
+      return { block: true, reason };
      }
-     if (!authed) {
-      const reason = "Another source-agent round needs a TypeSafe continuation or candidate authorization; call research_judge_continuation or research_judge_candidate first.";
+     const hashes = secItems.map((item) => candidateTaskHash((item as Json).candidate, (item as Json).task));
+     if (!consumeCandidateBatch(authorizationStore, runId, hashes)) {
+      emit({ event: "security_block", tool: event.toolName, reason });
+      blocks++;
+      return { block: true, reason };
+     }
+    }
+    if (wantsCommittee) {
+     const reason = "Committee launch needs a TypeSafe coverage COMPLETE for this freeze; call research_judge_coverage with the session, freeze, and branch-map dossier first.";
+     const peek = await peekLatestFreeze(runId, dataRoots.get(runId), asOfs.get(runId));
+     if (!peek || !consumeLaunchForFreeze(authorizationStore, runId, peek.sessionId, peek.freezeId)) {
       emit({ event: "security_block", tool: event.toolName, reason });
       blocks++;
       return { block: true, reason };
@@ -814,7 +821,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
      return { block: true, reason: plan.reason ?? "Stockbot task gate: spawn refused" };
     }
     // Allowed committee launch: prior ACCEPTs graded older outputs, drain them.
-    if (wantsCommittee) { drainRoleAccepts(authorizationStore, runId); drainCommitteeAccepts(authorizationStore, runId); }
+    if (wantsCommittee) { drainRoleAccepts(authorizationStore, runId); drainCommitteeAccepts(authorizationStore, runId); drainFinalize(authorizationStore, runId); }
     // Settle-time accounting: repeats mark and rounds count only on success
     // (tool_result hook below); plan-time adds nothing.
     // Durable gate audit: decision fields ride the task_planned sqlite row
@@ -858,6 +865,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   if (typeof finInner === "string" && finInner === "research_finalize") {
    let allowed = false;
    let rolesAccepted = false;
+   let finHash = "";
    try {
     const finParams: unknown = finArgs && typeof finArgs === "object" ? (finArgs as Json).arguments : undefined;
     const finAnswer: unknown = finParams && typeof finParams === "object" ? (finParams as Json).answer : undefined;
@@ -881,8 +889,9 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
        bearbot: { roleJobId: trio.roleJobIds.bearbot, outputHash: hashAction(trio.bearbot), freezeHash: trio.freezeHash },
       };
       rolesAccepted = hasOpenRoleAccepts(authorizationStore, runId, finFreeze);
-      const committeeOk = consumeMatchingAuth(authorizationStore, runId, "committee_accepted", hashAction({ freezeId: finFreeze }));
-      allowed = rolesAccepted && committeeOk && consumeMatchingAuth(authorizationStore, runId, "finalize", finalizeActionHash(finAnswer)) && consumeOpenRoleAccepts(authorizationStore, runId, finFreeze, expected);
+      const committeeHash = hashAction({ sessionId: finSession, freezeId: finFreeze });
+      finHash = finalizeActionHash(finAnswer, { sessionId: finSession, freezeId: finFreeze, stockbotHash: expected.stockbot.outputHash, bullbotHash: expected.bullbot.outputHash, bearbotHash: expected.bearbot.outputHash });
+      allowed = consumeFinalizeBundle(authorizationStore, { runId, freezeId: finFreeze, expected, committeeHash, finalizeHash: finHash });
      }
     }
    } catch {
@@ -898,9 +907,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    }
    // Durable gate audit: answer hash rides a routing sqlite row (never prose).
    try {
-    const finParams: unknown = finArgs && typeof finArgs === "object" ? (finArgs as Json).arguments : undefined;
-    const finAnswer: unknown = finParams && typeof finParams === "object" ? (finParams as Json).answer : undefined;
-    emit({ event: "routing_continuation", reason: "typesafe_finalize_allowed", answer_hash: finalizeActionHash(finAnswer) });
+    emit({ event: "routing_continuation", reason: "typesafe_finalize_allowed", answer_hash: finHash });
    } catch {
     // logging never breaks research
    }

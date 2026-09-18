@@ -6,6 +6,7 @@
  * missing, unreadable, or mismatched. Tools catch that into an isError block
  * with no auth, so failure always blocks fail-closed. Error text is constant:
  * keys and transcripts never leak into errors.
+ * Reasoning calls are OMP-native (@typesafe-ai/sdk), while trusted research state still travels through the Python research bridge (inspect + research_read).
  */
 
 import { hashAction } from "../research-control.ts";
@@ -150,6 +151,14 @@ async function loadFreezeIds(sessionId: string, freezeId: string, deps: StateLoa
  const freeze = await readRecord(sessionId, "freeze", freezeId, deps);
  requireId(freeze, sessionId, "freeze_id", freezeId);
  return strList(freeze.evidence_ids);
+}
+
+export async function requireFreeze(sessionId: string, freezeId: string, deps: StateLoaderDeps = {}): Promise<void> {
+ nonEmptyId(sessionId);
+ nonEmptyId(freezeId);
+ await inspectSession(sessionId, deps);
+ const rec = await readRecord(sessionId, "freeze", freezeId, deps);
+ requireId(rec, sessionId, "freeze_id", freezeId);
 }
 
 function dossierFindings(d: Json): { text: string; evidence_ids: string[] }[] {

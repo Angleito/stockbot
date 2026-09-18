@@ -28,7 +28,7 @@ export function getResearchBridge(): BridgeCall {
 }
 
 export type Advance = { done: false; prompt: string } | { done: true; answer: string } | null;
-type Stage = "SOURCE_RESEARCH" | "COMMITTEE" | "FINAL";
+type Stage = "SOURCE_RESEARCH" | "COMMITTEE" | "GATE" | "FINAL";
 
 interface Mem {
  sessionId: string;
@@ -228,11 +228,11 @@ function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | null): S
  const trio = trioState(session, jobs, maxFrozenWave);
  // Mirrors kernel stage_for_session intent over the real lowercase statuses:
  // trio-complete on the latest freeze is SOURCE while its next wave is already
- // authorized, FINAL once the gate stops; a live freeze with trio incomplete is
- // COMMITTEE; else SOURCE.
+ // authorized, FINAL once the gate stops, else GATE; a live freeze with trio
+ // incomplete is COMMITTEE; else SOURCE.
  let stage: Stage = "SOURCE_RESEARCH";
  if (trio.done) {
-  stage = nextWaveActive ? "SOURCE_RESEARCH" : "FINAL";
+  stage = nextWaveActive ? "SOURCE_RESEARCH" : gateStopped ? "FINAL" : "GATE";
  } else if (freezes.length > 0 || status === "freezing" || status === "analyzing") {
   stage = "COMMITTEE";
  }
@@ -247,6 +247,7 @@ const STAGE_GATE_DISCOVERY: Record<string, true> = { browse_tools: true, search_
 const STAGE_GATE_SOURCE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_read_search: true, research_cancel: true, research_add_evidence: true, research_submit_source_result: true };
 const STAGE_GATE_COMMITTEE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true };
 const STAGE_GATE_FINAL_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_finalize: true };
+const STAGE_GATE_GATE_EXTRA: Record<string, true> = { research_resume: true, research_status: true, research_read: true, research_cancel: true, research_finalize: true };
 // Local controls, thesis actions, and dotted bridge ops are never staged data
 // dispatches; SOURCE blocks them while unlisted data tools pass. (SOURCE extras
 // live in STAGE_GATE_SOURCE_EXTRA above, so they must not repeat here.)
@@ -254,6 +255,7 @@ const STAGE_GATE_NON_DISPATCH: Record<string, true> = { research_start: true, re
 function stageBlockReason(stage: Stage, toolName: string): string | undefined {
  if (STAGE_GATE_DISCOVERY[toolName]) return undefined;
  if (stage === "COMMITTEE") return STAGE_GATE_COMMITTEE_EXTRA[toolName] ? undefined : `Stage ${stage} forbids tool '${toolName}'`;
+ if (stage === "GATE") return STAGE_GATE_GATE_EXTRA[toolName] ? undefined : `Stage ${stage} forbids tool '${toolName}'`;
  if (stage === "FINAL") return STAGE_GATE_FINAL_EXTRA[toolName] ? undefined : `Stage ${stage} forbids tool '${toolName}'`;
  if (STAGE_GATE_SOURCE_EXTRA[toolName]) return undefined;
  return STAGE_GATE_NON_DISPATCH[toolName] ? `Stage ${stage} forbids tool '${toolName}'` : undefined;
@@ -384,6 +386,15 @@ async function inspect(sessionId: string, dataRoot?: string, asOf?: string): Pro
  const out: InspectSnapshot = { session: res.session as Json, jobs: objs(res.jobs), latestFreeze: lf && typeof lf === "object" ? (lf as Json) : null };
  lastSeen.set(sessionId, out);
  return out;
+}
+
+export async function peekLatestFreeze(researchKey: string, dataRoot?: string, asOf?: string): Promise<{ sessionId: string; freezeId: string } | null> {
+ const mem = runs.get(researchKey);
+ if (!mem) return null;
+ const snapshot = await inspect(mem.sessionId, dataRoot, asOf);
+ const freezes = strs(snapshot.session.freeze_ids);
+ if (freezes.length === 0) return null;
+ return { sessionId: mem.sessionId, freezeId: freezes[freezes.length - 1] };
 }
 // Evidence item shape. SEC search hits are navigation artifacts: a fact counts
 // only when the citation carries the canonical source_handle get_sec_document
@@ -645,6 +656,7 @@ const DIRECTOR_SPAWNS = ["sec-agent", "stockbot", "bullbot", "bearbot"];
 const STAGE_AGENTS: Record<Stage, string[]> = {
  SOURCE_RESEARCH: ["sec-agent"],
  COMMITTEE: ["stockbot", "bullbot", "bearbot"],
+ GATE: ["sec-agent"],
  FINAL: [],
 };
 const JOB_TYPE: Record<string, string> = {

@@ -44,6 +44,12 @@ test("missing channel coverage blocks", async () => {
 	expect((await judged(full(0.9, { F07: 0.2 }))).verdict).toBe("BLOCK");
 });
 
+test("S03-low blocks the committee, not the role", async () => {
+	const r = await judged(full(0.9, { S03: 0.2 }));
+	expect(r.verdict).toBe("BLOCK");
+	expect(r.failed.map((f) => f.id)).toContain("S03");
+});
+
 test("advisory F08 alone never blocks", async () => {
 	const r = await judged(full(0.9, { F08: 0.1 }));
 	expect(r.verdict).toBe("PASS");

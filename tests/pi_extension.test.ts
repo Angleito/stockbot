@@ -21,6 +21,13 @@ import {
 	toolCallRequest,
 	type Json,
 } from "../.stockbot/omp/index.ts";
+import {
+	authorizationStore,
+	candidateTaskHash,
+	hashAction,
+	issueAuthorization,
+	launchCommitteeHash,
+} from "../.stockbot/omp/lib/research-control.ts";
 
 const ROOT = new URL("..", import.meta.url).pathname;
 
@@ -2736,6 +2743,33 @@ test("committee dispatch prompts one task batch for the trio roles", async () =>
 	expect(state.jobs.map((j) => j.status)).toEqual(["running", "running", "running"]);
 });
 
+test("trio-done GATE plans sec-agent while execution needs candidate approval", async () => {
+	const SID = "rs:gate-plan-sec";
+	const E1 = `${SID}:ev:1`;
+	const F1 = `${SID}:1:freeze`;
+	const ops: ResumeOp[] = [];
+	const state: ResumeState = {
+		session: resumeSession(SID, {
+			status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], current_wave: 1,
+			committee_runs: [{ freeze_id: F1, wave_id: 1, jobs: ["job:g1", "job:g2", "job:g3"] }],
+		}),
+		jobs: [
+			{ job_id: "job:g1", job_type: "stockbot", wave_id: 1, status: "completed" },
+			{ job_id: "job:g2", job_type: "bullbot", wave_id: 1, status: "completed" },
+			{ job_id: "job:g3", job_type: "bearbot", wave_id: 1, status: "completed" },
+		],
+		freezes: { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } },
+	};
+	setResearchBridge(resumeBridge(state, ops));
+	const run = `run-gate-plan-${Date.now()}`;
+	await resumeResearch(SID, run);
+	const plan = await planTaskCall(
+		{ researchKey: run, toolCallId: "call-gate-sec-1" },
+		{ tasks: [{ agent: "sec-agent", task: "follow up", candidate: { q: "A" } }] },
+	);
+	expect(plan.block).toBeUndefined();
+	expect((plan.input as Json).tasks).toHaveLength(1);
+});
 test("director plans sec-agent with stable name, context, and omp-owned job", async () => {
 	const SID = "rs:task-sec";
 	const starts: Json[] = [];
@@ -3154,6 +3188,120 @@ test("tool_result handler records planned task outcomes", async () => {
 	} finally {
 		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
 		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		resetMainSessionIdentity();
+	}
+});
+test("handler blocks committee trio with no launch auth, then plans after launch_committee", async () => {
+	const SID = "rs:gate-committee-handler";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const knownRun = `run-gate-comm-${Date.now()}`;
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const prevRun = process.env.STOCKBOT_RUN_ID;
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-gate-comm-"));
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	process.env.STOCKBOT_RUN_ID = knownRun;
+	const issued: string[] = [];
+	try {
+		const { handlers, commands, pi } = fakePiHost();
+		await stockbotExtension(pi);
+		const main = { sessionManager: { id: "main" } };
+		await handlers["session_start"]({}, main);
+		setResearchBridge(async (req: Json) => {
+			if (req.op === "research.session.inspect")
+				return { result: { session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } } };
+			if (req.op === "research.session.create")
+				return { result: { session_id: SID } };
+			if (req.op === "research.committee.create")
+				return { result: { session_id: SID, wave_id: 1, jobs: ["job:stock-1", "job:bull-1", "job:bear-1"] } };
+			return { error: "unknown_op" };
+		});
+		await commands["research"].handler("gate committee probe", {});
+		const trio = { tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] };
+		const blocked = (await handlers["tool_call"](
+			{ toolName: "task", toolCallId: "call-gate-comm-0", input: trio },
+			main,
+		)) as unknown as Record<string, unknown>;
+		expect(blocked.block).toBe(true);
+		expect(String(blocked.reason)).toContain("Committee launch needs a TypeSafe coverage COMPLETE");
+		const dossierId = "dossier-gate-1";
+		const coverageHash = hashAction({ branch_map: { roots: ["ownership"] }, coverage: { ownership: "searched" } });
+		issued.push(issueAuthorization(knownRun, "launch_committee", launchCommitteeHash({ sessionId: SID, freezeId: F1, dossierId, coverageHash })).id);
+		const planned = (await handlers["tool_call"](
+			{ toolName: "task", toolCallId: "call-gate-comm-1", input: trio },
+			main,
+		)) as unknown as Record<string, unknown>;
+		expect((planned.input as Record<string, unknown>).tasks).toBeDefined();
+	} finally {
+		for (const id of issued) authorizationStore.delete(id);
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		if (prevRun === undefined) delete process.env.STOCKBOT_RUN_ID;
+		else process.env.STOCKBOT_RUN_ID = prevRun;
+		resetMainSessionIdentity();
+	}
+});
+
+test("handler blocks wave-2 sec-agent without candidate and on task swap", async () => {
+	const SID = "rs:gate-wave2-handler";
+	const knownRun = `run-gate-wave2-${Date.now()}`;
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const prevRun = process.env.STOCKBOT_RUN_ID;
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-gate-wave2-"));
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	process.env.STOCKBOT_RUN_ID = knownRun;
+	const issued: string[] = [];
+	let wave1jobDone = false;
+	try {
+		const { handlers, commands, pi } = fakePiHost();
+		await stockbotExtension(pi);
+		const main = { sessionManager: { id: "main" } };
+		await handlers["session_start"]({}, main);
+		setResearchBridge(async (req: Json) => {
+			if (req.op === "research.session.inspect")
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: wave1jobDone ? [] : [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "running" }], pending_next_action: null, latest_freeze: null } };
+			if (req.op === "research.session.create")
+				return { result: { session_id: SID } };
+			if (req.op === "research.job.start")
+				return { result: { job_id: "job:src-1", session_id: SID, status: "running", wave_id: 1, job_type: "source_agent" } };
+			if (req.op === "research.job.runtime") return { result: { job_id: "job:src-1" } };
+			return { error: "unknown_op" };
+		});
+		await commands["research"].handler("gate wave2 probe", {});
+		const wave1 = (await handlers["tool_call"](
+			{ toolName: "task", toolCallId: "call-wave2-1", input: { tasks: [{ agent: "sec-agent", task: "fetch wave one" }] } },
+			main,
+		)) as unknown as Record<string, unknown>;
+		expect(wave1.input).toBeDefined();
+		wave1jobDone = true;
+		await (handlers["tool_result"] as (event: unknown, ctx: unknown) => Promise<unknown>)(
+			{ toolName: "task", toolCallId: "call-wave2-1", isError: false, details: { results: [{ exit_code: 0 }] } },
+			main,
+		);
+		const bare = (await handlers["tool_call"](
+			{ toolName: "task", toolCallId: "call-wave2-2", input: { tasks: [{ agent: "sec-agent", task: "fetch wave two" }] } },
+			main,
+		)) as unknown as Record<string, unknown>;
+		expect(bare.block).toBe(true);
+		expect(String(bare.reason)).toContain("TypeSafe candidate authorization");
+		const candidate = { q: "wave two gap" };
+		issued.push(issueAuthorization(knownRun, "continue_research", candidateTaskHash(candidate, "fetch wave two")).id);
+		const swapped = (await handlers["tool_call"](
+			{ toolName: "task", toolCallId: "call-wave2-3", input: { tasks: [{ agent: "sec-agent", task: "fetch wave two altered", candidate }] } },
+			main,
+		)) as unknown as Record<string, unknown>;
+		expect(swapped.block).toBe(true);
+		expect(String(swapped.reason)).toContain("TypeSafe candidate authorization");
+	} finally {
+		for (const id of issued) authorizationStore.delete(id);
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		if (prevRun === undefined) delete process.env.STOCKBOT_RUN_ID;
+		else process.env.STOCKBOT_RUN_ID = prevRun;
 		resetMainSessionIdentity();
 	}
 });

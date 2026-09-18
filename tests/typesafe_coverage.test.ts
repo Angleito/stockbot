@@ -43,9 +43,13 @@ test("insufficient coverage for an honest answer is not COMPLETE", async () => {
 	expect(await judged(full(0.9, { V20: 0.2 }), true)).toBe("INCOMPLETE_ACTIONABLE");
 });
 
-test("0.70 boundary on V01/V19/V20 decides COMPLETE", async () => {
-	expect(await judged(full(0.9, { V01: 0.7, V19: 0.7, V20: 0.7 }), true)).toBe("COMPLETE");
-	expect(await judged(full(0.9, { V01: 0.6999 }), true)).toBe("INCOMPLETE_ACTIONABLE");
+test("middle-question V09-no flips a would-be COMPLETE to actionable", async () => {
+	expect(await judged(full(0.9, { V09: 0.2 }), true)).toBe("INCOMPLETE_ACTIONABLE");
+});
+
+test("0.70 boundary on every coverage question decides COMPLETE", async () => {
+	expect(await judged(full(0.7), true)).toBe("COMPLETE");
+	expect(await judged(full(0.9, { V09: 0.6999 }), true)).toBe("INCOMPLETE_ACTIONABLE");
 });
 
 test("branchStatus: uninvestigated material stays open, resolved closes", () => {

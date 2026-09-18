@@ -77,11 +77,6 @@ test("false balance when evidence favors one side forces revision", async () => 
 	expect(r.verdict).toBe("REJECT_FOR_REVISION");
 });
 
-test("dropped disagreement forces revision", async () => {
-	const r = await judged(full(0.9, { S03: 0.2 }));
-	expect(r.verdict).toBe("REJECT_FOR_REVISION");
-});
-
 test("0.70 boundary on a critical decides accept", async () => {
 	expect((await judged(full(0.9, { Q04: 0.7 }))).verdict).toBe("ACCEPT");
 	expect((await judged(full(0.9, { Q04: 0.6999 }))).verdict).toBe("REJECT_FOR_REVISION");

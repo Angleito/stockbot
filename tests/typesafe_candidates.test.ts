@@ -13,14 +13,14 @@ function full(ids: string[], v: number, except: Record<string, number> = {}): Re
 	return Object.fromEntries(ids.map((id) => [id, except[id] ?? v]));
 }
 
-async function judgedCont(p: Record<string, number>, hasCandidate: boolean) {
+async function judgedCont(p: Record<string, number>) {
 	const judgments: JudgmentMap = {};
 	for (const [id, v] of Object.entries(p)) judgments[id] = { p_yes: v, yes: yes(v) };
 	const { results } = await new FakeEvaluator(judgments).evaluate(
 		state,
 		CONT.map((id) => QUESTION_BANK[id]),
 	);
-	return judgeContinuation(results, hasCandidate);
+	return judgeContinuation(results);
 }
 
 async function judgedCand(p: Record<string, number>) {
@@ -34,19 +34,19 @@ async function judgedCand(p: Record<string, number>) {
 }
 
 test("unresolved and improvable continues", async () => {
-	expect((await judgedCont(full(CONT, 0.2, { N01: 0.9, N03: 0.85 }), false)).decision).toBe("continue");
+	expect((await judgedCont(full(CONT, 0.2, { N01: 0.9, N02: 0.9, N03: 0.85, N04: 0.9 }))).decision).toBe("continue");
 });
 
 test("honest stop with no candidate stops", async () => {
-	expect((await judgedCont(full(CONT, 0.2, { N05: 0.9, N06: 0.9 }), false)).decision).toBe("stop");
+	expect((await judgedCont(full(CONT, 0.2, { N05: 0.9, N06: 0.9 }))).decision).toBe("stop");
 });
 
-test("stop holds whether or not a candidate is queued", async () => {
-	expect((await judgedCont(full(CONT, 0.2, { N05: 0.9, N06: 0.9 }), true)).decision).toBe("stop");
+test("N02-no flips a would-be continue to stop", async () => {
+	expect((await judgedCont(full(CONT, 0.2, { N01: 0.9, N02: 0.2, N03: 0.9, N04: 0.9 }))).decision).toBe("stop");
 });
 
 test("unresolved but not improvable stops", async () => {
-	expect((await judgedCont(full(CONT, 0.2, { N01: 0.9, N03: 0.2 }), false)).decision).toBe("stop");
+	expect((await judgedCont(full(CONT, 0.2, { N01: 0.9, N02: 0.9, N03: 0.2, N04: 0.9 }))).decision).toBe("stop");
 });
 
 test("missing judgments fail closed to stop", async () => {
@@ -54,12 +54,12 @@ test("missing judgments fail closed to stop", async () => {
 		state,
 		CONT.map((id) => QUESTION_BANK[id]),
 	);
-	expect(judgeContinuation(results, false).decision).toBe("stop");
+	expect(judgeContinuation(results).decision).toBe("stop");
 });
 
-test("0.70 boundary on N01/N03 decides continue", async () => {
-	expect((await judgedCont(full(CONT, 0.2, { N01: 0.7, N03: 0.7 }), false)).decision).toBe("continue");
-	expect((await judgedCont(full(CONT, 0.2, { N01: 0.7, N03: 0.6999 }), false)).decision).toBe("stop");
+test("0.70 boundary on N01-N04 decides continue", async () => {
+	expect((await judgedCont(full(CONT, 0.2, { N01: 0.7, N02: 0.7, N03: 0.7, N04: 0.7 }))).decision).toBe("continue");
+	expect((await judgedCont(full(CONT, 0.2, { N01: 0.7, N02: 0.7, N03: 0.6999, N04: 0.7 }))).decision).toBe("stop");
 });
 
 test("targeted, novel, likely-useful candidate is authorized", async () => {

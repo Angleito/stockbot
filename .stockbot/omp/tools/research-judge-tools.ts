@@ -14,12 +14,12 @@
  */
 
 import type { ExtensionAPI, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { type AuthKind, hashAction, issueAuthorization } from "../lib/research-control.ts";
+import { type AuthKind, candidateTaskHash, hashAction, issueAuthorization, launchCommitteeHash } from "../lib/research-control.ts";
 import { buildAudit } from "../lib/typesafe/audit.ts";
 import { authorizeCandidate, judgeContinuation, judgeCoverage, judgeEvidence, resolveClaim } from "../lib/typesafe/decisions.ts";
 import { TypeSafeEvaluator } from "../lib/typesafe/evaluator.ts";
 import { PACKS, QUESTION_BANK } from "../lib/typesafe/questions.ts";
-import { loadCandidateGap, loadClaimState, loadContinuationState, loadCoverageState, loadEvidenceState } from "../lib/typesafe/state.ts";
+import { loadCandidateGap, loadClaimState, loadContinuationState, loadCoverageState, loadEvidenceState, requireFreeze } from "../lib/typesafe/state.ts";
 import { YES_THRESHOLD } from "../lib/typesafe/thresholds.ts";
 import type { JudgmentMap, JudgeQuestion, SystemOneEvaluator } from "../lib/typesafe/types.ts";
 
@@ -27,13 +27,13 @@ export interface JudgeToolDeps {
  evaluator?: SystemOneEvaluator;
  model?: string;
  getRunId?: () => string;
- hasOpenAuth?: (runId: string, kind: AuthKind) => boolean;
  stateLoader?: {
   evidence?: (sessionId: string, freezeId: string, evidenceId: string) => Promise<{ objective: string; claim: string; evidence: unknown }>;
   claim?: (sessionId: string, freezeId: string, claimId: string) => Promise<{ objective: string; claim: string; evidence_set: unknown; actionable: boolean }>;
   coverage?: (sessionId: string, branchMapId: string) => Promise<{ objective: string; branch_map: unknown; coverage: unknown; claim_states: unknown; actionable: boolean }>;
   continuation?: (sessionId: string) => Promise<{ objective: string; coverage: unknown; open_questions: unknown; current_conclusions: unknown }>;
   candidate?: (sessionId: string, gapId: string) => Promise<{ objective: string; gap: string }>;
+  freeze?: (sessionId: string, freezeId: string) => Promise<void>;
  };
 }
 
@@ -94,8 +94,8 @@ function packResults(full: JudgmentMap, ids: string[]): JudgmentMap {
  return out;
 }
 
-function authFor(runId: string, kind: AuthKind, fingerprint: unknown): Json {
- const auth = issueAuthorization(runId, kind, hashAction(fingerprint));
+function authFor(runId: string, kind: AuthKind, actionHash: string): Json {
+ const auth = issueAuthorization(runId, kind, actionHash);
  return { authorization_id: auth.id, kind: auth.kind };
 }
 
@@ -140,13 +140,19 @@ async function coverageTool(args: unknown, deps: JudgeToolDeps): Promise<NativeT
  try {
   const runId = requireRunId(deps);
   const bag = toolBag(args);
+  const sessionId = idOf(bag, "research_session_id");
+  const freezeId = idOf(bag, "freeze_id");
+  const branchMapId = idOf(bag, "branch_map_id");
   const load = deps.stateLoader?.coverage ?? loadCoverageState;
-  const st = await load(idOf(bag, "research_session_id"), idOf(bag, "branch_map_id"));
+  const st = await load(sessionId, branchMapId);
+  const freeze = deps.stateLoader?.freeze ?? requireFreeze;
+  await freeze(sessionId, freezeId);
   const { results, model } = await evaluatePack(deps, { objective: st.objective, branch_map: st.branch_map, coverage: st.coverage, claim_states: st.claim_states }, PACKS.coverage);
   const verdict = judgeCoverage(results, st.actionable);
   const audit = buildAudit({ runId, phase: "coverage", questions: results, result: verdict, model });
-  const auth = verdict === "COMPLETE" ? authFor(runId, "launch_committee", { verdict, results }) : undefined;
-  return { text: `coverage ${verdict}`, details: { verdict, questions: results, audit, ...(auth ? { authorization: auth } : {}) } };
+  const auth = verdict === "COMPLETE" ? issueAuthorization(runId, "launch_committee", launchCommitteeHash({ sessionId, freezeId, dossierId: branchMapId, coverageHash: hashAction({ branch_map: st.branch_map, coverage: st.coverage }) })) : undefined;
+  const authJson = auth ? { authorization_id: auth.id, kind: auth.kind satisfies AuthKind } : undefined;
+  return { text: `coverage ${verdict}`, details: { verdict, questions: results, audit, ...(authJson ? { authorization: authJson } : {}) } };
  } catch {
   return { text: "TypeSafe unavailable: coverage judgment failed. Transition blocked.", details: { error: "coverage_judgment_failed" }, isError: true };
  }
@@ -158,23 +164,13 @@ async function continuationTool(args: unknown, deps: JudgeToolDeps): Promise<Nat
   const bag = toolBag(args);
   const load = deps.stateLoader?.continuation ?? loadContinuationState;
   const st = await load(idOf(bag, "research_session_id"));
-  // hasCandidate derives from open continue_research auth for this run (never
-  // a model flag); tools cannot import the gate store, so it arrives via dep.
-  const hasCandidate = deps.hasOpenAuth ? deps.hasOpenAuth(runId, "continue_research") : hasOpenAuthFallback(runId);
   const { results, model } = await evaluatePack(deps, { objective: st.objective, coverage: st.coverage, open_questions: st.open_questions, current_conclusions: st.current_conclusions }, PACKS.continuation);
-  const { decision } = judgeContinuation(results, hasCandidate);
+  const { decision } = judgeContinuation(results);
   const audit = buildAudit({ runId, phase: "continuation", questions: results, result: decision, model });
-  const auth = decision === "continue" ? authFor(runId, "continue_research", { decision, results }) : undefined;
-  return { text: `continuation ${decision}`, details: { decision, questions: results, audit, ...(auth ? { authorization: auth } : {}) } };
+  return { text: `continuation ${decision}`, details: { decision, questions: results, audit } };
  } catch {
   return { text: "TypeSafe unavailable: continuation judgment failed. Transition blocked.", details: { error: "continuation_judgment_failed" }, isError: true };
  }
-}
-
-// Fail-closed default: without an injected open-auth reader there is no known
-// candidate, so the stop path holds.
-function hasOpenAuthFallback(_runId: string): boolean {
- return false;
 }
 
 async function candidateTool(args: unknown, deps: JudgeToolDeps): Promise<NativeToolResult> {
@@ -184,11 +180,13 @@ async function candidateTool(args: unknown, deps: JudgeToolDeps): Promise<Native
   const load = deps.stateLoader?.candidate ?? loadCandidateGap;
   const st = await load(idOf(bag, "research_session_id"), idOf(bag, "gap_id"));
   const candidate = bag.candidate;
-  if (candidate === undefined) throw new Error("typesafe_missing_id");
+  const task = bag.task;
+  if (candidate === null || typeof candidate !== "object" || Array.isArray(candidate)) throw new Error("typesafe_missing_id");
+  if (typeof task !== "string" || task.length === 0) throw new Error("typesafe_missing_id");
   const { results, model } = await evaluatePack(deps, { objective: st.objective, gap: st.gap, candidate }, PACKS.candidate);
   const authorized = authorizeCandidate(results);
   const audit = buildAudit({ runId, phase: "candidate", questions: results, result: authorized ? "authorized" : "rejected", model });
-  const auth = authorized ? authFor(runId, "continue_research", { candidate }) : undefined;
+  const auth = authorized ? authFor(runId, "continue_research", candidateTaskHash(candidate, task)) : undefined;
   return { text: `candidate ${authorized ? "authorized" : "rejected"}`, details: { authorized, questions: results, audit, ...(auth ? { authorization: auth } : {}) } };
  } catch {
   return { text: "TypeSafe unavailable: candidate judgment failed. Transition blocked.", details: { error: "candidate_judgment_failed" }, isError: true };
@@ -226,7 +224,7 @@ export function registerResearchJudgeTools(pi: ExtensionAPI, deps: JudgeToolDeps
  };
  tool("research_judge_evidence", "Judge one evidence item against its claim (E01-E16). Returns usable/unusable plus raw probabilities.", { research_session_id: anyProp("Research session id"), freeze_id: anyProp("Evidence freeze id"), evidence_id: anyProp("Evidence record id") });
  tool("research_judge_claim", "Resolve one claim over its evidence set (C01-C16). Returns SUPPORTED/CONTRADICTED/MIXED/UNKNOWN_* plus probabilities.", { research_session_id: anyProp("Research session id"), freeze_id: anyProp("Evidence freeze id"), claim_id: anyProp("Claim text: must exactly match kernel-grounded claim text") });
- tool("research_judge_coverage", "Judge branch-map coverage (V01-V20). Returns COMPLETE/INCOMPLETE_* plus probabilities; COMPLETE authorizes the committee once.", { research_session_id: anyProp("Research session id"), branch_map_id: anyProp("Dossier id carrying the branch map") });
- tool("research_judge_continuation", "Decide whether another research round is justified (N01-N06). Authorizes continue_research once on continue.", { research_session_id: anyProp("Research session id") });
- tool("research_judge_candidate", "Authorize one candidate investigation (N07-N12, all critical must pass). Authorizes continue_research once on pass. Post-first-round sec-agent task items must echo the approved candidate verbatim under item.candidate (deep-equal under hashAction); rephrased candidates need a fresh candidate judgment.", { research_session_id: anyProp("Research session id"), gap_id: anyProp("Material gap id or exact gap text"), candidate: anyProp("Proposed investigation OMP generated") });
+ tool("research_judge_coverage", "Judge branch-map coverage (V01-V20). Requires research_session_id, freeze_id, and branch_map_id; COMPLETE issues a launch_committee authorization bound to session/freeze/dossier.", { research_session_id: anyProp("Research session id"), freeze_id: anyProp("Evidence freeze id"), branch_map_id: anyProp("Dossier id carrying the branch map") });
+ tool("research_judge_continuation", "Decide whether another research round is justified (N01-N04 all required). Advisory only; issues no authorization — call research_judge_candidate to authorize.", { research_session_id: anyProp("Research session id") });
+ tool("research_judge_candidate", "Authorize one candidate investigation (N07-N12, all critical must pass). Authorizes continue_research once on pass. Post-first-round sec-agent task items must echo the approved candidate and full task text verbatim under item.candidate and item.task; rephrased candidates or altered instructions need a fresh candidate judgment.", { research_session_id: anyProp("Research session id"), gap_id: anyProp("Material gap id or exact gap text"), candidate: anyProp("Proposed investigation OMP generated"), task: anyProp("Full sec-agent task text the item must echo verbatim") });
 }
