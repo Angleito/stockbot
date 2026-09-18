@@ -615,6 +615,7 @@ import {
 	pitUnverified,
 	pitViolated,
 	researchContextBlock,
+	RESEARCH_CONTEXT_HEADER,
 	researchContextForRun,
 	resolveBindingFromEntries,
 	resumeResearch,
@@ -3412,11 +3413,13 @@ test("three concurrent children stay in-lane with forged ids overwritten", async
 		] as const;
 		for (const lane of lanes) {
 			const block = researchContextBlock({ sessionId: SID, jobId: lane.job, wave: 1, asOf: "2025-06-30", dataRoot: dir, domain: lane.domain, agent: lane.agent });
+			expect(block.startsWith(RESEARCH_CONTEXT_HEADER)).toBe(true);
 			expect(resolveBindingFromEntries(lane.omp, [{ type: "session_init", task: `${block}\n\ndesk work`, tools: [], agent: lane.agent }])?.jobId).toBe(lane.job);
 		}
 		const call = await bridgeTool(tools, "call_tool");
 		const secDoc = await bridgeTool(tools, "get_sec_document");
 		const webSearch = await bridgeTool(tools, "search_web");
+		const evidenceDirect = await bridgeTool(tools, "research_add_evidence");
 		type Exec = (id: string, params: Json, signal?: unknown, onUpdate?: unknown, ctx?: unknown) => Promise<{ content: { text: string }[]; details: unknown }>;
 		const childCtx = (lane: (typeof lanes)[number]) => ({
 			sessionManager: {
@@ -3471,6 +3474,20 @@ test("three concurrent children stay in-lane with forged ids overwritten", async
 		const idlessInner = ((wires.get(idlessWireId) as Json).arguments as Json).arguments as Json;
 		expect(idlessInner.session_id).toBe(SID);
 		expect(idlessInner.job_id).toBe(ids.fin);
+		// Direct research* tool from the bound FINRA child: forged top-level
+		// ids must resolve to the bound lane via the startsWith branch.
+		await (evidenceDirect as unknown as { execute: Exec }).execute("call-child-finra-direct", { session_id: SID, job_id: ids.sec, item: { content: "x" } } as unknown as Json, undefined, undefined, childCtx(lanes[1]));
+		for (const line of readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean)) {
+			const row = JSON.parse(line) as Json;
+			wires.set(String(row.tool_call_id), row);
+		}
+		expect(wires.size).toBe(6);
+		const directWire = wires.get("call-child-finra-direct") as Json;
+		expect(directWire.active_research_session_id).toBe(SID);
+		expect(directWire.active_research_job_id).toBe(ids.fin);
+		const directArgs = directWire.arguments as Json;
+		expect(directArgs.session_id).toBe(SID);
+		expect(directArgs.job_id).toBe(ids.fin);
 		const webWire = wires.get("call-child-web") as Json;
 		expect(webWire.active_research_session_id).toBe(SID);
 		expect(webWire.active_research_job_id).toBe(ids.web);
