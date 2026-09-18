@@ -181,17 +181,13 @@ function renderFinalAnswer(fr: Json): string {
  out.push(allowed.length === 1 && allowed[0].toUpperCase() === "SEC" ? "Scope: SEC sources only." : `Scope: ${allowed.join(", ")} sources only.`);
  return out.join("\n\n");
 }
-// Authoritative staged context: Mem stays {sessionId}; the active job derives
-// from the latest inspect cache as the running source_agent for the active
+// Director calls stay session-only: the kernel fails data tools without a job
+// closed (invalid_research_context) instead of misattributing them to a
+// sibling desk. Child lanes bind via the prompt block (parseResearchContextBlock).
 export function researchContextForRun(runId: string): { sessionId: string; jobId?: string } | undefined {
  const sid = runs.get(runId)?.sessionId;
  if (!sid) return undefined;
- const seen = lastSeen.get(sid);
- if (!seen) return { sessionId: sid };
- const cw = typeof seen.session.current_wave === "number" && Number.isInteger(seen.session.current_wave) ? (seen.session.current_wave as number) : 0;
- const wave = Math.max(cw, strs(seen.session.freeze_ids).length + 1, 1);
- const jid = str(seen.jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === wave && j.status === "running")?.job_id);
- return jid ? { sessionId: sid, jobId: jid } : { sessionId: sid };
+ return { sessionId: sid };
 }
 
 async function rpc(op: string, args: Json, dataRoot?: string, asOf?: string): Promise<Json> {
@@ -927,19 +923,149 @@ function shortSuffix(jobId: string): string {
  const cleaned = jobId.replace(/[^a-zA-Z0-9]/g, "");
  return cleaned.slice(-8).toLowerCase() || "job";
 }
-function researchContextBlock(b: { sessionId: string; jobId: string; wave: number; asOf?: string; freezeId?: string; domain?: string; question?: string; objective?: string }): string {
+export interface ResearchContextBlockInput { sessionId: string; jobId: string; wave: number; asOf?: string; dataRoot?: string; freezeId?: string; domain?: string; agent?: string; question?: string; objective?: string }
+export const RESEARCH_CONTEXT_HEADER = "# Research context (kernel-authoritative; pass these ids through verbatim)";
+export function researchContextBlock(b: ResearchContextBlockInput): string {
+ const question = b.question && b.question.length > 0 ? b.question.replace(/[\r\n]+/g, " ").trim() || "-" : "-";
+ const objective = b.objective && b.objective.length > 0 ? b.objective.replace(/[\r\n]+/g, " ").trim() || "-" : "-";
  const rows = [
   `research_session_id=${b.sessionId}`,
   `research_job_id=${b.jobId}`,
   `wave_id=${b.wave}`,
   `as_of=${b.asOf && b.asOf.length > 0 ? b.asOf : "-"}`,
+  `data_root=${b.dataRoot && b.dataRoot.length > 0 ? b.dataRoot : "-"}`,
   `freeze_id=${b.freezeId && b.freezeId.length > 0 ? b.freezeId : "-"}`,
   `source_domain=${b.domain && b.domain.length > 0 ? b.domain : "SEC"}`,
-  `question=${b.question && b.question.length > 0 ? b.question : "-"}`,
-  `objective=${b.objective && b.objective.length > 0 ? b.objective : "-"}`,
+  `agent=${b.agent && b.agent.length > 0 ? b.agent : "-"}`,
+  `question=${question}`,
+  `objective=${objective}`,
   `cutoff=${b.asOf && b.asOf.length > 0 ? b.asOf : "-"}`,
  ];
- return `# Research context (kernel-authoritative; pass these ids through verbatim)\n${rows.join("\n")}`;
+ return `${RESEARCH_CONTEXT_HEADER}\n${rows.join("\n")}`;
+}
+export interface ChildBinding { sessionId: string; jobId: string; wave: number; domain: string; agent: string; asOf?: string; dataRoot?: string; freezeId?: string }
+const childBindings = new Map<string, ChildBinding>();
+const RESEARCH_KEY_SET: Record<string, true> = { research_session_id: true, research_job_id: true, wave_id: true, as_of: true, data_root: true, freeze_id: true, source_domain: true, agent: true, question: true, objective: true, cutoff: true };
+const KEY_VALUE_RE = /^([A-Za-z_]+)=(.*)$/;
+function collectBlockText(value: unknown, out: string[]): void {
+ if (typeof value === "string") {
+  if (value.includes(RESEARCH_CONTEXT_HEADER)) out.push(value);
+  return;
+ }
+ if (!value || typeof value !== "object" || !("text" in value)) return;
+ const text = value.text;
+ const kind = "type" in value ? value.type : undefined;
+ if (kind === "text" && typeof text === "string" && text.includes(RESEARCH_CONTEXT_HEADER)) out.push(text);
+}
+function entryTexts(entry: unknown): string[] {
+ if (typeof entry === "string") return entry.includes(RESEARCH_CONTEXT_HEADER) ? [entry] : [];
+ if (!entry || typeof entry !== "object") return [];
+ const out: string[] = [];
+ if ("task" in entry) collectBlockText(entry.task, out);
+ if ("text" in entry) collectBlockText(entry.text, out);
+ if ("content" in entry) {
+  const content = entry.content;
+  if (typeof content === "string") collectBlockText(content, out);
+  else if (Array.isArray(content)) for (const block of content) collectBlockText(block, out);
+ }
+ if ("message" in entry && entry.message && typeof entry.message === "object" && "content" in entry.message) {
+  const mc = entry.message.content;
+  if (typeof mc === "string") collectBlockText(mc, out);
+  else if (Array.isArray(mc)) for (const block of mc) collectBlockText(block, out);
+ }
+ return out;
+}
+function parseBlockLines(text: string): ChildBinding | undefined {
+ const lines = text.split("\n");
+ const at = lines.findIndex((l) => l.trim() === RESEARCH_CONTEXT_HEADER);
+ if (at < 0) return undefined;
+ const vals: Record<string, string> = {};
+ for (let i = at + 1; i < lines.length; i++) {
+  const line = lines[i].trim();
+  if (!line) break;
+  const m = KEY_VALUE_RE.exec(line);
+  if (!m || !RESEARCH_KEY_SET[m[1]]) break;
+  vals[m[1]] = m[2];
+ }
+ const sid = (vals.research_session_id ?? "").trim();
+ const jid = (vals.research_job_id ?? "").trim();
+ if (!sid || sid === "-" || !jid || jid === "-") return undefined;
+ const waveRaw = (vals.wave_id ?? "").trim();
+ const wave = /^\d+$/.test(waveRaw) ? parseInt(waveRaw, 10) : 1;
+ const asOfRaw = (vals.as_of ?? "").trim();
+ const dataRootRaw = (vals.data_root ?? "").trim();
+ const freezeRaw = (vals.freeze_id ?? "").trim();
+ const domainRaw = (vals.source_domain ?? "").trim().toUpperCase();
+ const agentRaw = (vals.agent ?? "").trim();
+ return {
+  sessionId: sid,
+  jobId: jid,
+  wave,
+  domain: domainRaw || "SEC",
+  agent: agentRaw || "-",
+  asOf: asOfRaw !== "" && asOfRaw !== "-" ? asOfRaw : undefined,
+  dataRoot: dataRootRaw !== "" && dataRootRaw !== "-" ? dataRootRaw : undefined,
+  freezeId: freezeRaw !== "" && freezeRaw !== "-" ? freezeRaw : undefined,
+ };
+}
+// Public binding seam for the OMP child extension instance and its tests.
+export function parseResearchContextBlock(text: string): ChildBinding | undefined {
+ return parseBlockLines(text);
+}
+// Positive-only cache: early child calls may run before the initial prompt is
+// persisted, so a miss must re-parse on the next call instead of sticking.
+export function resolveBindingFromEntries(ompSessionKey: string, entries: unknown): ChildBinding | undefined {
+ const list = Array.isArray(entries) ? entries : [];
+ for (const entry of list) for (const text of entryTexts(entry)) {
+  const bound = parseBlockLines(text);
+  if (bound) {
+   childBindings.set(ompSessionKey, bound);
+   return bound;
+  }
+ }
+ return undefined;
+}
+// Public binding seam for the OMP child extension instance and its tests.
+export function bindingForOmpSession(ompSessionKey: string): ChildBinding | undefined {
+ return childBindings.get(ompSessionKey);
+}
+// Public binding seam for the OMP child extension instance and its tests.
+export function clearChildBinding(ompSessionKey: string): void {
+ childBindings.delete(ompSessionKey);
+}
+export function stripResearchBlock(text: string): string {
+ const lines = String(text).split("\n");
+ const kept: string[] = [];
+ let skipping = false;
+ for (const line of lines) {
+  const t = line.trim();
+  if (t === RESEARCH_CONTEXT_HEADER) {
+   skipping = true;
+   continue;
+  }
+  if (skipping) {
+   const m = KEY_VALUE_RE.exec(t);
+   if (m && RESEARCH_KEY_SET[m[1]]) continue;
+   skipping = false;
+  }
+  kept.push(line);
+ }
+ return kept.join("\n").trim();
+}
+export function planChildTaskCall(binding: ChildBinding, input: Json): TaskPlan {
+ const items = objs(input.tasks);
+ if (items.length === 0) return { block: true, reason: "Research task calls must use the batch form: provide context and a non-empty tasks array." };
+ const allow = DESK_SCOUTS[binding.agent];
+ if (!allow) return { block: true, reason: `Research session ${binding.sessionId}: '${binding.agent}' may not spawn nested scouts.` };
+ for (const item of items) {
+  const agentType = str(item.agent);
+  if (agentType !== allow) return { block: true, reason: `Research session ${binding.sessionId}: '${agentType}' is outside the ${binding.domain} lane (binding agent '${binding.agent}' may only spawn '${allow}').` };
+ }
+ const outItems = items.map((item) => ({
+  ...item,
+  task: `${researchContextBlock({ sessionId: binding.sessionId, jobId: binding.jobId, wave: binding.wave, asOf: binding.asOf, dataRoot: binding.dataRoot, freezeId: binding.freezeId, domain: binding.domain, agent: binding.agent })}\n\n${stripResearchBlock(str(item.task))}`,
+ }));
+ return { input: { ...input, tasks: outItems } };
 }
 // Pre-record shape guard mirroring the kernel's rich-envelope contract
 // (COMMITTEE_REQUIRED_KEYS + typed claims/channels + {overall, reasoning}
@@ -1101,13 +1227,20 @@ export async function planTaskCall(ctx: TaskPlanContext, input: Json, dataRoot?:
    outItems.push({
     ...item,
     name,
-    task: `${researchContextBlock({ sessionId, jobId, wave: itemWave, asOf, freezeId, domain, question, objective })}${withObjective.length > 0 ? `\n\n${withObjective}` : ""}`,
+    task: `${researchContextBlock({ sessionId, jobId, wave: itemWave, asOf, dataRoot, freezeId, domain, agent: agentType, question, objective })}${withObjective.length > 0 ? `\n\n${withObjective}` : ""}`,
    });
+  }
+  for (const item of planned) {
+   try {
+    await rpc("research.job.runtime", { job_id: item.jobId, runtime: "omp", runtime_agent_id: item.name, runtime_agent_type: item.agentType, runtime_task_call_id: ctx.toolCallId }, dataRoot, asOf);
+   } catch {
+    // best-effort pre-spawn attach never blocks the spawn; recordTaskResult retries
+   }
   }
   plannedByCall.set(ctx.toolCallId, { sessionId, items: planned });
   const first = planned[0];
   const contextText = str(input.context);
-  const shared = researchContextBlock({ sessionId, jobId: first.jobId, wave: first.wave, asOf, freezeId, domain: first.domain, question, objective });
+  const shared = researchContextBlock({ sessionId, jobId: first.jobId, wave: first.wave, asOf, dataRoot, freezeId, domain: first.domain, agent: first.agentType, question, objective });
   return {
    input: {
     ...input,

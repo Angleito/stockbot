@@ -10,7 +10,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
+import { type Advance, advanceOnAgentEnd, bindingForOmpSession, blockReasonForRun, type ChildBinding, clearResearchRun, planChildTaskCall, planTaskCall, recordTaskResult, researchContextForRun, resolveBindingFromEntries, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
 import { registerYoutubeAnalytics } from "./lib/youtube-analytics.ts";
 import { Text, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
@@ -437,6 +437,35 @@ function sessionIdOf(ctx: ExtensionContext | undefined | null): string | null {
  }
  return null;
 }
+function childBindingFor(ctx: ExtensionContext | undefined | null): ChildBinding | undefined {
+ if (!ctx || isMainSession(ctx)) return undefined;
+ const key = sessionIdOf(ctx) ?? "";
+ if (!key) return undefined;
+ const cached = bindingForOmpSession(key);
+ if (cached) return cached;
+ try {
+  const mgr: unknown = ctx?.sessionManager;
+  if (mgr && typeof mgr === "object" && "getEntries" in mgr && typeof mgr.getEntries === "function") {
+   return resolveBindingFromEntries(key, mgr.getEntries());
+  }
+ } catch {
+  return undefined;
+ }
+ return undefined;
+}
+function bindCallArgs(fnName: string, params: Json, bound: ChildBinding): Json {
+ if (fnName === "call_tool") {
+  const inner: unknown = params.arguments;
+  if (!inner || typeof inner !== "object") return params;
+  const bag = inner as Json;
+  const innerName = typeof bag.name === "string" ? bag.name : "";
+  const hasIds = "session_id" in bag || "job_id" in bag;
+  if (!hasIds && !innerName.startsWith("research")) return params;
+  return { ...params, arguments: { ...bag, session_id: bound.sessionId, job_id: bound.jobId } };
+ }
+ if (fnName.startsWith("research")) return { ...params, session_id: bound.sessionId, job_id: bound.jobId };
+ return params;
+}
 function isMainSession(ctx: ExtensionContext): boolean {
  // Manager-less contexts (tests, non-session callers) keep legacy behavior.
  const id = sessionIdOf(ctx);
@@ -550,7 +579,8 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    label: fn.name,
    description: fn.description,
    parameters: fn.parameters as ToolDefinition["parameters"],
-   async execute(_toolCallId: string, params: unknown) {
+   async execute(_toolCallId: string, params: unknown, signal: AbortSignal | undefined, onUpdate: unknown, ctx: ExtensionContext) {
+    const bound = childBindingFor(ctx);
     toolCalls++;
     if (fn.name === "browse_tools" || fn.name === "search_tools") routing.discoveryCalls++;
     if (fn.name === "call_tool") routing.callToolCount++;
@@ -581,7 +611,11 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
       routing.assistedSearchCalls++;
      }
     }
-    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, _toolCallId, fn.name, effParams, 0, dataRoots.get(runId), asOfs.get(runId), researchContextForRun(runId)));
+    if (bound) effParams = bindCallArgs(fn.name, effParams, bound);
+    const researchContext = bound ? { sessionId: bound.sessionId, jobId: bound.jobId } : researchContextForRun(runId);
+    const dataRoot = bound?.dataRoot ?? dataRoots.get(runId);
+    const asOf = bound?.asOf ?? asOfs.get(runId);
+    const bridge = await callBridge(toolCallRequest(crypto.randomUUID(), runId, _toolCallId, fn.name, effParams, 0, dataRoot, asOf, researchContext));
     const inner = bridge.result && typeof bridge.result === "object" ? (bridge.result as Json) : undefined;
     const failed = typeof bridge.error === "string" || (inner !== undefined && typeof inner.error === "string");
     const invalid = inner !== undefined && (inner.error_type === "unknown_tool" || inner.error_type === "invalid_tool_arguments");
@@ -714,11 +748,29 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
  // keep the pre-existing RESEARCH-only block.
  pi.on("tool_call", async (event, ctx) => {
   // Main task interception first: the Director owns every main-session spawn
-  // (stage-gated sec-agent/trio). sec-agent -> sec-scout fan-out runs inside
-  // the sec-agent child session, which passes through untouched; the kernel
-  // spawn policy still enforces there.
+  // (stage-gated sec-agent/trio). Nested scout fan-out runs inside each desk
+  // agent's own child session, which rewrites the batch onto the parent lane.
   if (event.toolName === "task") {
-   if (!isMainSession(ctx)) return;
+   if (!isMainSession(ctx)) {
+    const bound = childBindingFor(ctx);
+    if (!bound) return;
+    try {
+     const taskInput = (((event as unknown as Json).input ?? {}) as Json);
+     const plan = await planChildTaskCall(bound, taskInput);
+     if (plan.block) {
+      emit({ event: "security_block", tool: event.toolName, reason: plan.reason ?? "task spawn refused" });
+      blocks++;
+      return { block: true, reason: plan.reason ?? "Stockbot task gate: spawn refused" };
+     }
+     if (plan.input) return { input: plan.input as Record<string, unknown> };
+     return;
+    } catch (err) {
+     const reason = `Stockbot task gate failed (${err instanceof Error ? err.message : String(err)})`;
+     emit({ event: "security_block", tool: event.toolName, reason });
+     blocks++;
+     return { block: true, reason };
+    }
+   }
    try {
     const taskInput = (((event as unknown as Json).input ?? {}) as Json);
     const plan = await planTaskCall({ researchKey: runId, toolCallId: event.toolCallId }, taskInput, dataRoots.get(runId), asOfs.get(runId));
