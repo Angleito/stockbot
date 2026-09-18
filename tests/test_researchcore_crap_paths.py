@@ -894,6 +894,63 @@ def test_evidence_skips_unparseable_ledger_rows(tmp_path: Path, monkeypatch: pyt
     assert out["evidence_id"] == f"{sid}:ev:1"
 
 
+def test_evidence_insert_never_scans_ledger(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+
+    def _boom(_sid: str) -> list[dict[str, object]]:
+        raise AssertionError("record_evidence must not full-scan list_evidence")
+
+    monkeypatch.setattr(repo, "list_evidence", _boom)
+    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    assert out["evidence_id"] == f"{sid}:ev:1"
+    dup = svc.record_evidence(sid, src, _item(f"{sid}:ev:2"), repo=repo)
+    assert dup == {"evidence_id": f"{sid}:ev:1", "accepted": False, "duplicate_of": f"{sid}:ev:1"}
+
+
+def test_evidence_duplicate_id_and_dangling_supersede(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    from app.research.evidence import EvidenceIntegrityError
+
+    with pytest.raises(ValueError, match="duplicate evidence_id"):
+        repo.save_evidence(dict(repo.get_evidence(f"{sid}:ev:1")))
+    with pytest.raises(EvidenceIntegrityError, match="superseded_by"):
+        svc.record_evidence(
+            sid,
+            src,
+            _item(
+                f"{sid}:ev:9",
+                superseded_by=f"{sid}:ev:ghost",
+                source_record_id="0000320193-25-000099",
+                matching_passage="passage-ev9-unique",
+            ),
+            repo=repo,
+        )
+
+
+def test_evidence_parallel_identity_race_returns_winner(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Lost identity race: same identity, fresh id -> winner's duplicate_of, no new row."""
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    before = len(repo.list_evidence(sid))
+    orig_find = repo.find_evidence_by_identity
+    calls: list[str] = []
+
+    def _find_once(session_id: str, identity_key: str) -> object:
+        if not calls:
+            calls.append(identity_key)
+            return None
+        return orig_find(session_id, identity_key)
+
+    monkeypatch.setattr(repo, "find_evidence_by_identity", _find_once)
+    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:9", superseded_by=None), repo=repo)
+    assert out == {"evidence_id": f"{sid}:ev:1", "accepted": False, "duplicate_of": f"{sid}:ev:1"}
+    assert len(repo.list_evidence(sid)) == before
+
+
 # -- submit_source_result (unc 518-560: coverage/envelope vs persist) --
 
 

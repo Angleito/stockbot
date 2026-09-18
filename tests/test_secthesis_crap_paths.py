@@ -3394,6 +3394,49 @@ def test_rebuild_fts_reports_count_or_health_signal(tmp_path: Path) -> None:
     assert count == 1
 
 
+def test_search_document_text_skips_stale_fts_index(tmp_path: Path) -> None:
+    store_document_text(
+        "ACC:s1",
+        "zebra quark fusion reactor",
+        accession="ACC",
+        document_name="s1",
+        filed_at="2024-02-01",
+        known_at="2024-02-01T00:00:00Z",
+        root=tmp_path,
+    )
+    try:
+        assert rebuild_fts(root=tmp_path) == 1
+    except RuntimeError:
+        store_document_text(
+            "ACC:s2",
+            "zebra quark plasma drive",
+            accession="ACC",
+            document_name="s2",
+            filed_at="2024-02-02",
+            known_at="2024-02-02T00:00:00Z",
+            root=tmp_path,
+        )
+        assert "s2" in [r["document_name"] for r in search_document_text("zebra plasma", root=tmp_path)]
+        return
+    from app.sec.store import fts_freshness
+
+    assert fts_freshness(root=tmp_path) == {"fresh": True, "indexed_count": 1}
+    store_document_text(
+        "ACC:s2",
+        "zebra quark plasma drive",
+        accession="ACC",
+        document_name="s2",
+        filed_at="2024-02-02",
+        known_at="2024-02-02T00:00:00Z",
+        root=tmp_path,
+    )
+    stale = fts_freshness(root=tmp_path)
+    assert stale["fresh"] is False and stale["indexed_count"] == 1
+    assert "s2" in [r["document_name"] for r in search_document_text("zebra plasma", root=tmp_path)]
+    assert rebuild_fts(root=tmp_path) == 2
+    assert fts_freshness(root=tmp_path) == {"fresh": True, "indexed_count": 2}
+
+
 def test_search_document_text_fts_fallback_literal_and_blank(tmp_path: Path) -> None:
     store_document_text(
         "ACC:d1",

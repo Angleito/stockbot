@@ -598,6 +598,59 @@ def _materialize_fts_count(conn: _DuckDBConnection) -> int:
     return int(count)
 
 
+def _fts_meta_path(root: Path | str | None = None) -> Path:
+    """FTS freshness meta path: ``<db_root>/fts_meta.json`` (root may be the parquet dir)."""
+    base = duckdb.DEFAULT_DATA_ROOT if root is None else Path(root)
+    _, db_root = duckdb._data_roots(base)
+    return db_root / "fts_meta.json"
+
+
+def _fts_fingerprint(root: Path | str | None = None) -> str:
+    """Stat-only fingerprint of ``document_text`` parts; missing dir hashes empty."""
+    base = duckdb.DEFAULT_DATA_ROOT if root is None else Path(root)
+    parquet_root, _ = duckdb._data_roots(base)
+    doc_dir = parquet_root / "document_text"
+    parts: list[str] = []
+    if doc_dir.exists():
+        for part in sorted(doc_dir.rglob("*.parquet"), key=Path.as_posix):
+            try:
+                stat = part.stat()
+            except OSError:
+                continue
+            parts.append(f"{part.relative_to(parquet_root).as_posix()}|{stat.st_size}|{stat.st_mtime_ns}")
+    return hashlib.sha256("\n".join(parts).encode("utf-8")).hexdigest()
+
+
+def _fts_indexed_meta(root: Path | str | None) -> tuple[str | None, int | None]:
+    """(fingerprint, indexed_count) from the meta file; (None, count) when unusable."""
+    try:
+        meta_raw = _fts_meta_path(root).read_text(encoding="utf-8")
+    except OSError:
+        return None, None
+    try:
+        meta: object = json.loads(meta_raw)
+    except ValueError:
+        return None, None
+    if not isinstance(meta, dict):
+        return None, None
+    count = meta.get("indexed_count")
+    indexed_count = count if isinstance(count, int) and not isinstance(count, bool) else None
+    fingerprint = meta.get("fingerprint")
+    return (fingerprint if isinstance(fingerprint, str) else None), indexed_count
+
+
+def fts_freshness(root: Path | str | None = None) -> dict[str, object]:
+    """Freshness of the materialized FTS index vs live ``document_text`` parts."""
+    fingerprint, indexed_count = _fts_indexed_meta(root)
+    if fingerprint is None:
+        return {"fresh": False, "indexed_count": indexed_count}
+    try:
+        current = _fts_fingerprint(root)
+    except OSError:
+        return {"fresh": False, "indexed_count": indexed_count}
+    return {"fresh": fingerprint == current, "indexed_count": indexed_count}
+
+
 def rebuild_fts(root: Path | str | None = None) -> int:
     """Materialize ``document_text`` into the warehouse + native FTS index.
 
@@ -608,9 +661,16 @@ def rebuild_fts(root: Path | str | None = None) -> int:
     conn = duckdb._connect(Path(root) if root is not None else None)
     try:
         _load_fts_extension(conn)
-        return _materialize_fts_count(conn)
+        count = _materialize_fts_count(conn)
     finally:
         conn.close()
+    meta_path = _fts_meta_path(root)
+    meta_path.parent.mkdir(parents=True, exist_ok=True)
+    meta_path.write_text(
+        json.dumps({"indexed_at": _utcnow(), "indexed_count": count, "fingerprint": _fts_fingerprint(root)}),
+        encoding="utf-8",
+    )
+    return count
 
 
 def _fts_sql(
@@ -716,13 +776,15 @@ def search_document_text(
 ) -> list[dict[str, object]]:
     """Local text search: BM25 token path by default, exact-phrase when literal.
 
-    The token path falls back to AND-of-substrings when the FTS index or
-    extension is unavailable (rebuild_fts stays the explicit health signal).
+    The token path falls back to AND-of-substrings when the FTS index is
+    stale/missing or the extension is unavailable (rebuild_fts stays the
+    explicit health signal; search never auto-rebuilds).
     """
     text = _validate_search_query(query)
-    fts_hits = _try_fts_search(text, literal, limit, as_of, root)
-    if fts_hits is not None:
-        return fts_hits
+    if not literal and fts_freshness(root).get("fresh"):
+        fts_hits = _try_fts_search(text, literal, limit, as_of, root)
+        if fts_hits is not None:
+            return fts_hits
     where, params = _fallback_text_where(text, literal)
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
@@ -1443,19 +1505,38 @@ def query_beneficial_ownership(
     return _ordered_query("sec_beneficial_ownership", where, params, "ORDER BY known_at DESC", limit, root)
 
 
+def store_13f_holdings(
+    rows: Iterable[InstitutionalHolding | Mapping[str, object]],
+    *,
+    root: Path | str | None = None,
+) -> int:
+    """Bulk 13F writer: one ``write_rows`` for all rows; returns rows written."""
+    mapped = [_holding_row_from(value) for value in rows or []]
+    if not mapped:
+        return 0
+    return parquet.write_rows("sec_13f_holdings", mapped, root=_parquet_root(root))
+
+
 def store_13f_holding(
     row: InstitutionalHolding | Mapping[str, object],
     *,
     root: Path | str | None = None,
 ) -> int:
     """Typed writer: accepts ``InstitutionalHolding`` or a column row."""
-    d = _row_dict(row)
-    source_row = _holding_source_row(d)
-    return _pass_through(
-        "sec_13f_holdings",
-        _holding_row(d, normalize_cusip(d.get("cusip")), normalize_isin(d.get("isin")), source_row),
-        root,
-    )
+    return store_13f_holdings([row], root=root)
+
+
+def _holding_row_from(value: InstitutionalHolding | Mapping[str, object]) -> dict[str, object]:
+    """One mapped + provenance-filled 13F row (same shape as ``_pass_through``)."""
+    d = _row_dict(value)
+    row = _holding_row(d, normalize_cusip(d.get("cusip")), normalize_isin(d.get("isin")), _holding_source_row(d))
+    now = row.get("retrieved_at") or _utcnow()
+    row.setdefault("retrieved_at", now)
+    row["known_at"] = row.get("known_at") or now
+    row["parser_version"] = row.get("parser_version") or PARSER_VERSION
+    if not row.get("content_hash"):
+        row["content_hash"] = raw_archive.content_hash(json.dumps(row, sort_keys=True, default=str).encode("utf-8"))
+    return row
 
 
 def _cusip_where(

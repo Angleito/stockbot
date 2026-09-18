@@ -13,6 +13,8 @@ records behind filters.
 from __future__ import annotations
 
 import datetime as _dt
+import json
+import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
@@ -981,6 +983,11 @@ def _unique_key(row: dict[str, object], keys: tuple[str, ...]) -> tuple[str, ...
     return tuple(str(row.get(key) or "") for key in keys)
 
 
+def _key_empty(key: tuple[str, ...]) -> bool:
+    """True when a unique key carries no identity (all components blank)."""
+    return not any(part for part in key)
+
+
 def _existing_keys(name: str, root: Path) -> set[tuple[str, ...]]:
     """Keys already stored for ``name`` (existing boundary)."""
     ds = dataset(name)
@@ -999,8 +1006,86 @@ def _existing_keys(name: str, root: Path) -> set[tuple[str, ...]]:
 def _drop_duplicates(name: str, rows: list[dict[str, object]], root: Path) -> list[dict[str, object]]:
     """Rows whose unique key is not stored yet (existing boundary)."""
     ds = dataset(name)
-    existing = _existing_keys(name, root)
-    return [row for row in rows if _unique_key(row, ds.unique_keys) not in existing]
+    seen = set(_existing_keys(name, root))
+    kept: list[dict[str, object]] = []
+    for row in rows:
+        key = _unique_key(row, ds.unique_keys)
+        if key in seen:
+            continue
+        if not _key_empty(key):
+            seen.add(key)
+        kept.append(row)
+    return kept
+
+
+def _keys_db_path(root: Path) -> Path:
+    """Sidecar index beside dataset dirs (never matches the ``*.parquet`` glob)."""
+    return Path(root) / "_keys.sqlite"
+
+
+def _keys_ensure(conn: sqlite3.Connection) -> None:
+    conn.execute(
+        "CREATE TABLE IF NOT EXISTS dedup_keys(dataset TEXT NOT NULL, key TEXT NOT NULL, PRIMARY KEY(dataset, key))"
+    )
+
+
+def _encode_key(key: tuple[str, ...]) -> str:
+    return json.dumps(key, sort_keys=True)
+
+
+def _filter_survivors(
+    rows: list[dict[str, object]],
+    keys: list[str],
+    raw: list[tuple[str, ...]],
+    known: set[str],
+) -> tuple[list[dict[str, object]], list[str]]:
+    """(survivor rows, survivor keys) in input order; empty keys bypass intra-batch dedupe (legacy boundary)."""
+    seen = set(known)
+    survivors: list[dict[str, object]] = []
+    survivor_keys: list[str] = []
+    for row, key, raw_key in zip(rows, keys, raw):
+        if key in seen:
+            continue
+        if not _key_empty(raw_key):
+            seen.add(key)
+        survivors.append(row)
+        survivor_keys.append(key)
+    return survivors, survivor_keys
+
+
+def _keys_backfill(conn: sqlite3.Connection, ds: Dataset, root: Path) -> None:
+    """One-time index population from existing parquet parts."""
+    (count,) = conn.execute("SELECT COUNT(*) FROM dedup_keys WHERE dataset = ?", (ds.name,)).fetchone()
+    if count == 0 and next((root / ds.name).rglob("*.parquet"), None) is not None:
+        conn.executemany(
+            "INSERT OR IGNORE INTO dedup_keys(dataset, key) VALUES (?, ?)",
+            [(ds.name, _encode_key(key)) for key in _existing_keys(ds.name, root)],
+        )
+
+
+def _keys_known(conn: sqlite3.Connection, ds: Dataset, keys: list[str]) -> set[str]:
+    """Indexed keys among incoming; chunked at 500 placeholders."""
+    known: set[str] = set()
+    for start in range(0, len(keys), 500):
+        chunk = list(dict.fromkeys(keys[start : start + 500]))
+        marks = ",".join("?" for _ in chunk)
+        known.update(
+            row[0]
+            for row in conn.execute(
+                f"SELECT key FROM dedup_keys WHERE dataset = ? AND key IN ({marks})",
+                (ds.name, *chunk),
+            ).fetchall()
+        )
+    return known
+
+
+def _keys_remember(conn: sqlite3.Connection, ds: Dataset, survivor_keys: list[str]) -> None:
+    """Record survivor keys; INSERT OR IGNORE keeps parallel retries idempotent."""
+    if survivor_keys:
+        conn.executemany(
+            "INSERT OR IGNORE INTO dedup_keys(dataset, key) VALUES (?, ?)",
+            [(ds.name, key) for key in survivor_keys],
+        )
 
 
 def _group_partitions(
@@ -1042,6 +1127,46 @@ def read_table(name: str, root: Path | None = None, columns: list[str] | None = 
     return pa.concat_tables(tables, promote_options="permissive")
 
 
+def _write_rows_fallback(name: str, rows: list[dict[str, object]], root: Path) -> int:
+    """Full-scan dedupe path; correctness backstop when the sidecar is unusable."""
+    new_rows = _drop_duplicates(name, rows, root)
+    if not new_rows:
+        return 0
+    ds = dataset(name)
+    for year, part_rows in _group_partitions(ds, new_rows).items():
+        _append_partition(ds, root, year, part_rows)
+    return len(new_rows)
+
+
+def _write_rows_indexed(ds: Dataset, rows: list[dict[str, object]], root: Path) -> int:
+    """Sidecar-indexed dedupe; raises ``sqlite3.Error`` when the index is unusable."""
+    raw = [_unique_key(row, ds.unique_keys) for row in rows]
+    keys = [_encode_key(key) for key in raw]
+    root.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(_keys_db_path(root)), timeout=30)
+    try:
+        conn.execute("BEGIN IMMEDIATE")
+        _keys_ensure(conn)
+        _keys_backfill(conn, ds, root)
+        survivors, survivor_keys = _filter_survivors(rows, keys, raw, _keys_known(conn, ds, keys))
+        _keys_remember(conn, ds, survivor_keys)
+        conn.commit()
+    except BaseException:
+        try:
+            conn.rollback()
+        except sqlite3.Error:
+            pass
+        conn.close()
+        raise
+    else:
+        conn.close()
+    if not survivors:
+        return 0
+    for year, part_rows in _group_partitions(ds, survivors).items():
+        _append_partition(ds, root, year, part_rows)
+    return len(survivors)
+
+
 def write_rows(name: str, rows: list[dict[str, object]], root: Path | None = None) -> int:
     """Append rows deduplicated by the dataset's unique key; returns the
     number of rows actually written (0 on a deterministic rerun)."""
@@ -1049,12 +1174,10 @@ def write_rows(name: str, rows: list[dict[str, object]], root: Path | None = Non
     ds = dataset(name)
     if not rows:
         return 0
-    new_rows = _drop_duplicates(name, rows, root)
-    if not new_rows:
-        return 0
-    for year, part_rows in _group_partitions(ds, new_rows).items():
-        _append_partition(ds, root, year, part_rows)
-    return len(new_rows)
+    try:
+        return _write_rows_indexed(ds, rows, root)
+    except sqlite3.Error:
+        return _write_rows_fallback(name, rows, root)
 
 
 def count_rows(name: str, root: Path | None = None) -> int:

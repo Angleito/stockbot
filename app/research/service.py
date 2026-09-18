@@ -20,9 +20,12 @@ from . import session as _session
 from .evidence import (
     CLAIM_KINDS,
     Evidence,
+    EvidenceIntegrityError,
+    EvidenceRejectedError,
+    _ingest_missing,
+    _ingest_pit_gate,
     evidence_content_hash,
     evidence_to_dict,
-    ingest_evidence,
     normalize_accession,
     search_run_ref,
     sec_source_ref,
@@ -1030,13 +1033,38 @@ def _build_evidence_record(
         supports=supports,
         contradicts=contradicts,
         confidence=_svc_opt_float(data, "confidence"),
-        quality=_svc_opt_str(data, "quality"),
         metadata={**metadata, "identity_key": identity_key, "claim_kind": claim_kind},
         superseded_by=_svc_opt_str(data, "superseded_by"),
         record_kind=kind,
         claim_kind=claim_kind,
         provenance=provenance,
     )
+
+
+def _gate_evidence_record(store: ResearchRepository, found: ResearchSession, record: Evidence) -> None:
+    """Provenance + PIT gate + supersede-link check; raises on refusal."""
+    missing = _ingest_missing(record)
+    if missing:
+        reason, detail = "PROVENANCE_FAILURE", f"missing: {', '.join(missing)}"
+    else:
+        reason, detail = _ingest_pit_gate(record, found.as_of)
+    if reason:
+        raise EvidenceRejectedError(record.evidence_id, reason, detail)
+    if record.superseded_by is not None:
+        try:
+            store.get_evidence(record.superseded_by)
+        except KeyError:
+            raise EvidenceIntegrityError(
+                f"evidence {record.evidence_id}: superseded_by {record.superseded_by!r} not in ledger"
+            ) from None
+
+
+def _duplicate_response(store: ResearchRepository, session_id: str, record: Evidence) -> dict[str, JSONValue]:
+    """Winner row for a lost identity race; raises when the winner is gone."""
+    hit = store.find_evidence_by_identity(session_id, str(record.metadata.get("identity_key") or ""))
+    if hit is None:
+        raise ValueError(f"<research.sqlite>: evidence: duplicate identity_key {record.evidence_id!r}")
+    return {"evidence_id": hit.get("evidence_id"), "accepted": False, "duplicate_of": hit.get("evidence_id")}
 
 
 def _persist_evidence_record(
@@ -1047,31 +1075,18 @@ def _persist_evidence_record(
     record: Evidence,
     metadata: dict[str, JSONValue],
 ) -> dict[str, JSONValue]:
-    """PIT-gate + append the record, link it to the session, return the stored dict."""
-    from .evidence import EvidenceLedger
-
-    ledger = EvidenceLedger()
-    for existing in store.list_evidence(session_id):
-        try:
-            from .evidence import evidence_from_dict
-
-            ledger.append(evidence_from_dict(existing))
-        except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
-            continue
-    ingest_evidence(ledger, record, as_of=found.as_of)
+    """PIT-gate + persist the record, return the stored dict."""
+    _gate_evidence_record(store, found, record)
     stored = evidence_to_dict(record)
-    store.save_evidence(stored)
+    try:
+        store.save_evidence(stored)
+    except ValueError as exc:
+        if "identity_key" not in str(exc):
+            raise
+        return _duplicate_response(store, session_id, record)
     _emit(store, session_id, "evidence.accepted", {"job_id": job_id, "evidence_id": record.evidence_id})
     stored = dict(stored)
     stored["metadata"] = {k: v for k, v in metadata.items()}
-    if record.evidence_id not in found.evidence_ids:
-        store.save_session(
-            replace(
-                found,
-                evidence_ids=[*found.evidence_ids, record.evidence_id],
-                updated_at=utcnow(),
-            )
-        )
     return stored
 
 
@@ -1163,14 +1178,6 @@ def _record_absence_artifact(
     }
 
 
-def _evidence_duplicate(prior: list[dict[str, JSONValue]], identity_key: str):
-    """The prior row when this identity key repeats, else None (no per-job evidence cap)."""
-    for row in prior:
-        if isinstance(row.get("metadata"), dict) and row["metadata"].get("identity_key") == identity_key:
-            return {"evidence_id": row.get("evidence_id"), "accepted": False, "duplicate_of": row.get("evidence_id")}
-    return None
-
-
 def record_evidence(
     session_id: str,
     job_id: str,
@@ -1199,10 +1206,9 @@ def record_evidence(
     metadata, subject = _evidence_typed(data, found)
     provenance = _observed_provenance(data)
     identity_key = _evidence_identity(data, claim, subject, provenance)
-    prior = store.list_evidence(session_id)
-    dup = _evidence_duplicate(prior, identity_key)
-    if dup is not None:
-        return dup
+    hit = store.find_evidence_by_identity(session_id, identity_key)
+    if hit is not None:
+        return {"evidence_id": hit.get("evidence_id"), "accepted": False, "duplicate_of": hit.get("evidence_id")}
     record = _build_evidence_record(
         data,
         session_id=session_id,

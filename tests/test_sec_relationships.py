@@ -1117,11 +1117,13 @@ def test_hydrate_amendment_forms_use_base_parsers(tmp_path: Path, monkeypatch: p
 
     wh: list[dict[str, object]] = []
 
-    def _fake_store_holding(d: dict[str, object], **kwargs: object) -> int:
-        return (wh.append(d), 1)[1]
+    def _fake_store_holdings(rows: object, **kwargs: object) -> int:
+        assert isinstance(rows, list)
+        wh.extend(row for row in rows if isinstance(row, dict))
+        return 1
 
     monkeypatch.setattr(sec_insider, "normalize_13f_holdings", _fake_holdings_records)
-    monkeypatch.setattr(sec_store_mod, "store_13f_holding", _fake_store_holding)
+    monkeypatch.setattr(sec_store_mod, "store_13f_holdings", _fake_store_holdings)
     fh = Filing(
         form="13F-HR/A",
         accession_no="ACC-HA",

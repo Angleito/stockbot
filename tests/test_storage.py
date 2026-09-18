@@ -132,6 +132,45 @@ def test_parquet_rerun_is_deterministic_no_duplicates(data_root: Path):
     assert parquet.count_rows("financial_facts", root=data_root / "parquet") == 1
 
 
+def test_write_rows_dedupes_within_batch(data_root: Path):
+    row = _fact_row()
+    assert parquet.write_rows("financial_facts", [row, dict(row)], root=data_root / "parquet") == 1
+    assert parquet.count_rows("financial_facts", root=data_root / "parquet") == 1
+    assert parquet._drop_duplicates("financial_facts", [row, dict(row)], root=data_root / "parquet") == []
+    fresh, fresh_dup = {**row, "fact_id": "fresh-1"}, {**row, "fact_id": "fresh-1"}
+    assert parquet._drop_duplicates("financial_facts", [fresh, fresh_dup], root=data_root / "parquet") == [fresh]
+    other = {**row, "fact_id": "other-id", "period_end": "2025-01-01"}
+    kept = parquet._drop_duplicates("financial_facts", [row, other], root=data_root / "parquet")
+    assert kept == [other]  # break-instead-of-continue would stop at row and drop fresh other
+
+
+def test_write_rows_fallback_covers_legacy_empty_and_rerun(data_root: Path):
+    row = _fact_row()
+    assert parquet.write_rows("financial_facts", [row], root=data_root / "parquet") == 1
+    assert parquet._write_rows_fallback("financial_facts", [dict(row)], root=data_root / "parquet") == 0
+    assert parquet._drop_duplicates("financial_facts", [row, dict(row)], root=data_root / "parquet") == []
+    empty = {k: None for k in ("fact_id", "entity_id")}
+    assert parquet._drop_duplicates("financial_facts", [{**row, **empty}], root=data_root / "parquet") != []
+    fresh = {**row, "fact_id": "fallback-fresh-1", "period_end": "2025-06-01"}
+    before = parquet.count_rows("financial_facts", root=data_root / "parquet")
+    assert parquet._write_rows_fallback("financial_facts", [fresh], root=data_root / "parquet") == 1
+    assert parquet.count_rows("financial_facts", root=data_root / "parquet") == before + 1
+
+
+def test_write_rows_falls_back_when_sidecar_unusable(data_root: Path, monkeypatch: pytest.MonkeyPatch):
+    import sqlite3
+
+    row = _fact_row()
+    assert parquet.write_rows("financial_facts", [row], root=data_root / "parquet") == 1
+
+    def _boom(ds: object, rows: object, root: object) -> int:
+        raise sqlite3.Error("sidecar down")
+
+    monkeypatch.setattr(parquet, "_write_rows_indexed", _boom)
+    assert parquet.write_rows("financial_facts", [dict(row)], root=data_root / "parquet") == 0
+    assert parquet.count_rows("financial_facts", root=data_root / "parquet") == 1
+
+
 def test_parquet_unknown_dataset_rejected(data_root: Path):
     with pytest.raises(ValueError, match="Unknown parquet dataset"):
         parquet.write_rows("nope", [{}], root=data_root / "parquet")

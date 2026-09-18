@@ -2176,9 +2176,9 @@ def _store_13f_rows(
     written = 0
     for rec in recs or []:
         written += _observe_13f_security(rec, raw_path, content_hash, retrieved_at, data_root)
-        stored: object = _store_attr(store, "store_13f_holding")(
-            _stamp_record(rec, raw_path, retrieved_at, content_hash, source_url), root=data_root
-        )
+    stamped = [_stamp_record(rec, raw_path, retrieved_at, content_hash, source_url) for rec in recs or []]
+    if stamped:
+        stored: object = _store_attr(store, "store_13f_holdings")(stamped, root=data_root)
         written += stored if isinstance(stored, int) else 0
     return written, True, None
 
