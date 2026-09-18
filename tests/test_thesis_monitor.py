@@ -40,6 +40,7 @@ class _Src:
 
 class _Omp:
     """Fake run_thesis_omp: counts launches; ok-runs apply repo writes like OMP's tool calls."""
+
     def __init__(self, fail: bool = False, write: Callable[..., None] | None = None) -> None:
         self.fail = fail
         self.write = write

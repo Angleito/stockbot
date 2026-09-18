@@ -1988,7 +1988,21 @@ def _pi_env(db_path: Path, stockbot_store: Path | None) -> dict[str, str]:
 
 def _pi_cmd(prompt: str) -> list[str]:
     """OMP CLI argv: pristine prompt mode with the stockbot extension only."""
-    return ["omp", "-p", "--config", ".stockbot/omp/stockbot.yml", "--no-session", "--no-extensions", "--no-skills", "--no-rules", "--no-tools", "--extension", EXTENSION, "--", prompt]
+    return [
+        "omp",
+        "-p",
+        "--config",
+        ".stockbot/omp/stockbot.yml",
+        "--no-session",
+        "--no-extensions",
+        "--no-skills",
+        "--no-rules",
+        "--no-tools",
+        "--extension",
+        EXTENSION,
+        "--",
+        prompt,
+    ]
 
 
 def _pi_logs(attempt_dir: Path) -> tuple[Path, Path]:

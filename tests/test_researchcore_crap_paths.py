@@ -3786,12 +3786,12 @@ def _frozen_session(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> tuple[Re
     inside = svc.record_evidence(sid, src, _item(f"{sid}:ev:inside", claim_text="inside claim"), repo=repo)
     outside = svc.record_evidence(sid, src, _item(f"{sid}:ev:outside", claim_text="outside claim"), repo=repo)
     assert inside["evidence_id"] != outside["evidence_id"]
-    frozen = create_freeze(freeze_id=f"{sid}:F1", session_id=sid, wave_id=1,
-                           records=[evidence_from_dict(inside)], as_of=SVC_ASOF)
+    frozen = create_freeze(
+        freeze_id=f"{sid}:F1", session_id=sid, wave_id=1, records=[evidence_from_dict(inside)], as_of=SVC_ASOF
+    )
     repo.save_freeze(freeze_to_dict(frozen))
     repo.save_session(dataclasses.replace(repo.get_session(sid), freeze_ids=[frozen.freeze_id]))
-    return (repo, sid, frozen.freeze_id,
-            str(inside["evidence_id"]), str(outside["evidence_id"]))
+    return (repo, sid, frozen.freeze_id, str(inside["evidence_id"]), str(outside["evidence_id"]))
 
 
 class _FakeClient:
@@ -4779,28 +4779,40 @@ def test_research_read_freeze_scope_membership(tmp_path: Path, monkeypatch: pyte
     """freeze_id scopes evidence reads: out-of-freeze fails loudly, in-freeze and unscoped reads unchanged."""
     repo, sid, fid, inside_id, outside_id = _frozen_session(tmp_path, monkeypatch)
     ctx = _rctx(tmp_path)
-    rejected = execute_tool("research_read", {"session_id": sid, "kind": "evidence",
-                                              "resource_id": outside_id, "freeze_id": fid}, "m", context=ctx)
+    rejected = execute_tool(
+        "research_read",
+        {"session_id": sid, "kind": "evidence", "resource_id": outside_id, "freeze_id": fid},
+        "m",
+        context=ctx,
+    )
     assert rejected["error_type"] == "not_in_freeze"
     assert outside_id in str(rejected["error"]) and fid in str(rejected["error"])
-    allowed = execute_tool("research_read", {"session_id": sid, "kind": "evidence",
-                                             "resource_id": inside_id, "freeze_id": fid}, "m", context=ctx)
+    allowed = execute_tool(
+        "research_read",
+        {"session_id": sid, "kind": "evidence", "resource_id": inside_id, "freeze_id": fid},
+        "m",
+        context=ctx,
+    )
     rec = allowed["record"]
     assert isinstance(rec, dict)
     assert rec["evidence_id"] == inside_id
-    missing = execute_tool("research_read", {"session_id": sid, "kind": "evidence",
-                                             "resource_id": inside_id, "freeze_id": "nope"}, "m", context=ctx)
+    missing = execute_tool(
+        "research_read",
+        {"session_id": sid, "kind": "evidence", "resource_id": inside_id, "freeze_id": "nope"},
+        "m",
+        context=ctx,
+    )
     assert missing["error_type"] == "unknown_resource"
-    plain = execute_tool("research_read", {"session_id": sid, "kind": "evidence",
-                                           "resource_id": outside_id}, "m", context=ctx)
+    plain = execute_tool(
+        "research_read", {"session_id": sid, "kind": "evidence", "resource_id": outside_id}, "m", context=ctx
+    )
     unscoped = plain["record"]
     assert isinstance(unscoped, dict)
     assert unscoped["evidence_id"] == outside_id
     job_id = repo.list_jobs(sid)[0].job_id
-    assert execute_tool("research_read", {"session_id": sid, "kind": "job",
-                                          "resource_id": job_id, "freeze_id": fid}, "m", context=ctx) == \
-        execute_tool("research_read", {"session_id": sid, "kind": "job",
-                                       "resource_id": job_id}, "m", context=ctx)
+    assert execute_tool(
+        "research_read", {"session_id": sid, "kind": "job", "resource_id": job_id, "freeze_id": fid}, "m", context=ctx
+    ) == execute_tool("research_read", {"session_id": sid, "kind": "job", "resource_id": job_id}, "m", context=ctx)
 
 
 def test_research_read_freeze_scope_dossier(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4810,16 +4822,32 @@ def test_research_read_freeze_scope_dossier(tmp_path: Path, monkeypatch: pytest.
     repo, sid, fid, inside_id, outside_id = _frozen_session(tmp_path, monkeypatch)
     ctx = _rctx(tmp_path)
     for dossier_id, evidence_id in (("D-in", inside_id), ("D-out", outside_id)):
-        repo.save_dossier(dossier_to_dict(create_dossier(
-            dossier_id=dossier_id, session_id=sid, wave_id=1, subject="NVDA",
-            findings=[{"text": "finding", "evidence_ids": [evidence_id]}])))
-    allowed = execute_tool("research_read", {"session_id": sid, "kind": "dossier",
-                                             "resource_id": "D-in", "freeze_id": fid}, "m", context=ctx)
+        repo.save_dossier(
+            dossier_to_dict(
+                create_dossier(
+                    dossier_id=dossier_id,
+                    session_id=sid,
+                    wave_id=1,
+                    subject="NVDA",
+                    findings=[{"text": "finding", "evidence_ids": [evidence_id]}],
+                )
+            )
+        )
+    allowed = execute_tool(
+        "research_read",
+        {"session_id": sid, "kind": "dossier", "resource_id": "D-in", "freeze_id": fid},
+        "m",
+        context=ctx,
+    )
     rec = allowed["record"]
     assert isinstance(rec, dict)
     assert rec["dossier_id"] == "D-in"
-    leak = execute_tool("research_read", {"session_id": sid, "kind": "dossier",
-                                          "resource_id": "D-out", "freeze_id": fid}, "m", context=ctx)
+    leak = execute_tool(
+        "research_read",
+        {"session_id": sid, "kind": "dossier", "resource_id": "D-out", "freeze_id": fid},
+        "m",
+        context=ctx,
+    )
     assert leak["error_type"] == "not_in_freeze"
     assert outside_id in str(leak["error"])
 

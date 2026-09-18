@@ -646,7 +646,9 @@ def _dispatch_value_error(exc: ValueError) -> dict[str, object]:
     return {"error": str(exc)}
 
 
-def _consume_dispatch_budget(name: str, staged: _StagedContext, arguments: dict[str, object]) -> tuple[bool, dict[str, object] | None]:
+def _consume_dispatch_budget(
+    name: str, staged: _StagedContext, arguments: dict[str, object]
+) -> tuple[bool, dict[str, object] | None]:
     """Gate 8: attached staged data dispatches consume one persisted kernel slot.
 
     The validated arguments ride along: the kernel keys its no-progress repeat
@@ -667,7 +669,10 @@ def _consume_dispatch_budget(name: str, staged: _StagedContext, arguments: dict[
         }
     try:
         from app.research import service as _svc
-        _svc.authorize_and_consume_dispatch(staged.session_id, staged.job_id, name, arguments=arguments, repo=staged.store)
+
+        _svc.authorize_and_consume_dispatch(
+            staged.session_id, staged.job_id, name, arguments=arguments, repo=staged.store
+        )
     except ValueError as exc:
         return False, _dispatch_value_error(exc)
     except KeyError as exc:

@@ -1114,8 +1114,7 @@ def _op_research_job_runtime(request: Mapping[str, object], protocol_id: str) ->
         return {"id": protocol_id, "error": "missing_arg"}
     ctx = _bridge_ctx(request)
     try:
-        out = _kernel.attach_job_runtime(
-            job_id, dict(request), repo=ResearchRepository(data_root=ctx.data_root))
+        out = _kernel.attach_job_runtime(job_id, dict(request), repo=ResearchRepository(data_root=ctx.data_root))
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
     except ValueError as exc:
@@ -1123,9 +1122,7 @@ def _op_research_job_runtime(request: Mapping[str, object], protocol_id: str) ->
     return {"id": protocol_id, "result": out}
 
 
-def _op_research_job_fail(
-    request: Mapping[str, object], protocol_id: str
-) -> dict[str, object]:
+def _op_research_job_fail(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.job.fail -> service.fail_job."""
     job_id = _required_arg(request, "job_id")
     category = _required_arg(request, "category")
@@ -1135,7 +1132,10 @@ def _op_research_job_fail(
     ctx = _bridge_ctx(request)
     try:
         job = _kernel.fail_job(
-            job_id, category, message, repo=ResearchRepository(data_root=ctx.data_root),
+            job_id,
+            category,
+            message,
+            repo=ResearchRepository(data_root=ctx.data_root),
         )
     except _kernel.ResearchNotFound:
         return {"id": protocol_id, "error": "unknown_job", "job_id": job_id}
@@ -1144,9 +1144,7 @@ def _op_research_job_fail(
     return {"id": protocol_id, "result": job}
 
 
-def _op_research_job_cancel(
-    request: Mapping[str, object], protocol_id: str
-) -> dict[str, object]:
+def _op_research_job_cancel(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
     """Dumb dispatch: research.job.cancel -> service.cancel_job."""
     job_id = request.get("job_id")
     if not isinstance(job_id, str) or not job_id:

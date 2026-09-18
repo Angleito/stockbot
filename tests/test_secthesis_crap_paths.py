@@ -3240,14 +3240,14 @@ def test_snapshot_rule_eligible_branches() -> None:
 
 def test_pi_wait_reap_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.thesis.omp_runner import _OmpLaunch, _reap_omp, _wait_step
+
     wait_step_untyped: Callable[..., object] = _wait_step
     reap_untyped: Callable[..., object] = _reap_omp
     import tempfile
     from pathlib import Path as _P
 
     tmp = _P(tempfile.mkdtemp())
-    launch = _OmpLaunch(cmd=[], env={}, tmp=tmp, out_p=tmp / "o", err_p=tmp / "e",
-                       done_p=tmp / "d", db_p=tmp / "db")
+    launch = _OmpLaunch(cmd=[], env={}, tmp=tmp, out_p=tmp / "o", err_p=tmp / "e", done_p=tmp / "d", db_p=tmp / "db")
 
     class _Proc:
         def __init__(self, rc: object = None) -> None:
@@ -3264,8 +3264,10 @@ def test_pi_wait_reap_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     # done already -> sentinel
     assert wait_step_untyped(launch, _Proc(), T1, 9999999999.0, None) == -1.0 or True
     import app.thesis.omp_runner as omp_mod
+
     def _fake_21(db: object, rid: object) -> object:
         return True
+
     monkeypatch.setattr(omp_mod, "_run_complete", _fake_21)
     assert wait_step_untyped(launch, _Proc(), T1, 9999999999.0, None) == -1.0
 
@@ -4302,7 +4304,7 @@ def test_store_row_fallback_branches(tmp_path: Path) -> None:
 def test_client_failed_packet_and_runner_grants_and_pi_helpers() -> None:
     from app.sec.client import _failed_search_result
     from app.sec.models import SECSearchRequest
-    from app.thesis.omp_runner import _OmpLaunch, _await_omp, _omp_env, _run_complete
+    from app.thesis.omp_runner import _await_omp, _omp_env, _OmpLaunch, _run_complete
     from app.thesis.runner import capabilities_for_grants
 
     await_untyped: Callable[..., object] = _await_omp
@@ -4322,10 +4324,15 @@ def test_client_failed_packet_and_runner_grants_and_pi_helpers() -> None:
         def poll(self) -> int:
             return 0
 
-    launch = _OmpLaunch(cmd=["omp"], env={}, tmp=Path("/tmp"),
-                       out_p=Path("/tmp/o"), err_p=Path("/tmp/e"),
-                       done_p=Path("/tmp/does-not-exist-done"),
-                       db_p=Path("/tmp/does-not-exist-db"))
+    launch = _OmpLaunch(
+        cmd=["omp"],
+        env={},
+        tmp=Path("/tmp"),
+        out_p=Path("/tmp/o"),
+        err_p=Path("/tmp/e"),
+        done_p=Path("/tmp/does-not-exist-done"),
+        db_p=Path("/tmp/does-not-exist-db"),
+    )
     await_untyped(launch, _DoneProc(), None, 0)  # exits immediately, reaps no-op
 
 
@@ -4378,9 +4385,16 @@ def test_reap_and_exit_and_trigger_paths(tmp_path: Path) -> None:
     reap_untyped(proc)  # killpg may fail closed; wait always runs
     assert proc.waited is True
 
-    launch = omp_mod._OmpLaunch(cmd=["omp"], env={}, tmp=Path("/tmp"),
-                              out_p=Path("/tmp/o"), err_p=Path("/tmp/e"),
-                              done_p=Path("/tmp/d"), db_p=Path("/tmp/db"))
+    launch = omp_mod._OmpLaunch(
+        cmd=["omp"],
+        env={},
+        tmp=Path("/tmp"),
+        out_p=Path("/tmp/o"),
+        err_p=Path("/tmp/e"),
+        done_p=Path("/tmp/d"),
+        db_p=Path("/tmp/db"),
+    )
+
     class _Failed:
         def poll(self) -> int:
             return 3

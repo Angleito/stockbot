@@ -213,13 +213,18 @@ def heartbeat_job(job_id: str, *, repo: ResearchRepository | Path | str | None =
 
 # Closed runtime-identity vocabulary the OMP session writes into Job.diagnostics.
 _JOB_RUNTIME_KEYS: tuple[str, ...] = (
-    "runtime", "runtime_agent_id", "runtime_parent_agent_id",
-    "runtime_task_call_id", "runtime_agent_type", "runtime_session_file",
+    "runtime",
+    "runtime_agent_id",
+    "runtime_parent_agent_id",
+    "runtime_task_call_id",
+    "runtime_agent_type",
+    "runtime_session_file",
 )
 
 
-def attach_job_runtime(job_id: str, runtime: Mapping[str, object] | None = None, *,
-                       repo: ResearchRepository | Path | str | None = None) -> dict[str, JSONValue]:
+def attach_job_runtime(
+    job_id: str, runtime: Mapping[str, object] | None = None, *, repo: ResearchRepository | Path | str | None = None
+) -> dict[str, JSONValue]:
     """Merge OMP runtime identity into one job's diagnostics and persist it.
 
     Only accepted keys with non-empty string values are written; everything
@@ -229,8 +234,13 @@ def attach_job_runtime(job_id: str, runtime: Mapping[str, object] | None = None,
     store = _repo(repo)
     job = _require_job(store, job_id)
     merged = dict(job.diagnostics)
-    merged.update({key: value for key, value in (runtime or {}).items()
-                   if key in _JOB_RUNTIME_KEYS and isinstance(value, str) and value})
+    merged.update(
+        {
+            key: value
+            for key, value in (runtime or {}).items()
+            if key in _JOB_RUNTIME_KEYS and isinstance(value, str) and value
+        }
+    )
     updated = replace(job, diagnostics=merged)
     store.save_job(updated)
     return updated.to_dict()
@@ -3436,7 +3446,9 @@ def _dispatch_check_domain(job: Job, job_id: str, tool_name: str) -> None:
 _DISPATCH_ACTIONS = "dispatch_actions"
 
 
-def _dispatch_action(job: Job, found: ResearchSession, tool_name: str, arguments: Mapping[str, object]) -> tuple[str, str, str, str, tuple[str, ...], str, str, str, str]:
+def _dispatch_action(
+    job: Job, found: ResearchSession, tool_name: str, arguments: Mapping[str, object]
+) -> tuple[str, str, str, str, tuple[str, ...], str, str, str, str]:
     """Deterministic identity of one dispatch: normalized action fields + canonical arguments.
 
     Semantic fields mirror the runner's loop key through
@@ -3451,16 +3463,21 @@ def _dispatch_action(job: Job, found: ResearchSession, tool_name: str, arguments
     forms = args.get("forms")
     entity = args.get("ticker") or args.get("identifier") or args.get("entity") or args.get("query")
     action = normalize_research_action(
-        job.source_domain or "", tool_name,
-        str(args.get("query") or ""), str(entity or ""),
+        job.source_domain or "",
+        tool_name,
+        str(args.get("query") or ""),
+        str(entity or ""),
         forms if isinstance(forms, (list, tuple, str)) else (),
-        str(args.get("as_of") or ""), str(args.get("accession_no") or ""), found.objective,
+        str(args.get("as_of") or ""),
+        str(args.get("accession_no") or ""),
+        found.objective,
     )
     return (*action, json.dumps(args, sort_keys=True, default=str))
 
 
-def _dispatch_loop_gate(store: ResearchRepository, found: ResearchSession, job: Job,
-                        tool_name: str, arguments: Mapping[str, object] | None) -> None:
+def _dispatch_loop_gate(
+    store: ResearchRepository, found: ResearchSession, job: Job, tool_name: str, arguments: Mapping[str, object] | None
+) -> None:
     """Refuse an exact repeat of an action already dispatched for this job with no new evidence.
 
     State rides in the job's persisted ``diagnostics`` (action key -> session
@@ -3485,10 +3502,19 @@ def _dispatch_loop_gate(store: ResearchRepository, found: ResearchSession, job: 
     count = len(store.list_evidence(found.session_id))
     prior = seen.get(key)
     if isinstance(prior, int) and not isinstance(prior, bool) and count <= prior:
-        _emit(store, found.session_id, "research_loop_detected", {
-            "job_id": job.job_id, "tool": tool_name, "action": list(action), "query": action[2],
-            "evidence_count": count, "reason": "research_loop_detected",
-        })
+        _emit(
+            store,
+            found.session_id,
+            "research_loop_detected",
+            {
+                "job_id": job.job_id,
+                "tool": tool_name,
+                "action": list(action),
+                "query": action[2],
+                "evidence_count": count,
+                "reason": "research_loop_detected",
+            },
+        )
         raise ValueError(
             f"research_loop_detected: {tool_name!r} repeats an action that already ran with no new evidence "
             f"(evidence_count={count}); vary the arguments or record the findings it produced before retrying"

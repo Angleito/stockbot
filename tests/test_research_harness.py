@@ -1498,16 +1498,28 @@ def test_job_runtime_identity_merges_partial_then_complete(tmp_path: Path, monke
     repo = ResearchRepository()
     _sid, src = _svc_sid(repo)
     partial = _svc.attach_job_runtime(
-        src, {"runtime": "omp", "runtime_agent_id": "agent-1", "not_accepted": "x"}, repo=repo)
+        src, {"runtime": "omp", "runtime_agent_id": "agent-1", "not_accepted": "x"}, repo=repo
+    )
     assert partial["diagnostics"] == {"runtime": "omp", "runtime_agent_id": "agent-1"}
-    done = _svc.attach_job_runtime(src, {
-        "runtime_agent_id": "", "runtime_parent_agent_id": "agent-0",
-        "runtime_task_call_id": "call-7", "runtime_agent_type": "scout",
-        "runtime_session_file": "/tmp/session.jsonl"}, repo=repo)
+    done = _svc.attach_job_runtime(
+        src,
+        {
+            "runtime_agent_id": "",
+            "runtime_parent_agent_id": "agent-0",
+            "runtime_task_call_id": "call-7",
+            "runtime_agent_type": "scout",
+            "runtime_session_file": "/tmp/session.jsonl",
+        },
+        repo=repo,
+    )
     assert done["diagnostics"] == {
-        "runtime": "omp", "runtime_agent_id": "agent-1", "runtime_parent_agent_id": "agent-0",
-        "runtime_task_call_id": "call-7", "runtime_agent_type": "scout",
-        "runtime_session_file": "/tmp/session.jsonl"}
+        "runtime": "omp",
+        "runtime_agent_id": "agent-1",
+        "runtime_parent_agent_id": "agent-0",
+        "runtime_task_call_id": "call-7",
+        "runtime_agent_type": "scout",
+        "runtime_session_file": "/tmp/session.jsonl",
+    }
     assert ResearchRepository().get_job(src).diagnostics == done["diagnostics"]
     with pytest.raises(_svc.ResearchNotFound, match="unknown job_id"):
         _svc.attach_job_runtime("nope", {"runtime": "omp"}, repo=repo)
@@ -1541,6 +1553,7 @@ def test_job_fail_cancel_transitions(tmp_path: Path, monkeypatch: pytest.MonkeyP
         _svc.fail_job("nope", "timeout", "msg", repo=repo)
     with pytest.raises(_svc.ResearchNotFound, match="unknown job_id"):
         _svc.cancel_job("nope", repo=repo)
+
 
 def test_start_job_owner_override_records_omp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Existing budget.owner seam records OMP-created jobs as owner=omp; default stays pi."""
@@ -2650,6 +2663,7 @@ def test_reg_unlimited_different_queries_allowed() -> None:
 def test_dispatch_loop_gate_first_allowed_repeat_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """First dispatch runs; the identical immediate repeat is refused and journaled, never re-executed."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2669,6 +2683,7 @@ def test_dispatch_loop_gate_first_allowed_repeat_blocked(tmp_path: Path, monkeyp
 def test_dispatch_loop_gate_new_evidence_readmits_action(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """New evidence is progress: the same action runs again, then its own zero-progress repeat is refused."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2684,6 +2699,7 @@ def test_dispatch_loop_gate_new_evidence_readmits_action(tmp_path: Path, monkeyp
 def test_dispatch_loop_gate_survives_resume(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The tracked actions are persisted: a fresh repository still refuses the no-progress repeat."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2697,6 +2713,7 @@ def test_dispatch_loop_gate_survives_resume(tmp_path: Path, monkeypatch: pytest.
 def test_dispatch_loop_gate_distinct_arguments_allowed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """One tool with different arguments (documents, queries, forms) is a different action every time."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
@@ -2715,19 +2732,24 @@ def test_dispatch_loop_gate_distinct_arguments_allowed(tmp_path: Path, monkeypat
 def test_dispatch_loop_gate_state_is_per_job(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Tracking is per session+job: another job in the same session may run the same action."""
     from app.research import service as _svc
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _reg_svc_sid(repo)
     args = {"query": "GS OpenAI exposure"}
     _svc.authorize_and_consume_dispatch(sid, src, "search_sec_filings", arguments=args, repo=repo)
     scout = str(_svc.start_job(sid, "scout", repo=repo, wave_id=1)["job_id"])
-    assert _svc.authorize_and_consume_dispatch(sid, scout, "search_sec_filings", arguments=args, repo=repo)["job_id"] == scout
+    assert (
+        _svc.authorize_and_consume_dispatch(sid, scout, "search_sec_filings", arguments=args, repo=repo)["job_id"]
+        == scout
+    )
 
 
 def test_dispatch_loop_gate_gateway_repeat_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The model path passes arguments through the gateway: the repeat is refused before the tool runs."""
     import app.pi_gateway as _gw
     from app.pi_gateway import PiSessionContext, execute_pi_tool
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, jid = _reg_svc_sid(repo)
@@ -2735,9 +2757,11 @@ def test_dispatch_loop_gate_gateway_repeat_blocked(tmp_path: Path, monkeypatch: 
     ctx.active_research_session_id = sid
     ctx.active_research_job_id = jid
     calls: list[tuple[str, dict[str, object]]] = []
+
     def _fake_execute(name: str, arguments: dict[str, object], model: str, context: object = None) -> dict[str, object]:
         calls.append((name, dict(arguments)))
         return {"result_type": "sec_search", "query": arguments.get("query"), "count": 1, "results": []}
+
     monkeypatch.setattr(_gw, "execute_tool", _fake_execute)
     first = execute_pi_tool("search_sec_filings", {"query": "GS OpenAI exposure"}, ctx)
     assert "error" not in first, first
@@ -2752,6 +2776,7 @@ def test_dispatch_loop_gate_gateway_repeat_blocked(tmp_path: Path, monkeypatch: 
 def test_dispatch_loop_gate_no_staged_job_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A staged session with no active job keeps today's refusal verbatim; the loop gate never sees it."""
     from app.pi_gateway import PiSessionContext, execute_pi_tool
+
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, _src = _reg_svc_sid(repo)
