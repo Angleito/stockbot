@@ -10,14 +10,14 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, peekLatestFreeze, peekTaskFingerprint, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
+import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, peekHasPriorWave, peekLatestFreeze, peekTaskFingerprint, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
 import { registerYoutubeAnalytics } from "./lib/youtube-analytics.ts";
 import { Text, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
 import { authorizationStore, candidateTaskHash, consumeCandidateBatch, consumeFinalizeBundle, consumeLaunchForFreeze, drainCommitteeAccepts, drainFinalize, drainRoleAccepts, finalizeActionHash, hasOpenRoleAccepts, hashAction, isExactRepeat } from "./lib/research-control.ts";
 import { JUDGE_TOOL_NAMES, registerResearchJudgeTools } from "./tools/research-judge-tools.ts";
 import { REVIEW_TOOL_NAMES, registerOutputReviewTools } from "./tools/output-review-tools.ts";
-import { loadCommitteeState } from "./lib/typesafe/state.ts";
+import { coverageHash, loadCommitteeState, loadCoverageForFreeze } from "./lib/typesafe/state.ts";
 
 export type Json = Record<string, unknown>;
 
@@ -776,7 +776,16 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
       return { block: true, reason };
      }
     }
-    if (wantsSource && (sourceSpawns.get(runId) ?? 0) >= 1) {
+    if (wantsCommittee) {
+     const sortedAgents = taskItems.map((item) => item && typeof item === "object" ? String((item as Json).agent ?? "") : "").sort();
+     if (!(taskItems.length === 3 && sortedAgents.join(",") === "bearbot,bullbot,stockbot")) {
+      const reason = "Committee launch needs the exact trio in one batch: one stockbot, one bullbot, and one bearbot task and nothing else; partial or mixed batches are refused and spend no approval.";
+      emit({ event: "security_block", tool: event.toolName, reason });
+      blocks++;
+      return { block: true, reason };
+     }
+    }
+    if (wantsSource && await peekHasPriorWave(runId, dataRoots.get(runId), asOfs.get(runId))) {
      const secItems = taskItems.filter((item) => item && typeof item === "object" && (item as Json).agent === "sec-agent");
      for (const item of secItems) {
       const cand = (item as Json).candidate;
@@ -806,9 +815,22 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
      }
     }
     if (wantsCommittee) {
-     const reason = "Committee launch needs a TypeSafe coverage COMPLETE for this freeze; call research_judge_coverage with the session, freeze, and branch-map dossier first.";
+     const reason = "Committee launch needs a TypeSafe coverage COMPLETE for this freeze; call research_judge_coverage with the session and freeze first.";
      const peek = await peekLatestFreeze(runId, dataRoots.get(runId), asOfs.get(runId));
-     if (!peek || !consumeLaunchForFreeze(authorizationStore, runId, peek.sessionId, peek.freezeId)) {
+     if (!peek) {
+      emit({ event: "security_block", tool: event.toolName, reason });
+      blocks++;
+      return { block: true, reason };
+     }
+     let cov: { dossierId: string; branch_map: unknown; coverage: unknown };
+     try {
+      cov = await loadCoverageForFreeze(peek.sessionId, peek.freezeId, { dataRoot: dataRoots.get(runId), asOf: asOfs.get(runId) });
+     } catch {
+      emit({ event: "security_block", tool: event.toolName, reason });
+      blocks++;
+      return { block: true, reason };
+     }
+     if (!consumeLaunchForFreeze(authorizationStore, runId, { sessionId: peek.sessionId, freezeId: peek.freezeId, dossierId: cov.dossierId, coverageHash: coverageHash(cov.branch_map, cov.coverage) })) {
       emit({ event: "security_block", tool: event.toolName, reason });
       blocks++;
       return { block: true, reason };
@@ -826,6 +848,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     // (tool_result hook below); plan-time adds nothing.
     // Durable gate audit: decision fields ride the task_planned sqlite row
     // (agents, hashes, round) — never task text, prompts, or evidence.
+    // sourceSpawns is telemetry only: wave-1-free now derives from kernel history (peekHasPriorWave above), never this counter.
     await emit({ event: "task_planned", tool: event.toolName, tool_call_id: event.toolCallId, agents: agentNames, task_hash: taskHash || undefined, source_round: sourceSpawns.get(runId) ?? 0 });
     if (plan.input) return { input: plan.input as Record<string, unknown> };
     return;

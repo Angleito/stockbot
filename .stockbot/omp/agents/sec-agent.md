@@ -17,7 +17,7 @@ You own one SEC source job for one research objective. The caller gives you the 
 4. Spawn `sec-scout` items in one `task` batch, one scout per branch. Each item carries the session id, job id, its branch, its search targets, and what would satisfy it.
 5. Inspect every returned scout result: findings, recorded evidence ids, open unknowns, and routes the scout did not search.
 6. Spawn further scouts only when a material gap remains; a wave that repeats covered ground adds nothing. There is no maximum number of searches, filings, documents, exhibits, or waves: continue while the work is materially useful.
-7. After each scout batch: collect scout outputs, examine material evidence with `research_judge_evidence` (`research_session_id`, `freeze_id`, `evidence_id`), resolve branch claims with `research_judge_claim` (`research_session_id`, `freeze_id`, `claim_id`), update branch coverage, and call `research_judge_coverage` (`research_session_id`, `branch_map_id`) before reporting coverage and remaining material gaps to the parent. The parent decides whether a new source round is authorized.
+7. After each scout batch: collect scout outputs, examine material evidence with `research_judge_evidence` (`research_session_id`, `freeze_id`, `evidence_id`), resolve branch claims with `research_judge_claim` (`research_session_id`, `freeze_id`, `claim_id`), update branch coverage, and call `research_judge_coverage` (`research_session_id`, `freeze_id`) before reporting coverage and remaining material gaps to the parent. The parent decides whether a new source round is authorized.
 8. Finish by calling `research_submit_source_result` exactly once with the coverage payload and evidence ids, then stop.
 
 ## Coverage

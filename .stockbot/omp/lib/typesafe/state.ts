@@ -242,27 +242,37 @@ export async function loadClaimState(
  return { objective: objectiveOf(session), claim: claimId, evidence_set: evidence, actionable: actionableFrom(latest ? obj(latest.coverage) : null, session) };
 }
 
-export async function loadCoverageState(
+export function coverageHash(branchMap: unknown, coverage: unknown): string {
+ return hashAction({ branch_map: branchMap, coverage });
+}
+
+export async function loadCoverageForFreeze(
  sessionId: string,
- branchMapId: string,
+ freezeId: string,
  deps: StateLoaderDeps = {},
-): Promise<CoverageState> {
+): Promise<CoverageState & { dossierId: string }> {
  nonEmptyId(sessionId);
- nonEmptyId(branchMapId);
+ nonEmptyId(freezeId);
  const session = await inspectSession(sessionId, deps);
- // branch_map_id is a dossier_id: the branch map is the dossier's persisted coverage state.
- const dossier = await readRecord(sessionId, "dossier", branchMapId, deps);
- requireId(dossier, sessionId, "dossier_id", branchMapId);
- const coverage = obj(dossier.coverage);
+ const freeze = await readRecord(sessionId, "freeze", freezeId, deps);
+ requireId(freeze, sessionId, "freeze_id", freezeId);
+ const wave = freeze.wave_id;
+ if (typeof wave !== "number" || !Number.isInteger(wave)) throw bad();
+ const dossiers = await loadSessionDossiers(sessionId, session, deps);
+ const match = [...dossiers].reverse().find((d) => d.wave_id === wave) ?? null;
+ if (!match) throw bad();
+ const dossierId = str(match.dossier_id);
+ if (!dossierId) throw bad();
+ const coverage = obj(match.coverage);
  if (!coverage) throw bad();
- const findings = dossierFindings(dossier);
+ const findings = dossierFindings(match);
  const branch_map: Json = {
-  dossier_id: branchMapId,
+  dossier_id: dossierId,
   covered_branches: strList(coverage.covered_branches ?? []),
-  relationships: objs(dossier.relationships ?? []),
+  relationships: objs(match.relationships ?? []),
   findings,
  };
- return { objective: objectiveOf(session), branch_map, coverage, claim_states: findings, actionable: actionableFrom(coverage, session) };
+ return { objective: objectiveOf(session), branch_map, coverage, claim_states: findings, actionable: actionableFrom(coverage, session), dossierId };
 }
 
 export async function loadContinuationState(sessionId: string, deps: StateLoaderDeps = {}): Promise<ContinuationState> {

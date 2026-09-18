@@ -1739,47 +1739,30 @@ test("research director stages fetch, freeze, and finalize via stubbed bridge (T
 	}
 	expect(transitions()).toEqual(["research.session.create"]);
 	// Source ends via research.source.submit (submit-completed), then wave 1
-	// freezes and the whole trio is created atomically before authoring.
+	// freezes into GATE: coverage is judged before any committee job exists.
 	await bridgeFn({ op: "research.source.submit", job_id: "job:src" });
 	adv = await advanceOnAgentEnd(runId, "");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) {
+		expect(adv.prompt).toContain("research_judge_coverage");
 		expect(adv.prompt).toContain("task batch");
 		expect(adv.prompt).toContain("stockbot");
 		expect(adv.prompt).toContain("bullbot");
 		expect(adv.prompt).toContain("bearbot");
-		for (const role of ["stockbot", "bullbot", "bearbot"]) expect(adv.prompt).toContain(role);
-		expect(adv.prompt).not.toContain("source_agent");
 		expect(adv.prompt).toContain(FID);
 		expect(adv.prompt).toContain(EV1);
 	}
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create"]);
+	// The exact trio batch is the single creation point: planTaskCall creates
+	// all three role jobs atomically once launch is authorized downstream.
+	const trioPlan = await planTaskCall(
+		{ researchKey: runId, toolCallId: "call-driver-trio" },
+		{ tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] },
+	);
+	expect(trioPlan.block).toBeUndefined();
+	const trioNames = ((trioPlan.input as Json).tasks as Json[]).map((t) => String(t.name));
+	expect(trioNames).toEqual(["stockbot-jobauto1", "bullbot-jobauto2", "bearbot-jobauto3"]);
 	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create"]);
-	// Recorded roles drop out of the prompt; the surviving running roles keep
-	// their ids and no role is ever started one after another.
-	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1"] }];
-	adv = await advanceOnAgentEnd(runId, "");
-	expect(adv?.done).toBe(false);
-	if (adv && !adv.done) {
-		expect(adv.prompt).toContain("bullbot");
-		expect(adv.prompt).toContain("bearbot");
-		expect(adv.prompt).not.toContain("stockbot");
-		expect(adv.prompt).toContain("bullbot");
-		expect(adv.prompt).toContain("bearbot");
-		expect(adv.prompt).not.toContain("stockbot");
-		expect(adv.prompt).toContain(FID);
-		expect(adv.prompt).toContain(EV1);
-	}
-	committee = [{ freeze_id: FID, wave_id: 1, jobs: ["job:auto-1", "job:auto-2"] }];
-	adv = await advanceOnAgentEnd(runId, "");
-	expect(adv?.done).toBe(false);
-	if (adv && !adv.done) {
-		expect(adv.prompt).toContain("bearbot");
-		expect(adv.prompt).not.toContain("stockbot");
-		expect(adv.prompt).not.toContain("bullbot");
-		expect(adv.prompt).toContain(FID);
-		expect(adv.prompt).toContain(EV1);
-	}
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create"]);
 	// Full trio recorded with no next-wave job: the staged driver finalizes on
 	// this freeze with a TypeSafe-continuation hint (no Python decide call).
 	// Continuation is TypeSafe-owned: main calls research_judge_continuation /
@@ -1794,13 +1777,13 @@ test("research director stages fetch, freeze, and finalize via stubbed bridge (T
 		expect(adv.prompt).toContain(EV1);
 		expect(adv.prompt).toContain("research_judge_continuation");
 	}
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create"]);
 	// Finalize prompt stays stable without further RPC; Pi finalizes through the
 	// canonical tool while the dotted bridge op keeps its kernel claims guard.
 	adv = await advanceOnAgentEnd(runId, "model synthesis text");
 	expect(adv?.done).toBe(false);
 	if (adv && !adv.done) expect(adv.prompt).toContain("research_finalize");
-	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create", "research.committee.create", "research.committee.create"]);
+	expect(transitions()).toEqual(["research.session.create", "research.source.submit", "research.freeze.create", "research.committee.create"]);
 	// Pi's finalize with empty claims is rejected (claims_required); director stays open.
 	const rejected = await bridgeFn({ op: "research.session.finalize", session_id: SID, answer: "x", claims: [] });
 	expect(rejected.error).toBe("claims_required");
@@ -1905,7 +1888,7 @@ function expectFreezeIds(prompt: string, fid: string, ids: string[], notIds: str
 	for (const id of notIds) expect(prompt).not.toContain(id);
 }
 
-test("research director restart: evidence before E1 freezes wave-1 source and seeds stockbot", async () => {
+test("research director restart: evidence before E1 freezes wave-1 source into GATE", async () => {
 	const SID = "rs:resume-e1";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
@@ -1922,25 +1905,22 @@ test("research director restart: evidence before E1 freezes wave-1 source and se
 	expect(resumeTransitions(probing)).toEqual([]);
 	expect(probingResumed.prompt).toContain("research_submit_source_result");
 	expect(probingResumed.prompt).toContain("job:src");
-	// Model ends source work via research.source.submit; resume then freezes and
-	// creates the whole trio atomically, before any authoring prompt.
+	// Model ends source work via research.source.submit; resume then freezes
+	// into GATE — coverage is judged before any committee job exists.
 	state.jobs.find((j) => j.job_id === "job:src")!.status = "completed";
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-e1");
 	expect(resumed.sessionId).toBe(SID);
-	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.committee.create"]);
-	expect(ops.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 1 });
+	expect(resumeTransitions(ops)).toEqual(["research.freeze.create"]);
 	expect(ops.filter((o) => o.op === "research.job.start").length).toBe(0);
+	expect(ops.filter((o) => o.op === "research.committee.create").length).toBe(0);
+	expect(resumed.prompt).toContain("research_judge_coverage");
 	expect(resumed.prompt).toContain("task batch");
-	expect(resumed.prompt).toContain("task batch");
-	expect(resumed.prompt).toContain("stockbot");
-	expect(resumed.prompt).toContain("bullbot");
-	expect(resumed.prompt).toContain("bearbot");
 	for (const role of ["stockbot", "bullbot", "bearbot"]) expect(resumed.prompt).toContain(role);
 	expectFreezeIds(resumed.prompt, F1, [E1]);
 });
 
-test("research director restart: E1 resumes committee on F1 reusing the running role", async () => {
+test("research director restart: E1 with a running role drives COMMITTEE and keeps its id", async () => {
 	const SID = "rs:resume-trio1";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
@@ -1953,24 +1933,28 @@ test("research director restart: E1 resumes committee on F1 reusing the running 
 	};
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-trio1");
-	// The whole trio is (re)created atomically; the running role keeps its id and
-	// is never restarted.
-	expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
+	// A running role job means the freeze already left GATE: advance creates
+	// nothing (the exact-trio batch is the single creation point) and prompts
+	// the committee on the freeze; the running role keeps its id.
+	expect(resumeTransitions(ops)).toEqual([]);
 	expect(state.jobs.filter((j) => j.job_id === "job:trio-s" && j.status === "running").length).toBe(1);
 	expect(resumed.prompt).toContain("task batch");
 	expect(resumed.prompt).toContain("stockbot");
+	expect(resumed.prompt).not.toContain("research_judge_coverage");
 	// Committee prompts carry the freeze's ids, never the session's wider list.
 	expectFreezeIds(resumed.prompt, F1, [E1], [EX]);
 });
 
-test("research director restart: 1/3 trio creates the remaining roles together, then reuses a running bull", async () => {
+test("research director restart: 1/3 trio prompts COMMITTEE, exact batch creates the rest", async () => {
 	const SID = "rs:resume-trio13";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
 	const run = [{ freeze_id: F1, wave_id: 1, jobs: ["job:stock"] }];
 	const frozen: Record<string, Json> = { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } };
-	// No running successor: one atomic create supplies bull and bear together —
-	// never one role started, awaited, then the next.
+	const trio = { tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] };
+	// Recorded stock, no running successor: advance creates nothing (the
+	// exact-trio batch is the single creation point); the batch then supplies
+	// bull and bear together — never one role started, awaited, then the next.
 	const opsA: ResumeOp[] = [];
 	setResearchBridge(resumeBridge({
 		session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: run }),
@@ -1978,14 +1962,18 @@ test("research director restart: 1/3 trio creates the remaining roles together, 
 		freezes: { ...frozen },
 	}, opsA));
 	const resumedA = await resumeResearch(SID, "run-resume-trio13a");
-	expect(resumeTransitions(opsA)).toEqual(["research.committee.create"]);
-	expect(opsA.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 1 });
-	expect(opsA.filter((o) => o.op === "research.job.start").length).toBe(0);
-	expect(resumedA.prompt).toContain("bullbot");
-	expect(resumedA.prompt).toContain("bearbot");
-	expect(resumedA.prompt).toContain("bullbot");
-	expect(resumedA.prompt).toContain("bearbot");
+	expect(resumeTransitions(opsA)).toEqual([]);
+	// No running role job: generic committee prompt (the exact-trio batch
+	// names the roles); still COMMITTEE, never GATE.
+	expect(resumedA.prompt).toContain("task batch");
+	expect(resumedA.prompt).not.toContain("research_judge_coverage");
 	expectFreezeIds(resumedA.prompt, F1, [E1]);
+	const planA = await planTaskCall({ researchKey: "run-resume-trio13a", toolCallId: "call-trio13a" }, trio);
+	expect(planA.block).toBeUndefined();
+	expect(opsA.filter((o) => o.op === "research.committee.create")).toMatchObject([{ wave_id: 1 }]);
+	expect(opsA.filter((o) => o.op === "research.job.start").length).toBe(0);
+	const namesA = ((planA.input as Json).tasks as Json[]).map((t) => String(t.name));
+	expect(namesA).toEqual(["stockbot-jobstock", "bullbot-jobauto1", "bearbot-jobauto2"]);
 	// Running bull: reused with its own id and never restarted.
 	const opsB: ResumeOp[] = [];
 	const stateB: ResumeState = {
@@ -1998,13 +1986,13 @@ test("research director restart: 1/3 trio creates the remaining roles together, 
 	};
 	setResearchBridge(resumeBridge(stateB, opsB));
 	const resumedB = await resumeResearch(SID, "run-resume-trio13b");
-	expect(resumeTransitions(opsB)).toEqual(["research.committee.create"]);
+	expect(resumeTransitions(opsB)).toEqual([]);
 	expect(resumedB.prompt).toContain("bullbot");
 	expect(resumedB.prompt).not.toContain("stockbot");
 	expectFreezeIds(resumedB.prompt, F1, [E1]);
 });
 
-test("research director restart: 2/3 trio creates the last role and prompts only the missing one", async () => {
+test("research director restart: 2/3 trio prompts COMMITTEE, exact batch creates the last role", async () => {
 	const SID = "rs:resume-trio23";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
@@ -2021,11 +2009,18 @@ test("research director restart: 2/3 trio creates the last role and prompts only
 		freezes: { ...frozen },
 	}, opsA));
 	const resumedA = await resumeResearch(SID, "run-resume-trio23a");
-	expect(resumeTransitions(opsA)).toEqual(["research.committee.create"]);
-	expect(resumedA.prompt).toContain("bearbot");
-	expect(resumedA.prompt).not.toContain("stockbot");
-	expect(resumedA.prompt).not.toContain("bullbot");
+	expect(resumeTransitions(opsA)).toEqual([]);
+	// No running role job: generic committee prompt (the exact-trio batch
+	// names the roles); still COMMITTEE, never GATE.
+	expect(resumedA.prompt).toContain("task batch");
+	expect(resumedA.prompt).not.toContain("research_judge_coverage");
 	expectFreezeIds(resumedA.prompt, F1, [E1]);
+	const planA = await planTaskCall(
+		{ researchKey: "run-resume-trio23a", toolCallId: "call-trio23a" },
+		{ tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] },
+	);
+	expect(planA.block).toBeUndefined();
+	expect(opsA.filter((o) => o.op === "research.committee.create").length).toBe(1);
 	const opsB: ResumeOp[] = [];
 	setResearchBridge(resumeBridge({
 		session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: run }),
@@ -2033,7 +2028,7 @@ test("research director restart: 2/3 trio creates the last role and prompts only
 		freezes: { ...frozen },
 	}, opsB));
 	const resumedB = await resumeResearch(SID, "run-resume-trio23b");
-	expect(resumeTransitions(opsB)).toEqual(["research.committee.create"]);
+	expect(resumeTransitions(opsB)).toEqual([]);
 	expect(resumedB.prompt).toContain("bearbot");
 	expect(resumedB.prompt).not.toContain("stockbot");
 	expect(resumedB.prompt).not.toContain("bullbot");
@@ -2066,11 +2061,17 @@ test("research director restart: stale wave-1 running role never covers wave-2 t
 		freezes: { ...frozen },
 	}, ops));
 	const resumed = await resumeResearch(SID, "run-resume-stale-wave");
-	// Wave-2 jobs only: the stale wave-1 runner is neither reused nor prompted,
-	// and the missing wave-2 roles are created together.
-	expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
-	expect(ops.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 2 });
-	expect(resumed.prompt).toContain("bullbot");
+	// Wave-2 jobs only: the stale wave-1 runner is neither reused nor prompted.
+	// The missing wave-2 roles come from the exact-trio batch, never advance.
+	expect(resumeTransitions(ops)).toEqual([]);
+	const plan = await planTaskCall(
+		{ researchKey: "run-resume-stale-wave", toolCallId: "call-stale-wave" },
+		{ tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	expect(ops.filter((o) => o.op === "research.committee.create")).toMatchObject([{ wave_id: 2 }]);
+	expect(resumed.prompt).toContain("task batch");
+	expect(resumed.prompt).not.toContain("research_judge_coverage");
 	expect(resumed.prompt).not.toContain("job:stale-bull");
 	expect(resumed.prompt).not.toContain("job:s1");
 	expectFreezeIds(resumed.prompt, F2, [E1, E2]);
@@ -2098,20 +2099,15 @@ test("research director restart: authorized wave-2 reuses running source until n
 		freezes: { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } },
 	};
 	setResearchBridge(resumeBridge(state, ops));
-	// Latest freeze already covers every session id: keep fetching, no freeze.
-	const resumedA = await resumeResearch(SID, "run-resume-w2a");
-	expect(resumeTransitions(ops)).toEqual([]);
-	expect(resumedA.prompt).toContain("research_add_evidence");
-	expect(resumedA.prompt).toContain("job:w2src");
-	// One added id past the freeze with a submit-completed source: F2 freezes, stockbot seeds.
+	// One added id past the freeze with a submit-completed source: F2 freezes
+	// into GATE — coverage is judged before any committee job exists.
 	state.session = { ...state.session, evidence_ids: [E1, E2] };
 	state.jobs.find((j) => j.job_id === "job:w2src")!.status = "completed";
 	const resumedB = await resumeResearch(SID, "run-resume-w2b");
-	expect(resumeTransitions(ops)).toEqual(["research.freeze.create", "research.committee.create"]);
+	expect(resumeTransitions(ops)).toEqual(["research.freeze.create"]);
 	expect(ops.find((o) => o.op === "research.freeze.create")).toMatchObject({ wave_id: 2 });
-	expect(ops.find((o) => o.op === "research.committee.create")).toMatchObject({ wave_id: 2 });
+	expect(resumedB.prompt).toContain("research_judge_coverage");
 	expect(resumedB.prompt).toContain("task batch");
-	expect(resumedB.prompt).toContain("stockbot");
 	expectFreezeIds(resumedB.prompt, F2, [E1, E2]);
 });
 
@@ -2145,10 +2141,13 @@ test("research director restart: E2 resumes committee on F2 without source work"
 	};
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-resume-e2");
-	// One atomic create completes the trio; the running bull keeps its id.
-	expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
+	// A running wave-2 role means the freeze already left GATE: advance
+	// creates nothing (the exact-trio batch is the single creation point);
+	// the running bull keeps its id.
+	expect(resumeTransitions(ops)).toEqual([]);
 	expect(resumed.prompt).toContain("task batch");
 	expect(resumed.prompt).toContain("bullbot");
+	expect(resumed.prompt).not.toContain("research_judge_coverage");
 	expectFreezeIds(resumed.prompt, F2, [E1, E2], [F1]);
 });
 
@@ -2254,8 +2253,10 @@ test("research director restart: fresh context reloads freeze and evidence befor
 	};
 	setResearchBridge(bridgeWithRead);
 	const trio = await resumeResearch(SID, "run-resume-reload-trio");
+	// GATE: freeze with no trio jobs judges coverage before any committee
+	// job exists — reload the freeze, then judge coverage.
+	expect(trio.prompt).toContain("research_judge_coverage");
 	expect(trio.prompt).toContain("research_read");
-	expect(trio.prompt).toContain('"kind": "freeze"');
 	expect(trio.prompt).toContain(F1);
 	expect(trio.prompt).toContain(E1);
 	expect(trio.prompt).toContain(E2);
@@ -2426,7 +2427,7 @@ test("research director provisions wave-2 source job on settled authorization", 
 	}
 	expect(ops.filter((o) => o.op === "research.freeze.create").length).toBe(0);
 	// One new evidence id past E1 with a submit-completed wave-2 source: F2
-	// freezes and the wave-2 trio seeds from the E2 record.
+	// freezes into GATE — coverage is judged before any committee job exists.
 	evidence = [ev1, ev2];
 	w2status = "completed";
 	adv = await advanceOnAgentEnd(runId, "");
@@ -2436,13 +2437,11 @@ test("research director provisions wave-2 source job on settled authorization", 
 	const frozen = ops.filter((o) => o.op === "research.freeze.create");
 	expect(frozen.length).toBe(1);
 	expect(frozen[0].wave_id).toBe(2);
-	const creates = ops.filter((o) => o.op === "research.committee.create");
-	expect(creates.length).toBe(1);
-	expect(creates[0].wave_id).toBe(2);
+	expect(ops.filter((o) => o.op === "research.committee.create").length).toBe(0);
 	if (adv && !adv.done) {
+		expect(adv.prompt).toContain("research_judge_coverage");
 		expect(adv.prompt).toContain("task batch");
 		for (const role of ["stockbot", "bullbot", "bearbot"]) expect(adv.prompt).toContain(role);
-
 		expect(adv.prompt).toContain(FID2);
 		expect(adv.prompt).toContain(ev1);
 		expect(adv.prompt).toContain(ev2);
@@ -2590,7 +2589,7 @@ test("research director finalizes a late wave with no next-wave job", async () =
 	expectFreezeIds(resumed.prompt, `${SID}:4:freeze`, [`${SID}:ev:1`, `${SID}:ev:4`], [`${SID}:3:freeze`]);
 });
 
-test("director prompts carry the raw-source item shape and the rich analysis envelope", async () => {
+test("director prompts carry the raw-source item shape and the GATE coverage judgment", async () => {
 	const fetchSID = "rs:prompt-fetch";
 	const fetchOps: ResumeOp[] = [];
 	setResearchBridge(resumeBridge({
@@ -2626,14 +2625,14 @@ test("director prompts carry the raw-source item shape and the rich analysis env
 		freezes: { [F1]: { freeze_id: F1, session_id: trioSID, wave_id: 1, evidence_ids: [E1] } },
 	}, trioOps));
 	const trio = await resumeResearch(trioSID, "run-prompt-trio");
-	// Task-batch dispatch: names the trio roles and the structured envelope
-	// fields the batch children must return (detailed shape lives in the agent defs).
-	for (const key of ["stockbot", "bullbot", "bearbot", "task batch", "claims", "claim_type", "impact channels", "materiality", "uncertainties", "what_would_change", "follow_ups"]) {
+	// GATE: a freeze with no trio jobs judges coverage before any committee
+	// job exists — advance creates nothing and names coverage judgment.
+	expect(resumeTransitions(trioOps)).toEqual([]);
+	for (const key of ["stockbot", "bullbot", "bearbot", "task batch", "research_judge_coverage", "research_read", "research_judge_candidate"]) {
 		expect(trio.prompt).toContain(key);
 	}
-	expect(trio.prompt).toContain("observed_fact");
-	// Factual claims must cite the frozen evidence ids; nothing else is allowed.
-	expect(trio.prompt).toContain("must cite the frozen evidence ids");
+	expect(trio.prompt).toContain(F1);
+	// Only the frozen evidence ids are allowed.
 	expect(trio.prompt).toContain(E1);
 	expect(trio.prompt).not.toContain("research_add_evidence");
 });
@@ -2723,8 +2722,8 @@ test("agent_end renders the persisted answer once and resume repeats that same a
 	}
 });
 
-// --- committee: Director dispatches the trio as one OMP task batch ---
-test("committee dispatch prompts one task batch for the trio roles", async () => {
+// --- GATE: a frozen wave with no trio jobs judges coverage before any committee job exists ---
+test("frozen wave with no trio jobs stays in GATE and creates no committee jobs", async () => {
 	const SID = "rs:roles-task";
 	const E1 = `${SID}:ev:1`;
 	const F1 = `${SID}:1:freeze`;
@@ -2736,11 +2735,12 @@ test("committee dispatch prompts one task batch for the trio roles", async () =>
 	};
 	setResearchBridge(resumeBridge(state, ops));
 	const resumed = await resumeResearch(SID, "run-roles-task");
-	expect(resumeTransitions(ops)).toEqual(["research.committee.create"]);
+	expect(resumeTransitions(ops)).toEqual([]);
+	expect(resumed.prompt).toContain("research_judge_coverage");
 	for (const role of ["stockbot", "bullbot", "bearbot"]) expect(resumed.prompt).toContain(role);
 	expect(resumed.prompt).toContain("task batch");
 	expect(resumed.prompt).not.toContain("research_add_analysis");
-	expect(state.jobs.map((j) => j.status)).toEqual(["running", "running", "running"]);
+	expect(state.jobs).toEqual([]);
 });
 
 test("trio-done GATE plans sec-agent while execution needs candidate approval", async () => {
@@ -2830,7 +2830,7 @@ test("director blocks unknown agent and committee roles in source stage", async 
 	expect(String(committee.reason)).toContain("Director may not spawn 'stockbot'");
 });
 
-test("director blocks committee without a freeze, then names all three roles", async () => {
+test("GATE admits sec-agent and the exact trio; a running role job moves to COMMITTEE", async () => {
 	const SID = "rs:task-trio";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
@@ -2846,21 +2846,55 @@ test("director blocks committee without a freeze, then names all three roles", a
 	);
 	// Source stage still refuses the committee before the freeze check runs.
 	expect(noFreeze.block).toBe(true);
+	// Freeze with zero role jobs is GATE: advance names coverage judgment and
+	// creates no committee jobs.
 	const ops: ResumeOp[] = [];
 	setResearchBridge(resumeBridge({
 		session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }),
 		jobs: [],
 		freezes: { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } },
 	}, ops));
-	await resumeResearch(SID, "run-task-trio-frozen");
+	const gated = await resumeResearch(SID, "run-task-trio-frozen");
+	expect(gated.prompt).toContain("research_judge_coverage");
+	expect(ops.filter((o) => o.op === "research.committee.create")).toEqual([]);
+	// GATE admits sec-agent (COMMITTEE would refuse it).
+	const sec = await planTaskCall(
+		{ researchKey: "run-task-trio-frozen", toolCallId: "call-trio-sec" },
+		{ tasks: [{ agent: "sec-agent", task: "follow up" }] },
+	);
+	expect(sec.block).toBeUndefined();
+	// Exact trio in GATE reaches the role-jobs path and names all three roles.
 	const plan = await planTaskCall(
 		{ researchKey: "run-task-trio-frozen", toolCallId: "call-trio-1" },
 		{ tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] },
 	);
 	expect(plan.block).toBeUndefined();
 	const names = ((plan.input as Json).tasks as Json[]).map((t) => String(t.name));
-	expect(names).toEqual(["stockbot-jobauto1", "bullbot-jobauto2", "bearbot-jobauto3"]);
-	expect(ops.filter((o) => o.op === "research.committee.create").length).toBe(2);
+	expect(names).toEqual(["stockbot-jobauto2", "bullbot-jobauto3", "bearbot-jobauto4"]);
+	// A lone role job is a partial committee, not a plan.
+	const lone = await planTaskCall(
+		{ researchKey: "run-task-trio-frozen", toolCallId: "call-trio-lone" },
+		{ tasks: [{ agent: "stockbot", task: "analyze" }] },
+	);
+	expect(lone.block).toBe(true);
+	expect(String(lone.reason)).toContain("partial committee");
+	// One running role job moves the freeze to COMMITTEE: sec-agent refused.
+	const cops: ResumeOp[] = [];
+	setResearchBridge(resumeBridge({
+		session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }),
+		jobs: [{ job_id: "job:stock-1", job_type: "stockbot", wave_id: 1, status: "running" }],
+		freezes: { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } },
+	}, cops));
+	const driving = await resumeResearch(SID, "run-task-trio-driving");
+	expect(driving.prompt).not.toContain("research_judge_coverage");
+	expect(driving.prompt).toContain("Dispatch the committee now");
+	expect(cops.filter((o) => o.op === "research.committee.create")).toEqual([]);
+	const refusedSec = await planTaskCall(
+		{ researchKey: "run-task-trio-driving", toolCallId: "call-trio-sec-2" },
+		{ tasks: [{ agent: "sec-agent", task: "follow up" }] },
+	);
+	expect(refusedSec.block).toBe(true);
+	expect(String(refusedSec.reason)).toContain("stage COMMITTEE");
 	// No freeze on the session: the committee path refuses before creating jobs.
 	const bare: ResumeOp[] = [];
 	setResearchBridge(resumeBridge({
@@ -3195,6 +3229,7 @@ test("handler blocks committee trio with no launch auth, then plans after launch
 	const SID = "rs:gate-committee-handler";
 	const F1 = `${SID}:1:freeze`;
 	const E1 = `${SID}:ev:1`;
+	const DOS = "dossier-gate-1";
 	const knownRun = `run-gate-comm-${Date.now()}`;
 	const { resetMainSessionIdentity } = stockbotNS;
 	resetMainSessionIdentity();
@@ -3204,16 +3239,28 @@ test("handler blocks committee trio with no launch auth, then plans after launch
 	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
 	process.env.STOCKBOT_RUN_ID = knownRun;
 	const issued: string[] = [];
+	const coverage = { covered_branches: ["ownership"], ownership: "searched" };
+	const findings = [{ text: "f1", evidence_ids: [E1] }];
+	const branchMap = { dossier_id: DOS, covered_branches: ["ownership"], relationships: [], findings };
+	const chash = hashAction({ branch_map: branchMap, coverage });
 	try {
 		const { handlers, commands, pi } = fakePiHost();
 		await stockbotExtension(pi);
 		const main = { sessionManager: { id: "main" } };
 		await handlers["session_start"]({}, main);
+		const freezeRec = { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] };
+		const dossierRec = { dossier_id: DOS, session_id: SID, wave_id: 1, coverage, findings, relationships: [], open_questions: [] };
 		setResearchBridge(async (req: Json) => {
 			if (req.op === "research.session.inspect")
-				return { result: { session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } } };
+				return { result: { session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1, objective: "probe", dossier_ids: [DOS] }), jobs: [], pending_next_action: null, latest_freeze: freezeRec } };
 			if (req.op === "research.session.create")
 				return { result: { session_id: SID } };
+			if (req.op === "tool.invoke" && req.name === "research_read") {
+				const args = (req.arguments ?? {}) as Json;
+				if (args.kind === "freeze" && args.resource_id === F1) return { result: { record: freezeRec } };
+				if (args.kind === "dossier" && args.resource_id === DOS) return { result: { record: dossierRec } };
+				return { error: "unknown_resource" };
+			}
 			if (req.op === "research.committee.create")
 				return { result: { session_id: SID, wave_id: 1, jobs: ["job:stock-1", "job:bull-1", "job:bear-1"] } };
 			return { error: "unknown_op" };
@@ -3226,9 +3273,7 @@ test("handler blocks committee trio with no launch auth, then plans after launch
 		)) as unknown as Record<string, unknown>;
 		expect(blocked.block).toBe(true);
 		expect(String(blocked.reason)).toContain("Committee launch needs a TypeSafe coverage COMPLETE");
-		const dossierId = "dossier-gate-1";
-		const coverageHash = hashAction({ branch_map: { roots: ["ownership"] }, coverage: { ownership: "searched" } });
-		issued.push(issueAuthorization(knownRun, "launch_committee", launchCommitteeHash({ sessionId: SID, freezeId: F1, dossierId, coverageHash })).id);
+		issued.push(issueAuthorization(knownRun, "launch_committee", launchCommitteeHash({ sessionId: SID, freezeId: F1, dossierId: DOS, coverageHash: chash })).id);
 		const planned = (await handlers["tool_call"](
 			{ toolName: "task", toolCallId: "call-gate-comm-1", input: trio },
 			main,
@@ -3263,7 +3308,7 @@ test("handler blocks wave-2 sec-agent without candidate and on task swap", async
 		await handlers["session_start"]({}, main);
 		setResearchBridge(async (req: Json) => {
 			if (req.op === "research.session.inspect")
-				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: wave1jobDone ? [] : [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "running" }], pending_next_action: null, latest_freeze: null } };
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: wave1jobDone ? [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "completed" }] : [], pending_next_action: null, latest_freeze: null } };
 			if (req.op === "research.session.create")
 				return { result: { session_id: SID } };
 			if (req.op === "research.job.start")
@@ -3358,5 +3403,200 @@ test("lifecycle frames forward to kernel traces and unsubscribe on shutdown", as
 				// already exited
 			}
 		}
+	}
+});
+
+test("handler exact-trio gate leaves launch auth unspent for the full trio", async () => {
+	const SID = "rs:gate-trio-partial";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const DOS = "dossier-trio-1";
+	const knownRun = `run-gate-trio-partial-${Date.now()}`;
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const prevRun = process.env.STOCKBOT_RUN_ID;
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-gate-trio-partial-"));
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	process.env.STOCKBOT_RUN_ID = knownRun;
+	const issued: string[] = [];
+	const coverage = { covered_branches: ["ownership"], ownership: "searched" };
+	const findings = [{ text: "f1", evidence_ids: [E1] }];
+	const branchMap = { dossier_id: DOS, covered_branches: ["ownership"], relationships: [], findings };
+	const chash = hashAction({ branch_map: branchMap, coverage });
+	const jobs: Json[] = [];
+	try {
+		const { handlers, commands, pi } = fakePiHost();
+		await stockbotExtension(pi);
+		const main = { sessionManager: { id: "main" } };
+		await handlers["session_start"]({}, main);
+		const freezeRec = { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] };
+		const dossierRec = { dossier_id: DOS, session_id: SID, wave_id: 1, coverage, findings, relationships: [], open_questions: [] };
+		setResearchBridge(async (req: Json) => {
+			if (req.op === "research.session.create") return { result: { session_id: SID } };
+			if (req.op === "research.session.inspect")
+				return { result: { session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1, objective: "probe", dossier_ids: [DOS] }), jobs, pending_next_action: null, latest_freeze: freezeRec } };
+			if (req.op === "tool.invoke" && req.name === "research_read") {
+				const args = (req.arguments ?? {}) as Json;
+				if (args.kind === "freeze" && args.resource_id === F1) return { result: { record: freezeRec } };
+				if (args.kind === "dossier" && args.resource_id === DOS) return { result: { record: dossierRec } };
+				return { error: "unknown_resource" };
+			}
+			if (req.op === "research.committee.create") {
+				jobs.push({ job_id: "job:stock-1", job_type: "stockbot", wave_id: 1, status: "running" }, { job_id: "job:bull-1", job_type: "bullbot", wave_id: 1, status: "running" }, { job_id: "job:bear-1", job_type: "bearbot", wave_id: 1, status: "running" });
+				return { result: { session_id: SID, wave_id: 1, jobs: ["job:stock-1", "job:bull-1", "job:bear-1"] } };
+			}
+			return { error: "unknown_op" };
+		});
+		await commands["research"].handler("trio partial probe", {});
+		issued.push(issueAuthorization(knownRun, "launch_committee", launchCommitteeHash({ sessionId: SID, freezeId: F1, dossierId: DOS, coverageHash: chash })).id);
+		const solo = (await handlers["tool_call"]({ toolName: "task", toolCallId: "call-trio-partial-0", input: { tasks: [{ agent: "stockbot", task: "a" }] } }, main)) as unknown as Record<string, unknown>;
+		expect(solo.block).toBe(true);
+		expect(String(solo.reason)).toContain("exact trio");
+		expect(authorizationStore.get(issued[0])?.consumed).toBe(false);
+		const trio = { tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] };
+		const planned = (await handlers["tool_call"]({ toolName: "task", toolCallId: "call-trio-partial-1", input: trio }, main)) as unknown as Record<string, unknown>;
+		expect((planned.input as Record<string, unknown>).tasks).toBeDefined();
+	} finally {
+		for (const id of issued) authorizationStore.delete(id);
+		setResearchBridge(async () => ({ error: "bridge_unavailable" }));
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		if (prevRun === undefined) delete process.env.STOCKBOT_RUN_ID;
+		else process.env.STOCKBOT_RUN_ID = prevRun;
+		resetMainSessionIdentity();
+	}
+});
+
+test("handler blocks resumed wave-2 sec-agent without candidate", async () => {
+	const SID = "rs:gate-wave2-resumed";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const knownRun = `run-gate-wave2-resumed-${Date.now()}`;
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const prevRun = process.env.STOCKBOT_RUN_ID;
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-gate-wave2-resumed-"));
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	process.env.STOCKBOT_RUN_ID = knownRun;
+	try {
+		const { handlers, commands, pi } = fakePiHost();
+		await stockbotExtension(pi);
+		const main = { sessionManager: { id: "main" } };
+		await handlers["session_start"]({}, main);
+		setResearchBridge(async (req: Json) => {
+			if (req.op === "research.session.create") return { result: { session_id: SID } };
+			if (req.op === "research.session.inspect")
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1 }), jobs: [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "completed" }], pending_next_action: null, latest_freeze: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } } };
+			if (req.op === "research.job.start") return { result: { job_id: "job:src-2", session_id: SID, status: "running", wave_id: 2, job_type: "source_agent" } };
+			if (req.op === "research.job.runtime") return { result: { job_id: "job:src-2" } };
+			return { error: "unknown_op" };
+		});
+		await commands["research"].handler("resumed wave2 probe", {});
+		const bare = (await handlers["tool_call"]({ toolName: "task", toolCallId: "call-wave2-resumed-1", input: { tasks: [{ agent: "sec-agent", task: "fetch wave two" }] } }, main)) as unknown as Record<string, unknown>;
+		expect(bare.block).toBe(true);
+		expect(String(bare.reason)).toContain("TypeSafe candidate authorization");
+	} finally {
+		setResearchBridge(async () => ({ error: "bridge_unavailable" }));
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		if (prevRun === undefined) delete process.env.STOCKBOT_RUN_ID;
+		else process.env.STOCKBOT_RUN_ID = prevRun;
+		resetMainSessionIdentity();
+	}
+});
+
+test("advance freezes the wave without creating committee jobs and names coverage judgment", async () => {
+	const SID = "rs:gate-advance-freeze";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const run = `run-gate-advance-${Date.now()}`;
+	const ops: string[] = [];
+	let frozen = false;
+	try {
+		setResearchBridge(async (req: Json) => {
+			ops.push(String(req.op));
+			if (req.op === "research.session.create") return { result: { session_id: SID } };
+			if (req.op === "research.session.inspect") {
+				const fids = frozen ? [F1] : [];
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [E1], freeze_ids: fids, committee_runs: [], current_wave: 1 }), jobs: [{ job_id: "job:src", job_type: "source_agent", wave_id: 1, status: "completed" }], pending_next_action: null, latest_freeze: frozen ? { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } : null } };
+			}
+			if (req.op === "research.freeze.create") {
+				frozen = true;
+				return { result: { freeze_id: F1 } };
+			}
+			return { error: "unknown_op" };
+		});
+		const started = await startResearch("advance freeze probe?", run);
+		expect(started.sessionId).toBe(SID);
+		const adv = await advanceOnAgentEnd(run, "");
+		expect(adv?.done).toBe(false);
+		if (adv && !adv.done) {
+			expect(adv.prompt).toContain("research_judge_coverage");
+			expect(adv.prompt).toContain(F1);
+		}
+		expect(ops).toContain("research.freeze.create");
+		expect(ops).not.toContain("research.committee.create");
+	} finally {
+		setResearchBridge(async () => ({ error: "bridge_unavailable" }));
+	}
+});
+
+test("handler mixed sec-agent plus malformed trio spends neither approval", async () => {
+	const SID = "rs:gate-mixed-spend";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const DOS = "dossier-mixed-1";
+	const knownRun = `run-gate-mixed-${Date.now()}`;
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const prevRun = process.env.STOCKBOT_RUN_ID;
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-gate-mixed-"));
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	process.env.STOCKBOT_RUN_ID = knownRun;
+	const issued: string[] = [];
+	const coverage = { covered_branches: ["ownership"], ownership: "searched" };
+	const findings = [{ text: "f1", evidence_ids: [E1] }];
+	const branchMap = { dossier_id: DOS, covered_branches: ["ownership"], relationships: [], findings };
+	const chash = hashAction({ branch_map: branchMap, coverage });
+	try {
+		const { handlers, commands, pi } = fakePiHost();
+		await stockbotExtension(pi);
+		const main = { sessionManager: { id: "main" } };
+		await handlers["session_start"]({}, main);
+		const freezeRec = { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] };
+		const dossierRec = { dossier_id: DOS, session_id: SID, wave_id: 1, coverage, findings, relationships: [], open_questions: [] };
+		setResearchBridge(async (req: Json) => {
+			if (req.op === "research.session.create") return { result: { session_id: SID } };
+			if (req.op === "research.session.inspect")
+				return { result: { session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1, objective: "probe", dossier_ids: [DOS] }), jobs: [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "completed" }], pending_next_action: null, latest_freeze: freezeRec } };
+			if (req.op === "tool.invoke" && req.name === "research_read") {
+				const args = (req.arguments ?? {}) as Json;
+				if (args.kind === "freeze" && args.resource_id === F1) return { result: { record: freezeRec } };
+				if (args.kind === "dossier" && args.resource_id === DOS) return { result: { record: dossierRec } };
+				return { error: "unknown_resource" };
+			}
+			return { error: "unknown_op" };
+		});
+		await commands["research"].handler("mixed spend probe", {});
+		const candidate = { q: "wave two gap" };
+		const task = "fetch wave two";
+		issued.push(issueAuthorization(knownRun, "continue_research", candidateTaskHash(candidate, task)).id);
+		issued.push(issueAuthorization(knownRun, "launch_committee", launchCommitteeHash({ sessionId: SID, freezeId: F1, dossierId: DOS, coverageHash: chash })).id);
+		const mixed = (await handlers["tool_call"]({ toolName: "task", toolCallId: "call-mixed-0", input: { tasks: [{ agent: "sec-agent", task, candidate }, { agent: "stockbot", task: "a" }] } }, main)) as unknown as Record<string, unknown>;
+		expect(mixed.block).toBe(true);
+		expect(String(mixed.reason)).toContain("exact trio");
+		expect(authorizationStore.get(issued[0])?.consumed).toBe(false);
+		expect(authorizationStore.get(issued[1])?.consumed).toBe(false);
+	} finally {
+		for (const id of issued) authorizationStore.delete(id);
+		setResearchBridge(async () => ({ error: "bridge_unavailable" }));
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		if (prevRun === undefined) delete process.env.STOCKBOT_RUN_ID;
+		else process.env.STOCKBOT_RUN_ID = prevRun;
+		resetMainSessionIdentity();
 	}
 });

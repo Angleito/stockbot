@@ -1,6 +1,6 @@
 import type { JudgeQuestion, Kind, Phase } from "./types.ts";
 
-export const QUESTION_BANK_VERSION = "3";
+export const QUESTION_BANK_VERSION = "4";
 
 function q(id: string, phase: Phase, instruction: string, kind: Kind, critical: boolean): JudgeQuestion {
  return { id, phase, instruction, kind, critical };
@@ -74,6 +74,7 @@ export const QUESTION_BANK: Record<string, JudgeQuestion> = {
  N10: q("N10", "candidate", "This proposed investigation is likely to improve the supported resolution of the answer.", P, true),
  N11: q("N11", "candidate", "This proposed investigation is likely to help resolve a material contradiction or uncertainty.", P, false),
  N12: q("N12", "candidate", "This proposed investigation is sufficiently targeted to justify execution.", P, true),
+ N13: q("N13", "candidate", "The execution task faithfully implements the proposed investigation and does not materially expand or redirect its scope.", P, true),
  Q01: q("Q01", "role_output", "The output addresses all material parts of the assigned research question.", P, true),
  Q02: q("Q02", "role_output", "The output reflects all materially important evidence relevant to its role.", P, true),
  Q03: q("Q03", "role_output", "The output does not omit materially important contradictory evidence.", P, true),
@@ -135,7 +136,7 @@ export const PACKS: Record<string, string[]> = {
  claim: ids("C", 1, 16),
  coverage: ids("V", 1, 20),
  continuation: ["N01", "N02", "N03", "N04", "N05", "N06"],
- candidate: ["N07", "N08", "N09", "N10", "N11", "N12"],
+ candidate: ["N07", "N08", "N09", "N10", "N11", "N12", "N13"],
  common: ids("Q", 1, 18),
  stockbot: ["S01", "S02", "S04", "S05", "S06"],
  bull: ids("B", 1, 6),

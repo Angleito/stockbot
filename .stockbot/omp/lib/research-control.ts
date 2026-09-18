@@ -98,9 +98,9 @@ export function hasOpenAuth(store: Map<string, Authorization>, runId: string, ki
  }
  return false;
 }
-// Launch binding: session + freeze + dossier + coverage all bound at issuance;
-// the gate enforces session/freeze by parse-match, dossier/coverageHash ride
-// audit-bound in the stored hash.
+// Launch binding: session + freeze + dossier + coverageHash all bound at issuance
+// and all enforced at consume. Dossier/coverageHash are enforced, not audit-only:
+// a stale dossier or mismatched coverage hash rejects with the auth intact.
 export function launchCommitteeHash(fp: { sessionId: string; freezeId: string; dossierId: string; coverageHash: string }): string {
  if (!fp || typeof fp !== "object") throw new Error("research-control: invalid launch binding");
  for (const k of ["sessionId", "freezeId", "dossierId", "coverageHash"] as const) {
@@ -108,11 +108,12 @@ export function launchCommitteeHash(fp: { sessionId: string; freezeId: string; d
  }
  return hashAction({ sessionId: fp.sessionId, freezeId: fp.freezeId, dossierId: fp.dossierId, coverageHash: fp.coverageHash });
 }
-export function consumeLaunchForFreeze(store: Map<string, Authorization>, runId: string, sessionId: string, freezeId: string): boolean {
+export function consumeLaunchForFreeze(store: Map<string, Authorization>, runId: string, expected: { sessionId: string; freezeId: string; dossierId: string; coverageHash: string }): boolean {
  if (!(store instanceof Map)) throw new Error("research-control: invalid store");
  if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
- if (typeof sessionId !== "string" || sessionId.length === 0) throw new Error("research-control: invalid sessionId");
- if (typeof freezeId !== "string" || freezeId.length === 0) throw new Error("research-control: invalid freezeId");
+ for (const k of ["sessionId", "freezeId", "dossierId", "coverageHash"] as const) {
+  if (typeof expected?.[k] !== "string" || (expected[k] as string).length === 0) throw new Error("research-control: invalid launch binding");
+ }
  for (const auth of store.values()) {
   if (!auth || typeof auth !== "object" || auth.consumed) continue;
   if (auth.runId !== runId || auth.kind !== "launch_committee") continue;
@@ -120,7 +121,7 @@ export function consumeLaunchForFreeze(store: Map<string, Authorization>, runId:
   try { b = JSON.parse(auth.actionHash); } catch { continue; }
   if (!b || typeof b !== "object") continue;
   const row = b as Record<string, unknown>;
-  if (row.sessionId !== sessionId || row.freezeId !== freezeId) continue;
+  if (row.sessionId !== expected.sessionId || row.freezeId !== expected.freezeId || row.dossierId !== expected.dossierId || row.coverageHash !== expected.coverageHash) continue;
   return consumeAuthorization(store, auth.id, { runId: auth.runId, kind: "launch_committee", actionHash: auth.actionHash });
  }
  return false;

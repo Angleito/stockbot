@@ -231,8 +231,12 @@ function deriveState(session: Json, jobs: Json[], latestFreeze?: Json | null): S
  // authorized, FINAL once the gate stops, else GATE; a live freeze with trio
  // incomplete is COMMITTEE; else SOURCE.
  let stage: Stage = "SOURCE_RESEARCH";
+ const recordedIds = strs(objs(session.committee_runs).find((e) => e.freeze_id === trio.fid)?.jobs);
+ const hasCommitteeJobs = recordedIds.length > 0 || jobs.some((j) => (ROLES as readonly string[]).includes(str(j.job_type)) && j.wave_id === trio.wave);
  if (trio.done) {
   stage = nextWaveActive ? "SOURCE_RESEARCH" : gateStopped ? "FINAL" : "GATE";
+ } else if (freezes.length > 0 && !hasCommitteeJobs) {
+  stage = "GATE";
  } else if (freezes.length > 0 || status === "freezing" || status === "analyzing") {
   stage = "COMMITTEE";
  }
@@ -396,6 +400,13 @@ export async function peekLatestFreeze(researchKey: string, dataRoot?: string, a
  if (freezes.length === 0) return null;
  return { sessionId: mem.sessionId, freezeId: freezes[freezes.length - 1] };
 }
+export async function peekHasPriorWave(researchKey: string, dataRoot?: string, asOf?: string): Promise<boolean> {
+ const mem = runs.get(researchKey);
+ if (!mem) return false;
+ const snapshot = await inspect(mem.sessionId, dataRoot, asOf);
+ if (strs(snapshot.session.freeze_ids).length > 0) return true;
+ return snapshot.jobs.some((j) => str(j.job_type) === "source_agent");
+}
 // Evidence item shape. SEC search hits are navigation artifacts: a fact counts
 // only when the citation carries the canonical source_handle get_sec_document
 // returned for the window that was read, plus the passage being cited. The
@@ -481,29 +492,24 @@ function finalizePrompt(sessionId: string, freezeId: string, allowedIds: string,
   `The kernel persists the rich final_result and the session's final answer is rendered from it once, in this same turn — do not restate it as chat text after the call.`
  );
 }
-
 // Fail-closed freeze: the kernel rejects open source jobs, so the model must
 // end source work via research_submit_source_result first. No force-complete here.
 async function freezeWave(sessionId: string, wave: number, dataRoot?: string, asOf?: string): Promise<Json> {
  return rpc("research.freeze.create", { session_id: sessionId, wave_id: wave }, dataRoot, asOf);
 }
 
-// Atomic trio: one RPC creates every missing committee job (status RUNNING)
-// together, so no role is ever started, awaited, and only then followed by the
-// next. A role already running is reused; a recorded role is left alone. The
-// Director then prompts this context to dispatch the trio as one OMP task
-// batch (planTaskCall + recordTaskResult); no subprocess ever authors a role.
-async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf?: string, note = ""): Promise<Advance> {
- try {
-  await rpc("research.committee.create", { session_id: sessionId, wave_id: wave }, dataRoot, asOf);
- } catch (err) {
-  return { done: false, prompt: `Committee creation for research session ${sessionId} failed (${err instanceof Error ? err.message : String(err)}). Dispatch the committee as one task batch.` };
- }
+// Coverage gate owns committee creation: freeze prompts coverage judgment, and
+// the exact-trio task batch (planTaskCall + index gate) is the single creation
+// point after a launch approval is consumed. No jobs are created here.
+function coveragePrompt(sessionId: string, freezeId: string, allowedIds: string, note = ""): string {
+ return `${note}Evidence frozen for research session ${sessionId} (freeze ${freezeId}). Reload the freeze with research_read, then call research_judge_coverage with research_session_id and freeze_id. If COMPLETE, dispatch the committee as one task batch with exactly one stockbot, one bullbot, and one bearbot task. If INCOMPLETE, call research_judge_continuation or research_judge_candidate; only a TypeSafe candidate authorization permits another sec-agent round. Allowed evidence ids are: ${allowedIds}.`;
+}
+async function promptTrio(sessionId: string, wave: number, dataRoot?: string, asOf?: string, note = ""): Promise<Advance> {
  let snapshot: InspectSnapshot;
  try {
   snapshot = await inspect(sessionId, dataRoot, asOf);
  } catch (err) {
-  return { done: false, prompt: `Research session ${sessionId} unreadable after committee creation (${err instanceof Error ? err.message : String(err)}). Reply with model text only; the run stays staged.` };
+  return { done: false, prompt: `Research session ${sessionId} unreadable (${err instanceof Error ? err.message : String(err)}). Reply with model text only; the run stays staged.` };
  }
  const d = deriveState(snapshot.session, snapshot.jobs, snapshot.latestFreeze);
  const allowed = d.freezeEvidenceIds.join(", ");
@@ -511,6 +517,16 @@ async function seedTrio(sessionId: string, wave: number, dataRoot?: string, asOf
   return { done: false, prompt: finalizePrompt(sessionId, d.trio.fid, allowed, `${note}Trio complete for research session ${sessionId}. `, trioJobIdsForFreeze(snapshot.session, d.trio.fid)) };
  }
  return { done: false, prompt: trioPrompt(sessionId, d.trio.fid, d.trio.eligible, allowed, note) };
+}
+async function promptGate(sid: string, dataRoot?: string, asOf?: string, note = ""): Promise<Advance> {
+ let snapshot: InspectSnapshot;
+ try {
+  snapshot = await inspect(sid, dataRoot, asOf);
+ } catch (err) {
+  return { done: false, prompt: `Research session ${sid} unreadable (${err instanceof Error ? err.message : String(err)}). Reply with model text only; the run stays staged.` };
+ }
+ const d = deriveState(snapshot.session, snapshot.jobs, snapshot.latestFreeze);
+ return { done: false, prompt: coveragePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), note) };
 }
 
 export async function startResearch(
@@ -585,17 +601,13 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
    const frozen = await freezeWave(sid, 1, dataRoot, asOf);
    const reason = str((frozen.pending_next_action as Json | undefined)?.reason ?? (latestFreeze?.pending_next_action as Json | undefined)?.reason ?? "");
    const limit = reason ? ` Evidence limitations: ${reason}.` : "";
-   return seedTrio(sid, 1, dataRoot, asOf, limit ? `${limit} ` : "");
+   return promptGate(sid, dataRoot, asOf, limit ? `${limit} ` : "");
   } catch (err) {
    return { done: false, prompt: `Freeze for research session ${sid} failed (${err instanceof Error ? err.message : String(err)}). Add or repair evidence with Call call_tool with name="research_add_evidence", then continue.` };
   }
  }
  if (!d.trio.done) {
-  // Committee stage: one atomic RPC guarantees the whole trio exists RUNNING
-  // before any dispatch prompt (existing role jobs are reused, recorded roles
-  // stay out of the prompt); the Director then dispatches the trio as one OMP
-  // task batch (planTaskCall + recordTaskResult).
-  return seedTrio(sid, d.trio.wave, dataRoot, asOf);
+  return d.stage === "GATE" ? promptGate(sid, dataRoot, asOf) : promptTrio(sid, d.trio.wave, dataRoot, asOf);
  }
  // Trio complete for the latest freeze: OMP + TypeSafe owns continuation
  // (§§13/19/36-37). Python decide_next_wave is NOT invoked from this path:
@@ -644,7 +656,7 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  }
  const reasonN = str((frozenN.pending_next_action as Json | undefined)?.reason ?? "");
  const limitN = reasonN ? ` Evidence limitations: ${reasonN}.` : "";
- return seedTrio(sid, N, dataRoot, asOf, limitN ? `${limitN} ` : "");
+ return promptGate(sid, dataRoot, asOf, limitN ? `${limitN} ` : "");
 }
 // --- Director task interception policy (OMP runtime) ---------------------------
 // The Director owns every main-session spawn: SOURCE_RESEARCH allows sec-agent
@@ -656,7 +668,7 @@ const DIRECTOR_SPAWNS = ["sec-agent", "stockbot", "bullbot", "bearbot"];
 const STAGE_AGENTS: Record<Stage, string[]> = {
  SOURCE_RESEARCH: ["sec-agent"],
  COMMITTEE: ["stockbot", "bullbot", "bearbot"],
- GATE: ["sec-agent"],
+ GATE: ["sec-agent", "stockbot", "bullbot", "bearbot"],
  FINAL: [],
 };
 const JOB_TYPE: Record<string, string> = {
@@ -787,7 +799,10 @@ export async function planTaskCall(ctx: TaskPlanContext, input: Json, dataRoot?:
   }
  }
  try {
-  const isCommittee = items.some((item) => (ROLES as readonly string[]).includes(str(item.agent)));
+  const sortedAgents = items.map((item) => str(item.agent)).sort();
+  const isCommittee = sortedAgents.join(",") === "bearbot,bullbot,stockbot";
+  if (!isCommittee && sortedAgents.some((a) => (ROLES as readonly string[]).includes(a)))
+   return { block: true, reason: "Director may not spawn a partial committee: dispatch exactly one stockbot, one bullbot, and one bearbot task in one batch." };
   const roleJobs = new Map<string, string>();
   let freezeId = "";
   const cw = typeof snapshot.session.current_wave === "number" && Number.isInteger(snapshot.session.current_wave) ? (snapshot.session.current_wave as number) : 0;

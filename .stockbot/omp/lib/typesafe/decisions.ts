@@ -32,7 +32,7 @@ export function judgeContinuation(results: JudgmentMap): { decision: "continue" 
 }
 
 export function authorizeCandidate(results: JudgmentMap): boolean {
- return ["N07", "N08", "N09", "N10", "N12"].every((id) => isYes(results, id));
+ return ["N07", "N08", "N09", "N10", "N12", "N13"].every((id) => isYes(results, id));
 }
 
 export interface FailedQuestion {

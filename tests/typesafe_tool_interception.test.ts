@@ -407,7 +407,7 @@ test("omitted run_id blocks every judge and review tool", async () => {
 	const fakeLoader = {
 		evidence: async () => ({ objective: "o", claim: "c", evidence: { evidence_id: "e1" } }),
 		claim: async () => ({ objective: "o", claim: "c", evidence_set: [], actionable: false }),
-		coverage: async () => ({ objective: "o", branch_map: {}, coverage: {}, claim_states: [], actionable: false }),
+		coverage: async () => ({ objective: "o", branch_map: {}, coverage: {}, claim_states: [], actionable: false, dossierId: "d-1" }),
 		continuation: async () => ({ objective: "o", coverage: {}, open_questions: [], current_conclusions: [] }),
 		candidate: async () => ({ objective: "o", gap: "g" }),
 	};
@@ -433,7 +433,7 @@ test("fabricated coverage cannot yield launch_committee", async () => {
 	const { yes: y } = await import("../.stockbot/omp/lib/typesafe/thresholds.ts");
 	const judgments = Object.fromEntries(P.coverage.map((id) => [id, { p_yes: 0.9, yes: y(0.9) }]));
 	// Loader throws (untrusted/missing record) -> blocked, no auth ever issued.
-	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "s", freeze_id: "f", branch_map_id: "made-up" }, {
+	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "s", freeze_id: "f" }, {
 		evaluator: new FakeEvaluator(judgments),
 		getRunId: () => "run-fabricated",
 		stateLoader: { coverage: async () => { throw new Error("typesafe_untrusted_state"); } },
@@ -452,11 +452,11 @@ test("coverage COMPLETE issues launch_committee bound to session/freeze/dossier"
 	const run = `run-covbind-${Date.now()}`;
 	const branchMap = { roots: ["ownership"] };
 	const coverage = { ownership: "searched" };
-	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "sess-cov", freeze_id: "freeze-cov", branch_map_id: "dossier-1" }, {
+	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "sess-cov", freeze_id: "freeze-cov", branch_map_id: "stale-dossier" }, {
 		evaluator: new FakeEvaluator(judgments),
 		getRunId: () => run,
 		stateLoader: {
-			coverage: async () => ({ objective: "o", branch_map: branchMap, coverage, claim_states: [], actionable: true }),
+			coverage: async () => ({ objective: "o", branch_map: branchMap, coverage, claim_states: [], actionable: true, dossierId: "dossier-1" }),
 			freeze: async () => { },
 		},
 	});
@@ -472,7 +472,7 @@ test("coverage COMPLETE issues launch_committee bound to session/freeze/dossier"
 		expect(parsed.freezeId).toBe("freeze-cov");
 		expect(parsed.dossierId).toBe("dossier-1");
 		expect(parsed.coverageHash).toBe(hashAction({ branch_map: branchMap, coverage }));
-		expect(consumeLaunchForFreeze(authorizationStore, run, "sess-cov", "freeze-cov")).toBe(true);
+		expect(consumeLaunchForFreeze(authorizationStore, run, { sessionId: "sess-cov", freezeId: "freeze-cov", dossierId: "dossier-1", coverageHash: hashAction({ branch_map: branchMap, coverage }) })).toBe(true);
 	} finally {
 		for (const [id, a] of authorizationStore) if (a.runId === run) authorizationStore.delete(id);
 	}
@@ -485,11 +485,11 @@ test("coverage with a middle-V failure issues no launch_committee", async () => 
 	const { yes: y } = await import("../.stockbot/omp/lib/typesafe/thresholds.ts");
 	const judgments = Object.fromEntries(P.coverage.map((id) => [id, { p_yes: id === "V09" ? 0.2 : 0.9, yes: y(id === "V09" ? 0.2 : 0.9) }]));
 	const run = `run-covmid-${Date.now()}`;
-	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "sess-cov", freeze_id: "freeze-cov", branch_map_id: "dossier-1" }, {
+	const out = await runJudgeTool("research_judge_coverage", { research_session_id: "sess-cov", freeze_id: "freeze-cov", branch_map_id: "stale-dossier" }, {
 		evaluator: new FakeEvaluator(judgments),
 		getRunId: () => run,
 		stateLoader: {
-			coverage: async () => ({ objective: "o", branch_map: {}, coverage: {}, claim_states: [], actionable: true }),
+			coverage: async () => ({ objective: "o", branch_map: {}, coverage: {}, claim_states: [], actionable: true, dossierId: "dossier-1" }),
 			freeze: async () => { },
 		},
 	});
@@ -536,13 +536,16 @@ test("candidate without task is blocked and issues no authorization", async () =
 	expect(hasOpenAuth(authorizationStore, run, "continue_research")).toBe(false);
 });
 
-test("launch bound to session/freeze: wrong freeze does not consume", () => {
+test("launch bound to session/freeze/dossier/coverage: swaps do not consume", () => {
 	const run = `run-launchbind-${Date.now()}`;
 	const covHash = hashAction({ branch_map: {}, coverage: {} });
 	const a = issueAuthorization(run, "launch_committee", launchCommitteeHash({ sessionId: "sess-1", freezeId: "freeze-1", dossierId: "d1", coverageHash: covHash }));
+	const good = { sessionId: "sess-1", freezeId: "freeze-1", dossierId: "d1", coverageHash: covHash };
 	try {
-		expect(consumeLaunchForFreeze(authorizationStore, run, "sess-1", "freeze-2")).toBe(false);
-		expect(consumeLaunchForFreeze(authorizationStore, run, "sess-1", "freeze-1")).toBe(true);
+		expect(consumeLaunchForFreeze(authorizationStore, run, { ...good, freezeId: "freeze-2" })).toBe(false);
+		expect(consumeLaunchForFreeze(authorizationStore, run, { ...good, dossierId: "d2" })).toBe(false);
+		expect(consumeLaunchForFreeze(authorizationStore, run, { ...good, coverageHash: hashAction({ branch_map: {}, coverage: { other: 1 } }) })).toBe(false);
+		expect(consumeLaunchForFreeze(authorizationStore, run, good)).toBe(true);
 	} finally {
 		authorizationStore.delete(a.id);
 	}

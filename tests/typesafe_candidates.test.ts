@@ -78,11 +78,16 @@ test("untargeted candidate is not authorized", async () => {
 	expect(await judgedCand(full(CAND, 0.9, { N12: 0.2 }))).toBe(false);
 });
 
+test("scope-divergent task is not authorized", async () => {
+	expect(await judgedCand(full(CAND, 0.9, { N13: 0.2 }))).toBe(false);
+});
+
 test("advisory N11 alone never blocks authorization", async () => {
 	expect(await judgedCand(full(CAND, 0.9, { N11: 0.1 }))).toBe(true);
 });
 
 test("0.70 boundary on every gating candidate question", async () => {
-	expect(await judgedCand(full(CAND, 0.9, { N07: 0.7, N08: 0.7, N09: 0.7, N10: 0.7, N12: 0.7 }))).toBe(true);
+	expect(await judgedCand(full(CAND, 0.9, { N07: 0.7, N08: 0.7, N09: 0.7, N10: 0.7, N12: 0.7, N13: 0.7 }))).toBe(true);
 	expect(await judgedCand(full(CAND, 0.9, { N10: 0.6999 }))).toBe(false);
+	expect(await judgedCand(full(CAND, 0.9, { N13: 0.6999 }))).toBe(false);
 });

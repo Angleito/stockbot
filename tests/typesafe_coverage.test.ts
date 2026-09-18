@@ -4,7 +4,11 @@ import { FakeEvaluator } from "../.stockbot/omp/lib/typesafe/evaluator.ts";
 import { PACKS, QUESTION_BANK } from "../.stockbot/omp/lib/typesafe/questions.ts";
 import { branchStatus, createResearchState, researchComplete, setBranchResult } from "../.stockbot/omp/lib/research-state.ts";
 import { yes } from "../.stockbot/omp/lib/typesafe/thresholds.ts";
-import type { JudgmentMap } from "../.stockbot/omp/lib/typesafe/types.ts";
+import type { JudgmentMap, JudgeQuestion } from "../.stockbot/omp/lib/typesafe/types.ts";
+import { authorizationStore, hasOpenAuth, hashAction, launchCommitteeHash } from "../.stockbot/omp/lib/research-control.ts";
+import { coverageHash, loadCoverageForFreeze } from "../.stockbot/omp/lib/typesafe/state.ts";
+import { runJudgeTool } from "../.stockbot/omp/tools/research-judge-tools.ts";
+import { setResearchBridge } from "../.stockbot/omp/lib/research-director.ts";
 
 const IDS = [...PACKS.coverage];
 const state = { branches: ["ownership", "revenue", "supplier"], searched: ["ownership"] };
@@ -70,4 +74,161 @@ test("researchComplete tracks open material branches only", () => {
 	expect(researchComplete(rs)).toBe(false);
 	setBranchResult(rs, "b1", true, "SUPPORTED");
 	expect(researchComplete(rs)).toBe(true);
+});
+
+type Req = Record<string, unknown>;
+
+function freezeBridge(session: Req, records: Record<string, Req>): (req: Req) => Promise<Req> {
+	return async (req: Req): Promise<Req> => {
+		if (req.op === "research.session.inspect") return { result: { session } };
+		if (req.op === "tool.invoke" && req.name === "research_read") {
+			const args = (req.arguments ?? {}) as Req;
+			const rec = records[`${String(args.kind)}:${String(args.resource_id)}`];
+			if (rec) return { result: { record: rec } };
+		}
+		return { error: "unknown_op" };
+	};
+}
+
+const SID = "sess-cov-load";
+const dossierRec = (id: string, wave: number, tag: string): Req => ({
+	session_id: SID,
+	dossier_id: id,
+	wave_id: wave,
+	coverage: { covered_branches: [tag], marker: tag },
+	findings: [{ text: `finding ${tag}`, evidence_ids: [] }],
+	relationships: [],
+});
+const loadSession = (dossierIds: string[]): Req => ({
+	session_id: SID,
+	objective: "objective o",
+	dossier_ids: dossierIds,
+	unresolved_questions: [],
+});
+
+test("loadCoverageForFreeze derives the wave-2 dossier", async () => {
+	setResearchBridge(freezeBridge(loadSession(["d-1", "d-2"]), {
+		"freeze:fz-2": { session_id: SID, freeze_id: "fz-2", wave_id: 2 },
+		"dossier:d-1": dossierRec("d-1", 1, "w1"),
+		"dossier:d-2": dossierRec("d-2", 2, "w2"),
+	}));
+	const st = await loadCoverageForFreeze(SID, "fz-2");
+	expect(st.dossierId).toBe("d-2");
+	expect(st.objective).toBe("objective o");
+	expect(st.coverage).toMatchObject({ marker: "w2" });
+});
+
+test("loadCoverageForFreeze rejects with no wave-matching dossier", async () => {
+	setResearchBridge(freezeBridge(loadSession(["d-1"]), {
+		"freeze:fz-9": { session_id: SID, freeze_id: "fz-9", wave_id: 9 },
+		"dossier:d-1": dossierRec("d-1", 1, "w1"),
+	}));
+	let threw = "";
+	try {
+		await loadCoverageForFreeze(SID, "fz-9");
+	} catch (e) {
+		threw = String((e as Error)?.message ?? e);
+	}
+	expect(threw).toBe("typesafe_untrusted_state");
+});
+
+test("coverageHash is stable on equal inputs, differs on differing coverage", () => {
+	const branchMap = { dossier_id: "d-2", covered_branches: ["a"] };
+	expect(coverageHash(branchMap, { m: "w2" })).toBe(hashAction({ branch_map: branchMap, coverage: { m: "w2" } }));
+	expect(coverageHash(branchMap, { m: "w2" })).toBe(
+		coverageHash({ dossier_id: "d-2", covered_branches: ["a"] }, { m: "w2" }),
+	);
+	expect(coverageHash(branchMap, { m: "w2" })).not.toBe(coverageHash(branchMap, { m: "other" }));
+});
+
+const covJudgments = (): JudgmentMap =>
+	Object.fromEntries(PACKS.coverage.map((id) => [id, { p_yes: 0.9, yes: yes(0.9) }]));
+
+test("coverage COMPLETE binds the derived dossier even with a stale branch_map_id", async () => {
+	const run = `run-covderived-${Date.now()}`;
+	const branchMap = { dossier_id: "d-derived", covered_branches: ["a"] };
+	const coverage = { marker: "w2" };
+	const out = await runJudgeTool(
+		"research_judge_coverage",
+		{ research_session_id: "sess-cov", freeze_id: "fz-2", branch_map_id: "stale-dossier" },
+		{
+			evaluator: new FakeEvaluator(covJudgments()),
+			getRunId: () => run,
+			stateLoader: {
+				coverage: async () => ({ objective: "o", branch_map: branchMap, coverage, claim_states: [], actionable: true, dossierId: "d-derived" }),
+				freeze: async () => { },
+			},
+		},
+	);
+	try {
+		expect(out?.isError).toBeUndefined();
+		expect(out?.details.verdict).toBe("COMPLETE");
+		const auth = out?.details.authorization as { authorization_id?: string } | undefined;
+		expect(typeof auth?.authorization_id).toBe("string");
+		const stored = authorizationStore.get(String(auth?.authorization_id));
+		expect(stored?.kind).toBe("launch_committee");
+		const parsed = JSON.parse(String(stored?.actionHash)) as Req;
+		expect(parsed.sessionId).toBe("sess-cov");
+		expect(parsed.freezeId).toBe("fz-2");
+		expect(parsed.dossierId).toBe("d-derived");
+		expect(parsed.coverageHash).toBe(coverageHash(branchMap, coverage));
+		expect(String(stored?.actionHash)).toBe(
+			launchCommitteeHash({ sessionId: "sess-cov", freezeId: "fz-2", dossierId: "d-derived", coverageHash: coverageHash(branchMap, coverage) }),
+		);
+	} finally {
+		for (const [id, a] of authorizationStore) if (a.runId === run) authorizationStore.delete(id);
+	}
+});
+
+test("candidate with N13 low is rejected with no authorization", async () => {
+	const judgments = Object.fromEntries(
+		PACKS.candidate.map((id) => [id, { p_yes: id === "N13" ? 0.2 : 0.9, yes: yes(id === "N13" ? 0.2 : 0.9) }]),
+	);
+	const run = `run-candn13-${Date.now()}`;
+	const out = await runJudgeTool(
+		"research_judge_candidate",
+		{ research_session_id: "s", gap_id: "g", candidate: { q: "A" }, task: "do X that drifts" },
+		{
+			evaluator: new FakeEvaluator(judgments),
+			getRunId: () => run,
+			stateLoader: { candidate: async () => ({ objective: "o", gap: "g" }) },
+		},
+	);
+	expect(out?.isError).toBeUndefined();
+	expect(out?.details.authorized).toBe(false);
+	expect(out?.details.authorization).toBeUndefined();
+	expect(hasOpenAuth(authorizationStore, run, "continue_research")).toBe(false);
+});
+
+test("candidate judgment receives the task in evaluated state", async () => {
+	const seen: { state?: Req } = {};
+	const judgments = Object.fromEntries(PACKS.candidate.map((id) => [id, { p_yes: 0.9, yes: yes(0.9) }]));
+	const capturing = {
+		async evaluate(state: unknown, questions: JudgeQuestion[]) {
+			seen.state = state as Req;
+			const results: JudgmentMap = {};
+			for (const q of questions) {
+				const p = (judgments[q.id] as { p_yes: number } | undefined)?.p_yes ?? 0.9;
+				results[q.id] = { p_yes: p, yes: yes(p) };
+			}
+			return { results, model: "capture" };
+		},
+	};
+	const run = `run-candtask-${Date.now()}`;
+	try {
+		const out = await runJudgeTool(
+			"research_judge_candidate",
+			{ research_session_id: "s", gap_id: "g", candidate: { q: "A" }, task: "faithful task" },
+			{
+				evaluator: capturing,
+				getRunId: () => run,
+				stateLoader: { candidate: async () => ({ objective: "o", gap: "g" }) },
+			},
+		);
+		expect(out?.details.authorized).toBe(true);
+		expect(seen.state?.task).toBe("faithful task");
+		expect(seen.state?.candidate).toEqual({ q: "A" });
+	} finally {
+		for (const [id, a] of authorizationStore) if (a.runId === run) authorizationStore.delete(id);
+	}
 });

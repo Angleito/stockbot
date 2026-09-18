@@ -7,7 +7,7 @@ const SIZES: Record<string, number> = {
 	claim: 16,
 	coverage: 20,
 	continuation: 6,
-	candidate: 6,
+	candidate: 7,
 	common: 18,
 	stockbot: 5,
 	bull: 6,
@@ -17,8 +17,8 @@ const SIZES: Record<string, number> = {
 	final_extended: 16,
 };
 
-test("bank version is 3", () => {
-	expect(QUESTION_BANK_VERSION).toBe("3");
+test("bank version is 4", () => {
+	expect(QUESTION_BANK_VERSION).toBe("4");
 });
 
 test("pack sizes match the plan", () => {
@@ -64,7 +64,7 @@ test("critical sets match the plan", () => {
 	expect(crit(PACKS.claim)).toEqual(["C01", "C02", "C03", "C06", "C13"]);
 	expect(crit(PACKS.coverage)).toEqual(["V01", "V02", "V03", "V04", "V05", "V06", "V07", "V08", "V09", "V10", "V11", "V12", "V13", "V14", "V15", "V16", "V17", "V18", "V19", "V20"]);
 	expect(crit(PACKS.continuation)).toHaveLength(6);
-	expect(crit(PACKS.candidate)).toEqual(["N07", "N08", "N09", "N10", "N12"]);
+	expect(crit(PACKS.candidate)).toEqual(["N07", "N08", "N09", "N10", "N12", "N13"]);
 	expect(crit(PACKS.common)).toEqual([
 		"Q01", "Q02", "Q03", "Q04", "Q05", "Q06", "Q07", "Q13", "Q14", "Q15", "Q18",
 	]);
