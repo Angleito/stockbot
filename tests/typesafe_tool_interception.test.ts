@@ -8,6 +8,8 @@ import {
 	consumeLaunchForFreeze,
 	consumeMatchingAuth,
 	consumeOpenRoleAccepts,
+	consumeReservedBatch,
+	consumeReservedLaunch,
 	drainCommitteeAccepts,
 	drainFinalize,
 	drainRoleAccepts,
@@ -19,6 +21,9 @@ import {
 	issueAuthorization,
 	issueRoleAccept,
 	launchCommitteeHash,
+	releaseReservations,
+	reserveCandidateBatch,
+	reserveLaunchForFreeze,
 } from "../.stockbot/omp/lib/research-control.ts";
 import { reviewCommittee, reviewFinal } from "../.stockbot/omp/lib/typesafe/decisions.ts";
 import {
@@ -312,6 +317,60 @@ test("candidate batch partial failure burns nothing", () => {
 		authorizationStore.delete(a.id);
 	}
 });
+test("reserved batch is all-or-none, hidden from direct consume, releasable", () => {
+	const run = `run-reserve-${Date.now()}`;
+	const good = candidateTaskHash({ q: "A" }, "task-a");
+	const a = issueAuthorization(run, "continue_research", good);
+	try {
+		expect(reserveCandidateBatch(authorizationStore, run, [good, candidateTaskHash({ q: "B" }, "task-b")])).toBeNull();
+		expect(authorizationStore.get(a.id)?.reserved).not.toBe(true);
+		const held = reserveCandidateBatch(authorizationStore, run, [good]);
+		expect(held).toEqual([a.id]);
+		expect(reserveCandidateBatch(authorizationStore, run, [good])).toBeNull();
+		expect(consumeCandidateBatch(authorizationStore, run, [good])).toBe(false);
+		releaseReservations(authorizationStore, held ?? []);
+		expect(authorizationStore.get(a.id)?.reserved).toBe(false);
+		expect(consumeCandidateBatch(authorizationStore, run, [good])).toBe(true);
+	} finally {
+		authorizationStore.delete(a.id);
+	}
+});
+test("consume-reserved batch mismatch releases and returns false", () => {
+	const run = `run-resvmis-${Date.now()}`;
+	const good = candidateTaskHash({ q: "A" }, "task-a");
+	const a = issueAuthorization(run, "continue_research", good);
+	try {
+		const held = reserveCandidateBatch(authorizationStore, run, [good]);
+		expect(held).toEqual([a.id]);
+		expect(consumeReservedBatch(authorizationStore, held ?? [], run, [candidateTaskHash({ q: "B" }, "task-b")])).toBe(false);
+		expect(authorizationStore.get(a.id)?.consumed).toBe(false);
+		expect(authorizationStore.get(a.id)?.reserved).toBe(false);
+		const held2 = reserveCandidateBatch(authorizationStore, run, [good]);
+		expect(consumeReservedBatch(authorizationStore, held2 ?? [], run, [good])).toBe(true);
+		expect(authorizationStore.get(a.id)?.consumed).toBe(true);
+	} finally {
+		authorizationStore.delete(a.id);
+	}
+});
+test("launch reserve/consume/release refuses dossier swap", () => {
+	const run = `run-reslaunch-${Date.now()}`;
+	const covHash = hashAction({ branch_map: {}, coverage: {} });
+	const good = { sessionId: "sess-1", freezeId: "freeze-1", dossierId: "d1", coverageHash: covHash };
+	const a = issueAuthorization(run, "launch_committee", launchCommitteeHash(good));
+	try {
+		const held = reserveLaunchForFreeze(authorizationStore, run, good);
+		expect(held).toBe(a.id);
+		expect(reserveLaunchForFreeze(authorizationStore, run, good)).toBeNull();
+		expect(consumeLaunchForFreeze(authorizationStore, run, good)).toBe(false);
+		expect(consumeReservedLaunch(authorizationStore, held ?? "", run, { ...good, dossierId: "d2" })).toBe(false);
+		expect(authorizationStore.get(a.id)?.consumed).toBe(false);
+		const held2 = reserveLaunchForFreeze(authorizationStore, run, good);
+		expect(consumeReservedLaunch(authorizationStore, held2 ?? "", run, good)).toBe(true);
+		expect(authorizationStore.get(a.id)?.consumed).toBe(true);
+	} finally {
+		authorizationStore.delete(a.id);
+	}
+});
 
 test("committee skip blocks finalize: committee_accepted is required", () => {
 	const run = `run-commskip-${Date.now()}`;
@@ -497,6 +556,10 @@ test("coverage with a middle-V failure issues no launch_committee", async () => 
 		expect(out?.details.verdict).not.toBe("COMPLETE");
 		expect(out?.details.authorization).toBeUndefined();
 		expect(hasOpenAuth(authorizationStore, run, "launch_committee")).toBe(false);
+		expect(String(out?.text)).toContain("coverage ");
+		const failed = out?.details.failed as { id: string; p_yes: number; reason: string }[] | undefined;
+		expect(failed?.map((f) => f.id)).toEqual(["V09"]);
+		expect(typeof failed?.[0]?.reason).toBe("string");
 	} finally {
 		for (const [id, a] of authorizationStore) if (a.runId === run) authorizationStore.delete(id);
 	}

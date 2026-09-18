@@ -20,6 +20,7 @@ export interface Authorization {
  actionHash: string;
  createdAt: number;
  consumed: boolean;
+ reserved?: boolean;
 }
 
 export const authorizationStore = new Map<string, Authorization>();
@@ -49,6 +50,7 @@ export function issueAuthorization(runId: string, kind: AuthKind, actionHash: st
   actionHash,
   createdAt: Date.now(),
   consumed: false,
+  reserved: false,
  };
  authorizationStore.set(auth.id, auth);
  return auth;
@@ -116,6 +118,7 @@ export function consumeLaunchForFreeze(store: Map<string, Authorization>, runId:
  }
  for (const auth of store.values()) {
   if (!auth || typeof auth !== "object" || auth.consumed) continue;
+  if (auth.reserved === true) continue;
   if (auth.runId !== runId || auth.kind !== "launch_committee") continue;
   let b: unknown;
   try { b = JSON.parse(auth.actionHash); } catch { continue; }
@@ -141,6 +144,7 @@ export function consumeCandidateBatch(store: Map<string, Authorization>, runId: 
   let found: string | null = null;
   for (const auth of store.values()) {
    if (!auth || typeof auth !== "object" || auth.consumed) continue;
+   if (auth.reserved === true) continue;
    if (auth.runId !== runId || auth.kind !== "continue_research") continue;
    if (auth.actionHash !== h) continue;
    if (pickedIds.has(auth.id)) continue;
@@ -155,6 +159,99 @@ export function consumeCandidateBatch(store: Map<string, Authorization>, runId: 
   if (!consumeAuthorization(store, id, { runId: auth.runId, kind: "continue_research", actionHash: auth.actionHash })) return false;
  }
  return true;
+}
+export function reserveCandidateBatch(store: Map<string, Authorization>, runId: string, hashes: string[]): string[] | null {
+ if (!(store instanceof Map)) throw new Error("research-control: invalid store");
+ if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
+ if (!Array.isArray(hashes) || hashes.length === 0) throw new Error("research-control: invalid hashes");
+ for (const h of hashes) { if (typeof h !== "string" || h.length === 0) throw new Error("research-control: invalid hashes"); }
+ const picked: string[] = [];
+ const pickedIds = new Set<string>();
+ for (const h of hashes) {
+  let found: string | null = null;
+  for (const auth of store.values()) {
+   if (!auth || typeof auth !== "object" || auth.consumed) continue;
+   if (auth.reserved === true) continue;
+   if (auth.runId !== runId || auth.kind !== "continue_research") continue;
+   if (auth.actionHash !== h) continue;
+   if (pickedIds.has(auth.id)) continue;
+   found = auth.id; break;
+  }
+  if (!found) return null;
+  picked.push(found); pickedIds.add(found);
+ }
+ for (const id of picked) {
+  const auth = store.get(id);
+  if (auth) auth.reserved = true;
+ }
+ return picked;
+}
+export function reserveLaunchForFreeze(store: Map<string, Authorization>, runId: string, expected: { sessionId: string; freezeId: string; dossierId: string; coverageHash: string }): string | null {
+ if (!(store instanceof Map)) throw new Error("research-control: invalid store");
+ if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
+ for (const k of ["sessionId", "freezeId", "dossierId", "coverageHash"] as const) {
+  if (typeof expected?.[k] !== "string" || (expected[k] as string).length === 0) throw new Error("research-control: invalid launch binding");
+ }
+ for (const auth of store.values()) {
+  if (!auth || typeof auth !== "object" || auth.consumed) continue;
+  if (auth.reserved === true) continue;
+  if (auth.runId !== runId || auth.kind !== "launch_committee") continue;
+  let b: unknown;
+  try { b = JSON.parse(auth.actionHash); } catch { continue; }
+  if (!b || typeof b !== "object") continue;
+  const row = b as Record<string, unknown>;
+  if (row.sessionId !== expected.sessionId || row.freezeId !== expected.freezeId || row.dossierId !== expected.dossierId || row.coverageHash !== expected.coverageHash) continue;
+  auth.reserved = true;
+  return auth.id;
+ }
+ return null;
+}
+export function consumeReservedBatch(store: Map<string, Authorization>, ids: string[], runId: string, hashes: string[]): boolean {
+ if (!(store instanceof Map)) throw new Error("research-control: invalid store");
+ if (!Array.isArray(ids) || ids.length === 0) throw new Error("research-control: invalid ids");
+ if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
+ if (!Array.isArray(hashes) || hashes.length === 0) throw new Error("research-control: invalid hashes");
+ const release = (): void => { for (const id of ids) { const a = store.get(id); if (a && !a.consumed) a.reserved = false; } };
+ if (ids.length !== hashes.length) { release(); return false; }
+ for (let i = 0; i < ids.length; i++) {
+  const auth = store.get(ids[i]);
+  if (!auth || typeof auth !== "object" || auth.consumed || auth.reserved !== true) { release(); return false; }
+  if (auth.runId !== runId || auth.kind !== "continue_research" || auth.actionHash !== hashes[i]) { release(); return false; }
+ }
+ for (const id of ids) {
+  const auth = store.get(id);
+  if (!auth || !consumeAuthorization(store, id, { runId: auth.runId, kind: "continue_research", actionHash: auth.actionHash })) { release(); return false; }
+  auth.reserved = false;
+ }
+ return true;
+}
+export function consumeReservedLaunch(store: Map<string, Authorization>, id: string, runId: string, expected: { sessionId: string; freezeId: string; dossierId: string; coverageHash: string }): boolean {
+ if (!(store instanceof Map)) throw new Error("research-control: invalid store");
+ if (typeof id !== "string" || id.length === 0) throw new Error("research-control: invalid id");
+ if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
+ for (const k of ["sessionId", "freezeId", "dossierId", "coverageHash"] as const) {
+  if (typeof expected?.[k] !== "string" || (expected[k] as string).length === 0) throw new Error("research-control: invalid launch binding");
+ }
+ const release = (): void => { const a = store.get(id); if (a && !a.consumed) a.reserved = false; };
+ const auth = store.get(id);
+ if (!auth || typeof auth !== "object" || auth.consumed || auth.reserved !== true) { release(); return false; }
+ if (auth.runId !== runId || auth.kind !== "launch_committee") { release(); return false; }
+ let b: unknown;
+ try { b = JSON.parse(auth.actionHash); } catch { release(); return false; }
+ if (!b || typeof b !== "object") { release(); return false; }
+ const row = b as Record<string, unknown>;
+ if (row.sessionId !== expected.sessionId || row.freezeId !== expected.freezeId || row.dossierId !== expected.dossierId || row.coverageHash !== expected.coverageHash) { release(); return false; }
+ if (!consumeAuthorization(store, id, { runId: auth.runId, kind: "launch_committee", actionHash: auth.actionHash })) { release(); return false; }
+ auth.reserved = false;
+ return true;
+}
+export function releaseReservations(store: Map<string, Authorization>, ids: string[]): void {
+ if (!(store instanceof Map)) throw new Error("research-control: invalid store");
+ for (const id of ids) {
+  const auth = store.get(id);
+  if (!auth || typeof auth !== "object" || auth.consumed) continue;
+  auth.reserved = false;
+ }
 }
 // Canonical finalize binding: answer plus exact committee under review.
 export function finalizeActionHash(answer: unknown, ctx: { sessionId: string; freezeId: string; stockbotHash: string; bullbotHash: string; bearbotHash: string }): string {

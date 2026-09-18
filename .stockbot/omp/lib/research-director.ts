@@ -44,6 +44,10 @@ const lastSeen = new Map<string, InspectSnapshot>();
 
 const ROLES = ["stockbot", "bullbot", "bearbot"] as const;
 const TERMINAL: Record<string, true> = { completed: true, failed: true, cancelled: true };
+// Job-scoped settled states (Python _TERMINAL_JOBS, service.py:139): timed_out
+// ends a job but never a session — TERMINAL above stays session-scoped
+// (Python session TERMINAL_STATUSES has no timed_out; do not merge them).
+const SOURCE_SETTLED: Record<string, true> = { completed: true, failed: true, cancelled: true, timed_out: true };
 
 const str = (v: unknown): string => (typeof v === "string" ? v : "");
 const strs = (v: unknown): string[] =>
@@ -405,7 +409,7 @@ export async function peekHasPriorWave(researchKey: string, dataRoot?: string, a
  if (!mem) return false;
  const snapshot = await inspect(mem.sessionId, dataRoot, asOf);
  if (strs(snapshot.session.freeze_ids).length > 0) return true;
- return snapshot.jobs.some((j) => str(j.job_type) === "source_agent");
+ return snapshot.jobs.some((j) => str(j.job_type) === "source_agent" && SOURCE_SETTLED[str(j.status)] === true);
 }
 // Evidence item shape. SEC search hits are navigation artifacts: a fact counts
 // only when the citation carries the canonical source_handle get_sec_document
@@ -502,7 +506,7 @@ async function freezeWave(sessionId: string, wave: number, dataRoot?: string, as
 // the exact-trio task batch (planTaskCall + index gate) is the single creation
 // point after a launch approval is consumed. No jobs are created here.
 function coveragePrompt(sessionId: string, freezeId: string, allowedIds: string, note = ""): string {
- return `${note}Evidence frozen for research session ${sessionId} (freeze ${freezeId}). Reload the freeze with research_read, then call research_judge_coverage with research_session_id and freeze_id. If COMPLETE, dispatch the committee as one task batch with exactly one stockbot, one bullbot, and one bearbot task. If INCOMPLETE, call research_judge_continuation or research_judge_candidate; only a TypeSafe candidate authorization permits another sec-agent round. Allowed evidence ids are: ${allowedIds}.`;
+ return `${note}Evidence frozen for research session ${sessionId} (freeze ${freezeId}). Reload the freeze with research_read, then call research_judge_coverage with research_session_id and freeze_id. If COMPLETE, dispatch the committee as one task batch with exactly one stockbot, one bullbot, and one bearbot task. If INCOMPLETE, call research_judge_continuation or research_judge_candidate with gap_id typesafe:coverage:${freezeId}:<VNN>; only a TypeSafe candidate authorization permits another sec-agent round. Allowed evidence ids are: ${allowedIds}.`;
 }
 async function promptTrio(sessionId: string, wave: number, dataRoot?: string, asOf?: string, note = ""): Promise<Advance> {
  let snapshot: InspectSnapshot;
@@ -849,6 +853,16 @@ export async function planTaskCall(ctx: TaskPlanContext, input: Json, dataRoot?:
    const jobType = JOB_TYPE[agentType] ?? agentType;
    let jobId = roleJobs.get(agentType) ?? "";
    let itemWave = wave;
+   if (!jobId && jobType === "source_agent") {
+    const reuse = snapshot.jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === itemWave && str(j.status) === "running")
+     ?? snapshot.jobs.find((j) => str(j.job_type) === "source_agent" && j.wave_id === itemWave && str(j.status) === "queued");
+    const rid = str(reuse?.job_id);
+    if (rid) {
+     jobId = rid;
+     const w = num(reuse?.wave_id);
+     if (w !== null) itemWave = w;
+    }
+   }
    if (!jobId) {
     const job = await rpc("research.job.start", { session_id: sessionId, type: jobType, wave_id: itemWave, budget: { owner: "omp" } }, dataRoot, asOf);
     jobId = str(job.job_id);

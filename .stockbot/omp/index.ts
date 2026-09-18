@@ -14,7 +14,7 @@ import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, p
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
 import { registerYoutubeAnalytics } from "./lib/youtube-analytics.ts";
 import { Text, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
-import { authorizationStore, candidateTaskHash, consumeCandidateBatch, consumeFinalizeBundle, consumeLaunchForFreeze, drainCommitteeAccepts, drainFinalize, drainRoleAccepts, finalizeActionHash, hasOpenRoleAccepts, hashAction, isExactRepeat } from "./lib/research-control.ts";
+import { authorizationStore, candidateTaskHash, consumeFinalizeBundle, consumeReservedBatch, consumeReservedLaunch, drainCommitteeAccepts, drainFinalize, drainRoleAccepts, finalizeActionHash, hasOpenRoleAccepts, hashAction, isExactRepeat, releaseReservations, reserveCandidateBatch, reserveLaunchForFreeze } from "./lib/research-control.ts";
 import { JUDGE_TOOL_NAMES, registerResearchJudgeTools } from "./tools/research-judge-tools.ts";
 import { REVIEW_TOOL_NAMES, registerOutputReviewTools } from "./tools/output-review-tools.ts";
 import { coverageHash, loadCommitteeState, loadCoverageForFreeze } from "./lib/typesafe/state.ts";
@@ -776,6 +776,9 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
       return { block: true, reason };
      }
     }
+    let secHashes: string[] = [];
+    let reservedCandidate: string[] | null = null;
+    let reservedLaunch: string | null = null;
     if (wantsCommittee) {
      const sortedAgents = taskItems.map((item) => item && typeof item === "object" ? String((item as Json).agent ?? "") : "").sort();
      if (!(taskItems.length === 3 && sortedAgents.join(",") === "bearbot,bullbot,stockbot")) {
@@ -807,17 +810,20 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
       blocks++;
       return { block: true, reason };
      }
-     const hashes = secItems.map((item) => candidateTaskHash((item as Json).candidate, (item as Json).task));
-     if (!consumeCandidateBatch(authorizationStore, runId, hashes)) {
+     secHashes = secItems.map((item) => candidateTaskHash((item as Json).candidate, (item as Json).task));
+     reservedCandidate = reserveCandidateBatch(authorizationStore, runId, secHashes);
+     if (!reservedCandidate) {
       emit({ event: "security_block", tool: event.toolName, reason });
       blocks++;
       return { block: true, reason };
      }
     }
+    let launchExpected: { sessionId: string; freezeId: string; dossierId: string; coverageHash: string } | null = null;
     if (wantsCommittee) {
      const reason = "Committee launch needs a TypeSafe coverage COMPLETE for this freeze; call research_judge_coverage with the session and freeze first.";
      const peek = await peekLatestFreeze(runId, dataRoots.get(runId), asOfs.get(runId));
      if (!peek) {
+      if (reservedCandidate) releaseReservations(authorizationStore, reservedCandidate);
       emit({ event: "security_block", tool: event.toolName, reason });
       blocks++;
       return { block: true, reason };
@@ -826,11 +832,15 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
      try {
       cov = await loadCoverageForFreeze(peek.sessionId, peek.freezeId, { dataRoot: dataRoots.get(runId), asOf: asOfs.get(runId) });
      } catch {
+      if (reservedCandidate) releaseReservations(authorizationStore, reservedCandidate);
       emit({ event: "security_block", tool: event.toolName, reason });
       blocks++;
       return { block: true, reason };
      }
-     if (!consumeLaunchForFreeze(authorizationStore, runId, { sessionId: peek.sessionId, freezeId: peek.freezeId, dossierId: cov.dossierId, coverageHash: coverageHash(cov.branch_map, cov.coverage) })) {
+     launchExpected = { sessionId: peek.sessionId, freezeId: peek.freezeId, dossierId: cov.dossierId, coverageHash: coverageHash(cov.branch_map, cov.coverage) };
+     reservedLaunch = reserveLaunchForFreeze(authorizationStore, runId, launchExpected);
+     if (!reservedLaunch) {
+      if (reservedCandidate) releaseReservations(authorizationStore, reservedCandidate);
       emit({ event: "security_block", tool: event.toolName, reason });
       blocks++;
       return { block: true, reason };
@@ -838,9 +848,25 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     }
     const plan = await planTaskCall({ researchKey: runId, toolCallId: event.toolCallId }, taskInput, dataRoots.get(runId), asOfs.get(runId));
     if (plan.block) {
+     if (reservedCandidate) releaseReservations(authorizationStore, reservedCandidate);
+     if (reservedLaunch) releaseReservations(authorizationStore, [reservedLaunch]);
      emit({ event: "security_block", tool: event.toolName, reason: plan.reason ?? "task spawn refused" });
      blocks++;
      return { block: true, reason: plan.reason ?? "Stockbot task gate: spawn refused" };
+    }
+    if (reservedCandidate) {
+     if (!consumeReservedBatch(authorizationStore, reservedCandidate, runId, secHashes)) {
+      emit({ event: "security_block", tool: event.toolName, reason: "Stockbot TypeSafe: authorization consume failed; blocked fail-closed." });
+      blocks++;
+      return { block: true, reason: "Stockbot TypeSafe: authorization consume failed; blocked fail-closed." };
+     }
+    }
+    if (reservedLaunch && launchExpected) {
+     if (!consumeReservedLaunch(authorizationStore, reservedLaunch, runId, launchExpected)) {
+      emit({ event: "security_block", tool: event.toolName, reason: "Stockbot TypeSafe: authorization consume failed; blocked fail-closed." });
+      blocks++;
+      return { block: true, reason: "Stockbot TypeSafe: authorization consume failed; blocked fail-closed." };
+     }
     }
     // Allowed committee launch: prior ACCEPTs graded older outputs, drain them.
     if (wantsCommittee) { drainRoleAccepts(authorizationStore, runId); drainCommitteeAccepts(authorizationStore, runId); drainFinalize(authorizationStore, runId); }
@@ -849,6 +875,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     // Durable gate audit: decision fields ride the task_planned sqlite row
     // (agents, hashes, round) — never task text, prompts, or evidence.
     // sourceSpawns is telemetry only: wave-1-free now derives from kernel history (peekHasPriorWave above), never this counter.
+    // Finalize path (consumeFinalizeBundle after all loads) and recordTaskResult unchanged.
     await emit({ event: "task_planned", tool: event.toolName, tool_call_id: event.toolCallId, agents: agentNames, task_hash: taskHash || undefined, source_round: sourceSpawns.get(runId) ?? 0 });
     if (plan.input) return { input: plan.input as Record<string, unknown> };
     return;

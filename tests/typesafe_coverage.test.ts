@@ -99,8 +99,8 @@ const dossierRec = (id: string, wave: number, tag: string): Req => ({
 	findings: [{ text: `finding ${tag}`, evidence_ids: [] }],
 	relationships: [],
 });
-const loadSession = (dossierIds: string[]): Req => ({
-	session_id: SID,
+const loadSession = (dossierIds: string[], sid: string = SID): Req => ({
+	session_id: sid,
 	objective: "objective o",
 	dossier_ids: dossierIds,
 	unresolved_questions: [],
@@ -230,5 +230,84 @@ test("candidate judgment receives the task in evaluated state", async () => {
 		expect(seen.state?.candidate).toEqual({ q: "A" });
 	} finally {
 		for (const [id, a] of authorizationStore) if (a.runId === run) authorizationStore.delete(id);
+	}
+});
+test("INCOMPLETE coverage records gaps and minted gap_id authorizes a candidate", async () => {
+	const sessionId = `sess-gap-${Date.now()}`;
+	const freezeId = "fz-gap";
+	const run = `run-gap-${Date.now()}`;
+	const covJudgments = Object.fromEntries(PACKS.coverage.map((id) => [id, { p_yes: id === "V14" ? 0.2 : 0.9, yes: yes(id === "V14" ? 0.2 : 0.9) }]));
+	const out = await runJudgeTool(
+		"research_judge_coverage",
+		{ research_session_id: sessionId, freeze_id: freezeId },
+		{
+			evaluator: new FakeEvaluator(covJudgments),
+			getRunId: () => run,
+			stateLoader: {
+				coverage: async () => ({ objective: "o", branch_map: {}, coverage: {}, claim_states: [], actionable: true, dossierId: "d-gap" }),
+				freeze: async () => { },
+			},
+		},
+	);
+	try {
+		expect(out?.details.verdict).not.toBe("COMPLETE");
+		expect((out?.details.failed as { id: string }[]).map((f) => f.id)).toEqual(["V14"]);
+		setResearchBridge(freezeBridge(loadSession([], sessionId), {
+			[`freeze:${freezeId}`]: { session_id: sessionId, freeze_id: freezeId, wave_id: 1 },
+		}));
+		const { loadCandidateGap } = await import("../.stockbot/omp/lib/typesafe/state.ts");
+		const gapId = `typesafe:coverage:${freezeId}:V14`;
+		const gap = await loadCandidateGap(sessionId, gapId);
+		expect(gap.gap).toBe(QUESTION_BANK.V14.instruction);
+		let threw = "";
+		try {
+			await loadCandidateGap(sessionId, `typesafe:coverage:${freezeId}:V09`);
+		} catch (e) {
+			threw = String((e as Error)?.message ?? e);
+		}
+		expect(threw).toBe("typesafe_untrusted_state");
+		const candJudgments = Object.fromEntries(PACKS.candidate.map((id) => [id, { p_yes: 0.9, yes: yes(0.9) }]));
+		const cand = await runJudgeTool(
+			"research_judge_candidate",
+			{ research_session_id: sessionId, gap_id: gapId, candidate: { q: "A" }, task: "faithful task" },
+			{ evaluator: new FakeEvaluator(candJudgments), getRunId: () => run, stateLoader: { candidate: async () => gap } },
+		);
+		expect(cand?.details.authorized).toBe(true);
+	} finally {
+		for (const [id, a] of authorizationStore) if (a.runId === run) authorizationStore.delete(id);
+		setResearchBridge(async () => ({ error: "bridge_unavailable" }));
+	}
+});
+test("minted gap rejects in a fresh session until coverage re-runs", async () => {
+	const run = `run-gapfresh-${Date.now()}`;
+	const covJudgments = Object.fromEntries(PACKS.coverage.map((id) => [id, { p_yes: id === "V09" ? 0.2 : 0.9, yes: yes(id === "V09" ? 0.2 : 0.9) }]));
+	const out = await runJudgeTool(
+		"research_judge_coverage",
+		{ research_session_id: "sess-gap-a", freeze_id: "fz-gap" },
+		{
+			evaluator: new FakeEvaluator(covJudgments),
+			getRunId: () => run,
+			stateLoader: {
+				coverage: async () => ({ objective: "o", branch_map: {}, coverage: {}, claim_states: [], actionable: true, dossierId: "d-gap" }),
+				freeze: async () => { },
+			},
+		},
+	);
+	try {
+		expect((out?.details.failed as { id: string }[]).map((f) => f.id)).toEqual(["V09"]);
+		setResearchBridge(freezeBridge(loadSession([], "sess-gap-fresh"), {
+			"freeze:fz-gap": { session_id: "sess-gap-fresh", freeze_id: "fz-gap", wave_id: 1 },
+		}));
+		const { loadCandidateGap } = await import("../.stockbot/omp/lib/typesafe/state.ts");
+		let threw = "";
+		try {
+			await loadCandidateGap("sess-gap-fresh", "typesafe:coverage:fz-gap:V09");
+		} catch (e) {
+			threw = String((e as Error)?.message ?? e);
+		}
+		expect(threw).toBe("typesafe_untrusted_state");
+	} finally {
+		for (const [id, a] of authorizationStore) if (a.runId === run) authorizationStore.delete(id);
+		setResearchBridge(async () => ({ error: "bridge_unavailable" }));
 	}
 });

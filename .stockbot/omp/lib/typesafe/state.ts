@@ -36,6 +36,30 @@ export interface ContinuationState {
  current_conclusions: { text: string; evidence_ids: string[] }[];
 }
 export interface CandidateGap { objective: string; gap: string }
+interface CoverageGap { sessionId: string; freezeId: string; criterion: string; pYes: number; reason: string }
+const COVERAGE_PREFIX = "typesafe:coverage:";
+const COVERAGE_CRITERION = /^V(0[1-9]|1[0-9]|20)$/;
+const coverageGaps = new Map<string, CoverageGap>();
+const coverageKey = (sessionId: string, freezeId: string, criterion: string): string => `${sessionId}::${freezeId}::${criterion}`;
+export function recordCoverageGaps(sessionId: string, freezeId: string, failed: { id: string; pYes: number; reason: string }[]): void {
+ for (const key of [...coverageGaps.keys()]) {
+  if (key.startsWith(`${sessionId}::${freezeId}::`)) coverageGaps.delete(key);
+ }
+ for (const f of failed) {
+  if (!COVERAGE_CRITERION.test(f.id)) continue;
+  coverageGaps.set(coverageKey(sessionId, freezeId, f.id), { sessionId, freezeId, criterion: f.id, pYes: f.pYes, reason: f.reason });
+ }
+}
+function lookupCoverageGap(sessionId: string, gapId: string): CoverageGap | null {
+ if (!gapId.startsWith(COVERAGE_PREFIX)) return null;
+ const rest = gapId.slice(COVERAGE_PREFIX.length);
+ const sep = rest.lastIndexOf(":");
+ if (sep <= 0) return null;
+ const freezePart = rest.slice(0, sep);
+ const criterion = rest.slice(sep + 1);
+ if (!freezePart || !COVERAGE_CRITERION.test(criterion)) return null;
+ return coverageGaps.get(coverageKey(sessionId, freezePart, criterion)) ?? null;
+}
 export interface RoleOutputState {
  role: string;
  objective: string;
@@ -291,8 +315,15 @@ export async function loadCandidateGap(sessionId: string, gapId: string, deps: S
  nonEmptyId(sessionId);
  nonEmptyId(gapId);
  const session = await inspectSession(sessionId, deps);
- // gap_id is either a coverage artifact_id (direct read) or exact gap text
- // (dossier open_question / session unresolved_question); else throw.
+ // gap_id is a TypeSafe-minted failed coverage criterion (bank-owned text),
+ // a coverage artifact_id (direct read), or exact gap text (dossier
+ // open_question / session unresolved_question); else throw.
+ if (gapId.startsWith(COVERAGE_PREFIX)) {
+  const hit = lookupCoverageGap(sessionId, gapId);
+  if (!hit) throw bad();
+  await readRecord(sessionId, "freeze", hit.freezeId, deps).then((rec) => requireId(rec, sessionId, "freeze_id", hit.freezeId));
+  return { objective: objectiveOf(session), gap: hit.reason };
+ }
  try {
   const rec = await readRecord(sessionId, "coverage", gapId, deps);
   requireId(rec, sessionId, "artifact_id", gapId);

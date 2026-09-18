@@ -2775,8 +2775,10 @@ test("director plans sec-agent with stable name, context, and omp-owned job", as
 	const starts: Json[] = [];
 	const ops: ResumeOp[] = [];
 	const inner = resumeBridge({
+		// No pre-existing job: planTaskCall starts an omp-owned source job.
+		// (With a same-wave running source job present it reuses it instead.)
 		session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }),
-		jobs: [{ job_id: "job:src-old", job_type: "source_agent", wave_id: 1, status: "running" }],
+		jobs: [],
 		freezes: {},
 	}, ops);
 	setResearchBridge(async (req: Json) => {
@@ -2803,6 +2805,30 @@ test("director plans sec-agent with stable name, context, and omp-owned job", as
 	expect(starts[0].type).toBe("source_agent");
 	expect(starts[0].wave_id).toBe(1);
 	expect(starts[0].budget).toMatchObject({ owner: "omp" });
+});
+test("director reuses the pre-created running wave-1 source job", async () => {
+	const SID = "rs:task-sec-reuse";
+	const starts: Json[] = [];
+	const ops: ResumeOp[] = [];
+	const inner = resumeBridge({
+		session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }),
+		jobs: [{ job_id: "job:src-old", job_type: "source_agent", wave_id: 1, status: "running" }],
+		freezes: {},
+	}, ops);
+	setResearchBridge(async (req: Json) => {
+		if (req.op === "research.job.start") starts.push(req);
+		return inner(req);
+	});
+	await resumeResearch(SID, "run-task-sec-reuse");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-sec-reuse", toolCallId: "call-sec-reuse-1" },
+		{ tasks: [{ agent: "sec-agent", task: "fetch SEC filings" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	const tasks = (plan.input as Json).tasks as Json[];
+	expect(String(tasks[0].name)).toBe("sec-agent-obsrcold");
+	expect(String(tasks[0].task)).toContain("research_job_id=job:src-old");
+	expect(starts.length).toBe(0);
 });
 
 test("director blocks unknown agent and committee roles in source stage", async () => {
@@ -3176,6 +3202,18 @@ test("sec-agent submit-completed skips the no-submit fail; direct return fails",
 	expect((failed as unknown as Json).category).toBe("model_output_failure");
 	expect(String((failed as unknown as Json).message)).toContain("without submitting a source result");
 });
+test("pre-created RUNNING wave-1 source is wave-1-free at the director", async () => {
+	const SID = "rs:prior-wave-running";
+	setResearchBridge(async (req: Json) => {
+		if (req.op === "research.session.inspect")
+			return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "running" }], pending_next_action: null, latest_freeze: null } };
+		return { error: "unknown_op" };
+	});
+	const run = `run-prior-running-${Date.now()}`;
+	await resumeResearch(SID, run);
+	const { peekHasPriorWave } = await import("../.stockbot/omp/lib/research-director.ts");
+	expect(await peekHasPriorWave(run)).toBe(false);
+});
 test("tool_result handler records planned task outcomes", async () => {
 	const SID = "rs:task-handler-record";
 	const kinds: string[] = [];
@@ -3306,22 +3344,29 @@ test("handler blocks wave-2 sec-agent without candidate and on task swap", async
 		await stockbotExtension(pi);
 		const main = { sessionManager: { id: "main" } };
 		await handlers["session_start"]({}, main);
+		const started: Json[] = [];
 		setResearchBridge(async (req: Json) => {
 			if (req.op === "research.session.inspect")
-				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: wave1jobDone ? [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "completed" }] : [], pending_next_action: null, latest_freeze: null } };
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: wave1jobDone ? [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "completed" }] : [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "running" }], pending_next_action: null, latest_freeze: null } };
 			if (req.op === "research.session.create")
 				return { result: { session_id: SID } };
-			if (req.op === "research.job.start")
+			if (req.op === "research.job.start") {
+				started.push(req);
 				return { result: { job_id: "job:src-1", session_id: SID, status: "running", wave_id: 1, job_type: "source_agent" } };
+			}
 			if (req.op === "research.job.runtime") return { result: { job_id: "job:src-1" } };
 			return { error: "unknown_op" };
 		});
 		await commands["research"].handler("gate wave2 probe", {});
+		started.length = 0;
 		const wave1 = (await handlers["tool_call"](
 			{ toolName: "task", toolCallId: "call-wave2-1", input: { tasks: [{ agent: "sec-agent", task: "fetch wave one" }] } },
 			main,
 		)) as unknown as Record<string, unknown>;
 		expect(wave1.input).toBeDefined();
+		const wave1tasks = (wave1.input as Record<string, unknown>).tasks as Json[];
+		expect(String(wave1tasks[0].task)).toContain("research_job_id=job:src-1");
+		expect(started.length).toBe(0);
 		wave1jobDone = true;
 		await (handlers["tool_result"] as (event: unknown, ctx: unknown) => Promise<unknown>)(
 			{ toolName: "task", toolCallId: "call-wave2-1", isError: false, details: { results: [{ exit_code: 0 }] } },
@@ -3589,7 +3634,71 @@ test("handler mixed sec-agent plus malformed trio spends neither approval", asyn
 		expect(mixed.block).toBe(true);
 		expect(String(mixed.reason)).toContain("exact trio");
 		expect(authorizationStore.get(issued[0])?.consumed).toBe(false);
+		expect(authorizationStore.get(issued[0])?.reserved).toBe(false);
 		expect(authorizationStore.get(issued[1])?.consumed).toBe(false);
+		expect(authorizationStore.get(issued[1])?.reserved).toBe(false);
+	} finally {
+		for (const id of issued) authorizationStore.delete(id);
+		setResearchBridge(async () => ({ error: "bridge_unavailable" }));
+		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
+		else process.env.STOCKBOT_DATA_DIR = prevRoot;
+		if (prevRun === undefined) delete process.env.STOCKBOT_RUN_ID;
+		else process.env.STOCKBOT_RUN_ID = prevRun;
+		resetMainSessionIdentity();
+	}
+});
+test("handler releases launch auth and burns nothing else when committee creation fails", async () => {
+	const SID = "rs:gate-release-fail";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const DOS = "dossier-release-1";
+	const knownRun = `run-gate-release-${Date.now()}`;
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	const prevRoot = process.env.STOCKBOT_DATA_DIR;
+	const prevRun = process.env.STOCKBOT_RUN_ID;
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-gate-release-"));
+	process.env.STOCKBOT_DATA_DIR = join(dir, "data");
+	process.env.STOCKBOT_RUN_ID = knownRun;
+	const issued: string[] = [];
+	const coverage = { covered_branches: ["ownership"], ownership: "searched" };
+	const findings = [{ text: "f1", evidence_ids: [E1] }];
+	const branchMap = { dossier_id: DOS, covered_branches: ["ownership"], relationships: [], findings };
+	const chash = hashAction({ branch_map: branchMap, coverage });
+	try {
+		const { handlers, commands, pi } = fakePiHost();
+		await stockbotExtension(pi);
+		const main = { sessionManager: { id: "main" } };
+		await handlers["session_start"]({}, main);
+		const freezeRec = { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] };
+		const dossierRec = { dossier_id: DOS, session_id: SID, wave_id: 1, coverage, findings, relationships: [], open_questions: [] };
+		setResearchBridge(async (req: Json) => {
+			if (req.op === "research.session.create") return { result: { session_id: SID } };
+			if (req.op === "research.session.inspect")
+				return { result: { session: resumeSession(SID, { status: "analyzing", evidence_ids: [E1], freeze_ids: [F1], committee_runs: [], current_wave: 1, objective: "probe", dossier_ids: [DOS] }), jobs: [{ job_id: "job:src-1", job_type: "source_agent", wave_id: 1, status: "completed" }], pending_next_action: null, latest_freeze: freezeRec } };
+			if (req.op === "tool.invoke" && req.name === "research_read") {
+				const args = (req.arguments ?? {}) as Json;
+				if (args.kind === "freeze" && args.resource_id === F1) return { result: { record: freezeRec } };
+				if (args.kind === "dossier" && args.resource_id === DOS) return { result: { record: dossierRec } };
+				return { error: "unknown_resource" };
+			}
+			if (req.op === "research.committee.create") return { error: "committee_down" };
+			if (req.op === "research.job.start") return { result: { job_id: "job:src-2", session_id: SID, status: "running", wave_id: 2, job_type: "source_agent" } };
+			if (req.op === "research.job.runtime") return { result: { job_id: "job:src-2" } };
+			return { error: "unknown_op" };
+		});
+		await commands["research"].handler("release probe", {});
+		const candidate = { q: "wave two gap" };
+		const secTask = "fetch wave two";
+		issued.push(issueAuthorization(knownRun, "continue_research", candidateTaskHash(candidate, secTask)).id);
+		issued.push(issueAuthorization(knownRun, "launch_committee", launchCommitteeHash({ sessionId: SID, freezeId: F1, dossierId: DOS, coverageHash: chash })).id);
+		const trio = { tasks: [{ agent: "stockbot", task: "a" }, { agent: "bullbot", task: "b" }, { agent: "bearbot", task: "c" }] };
+		const blocked = (await handlers["tool_call"]({ toolName: "task", toolCallId: "call-release-0", input: trio }, main)) as unknown as Record<string, unknown>;
+		expect(blocked.block).toBe(true);
+		expect(authorizationStore.get(issued[0])?.consumed).toBe(false);
+		expect(authorizationStore.get(issued[0])?.reserved).toBe(false);
+		expect(authorizationStore.get(issued[1])?.consumed).toBe(false);
+		expect(authorizationStore.get(issued[1])?.reserved).toBe(false);
 	} finally {
 		for (const id of issued) authorizationStore.delete(id);
 		setResearchBridge(async () => ({ error: "bridge_unavailable" }));

@@ -19,7 +19,7 @@ import { buildAudit } from "../lib/typesafe/audit.ts";
 import { authorizeCandidate, judgeContinuation, judgeCoverage, judgeEvidence, resolveClaim } from "../lib/typesafe/decisions.ts";
 import { TypeSafeEvaluator } from "../lib/typesafe/evaluator.ts";
 import { PACKS, QUESTION_BANK } from "../lib/typesafe/questions.ts";
-import { coverageHash, loadCandidateGap, loadClaimState, loadContinuationState, loadCoverageForFreeze, loadEvidenceState, requireFreeze } from "../lib/typesafe/state.ts";
+import { coverageHash, loadCandidateGap, loadClaimState, loadContinuationState, loadCoverageForFreeze, loadEvidenceState, recordCoverageGaps, requireFreeze } from "../lib/typesafe/state.ts";
 import { YES_THRESHOLD } from "../lib/typesafe/thresholds.ts";
 import type { JudgmentMap, JudgeQuestion, SystemOneEvaluator } from "../lib/typesafe/types.ts";
 
@@ -151,7 +151,14 @@ async function coverageTool(args: unknown, deps: JudgeToolDeps): Promise<NativeT
   const audit = buildAudit({ runId, phase: "coverage", questions: results, result: verdict, model });
   const auth = verdict === "COMPLETE" ? issueAuthorization(runId, "launch_committee", launchCommitteeHash({ sessionId, freezeId, dossierId: st.dossierId, coverageHash: coverageHash(st.branch_map, st.coverage) })) : undefined;
   const authJson = auth ? { authorization_id: auth.id, kind: auth.kind satisfies AuthKind } : undefined;
-  return { text: `coverage ${verdict}`, details: { verdict, questions: results, audit, ...(authJson ? { authorization: authJson } : {}) } };
+  if (verdict === "COMPLETE") {
+   recordCoverageGaps(sessionId, freezeId, []);
+   return { text: `coverage ${verdict}`, details: { verdict, questions: results, audit, failed: [], ...(authJson ? { authorization: authJson } : {}) } };
+  }
+  const failed = PACKS.coverage.filter((id) => !results[id]?.yes).map((id) => ({ id, p_yes: results[id]?.p_yes ?? 0, reason: QUESTION_BANK[id].instruction }));
+  recordCoverageGaps(sessionId, freezeId, failed.map((f) => ({ id: f.id, pYes: f.p_yes, reason: f.reason })));
+  const ids = failed.map((f) => f.id).join(",");
+  return { text: `coverage ${verdict} (failed ${ids}; call research_judge_candidate with gap_id typesafe:coverage:${freezeId}:<VNN>)`, details: { verdict, questions: results, audit, failed, ...(authJson ? { authorization: authJson } : {}) } };
  } catch {
   return { text: "TypeSafe unavailable: coverage judgment failed. Transition blocked.", details: { error: "coverage_judgment_failed" }, isError: true };
  }
@@ -223,7 +230,7 @@ export function registerResearchJudgeTools(pi: ExtensionAPI, deps: JudgeToolDeps
  };
  tool("research_judge_evidence", "Judge one evidence item against its claim (E01-E16). Returns usable/unusable plus raw probabilities.", { research_session_id: anyProp("Research session id"), freeze_id: anyProp("Evidence freeze id"), evidence_id: anyProp("Evidence record id") });
  tool("research_judge_claim", "Resolve one claim over its evidence set (C01-C16). Returns SUPPORTED/CONTRADICTED/MIXED/UNKNOWN_* plus probabilities.", { research_session_id: anyProp("Research session id"), freeze_id: anyProp("Evidence freeze id"), claim_id: anyProp("Claim text: must exactly match kernel-grounded claim text") });
- tool("research_judge_coverage", "Judge frozen coverage for a session and freeze (V01-V20, all required). The branch-map dossier is derived from the freeze wave, never model-selected. COMPLETE authorizes the exact trio once.", { research_session_id: anyProp("Research session id"), freeze_id: anyProp("Evidence freeze id") });
+ tool("research_judge_coverage", "Judge frozen coverage for a session and freeze (V01-V20, all required). The branch-map dossier is derived from the freeze wave, never model-selected. COMPLETE authorizes the exact trio once. INCOMPLETE names failed V ids; each becomes a candidate gap typesafe:coverage:<freeze_id>:<VNN>.", { research_session_id: anyProp("Research session id"), freeze_id: anyProp("Evidence freeze id") });
  tool("research_judge_continuation", "Decide whether another research round is justified (N01-N04 all required). Advisory only; issues no authorization — call research_judge_candidate to authorize.", { research_session_id: anyProp("Research session id") });
- tool("research_judge_candidate", "Authorize one candidate investigation (N07-N12, N13 scope fidelity is required: the task must faithfully implement the candidate.). Authorizes continue_research once on pass. Post-first-round sec-agent task items must echo the approved candidate and full task text verbatim under item.candidate and item.task; rephrased candidates or altered instructions need a fresh candidate judgment.", { research_session_id: anyProp("Research session id"), gap_id: anyProp("Material gap id or exact gap text"), candidate: anyProp("Proposed investigation OMP generated"), task: anyProp("Full sec-agent task text the item must echo verbatim") });
+ tool("research_judge_candidate", "Authorize one candidate investigation (N07-N12, N13 scope fidelity is required: the task must faithfully implement the candidate.). Authorizes continue_research once on pass. Post-first-round sec-agent task items must echo the approved candidate and full task text verbatim under item.candidate and item.task; rephrased candidates or altered instructions need a fresh candidate judgment. TypeSafe-discovered gaps: use gap_id typesafe:coverage:<freeze_id>:<VNN> for a failed criterion named by research_judge_coverage.", { research_session_id: anyProp("Research session id"), gap_id: anyProp("Material gap id or exact gap text"), candidate: anyProp("Proposed investigation OMP generated"), task: anyProp("Full sec-agent task text the item must echo verbatim") });
 }
