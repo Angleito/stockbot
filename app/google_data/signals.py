@@ -516,12 +516,11 @@ def _signal_id_for(table: object, period: object, geo: object, term: object, lis
 
 def _warehouse_records(data_root: Path | str | None = None) -> list[dict[str, object]]:
     try:
-        from ..storage import parquet as _parquet
+        from ..storage import duckdb as _duckdb
     except ImportError:
         return []
-    root = _resolve_root(data_root) / "parquet"
     try:
-        return _parquet.read_table("google_observations", root).to_pylist()
+        return _duckdb.query("SELECT * EXCLUDE (_dedup, _tsraw) FROM google_observations", data_root=_resolve_root(data_root))
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return []
 
@@ -652,17 +651,17 @@ def _persist_migration_rows(
     rows: list[dict[str, object]],
     feature_rows: list[dict[str, object]],
     data_root: Path | str | None,
-    _parquet: _ParquetWriter,
+    _writer: _ParquetWriter,
 ) -> int | None:
     written = 0
     if rows:
         try:
-            written = _parquet.write_rows("google_observations", rows, root=_resolve_root(data_root) / "parquet")
+            written = _writer.insert_ignore("google_observations", rows, data_root=_resolve_root(data_root))
         except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             return None
     if feature_rows:
         try:
-            _parquet.write_rows("google_signal_features", feature_rows, root=_resolve_root(data_root) / "parquet")
+            _writer.insert_ignore("google_signal_features", feature_rows, data_root=_resolve_root(data_root))
         except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
             pass
     return written
@@ -683,7 +682,7 @@ def migrate_jsonl_once(data_root: Path | str | None = None) -> int:
     JSONL is not extended afterwards; it stays as a read-only legacy trail.
     """
     try:
-        from ..storage import parquet as _parquet
+        from ..storage import duckdb as _store
     except ImportError:
         _backfill_legacy_features(data_root)
         return 0
@@ -692,7 +691,7 @@ def migrate_jsonl_once(data_root: Path | str | None = None) -> int:
         _backfill_legacy_features(data_root)
         return 0
     rows, feature_rows = _collect_migration_rows(store)
-    written = _persist_migration_rows(rows, feature_rows, data_root, _parquet)
+    written = _persist_migration_rows(rows, feature_rows, data_root, _store)
     if written is None:
         return 0
     _backfill_legacy_features(data_root)
@@ -709,8 +708,15 @@ def _signal_identity(row: dict[str, object]) -> tuple[object, object, object, ob
 
 
 def _signal_payload(row: dict[str, object]) -> tuple[dict[str, object], list[object], str]:
-    metrics: dict[str, object] = as_dict(json_from_text(row.get("metrics_json"), what="metrics_json"), what="metrics")
-    evidence: list[object] = as_list(json_from_text(row.get("evidence_json"), what="evidence_json"), what="evidence")
+    metrics_raw, evidence_raw = row.get("metrics_json"), row.get("evidence_json")
+    metrics: dict[str, object] = as_dict(
+        json_from_text(metrics_raw if isinstance(metrics_raw, str) else str(metrics_raw), what="metrics_json"),
+        what="metrics",
+    )
+    evidence: list[object] = as_list(
+        json_from_text(evidence_raw if isinstance(evidence_raw, str) else str(evidence_raw), what="evidence_json"),
+        what="evidence",
+    )
     return metrics, evidence, str(row.get("collector_version") or "1")
 
 
@@ -774,7 +780,7 @@ def _latest_versions(data_root: Path | str | None, cutoff: str | None) -> dict[s
             continue
         record = _record_to_signal(row)
         known = str(record.get("known_at", ""))
-        if cutoff is not None and known > cutoff:
+        if cutoff is not None and _parse_instant(known) > _parse_instant(str(cutoff)):
             continue
         key = _version_key(record, row)
         sid = str(record.get("signal_id") or "")
@@ -786,11 +792,11 @@ def _latest_versions(data_root: Path | str | None, cutoff: str | None) -> dict[s
 
 def _load_feature_rows(data_root: Path | str | None) -> list[dict[str, object]]:
     try:
-        from ..storage import parquet as _parquet_q
+        from ..storage import duckdb as _duckdb_q
     except ImportError:
         return []
     try:
-        return _parquet_q.read_table("google_signal_features", _resolve_root(data_root) / "parquet").to_pylist()
+        return _duckdb_q.query("SELECT * EXCLUDE (_dedup, _tsraw) FROM google_signal_features", data_root=_resolve_root(data_root))
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return []
 
@@ -837,10 +843,24 @@ def _frow_scope_ok(frow: object, feature_scope_hash: str | None) -> bool:
     return isinstance(frow, dict) and str(frow.get("feature_scope_hash") or "") == feature_scope_hash
 
 
+def _parse_instant(value: str) -> tuple[float, str]:
+    """(epoch seconds, raw) for cutoff compare; unparseable sorts by raw text."""
+    try:
+        moment = datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return (float("inf"), value)
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return (moment.timestamp(), value)
+
+
 def _frow_cutoff_ok(frow: object, cutoff: str | None) -> bool:
     if cutoff is None:
         return True
-    return isinstance(frow, dict) and not str(frow.get("calculated_at") or "") > cutoff
+    if not isinstance(frow, dict):
+        return False
+    stamp = str(frow.get("calculated_at") or "")
+    return _parse_instant(stamp) <= _parse_instant(str(cutoff))
 
 
 def _feature_row_matches(frow: object, oid: str, cutoff: str | None, feature_scope_hash: str | None) -> bool:
@@ -854,14 +874,17 @@ def _feature_row_matches(frow: object, oid: str, cutoff: str | None, feature_sco
 
 
 def _frow_scope_text(frow: dict[str, object]) -> dict[str, object] | None:
-    scope = json_from_text(frow.get("feature_scope_json"), what="feature_scope_json")
+    raw = frow.get("feature_scope_json")
+    scope = json_from_text(raw if isinstance(raw, str) else str(raw), what="feature_scope_json")
     return scope if isinstance(scope, dict) else None
 
 
 class _ParquetWriter(Protocol):
-    """Structural seam: storage.parquet module or test double with write_rows."""
+    """Structural seam: storage.duckdb module or test double with insert_ignore."""
 
-    def write_rows(self, name: str, rows: list[dict[str, object]], root: Path | None = None) -> int: ...
+    def insert_ignore(
+        self, table: str, rows: list[dict[str, object]], data_root: Path | None = None
+    ) -> int: ...
 
 
 class _TrendsInputs(Protocol):
@@ -933,7 +956,8 @@ def _available_scopes(by_scope: dict[str, list[dict[str, object]]]) -> list[dict
     available: list[dict[str, object]] = []
     for scope_hash in sorted(by_scope):
         rep = _pick_feature_row(by_scope[scope_hash])
-        scope = json_from_text(rep.get("feature_scope_json"), what="feature_scope_json")
+        raw = rep.get("feature_scope_json")
+        scope = json_from_text(raw if isinstance(raw, str) else str(raw), what="feature_scope_json")
         if not isinstance(scope, dict):
             continue
         available.append(
@@ -962,9 +986,13 @@ def _attach_features(
     flat = [r for rows in by_scope.values() for r in rows]
     best = _best_scoped_row(flat, by_scope, feature_scope_hash)
     if best is not None:
-        decoded = json_from_text(best.get("features_json"), what="features_json")
+        raw = best.get("features_json")
+        decoded = json_from_text(raw if isinstance(raw, str) else str(raw), what="features_json")
         record["features"] = decoded if isinstance(decoded, dict) else None
-        scope_decoded = json_from_text(best.get("feature_scope_json"), what="feature_scope_json")
+        scope_raw = best.get("feature_scope_json")
+        scope_decoded = json_from_text(
+            scope_raw if isinstance(scope_raw, str) else str(scope_raw), what="feature_scope_json"
+        )
         record["feature_scope"] = scope_decoded
         record["feature_scope_hash"] = best.get("feature_scope_hash")
         record["feature_calculated_at"] = best.get("calculated_at")

@@ -687,14 +687,16 @@ def test_empty_accounts_still_persists_empty_snapshot(data_root: Path) -> None:
 
 
 def test_persisted_rows_contain_no_oauth_data(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.storage import duckdb
+
     captured: list[tuple[str, list[dict[str, object]]]] = []
-    real_write_rows = parquet.write_rows
+    real_insert = duckdb.insert_ignore
 
-    def spy(name: str, rows: list[dict[str, object]], root: Path | None = None) -> int:
-        captured.append((name, list(rows)))
-        return real_write_rows(name, rows, root=root)
+    def spy(table: str, rows: list[dict[str, object]], data_root: Path | None = None) -> int:
+        captured.append((table, list(rows)))
+        return real_insert(table, rows, data_root=data_root)
 
-    monkeypatch.setattr(parquet, "write_rows", spy)
+    monkeypatch.setattr(duckdb, "insert_ignore", spy)
     _run_sync(data_root)
     forbidden = ("token", "oauth", "secret", "access", "refresh", "authorization")
     assert captured

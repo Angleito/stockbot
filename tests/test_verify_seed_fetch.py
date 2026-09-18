@@ -97,6 +97,8 @@ def _main_mocks(
 
 
 def test_all_present_no_fetch_and_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.storage import duckdb
+
     durable = tmp_path / "durable"
     _seed_all(durable)
 
@@ -107,11 +109,14 @@ def test_all_present_no_fetch_and_copy(tmp_path: Path, monkeypatch: pytest.Monke
     assert v.ensure_finra_fixture(durable, ["get_short_interest_leaderboard"]) == 0
     store = tmp_path / "store"
     v.seed_finra_fixture(store, durable)
-    assert (store / "parquet" / "short_interest").is_dir()
-    assert not (store / "parquet" / "short_interest").is_symlink()
+    rows = duckdb.query("SELECT COUNT(*) AS n FROM short_interest", data_root=store)
+    assert rows and rows[0]["n"] == 1
+    assert not (store / "warehouse.duckdb").is_symlink()
 
 
 def test_missing_fetch_called_once_then_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.storage import duckdb
+
     durable = tmp_path / "durable"
     _seed_all(durable)
     monkeypatch.setenv("PI_VERIFY_SETTLEMENT_DATE", SETTLEMENT)
@@ -119,17 +124,44 @@ def test_missing_fetch_called_once_then_copy(tmp_path: Path, monkeypatch: pytest
 
     def _fake(d: Path, s: str) -> None:
         calls.append((d, s))
-        target = d / "parquet" / "financial_facts"
-        target.mkdir(parents=True, exist_ok=True)
-        (target / "fetched.marker").write_text("fetched")
+        duckdb.insert_ignore(
+            "financial_facts",
+            [
+                {
+                    "fact_id": "fetched",
+                    "entity_id": "sec:cik:0000000001",
+                    "security_id": "sec:equity:0000000001",
+                    "concept": "EntityCommonStockSharesOutstanding",
+                    "original_concept": "dei:EntityCommonStockSharesOutstanding",
+                    "value": 1.0,
+                    "unit": "shares",
+                    "duration_type": "instant",
+                    "period_end": "2026-08-01",
+                    "period_start": None,
+                    "fiscal_year": None,
+                    "fiscal_period": None,
+                    "filed_at": "2026-08-02",
+                    "accession": "fetched",
+                    "frame": None,
+                    "known_at": "2026-08-02",
+                    "retrieved_at": "2026-08-10T12:00:00Z",
+                    "source_url": "u",
+                    "source_record_id": "cik0000000001",
+                    "content_hash": "fetched",
+                    "parser_version": "sec-companyfacts-v6",
+                }
+            ],
+            data_root=d,
+        )
 
-    shutil.rmtree(durable / "parquet" / "financial_facts")
+    duckdb.execute("DELETE FROM financial_facts", data_root=durable)
     monkeypatch.setattr(v, "fetch_finra_fixture", _fake)
     assert v.ensure_finra_fixture(durable, ["get_short_interest_leaderboard"]) == 0
     assert calls == [(durable, SETTLEMENT)]
     store = tmp_path / "store"
     v.seed_finra_fixture(store, durable)
-    assert (store / "parquet" / "financial_facts" / "fetched.marker").read_text() == "fetched"
+    rows = duckdb.query("SELECT fact_id FROM financial_facts", data_root=store)
+    assert [r["fact_id"] for r in rows] == ["fetched"]
 
 
 def test_missing_env_unset_main_fails_without_matrix(
@@ -137,9 +169,11 @@ def test_missing_env_unset_main_fails_without_matrix(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from app.storage import duckdb
+
     durable = tmp_path / "durable"
     _seed_all(durable)
-    shutil.rmtree(durable / "parquet" / "securities")
+    duckdb.execute("DELETE FROM securities", data_root=durable)
     monkeypatch.delenv("PI_VERIFY_SETTLEMENT_DATE", raising=False)
     matrix_calls = _main_mocks(monkeypatch, durable, tmp_path)
     assert v.main() != 0
@@ -152,9 +186,11 @@ def test_fetch_failure_main_fails_without_matrix(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
+    from app.storage import duckdb
+
     durable = tmp_path / "durable"
     _seed_all(durable)
-    shutil.rmtree(durable / "parquet" / "short_interest")
+    duckdb.execute("DELETE FROM short_interest", data_root=durable)
     monkeypatch.setenv("PI_VERIFY_SETTLEMENT_DATE", SETTLEMENT)
 
     def _boom(_d: Path, _s: str) -> None:

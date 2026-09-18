@@ -379,6 +379,17 @@ def _check_window(offset: str | float, max_chars: str | float | None) -> tuple[i
     return offset, max_chars
 
 
+def _iso_stamp(value: object) -> object:
+    """Warehouse date/datetime to ISO text; non-dates pass through."""
+    from datetime import date, datetime
+
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
 def _bounded_response(
     *,
     accession_no: str,
@@ -426,9 +437,9 @@ def _bounded_response(
         "total_chars": total,
         "more_available": end < total,
         "source_url": source_url,
-        "filed_at": filed_at,
-        "known_at": known_at,
-        "retrieved_at": retrieved_at,
+        "filed_at": _iso_stamp(filed_at),
+        "known_at": _iso_stamp(known_at),
+        "retrieved_at": _iso_stamp(retrieved_at),
         "cache_hit": cache_hit,
         "cache_type": cache_type,
     }
@@ -457,8 +468,8 @@ def _bounded_response(
         raw_view=raw_view,
         available_sections=available_sections,
         source_url=source_url,
-        filed_at=filed_at,
-        known_at=known_at,
+        filed_at=_iso_stamp(filed_at),
+        known_at=_iso_stamp(known_at),
         content_hash=content_hash,
         source_content_hash=source_content_hash,
         offset=offset,

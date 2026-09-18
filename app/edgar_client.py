@@ -19,6 +19,7 @@ from .config import get_data_root, init_config
 os.environ.setdefault("EDGAR_LOCAL_DATA_DIR", str(get_data_root() / "edgar"))
 
 from edgar import Company, Filing
+from edgar.urls import build_archive_url, build_company_facts_url
 
 from . import cache
 
@@ -79,20 +80,22 @@ def _result_content_hash(payload: dict[str, object]) -> str:
 
 
 def _companyfacts_url(cik: object) -> str | None:
+    """Provenance URL for a CIK via EdgarTools (mirror-aware, None when bad)."""
     if isinstance(cik, (int, float, str, bytes)):
         try:
-            return f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json"
+            return build_company_facts_url(int(cik))
         except TypeError, ValueError:
             return None
     return None
 
 
 def _filing_dir_url(cik: object, accession: object) -> str | None:
+    """Filing-directory URL via EdgarTools (mirror-aware, None when bad)."""
     if not isinstance(cik, (int, float, str, bytes)):
         return None
     try:
         acc = str(accession).replace("-", "")
-        return f"https://www.sec.gov/Archives/edgar/data/{int(cik)}/{acc}/"
+        return build_archive_url(f"data/{int(cik)}/{acc}/")
     except TypeError, ValueError:
         return None
 

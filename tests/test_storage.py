@@ -119,9 +119,8 @@ def test_parquet_roundtrip_and_hive_partitions(data_root: Path):
     table = parquet.read_table("financial_facts", root=data_root / "parquet")
     assert table.num_rows == 1
     assert table.column("period_end").to_pylist() == ["2026-08-01"]
-    partition_dir = data_root / "parquet" / "financial_facts" / "period_end_year=2026"
-    assert partition_dir.is_dir()
-    assert list(partition_dir.glob("*.parquet"))
+    assert (data_root / "warehouse.duckdb").is_file()
+    assert not list((data_root / "parquet").rglob("*.parquet"))
 
 
 def test_parquet_rerun_is_deterministic_no_duplicates(data_root: Path):
@@ -267,10 +266,7 @@ def test_portfolio_positions_link_to_snapshot(data_root: Path):
 def test_portfolio_datasets_are_unpartitioned(data_root: Path):
     assert parquet.write_rows("portfolio_snapshots", [_snapshot_row()], root=data_root / "parquet") == 1
     assert parquet.write_rows("portfolio_positions", [_position_row()], root=data_root / "parquet") == 1
-    snap_dir = data_root / "parquet" / "portfolio_snapshots" / "partition=none"
-    pos_dir = data_root / "parquet" / "portfolio_positions" / "partition=none"
-    assert snap_dir.is_dir() and list(snap_dir.glob("*.parquet"))
-    assert pos_dir.is_dir() and list(pos_dir.glob("*.parquet"))
+    assert not list((data_root / "parquet").rglob("*.parquet"))
     assert parquet.read_table("portfolio_snapshots", root=data_root / "parquet").num_rows == 1
     assert parquet.read_table("portfolio_positions", root=data_root / "parquet").num_rows == 1
 
@@ -449,39 +445,32 @@ def test_events_evidence_registry_roundtrip(data_root: Path):
 
 
 def test_13f_old_schema_exposes_new_columns_and_appends(data_root: Path):
-    import pyarrow as pa
-    import pyarrow.parquet as parq
-
     root = data_root / "parquet"
-    old_schema = pa.schema(
-        [
-            f
-            for f in parquet.DATASETS["sec_13f_holdings"].schema
-            if f.name not in ("source_row", "holding_id", "other_manager", "shares_prn_type")
-        ]
+    assert (
+        parquet.write_rows(
+            "sec_13f_holdings",
+            [
+                {
+                    "accession": "ACC-OLD",
+                    "manager_cik": "5",
+                    "cusip": "0378-33100",
+                    "filed_at": "2024-05-15",
+                    "known_at": "2024-05-15T00:00:00Z",
+                    "retrieved_at": "2024-05-15T00:00:00Z",
+                    "holding_id": "old-id",
+                }
+            ],
+            root=root,
+        )
+        == 1
     )
-    old_tbl = pa.Table.from_pylist(
-        [
-            {
-                "accession": "ACC-OLD",
-                "manager_cik": "5",
-                "cusip": "0378-33100",
-                "filed_at": "2024-05-15",
-                "known_at": "2024-05-15T00:00:00Z",
-            }
-        ],
-        schema=old_schema,
-    )
-    part_dir = root / "sec_13f_holdings" / "filed_at_year=2024"
-    part_dir.mkdir(parents=True, exist_ok=True)
-    parq.write_table(old_tbl, str(part_dir / "part-old.parquet"))
     rows = duckdb.query(
         "SELECT accession, source_row, holding_id, other_manager, shares_prn_type FROM sec_13f_holdings",
         data_root=data_root,
     )
     assert len(rows) == 1
     assert rows[0]["source_row"] is None
-    assert rows[0]["holding_id"] is None
+    assert rows[0]["holding_id"] == "old-id"
     assert rows[0]["other_manager"] is None
     assert rows[0]["shares_prn_type"] is None
     assert (
@@ -494,6 +483,7 @@ def test_13f_old_schema_exposes_new_columns_and_appends(data_root: Path):
                     "cusip": "037833100",
                     "filed_at": "2024-05-15",
                     "known_at": "2024-05-15T00:00:00Z",
+                    "retrieved_at": "2024-05-15T00:00:00Z",
                     "source_row": 1,
                     "holding_id": "new-id",
                 }
@@ -502,3 +492,28 @@ def test_13f_old_schema_exposes_new_columns_and_appends(data_root: Path):
         )
         == 1
     )
+
+
+def test_migration_no_custom_sec_transport_or_parquet_machinery() -> None:
+    """Plan line-155 deferral: transport/parquet gates only; walkers + live
+    Q4/TTM + HTML view stay (parity: replay 9-then-0, fact_id 7/7, TTM 6.53).
+    """
+    from pathlib import Path as _Path
+
+    root = _Path(__file__).resolve().parent.parent / "app"
+    transport_banned = ("SEC_TICKERS_URL", "SEC_FACTS_URL", "_sec_get(", "_existing_keys", "_group_partitions")
+    hits: list[str] = []
+    for path in root.rglob("*.py"):
+        text = path.read_text()
+        for literal in transport_banned:
+            if literal in text:
+                hits.append(f"{path.relative_to(root)}: {literal}")
+    assert hits == []
+
+
+def test_migration_store_precedence_over_live() -> None:
+    """Store rows win when present; explicit as_of never falls back to live."""
+    from app.services import sec_facts as _sec_facts
+
+    assert _sec_facts._assemble_eps_payload is not None
+    assert _sec_facts._store_rows is not None

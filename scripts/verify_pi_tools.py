@@ -513,8 +513,20 @@ _SETTLEMENT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
 def missing_finra_datasets(durable: Path) -> list[str]:
-    """Durable FINRA seed datasets absent as directories."""
-    return [n for n in FINRA_SEED_DATASETS if not (durable / "parquet" / n).is_dir()]
+    """Durable FINRA seed datasets with zero warehouse rows."""
+    from app.storage import duckdb
+
+    missing: list[str] = []
+    for name in FINRA_SEED_DATASETS:
+        try:
+            rows = duckdb.query(f'SELECT COUNT(*) AS n FROM "{name}"', data_root=durable)
+        except Exception:  # noqa: BLE001 - missing table counts as missing dataset
+            missing.append(name)
+            continue
+        count = rows[0].get("n") if rows else 0
+        if not isinstance(count, int) or count == 0:
+            missing.append(name)
+    return missing
 
 
 def _ticker_ciks_from_sec(sec: object) -> dict[str, int]:
@@ -612,19 +624,25 @@ def seed_finra_fixture(store: Path, durable: Path) -> None:
     Verify batches run in an isolated store that starts empty, so the
     FINRA short-interest snapshot plus its SEC join inputs would otherwise
     be missing and get_short_interest_leaderboard fails deterministically.
-    Plain file copy (never symlink): batch runs must not append to the
-    operator's durable datasets. Warns and continues when the durable
-    store has nothing to copy; the tool then fails in-attempt with the
-    refresh-data hint instead of breaking unrelated tools here.
+    Warehouse copy via read + insert (never symlink): batch runs must not
+    append to the operator's durable datasets. Warns and continues when the
+    durable store has nothing to copy; the tool then fails in-attempt with
+    the refresh-data hint instead of breaking unrelated tools here.
     """
     if store.resolve() == durable.resolve():
         return
+    from app.storage import duckdb
+
     for name in FINRA_SEED_DATASETS:
-        src = durable / "parquet" / name
-        if not src.is_dir():
-            print(f"verify seed: durable dataset missing, skipping: {src}", file=sys.stderr)
+        try:
+            rows = duckdb.query(f'SELECT * EXCLUDE (_dedup, _tsraw) FROM "{name}"', data_root=durable)
+        except Exception as exc:  # noqa: BLE001 - missing table warns and continues
+            print(f"verify seed: durable dataset missing, skipping: {name} ({exc})", file=sys.stderr)
             continue
-        shutil.copytree(src, store / "parquet" / name, dirs_exist_ok=True)
+        if not rows:
+            print(f"verify seed: durable dataset missing, skipping: {name}", file=sys.stderr)
+            continue
+        duckdb.insert_ignore(name, rows, data_root=store)
 
 
 class _VerifyCase(TypedDict):

@@ -335,6 +335,7 @@ def test_13f_cusip_canonical_round_trip(tmp_path: Path) -> None:
                 "isin": None,
                 "security_id": None,
                 "known_at": "2024-02-14",
+                "retrieved_at": "2024-02-14",
             }
         ],
         root=tmp_path / "parquet",
@@ -408,6 +409,7 @@ def test_13f_issuer_dedupes_legacy_cusip(tmp_path: Path) -> None:
         "class_title": "COM",
         "filed_at": "2024-05-15",
         "known_at": "2024-05-15T00:00:00Z",
+        "retrieved_at": "2024-05-15T00:00:00Z",
     }
     _pq.write_rows(
         "sec_13f_holdings",
@@ -418,8 +420,8 @@ def test_13f_issuer_dedupes_legacy_cusip(tmp_path: Path) -> None:
                 "isin": None,
                 "security_id": None,
                 "entity_id": None,
-                "source_row": None,
-                "holding_id": None,
+                "source_row": 1,
+                "holding_id": "dup-1",
             },
             {
                 **base,
@@ -427,8 +429,8 @@ def test_13f_issuer_dedupes_legacy_cusip(tmp_path: Path) -> None:
                 "isin": None,
                 "security_id": None,
                 "entity_id": None,
-                "source_row": None,
-                "holding_id": None,
+                "source_row": 2,
+                "holding_id": "dup-2",
             },
             {
                 **base,
@@ -437,8 +439,8 @@ def test_13f_issuer_dedupes_legacy_cusip(tmp_path: Path) -> None:
                 "security_id": None,
                 "entity_id": None,
                 "shares": 999,
-                "source_row": None,
-                "holding_id": None,
+                "source_row": 3,
+                "holding_id": "dup-3",
             },
             {
                 **base,
@@ -447,8 +449,8 @@ def test_13f_issuer_dedupes_legacy_cusip(tmp_path: Path) -> None:
                 "security_id": None,
                 "entity_id": None,
                 "voting": "sole=1000",
-                "source_row": None,
-                "holding_id": None,
+                "source_row": 4,
+                "holding_id": "dup-4",
             },
         ],
         root=tmp_path / "parquet",
@@ -713,6 +715,7 @@ def test_13f_legacy_dashed_row_maps_to_issuer(tmp_path: Path) -> None:
                 "entity_id": None,
                 "filed_at": "2024-05-15",
                 "known_at": "2024-05-15T00:00:00Z",
+                "retrieved_at": "2024-06-01T00:00:00Z",
             }
         ],
         root=tmp_path / "parquet",

@@ -284,6 +284,34 @@ def _parquet_root(data_root: Path | str | None) -> Path | None:
     return Path(data_root) / "parquet"
 
 
+def _db_root(data_root: Path | str | None) -> Path | None:
+    """Warehouse root for ``duckdb`` calls (``<root>/parquet`` maps to ``<root>``)."""
+    if data_root is None:
+        return None
+    path = Path(data_root)
+    return path.parent if path.name == "parquet" else path
+
+
+def _read_warehouse(table: str, data_root: Path | str | None) -> list[dict[str, object]]:
+    """Best-effort warehouse read; a missing store reads as no rows."""
+    try:
+        from ..storage import duckdb as _duckdb
+    except ImportError:
+        return []
+    try:
+        rows = _duckdb.query(f"SELECT * FROM {table}", data_root=_db_root(data_root))
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return []
+    return [row for row in rows if isinstance(row, dict)]
+
+
+def _insert_warehouse(table: str, rows: list[dict[str, object]], data_root: Path | str | None) -> int:
+    """Warehouse insert; failures propagate to the caller's best-effort boundary."""
+    from ..storage import duckdb as _duckdb
+
+    return _duckdb.insert_ignore(table, rows, data_root=_db_root(data_root))
+
+
 def _checkpoint_key(template: str, refresh: str, params: dict[str, object]) -> str:
     """Scoped completion key for the exact canonical query submitted."""
     scope_hash = hashlib.sha256(json.dumps(params, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
@@ -485,19 +513,8 @@ def expected_inputs_hash(
     return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
 
 
-def _load_checkpoint_rows(proot: Path) -> list[object]:
-    try:
-        from ..storage import parquet as _parquet
-    except ImportError:
-        return []
-    try:
-        table = _parquet.read_table("ingestion_checkpoints", proot)
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return []
-    try:
-        return table.to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return []
+def _load_checkpoint_rows(proot: Path) -> list[dict[str, object]]:
+    return _read_warehouse("ingestion_checkpoints", proot)
 
 
 def _completion_row_eligible(row: dict[str, object]) -> bool:
@@ -535,20 +552,20 @@ def _completed_refreshes(data_root: Path | str | None, templates: list[str]) -> 
     return done
 
 
-def _read_observation_rows(proot: Path) -> list[object]:
-    try:
-        from ..storage import parquet as _parquet
-    except ImportError:
-        return []
-    try:
-        return _parquet.read_table("google_observations", proot).to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return []
+def _read_observation_rows(proot: Path) -> list[dict[str, object]]:
+    return _read_warehouse("google_observations", proot)
 
 
 def _decode_warehouse_content(row: dict[str, object]) -> tuple[dict[str, object], list[object], str, str] | None:
-    metrics = as_dict(json_from_text(row.get("metrics_json"), what="metrics_json"), what="metrics")
-    evidence = as_list(json_from_text(row.get("evidence_json"), what="evidence_json"), what="evidence")
+    metrics_raw, evidence_raw = row.get("metrics_json"), row.get("evidence_json")
+    metrics = as_dict(
+        json_from_text(metrics_raw if isinstance(metrics_raw, str) else str(metrics_raw), what="metrics_json"),
+        what="metrics",
+    )
+    evidence = as_list(
+        json_from_text(evidence_raw if isinstance(evidence_raw, str) else str(evidence_raw), what="evidence_json"),
+        what="evidence",
+    )
     try:
         metrics_canon = json.dumps(metrics, sort_keys=True, separators=(",", ":"), default=str)
         evidence_canon = json.dumps(evidence, sort_keys=True, separators=(",", ":"), default=str)
@@ -646,21 +663,16 @@ def _backfill_context(data_root: Path | str | None) -> tuple[Path, Path] | None:
     return proot, marker
 
 
-def _read_backfill_source(proot: Path) -> list[object]:
-    try:
-        from ..storage import parquet as _parquet_r
-    except ImportError:
-        return []
-    try:
-        return _parquet_r.read_table("google_observations", proot).to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return []
+def _read_backfill_source(proot: Path) -> list[dict[str, object]]:
+    return _read_warehouse("google_observations", proot)
 
 
 def _backfill_features_blob(row: dict[str, object]) -> dict[str, object] | None:
     raw = row.get("features_json")
     if raw is None or raw == "":
         return None
+    if not isinstance(raw, str):
+        raw = str(raw)
     decoded = json_from_text(raw, what="features_json")
     return decoded if isinstance(decoded, dict) else None
 
@@ -686,7 +698,7 @@ def _backfill_feature_row(row: object) -> dict[str, object] | None:
     return _backfill_feature_payload(row, decoded)
 
 
-def _collect_backfill_rows(rows: list[object]) -> list[dict[str, object]]:
+def _collect_backfill_rows(rows: list[object] | list[dict[str, object]]) -> list[dict[str, object]]:
     feature_rows: list[dict[str, object]] = []
     for row in rows:
         converted = _backfill_feature_row(row)
@@ -697,14 +709,10 @@ def _collect_backfill_rows(rows: list[object]) -> list[dict[str, object]]:
 
 
 def _finish_backfill(proot: Path, marker: Path, feature_rows: list[dict[str, object]]) -> int:
-    try:
-        from ..storage import parquet as _parquet_w
-    except ImportError:
-        return 0
     written = 0
     if feature_rows:
         try:
-            written = _parquet_w.write_rows("google_signal_features", feature_rows, root=proot)
+            written = _insert_warehouse("google_signal_features", feature_rows, proot)
         except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
             return 0
     try:
@@ -854,24 +862,16 @@ def _store_observations(
     if proot is None:
         return {}
     try:
-        from ..storage import parquet as _parquet_s
-    except ImportError:
-        return {}
-    try:
         backfill_legacy_feature_rows(data_root)
     except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
         pass
-    stored: list[dict[str, object]] = []
-    try:
-        stored = _parquet_s.read_table("google_observations", proot).to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        stored = []
+    stored = _read_warehouse("google_observations", proot)
     first_known = _first_known_map(stored)
     warehouse_rows: list[dict[str, object]] = []
     expected: dict[tuple[object, str], set[tuple[str, str]]] = {}
     for obs in observations:
         warehouse_rows.append(_store_one_observation(obs, first_known, retrieved_at, expected))
-    _parquet_s.write_rows("google_observations", warehouse_rows, root=proot)
+    _insert_warehouse("google_observations", warehouse_rows, proot)
     return expected
 
 
@@ -961,12 +961,8 @@ def _mark_complete(
     proot = _parquet_root(data_root)
     if proot is None:
         return
-    try:
-        from ..storage import parquet as _parquet_m
-    except ImportError:
-        return
     now = datetime.now(UTC).isoformat()
-    _parquet_m.write_rows(
+    _insert_warehouse(
         "ingestion_checkpoints",
         [
             {
@@ -984,7 +980,7 @@ def _mark_complete(
                 "totals_json": "{}",
             }
         ],
-        root=proot,
+        proot,
     )
 
 
@@ -1698,7 +1694,7 @@ def _feature_rows(
                 "feature_scope_json": json.dumps(scope, sort_keys=True),
                 "features_json": json.dumps(feats, sort_keys=True, default=str),
                 "calc_version": calc_version,
-                "calculated_at": min(calc_at, retrieved_at),
+                "calculated_at": calc_at,
                 "inputs_hash": expected,
             }
         )
@@ -1706,7 +1702,6 @@ def _feature_rows(
 
 
 def _write_feature_rows(
-    parquet_mod: ModuleType,
     proot: Path,
     observations: list[dict[str, object]],
     effective: list[dict[str, object]],
@@ -1719,21 +1714,13 @@ def _write_feature_rows(
     infos = _feature_infos(observations, dma_set, week_start, week_end)
     if not infos:
         return
-    empty_rows: list[object] = []
-    raw_existing: object = None
-    try:
-        raw_existing = parquet_mod.read_table("google_signal_features", proot).to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        raw_existing = empty_rows
-    existing: list[dict[str, object]] = (
-        [r for r in raw_existing if isinstance(r, dict)] if isinstance(raw_existing, list) else []
-    )
-    parquet_mod.write_rows(
+    existing = _read_warehouse("google_signal_features", proot)
+    _insert_warehouse(
         "google_signal_features",
         _feature_rows(
             infos, _feature_candidates(infos, effective), calc_version, retrieved_at, _feature_calc_map(existing)
         ),
-        root=proot,
+        proot,
     )
 
 
@@ -1790,16 +1777,12 @@ def _persist_collect(
     signals_mod: ModuleType,
 ) -> None:
     expected = _store_observations(data_root, observations, retrieved_at)
-    try:
-        from ..storage import parquet as parquet_mod
-    except ImportError:
-        parquet_mod = None
     proot = _parquet_root(data_root)
-    if proot is not None and parquet_mod is not None:
+    if proot is not None:
         version = getattr(signals_mod, "CALC_VERSION", "")
         calc_version = version if isinstance(version, str) else ""
         _write_feature_rows(
-            parquet_mod, proot, observations, effective, dma_set, week_start, week_end, calc_version, retrieved_at
+            proot, observations, effective, dma_set, week_start, week_end, calc_version, retrieved_at
         )
     _verify_warehouse(data_root, fetched, expected)
     _mark_fetched(data_root, fetched)

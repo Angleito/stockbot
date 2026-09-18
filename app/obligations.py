@@ -668,6 +668,16 @@ def _latest_report(ticker: str, form: str) -> tuple[Filing, object] | None:
     return filing, filing.obj()
 
 
+def _store_fact_text_row(row: dict[str, object]) -> dict[str, object]:
+    """Store row with TEXT-or-TIMESTAMPTZ date columns as ISO strings (existing boundary)."""
+    out = dict(row)
+    for key in ("period_start", "period_end", "filed_at", "known_at"):
+        value = out.get(key)
+        if isinstance(value, datetime):
+            out[key] = value.date().isoformat()
+    return out
+
+
 def _xbrl_store_facts(ticker: str) -> list[FinancialFactRow]:
     """Normalized-store XBRL facts for obligation concepts (PIT provenance).
 
@@ -696,6 +706,7 @@ def _xbrl_store_facts(ticker: str) -> list[FinancialFactRow]:
         params=[entity_id, *[f"%{n}%" for n in needles], param],
         data_root=sec_facts.DEFAULT_DATA_ROOT,
     )
+    rows = [_store_fact_text_row(row) for row in rows]
     return [fact for row in rows if (fact := sec_facts._validated_fact_row(row)) is not None]
 
 
@@ -2485,9 +2496,19 @@ class _PersistBuild:
         self.skipped_proxied = 0
 
 
+def _persist_filed(value: object) -> str | None:
+    """Filed date string for TEXT or TIMESTAMPTZ source values (existing boundary)."""
+    if value is None:
+        return None
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    text = str(value).strip()
+    return text or None
+
+
 def _persist_normalize_exposure(exp: Mapping[str, object]) -> dict[str, object]:
     """Exposure as an amount-None contingent event row (default flag kept)."""
-    filed = str(exp.get("filed") or "").strip() or None
+    filed = _persist_filed(exp.get("filed"))
     norm: dict[str, object] = {
         "ticker": exp.get("ticker"),
         "type": exp.get("type", "other"),
@@ -2672,7 +2693,7 @@ def _persist_build_row(row: Mapping[str, object], sink: _PersistBuild, target: l
     if row.get("provenance") == "proxied":
         sink.skipped_proxied += 1
         return None
-    filed = str(row.get("filed") or "").strip() or None
+    filed = _persist_filed(row.get("filed"))
     if not filed:
         sink.skipped += 1
         return None
@@ -2683,15 +2704,15 @@ def _persist_build_row(row: Mapping[str, object], sink: _PersistBuild, target: l
 
 
 def _persist_write_sink(sink: _PersistBuild) -> dict[str, object]:
-    """Flush the sink to parquet tables with skip counts."""
-    from .storage import parquet
+    """Flush the sink to DuckDB tables with skip counts."""
+    from .storage import duckdb
 
     return {
-        "events_written": parquet.write_rows("events", sink.event_rows, root=sink.data_root / "parquet"),
-        "capital_events_written": parquet.write_rows(
-            "capital_events", sink.capital_rows, root=sink.data_root / "parquet"
+        "events_written": duckdb.insert_ignore("events", sink.event_rows, data_root=sink.data_root),
+        "capital_events_written": duckdb.insert_ignore(
+            "capital_events", sink.capital_rows, data_root=sink.data_root
         ),
-        "evidence_written": parquet.write_rows("evidence", sink.evidence_rows, root=sink.data_root / "parquet"),
+        "evidence_written": duckdb.insert_ignore("evidence", sink.evidence_rows, data_root=sink.data_root),
         "skipped_no_filing_date": sink.skipped,
         "skipped_proxied": sink.skipped_proxied,
     }
@@ -2738,19 +2759,29 @@ def persist_obligation_events(
     return _persist_write_sink(sink)
 
 
+def _drop_internal(row: dict[str, object]) -> dict[str, object]:
+    """Strip warehouse-internal columns (existing boundary)."""
+    row.pop("_dedup", None)
+    row.pop("_tsraw", None)
+    return row
+
+
 def _asof_read_tables(
     data_root: Path,
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
     """Stored events/capital/evidence tables (capital empty when absent)."""
-    from .storage import parquet
+    from .storage import duckdb
 
-    parquet_root = data_root / "parquet"
-    stored: list[dict[str, object]] = parquet.read_table("events", root=parquet_root).to_pylist()
+    stored: list[dict[str, object]] = [_drop_internal(row) for row in duckdb.query("SELECT * FROM events", data_root=data_root)]
     try:
-        stored_capital: list[dict[str, object]] = parquet.read_table("capital_events", root=parquet_root).to_pylist()
+        stored_capital: list[dict[str, object]] = [
+            _drop_internal(row) for row in duckdb.query("SELECT * FROM capital_events", data_root=data_root)
+        ]
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         stored_capital = []
-    stored_evidence: list[dict[str, object]] = parquet.read_table("evidence", root=parquet_root).to_pylist()
+    stored_evidence: list[dict[str, object]] = [
+        _drop_internal(row) for row in duckdb.query("SELECT * FROM evidence", data_root=data_root)
+    ]
     return stored, stored_capital, stored_evidence
 
 
@@ -2764,13 +2795,19 @@ def _asof_evidence_index(stored_evidence: list[dict[str, object]]) -> dict[str, 
     return evidence_by_event
 
 
+def _asof_filed_at(value: object) -> str:
+    """Filed-date string for TEXT or TIMESTAMPTZ event values (existing boundary)."""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    return str(value or "")
+
 def _asof_keep_ticker(events: list[dict[str, object]], ticker: str, as_of: str) -> list[dict[str, object]]:
     """Events for one ticker filed on or before the as-of date."""
     kept: list[dict[str, object]] = []
     for e in events:
         if str(e.get("ticker") or "").strip().upper() != ticker:
             continue
-        if str(e.get("filed_at") or "")[:10] > as_of:
+        if _asof_filed_at(e.get("filed_at"))[:10] > as_of[:10]:
             continue
         kept.append(e)
     return kept
@@ -2819,8 +2856,8 @@ def _rebuild_event_row(
     row: dict[str, object] = {
         "type": event.get("event_type"),
         "amount_billions": event.get("amount_billions"),
-        "filed": event.get("filed_at"),
-        "known_at": event.get("known_at"),
+        "filed": _asof_filed_at(event.get("filed_at")),
+        "known_at": _asof_filed_at(event.get("known_at")) or event.get("known_at"),
         "certainty": event.get("certainty"),
         "status": event.get("status"),
         "revenue_matched": event.get("revenue_matched"),

@@ -529,21 +529,21 @@ def _persist_entity(meta: Mapping[str, object], *, now: str, data_root: Path | s
     are currently valid (null bounds) and visible from ``known_at``; former
     names keep SEC ``from``/``to`` (null when missing). Extra keys are
     dropped by the warehouse writer, so only dataset columns are sent.
-    An explicit ``data_root`` writes under ``<data_root>/parquet``; None
-    keeps the configured default root.
+    An explicit ``data_root`` writes to the warehouse under ``data_root``;
+    None keeps the configured default root.
     """
     try:
-        from ...storage.parquet import write_rows
+        from ...storage.duckdb import insert_ignore
 
-        parquet_root = Path(data_root) / "parquet" if data_root is not None else None
+        root = Path(data_root) if data_root is not None else None
         cik_raw: object = meta.get("cik")
         if not isinstance(cik_raw, (int, str)):
             return f"entity persistence skipped for CIK {cik_raw!r}: invalid cik"
         entity_id = sec_entity_id(cik_raw)
-        write_rows("entities", [_entity_store_row(meta, entity_id, now)], root=parquet_root)
+        insert_ignore("entities", [_entity_store_row(meta, entity_id, now)], data_root=root)
         aliases = _ticker_alias_rows(meta, entity_id, now) + _former_alias_rows(meta, entity_id, now)
         if aliases:
-            write_rows("entity_aliases", aliases, root=parquet_root)
+            insert_ignore("entity_aliases", aliases, data_root=root)
     except Exception as exc:  # noqa: BLE001 - entity alias persistence is best-effort, failure returns a skip note
         return f"entity persistence skipped for CIK {meta.get('cik')}: {exc}"
     return None

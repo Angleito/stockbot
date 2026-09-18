@@ -20,7 +20,7 @@ from ..domain.portfolio.valuation import build_position
 from ..robinhood.account import BrokeragePosition, CashBalance
 from ..robinhood.adapters import to_position_input, to_quote
 from ..robinhood.portfolio import RobinhoodPortfolioProvider
-from ..storage import duckdb, mappers, parquet
+from ..storage import duckdb, mappers
 from .account_identity import local_account_id
 
 SNAPSHOT_SOURCE = "robinhood_mcp"
@@ -87,8 +87,7 @@ def persist_snapshot(snapshot: PortfolioSnapshot, *, data_root: Path | None = No
 
     Never writes OAuth/token or raw provider payload data or raw broker account identifiers.
     """
-    parquet_root = Path(data_root) / "parquet" if data_root else None
-    parquet.write_rows(
+    duckdb.insert_ignore(
         "portfolio_snapshots",
         [
             {
@@ -107,9 +106,9 @@ def persist_snapshot(snapshot: PortfolioSnapshot, *, data_root: Path | None = No
                 "calculation_version": CALCULATION_VERSION,
             }
         ],
-        root=parquet_root,
+        data_root=data_root,
     )
-    parquet.write_rows(
+    duckdb.insert_ignore(
         "portfolio_positions",
         [
             {
@@ -135,19 +134,34 @@ def persist_snapshot(snapshot: PortfolioSnapshot, *, data_root: Path | None = No
             }
             for position in snapshot.positions
         ],
-        root=parquet_root,
+        data_root=data_root,
     )
-    parquet.write_rows(
+    duckdb.insert_ignore(
         "portfolio_accounts",
         [{"snapshot_id": snapshot.snapshot_id, "account_id": account_id} for account_id in snapshot.account_ids],
-        root=parquet_root,
+        data_root=data_root,
     )
+
+
+def _position_row(row: Mapping[str, object]) -> dict[str, object]:
+    """Position row without warehouse internals, TIMESTAMPTZ as ISO strings (existing boundary)."""
+    out = {key: value for key, value in dict(row).items() if key not in ("_dedup", "_tsraw")}
+    quote_at = out.get("quote_retrieved_at")
+    if isinstance(quote_at, datetime):
+        out["quote_retrieved_at"] = quote_at.isoformat()
+    return out
+
+
+def _snapshot_created_at(value: object) -> datetime:
+    """Snapshot instant from a TEXT or TIMESTAMPTZ column value (existing boundary)."""
+    if isinstance(value, datetime):
+        return value
+    return datetime.fromisoformat(str(value))
 
 
 def _snapshot_header(row: Mapping[str, object]) -> tuple[str, datetime, str]:
     """(snapshot id, created_at, broker) from the newest snapshot row."""
-    created_at = datetime.fromisoformat(str(row["created_at"]))
-    return str(row["snapshot_id"]), created_at, str(row["broker"])
+    return str(row["snapshot_id"]), _snapshot_created_at(row["created_at"]), str(row["broker"])
 
 
 def _snapshot_decimals(row: Mapping[str, object]) -> tuple[Decimal | None, Decimal | None, Decimal | None]:
@@ -164,9 +178,8 @@ def _snapshot_decimals(row: Mapping[str, object]) -> tuple[Decimal | None, Decim
 def _snapshot_account_ids(
     snapshot_id: str, positions: tuple[object, ...], *, data_root: Path | None
 ) -> tuple[str, ...]:
-    """Write-order account ids, or position-derived for legacy snapshots."""
     account_rows = duckdb.query(
-        "SELECT account_id FROM portfolio_accounts WHERE snapshot_id = ?",
+        "SELECT account_id FROM portfolio_accounts WHERE snapshot_id = ? ORDER BY rowid",
         params=[snapshot_id],
         data_root=data_root,
     )
@@ -204,9 +217,9 @@ def read_latest_snapshot(*, data_root: Path | None = None) -> PortfolioSnapshot 
     row = rows[0]
     snapshot_id, created_at, broker = _snapshot_header(row)
     positions = tuple(
-        mappers.position_from_row(position_row, created_at)
+        mappers.position_from_row(_position_row(position_row), created_at)
         for position_row in duckdb.query(
-            "SELECT * FROM portfolio_positions WHERE snapshot_id = ?",
+            "SELECT * FROM portfolio_positions WHERE snapshot_id = ? ORDER BY rowid",
             params=[snapshot_id],
             data_root=data_root,
         )

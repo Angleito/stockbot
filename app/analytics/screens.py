@@ -19,7 +19,7 @@ from typing import TypedDict
 
 from .. import finra_client
 from ..config import finra_use_mock, get_data_root
-from ..storage import duckdb, parquet
+from ..storage import duckdb
 
 DEFAULT_DATA_ROOT = get_data_root()
 SCREEN_CALC_VERSION = "short-interest-leaderboard-v2"
@@ -44,6 +44,13 @@ def _resolve_as_of(as_of: str | None) -> str:
     if as_of:
         return as_of
     return datetime.now(UTC).date().isoformat()
+
+
+def _date_str(value: object) -> str:
+    """ISO date string for TEXT or TIMESTAMPTZ column values (existing boundary)."""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    return str(value)
 
 
 def _clamp_limit(limit: int | None) -> int:
@@ -74,7 +81,7 @@ def latest_settlement_date(as_of: str | None = None, data_root: Path | None = No
         raise ValueError(
             f"No FINRA short interest is ingested{horizon}; run 'python cli.py refresh-data --settlement-date YYYY-MM-DD' first."
         )
-    return str(latest)
+    return _date_str(latest)
 
 
 def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> tuple[list[dict[str, object]], int]:
@@ -101,6 +108,8 @@ def _snapshot_rows(settlement_date: str, as_of: str, data_root: Path) -> tuple[l
     clean = [row for row in rows if row["_variants"] == 1]
     for row in clean:
         del row["_variants"]
+        row.pop("_dedup", None)
+        row.pop("_tsraw", None)
     return clean, len(rows) - len(clean)
 
 
@@ -205,7 +214,7 @@ def _screen_input_fingerprint(settlement_date: str, as_of: str, data_root: Path)
             data_root=data_root,
         ),
     }
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()[:16]
+    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":"), default=str).encode()).hexdigest()[:16]
 
 
 def _leaderboard_key(item: dict[str, object]) -> tuple[float, str]:
@@ -339,8 +348,8 @@ def _screen_candidate(
         "short_shares": short_shares,
         "shares_outstanding": shares,
         "short_interest_percent": 100 * short_shares / shares,
-        "sec_shares_as_of": str(fact["period_end"]),
-        "sec_filed_at": str(fact["filed_at"]),
+        "sec_shares_as_of": _date_str(fact["period_end"]),
+        "sec_filed_at": _date_str(fact["filed_at"]),
         "sec_accession": fact.get("accession"),
         "sec_source_url": fact.get("source_url"),
     }
@@ -370,7 +379,7 @@ def _persist_screen_run(
     accum.candidates.sort(key=_leaderboard_key)
     run_id = f"{SCREEN_NAME}:{settlement_date}:{as_of}:{SCREEN_CALC_VERSION}:{_screen_input_fingerprint(settlement_date, as_of, data_root)}"
     created_at = _utc_now()
-    parquet.write_rows(
+    duckdb.insert_ignore(
         "screen_runs",
         [
             {
@@ -392,9 +401,9 @@ def _persist_screen_run(
                 "parser_version": SCREEN_CALC_VERSION,
             }
         ],
-        root=data_root / "parquet",
+        data_root=data_root,
     )
-    parquet.write_rows(
+    duckdb.insert_ignore(
         "screen_entries",
         [
             {
@@ -414,7 +423,7 @@ def _persist_screen_run(
             }
             for index, item in enumerate(accum.candidates, 1)
         ],
-        root=data_root / "parquet",
+        data_root=data_root,
     )
 
 
@@ -770,7 +779,7 @@ def _cycle_settlement_dates(as_of: str, data_root: Path) -> list[str]:
         params=[as_of, param],
         data_root=data_root,
     )
-    return [str(row["settlement_date"]) for row in rows]
+    return [_date_str(row["settlement_date"]) for row in rows]
 
 
 class _CycleItem(TypedDict):
@@ -817,8 +826,8 @@ def _select_fact_for_period(facts: list[dict[str, object]], settlement_date: str
     """Latest fact whose period end is on/before the settlement date; facts
     are pre-sorted newest first and already restricted by known_at <= as_of."""
     for fact in facts:
-        period_end = str(fact.get("period_end") or "")
-        if not period_end or period_end > settlement_date:
+        period_end = _date_str(fact.get("period_end") or "")
+        if not period_end or period_end[:10] > settlement_date:
             continue
         value = fact.get("value")
         if value is None or float(str(value)) <= 0:
@@ -873,8 +882,8 @@ def short_interest_change_screen(
             "short_shares_current": short_current,
             "short_interest_percent_current": si_pct_current,
             "shares_outstanding_current": float(str(fact["value"])),
-            "sec_shares_as_of_current": str(fact["period_end"]),
-            "sec_filed_at_current": str(fact["filed_at"]),
+            "sec_shares_as_of_current": _date_str(fact["period_end"]),
+            "sec_filed_at_current": _date_str(fact["filed_at"]),
             "sec_accession_current": fact.get("accession"),
             "sec_source_url_current": fact.get("source_url"),
             "short_shares_prior": None,
@@ -901,8 +910,8 @@ def short_interest_change_screen(
                     "short_shares_prior": short_prior,
                     "short_interest_percent_prior": si_pct_prior,
                     "shares_outstanding_prior": float(str(prior_fact["value"])),
-                    "sec_shares_as_of_prior": str(prior_fact["period_end"]),
-                    "sec_filed_at_prior": str(prior_fact["filed_at"]),
+                    "sec_shares_as_of_prior": _date_str(prior_fact["period_end"]),
+                    "sec_filed_at_prior": _date_str(prior_fact["filed_at"]),
                     "sec_accession_prior": prior_fact.get("accession"),
                     "sec_source_url_prior": prior_fact.get("source_url"),
                     "short_change_abs": short_current - short_prior,

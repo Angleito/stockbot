@@ -136,19 +136,37 @@ def _resolve_entity(ticker: str, as_of: _dt.date, data_root: Path | None) -> str
 
 
 def _stored_text(value: object) -> str:
-    """Coerce a store text column: str as-is, None -> "", else str(value)."""
+    """Coerce a store text column: str as-is, date/datetime to ISO, None -> "", else str."""
+    from datetime import date, datetime
+
     if isinstance(value, str):
         return value
-    return "" if value is None else str(value)
+    if value is None:
+        return ""
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return str(value)
 
 
 def _stored_opt_text(value: object) -> str | None:
-    """Coerce an optional store text column: str as-is, else None."""
-    return value if isinstance(value, str) else None
+    """Coerce an optional store text column: str as-is, date/datetime to ISO, else None."""
+    from datetime import date, datetime
+
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        return value.date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return None
 
 
 def _stored_opt_int(value: object) -> int | None:
-    """Coerce an optional store int column: int as-is, else None."""
+    """Coerce an optional store int column: int as-is (bool excluded), else None."""
+    if isinstance(value, bool):
+        return None
     return value if isinstance(value, int) else None
 
 
@@ -157,15 +175,17 @@ def _validated_fact_row(row: Mapping[str, object]) -> FinancialFactRow | None:
 
     The store is machine-written so every row validates; a row without a
     concept, period end, or numeric value cannot assemble and is skipped.
+    Warehouse timestamp columns arrive as datetimes (TIMESTAMPTZ), so the
+    period-end gate coerces through the ISO helper instead of requiring str.
     """
     concept = row.get("concept")
-    period_end = row.get("period_end")
+    period_end = _stored_opt_text(row.get("period_end"))
     value = row.get("value")
     if not isinstance(concept, str) or not concept:
         return None
-    if not isinstance(period_end, str) or not period_end:
+    if not period_end:
         return None
-    if not isinstance(value, (int, float)):
+    if isinstance(value, bool) or not isinstance(value, (int, float)):
         return None
     return {
         "concept": concept,
@@ -477,10 +497,16 @@ def _validated_dividend_event(row: Mapping[str, object]) -> DividendEventRow | N
         return None
 
     def _text(key: str) -> str | None:
+        from datetime import date, datetime
+
         value = row.get(key)
         if isinstance(value, str):
             return value
-        return None if value is None else str(value)
+        if isinstance(value, datetime):
+            return value.date().isoformat()
+        if isinstance(value, date):
+            return value.isoformat()
+        return None
 
     amount = row.get("amount_per_share")
     return {
@@ -1396,13 +1422,13 @@ def _shares_store_payload(ticker: str, row: Mapping[str, object], shares_value: 
     return {
         "ticker": ticker,
         "shares_outstanding": shares_value,
-        "as_of": str(row["period_end"]),
+        "as_of": _stored_opt_text(row.get("period_end")) or "",
         "source": "SEC EDGAR company facts",
         "note": "SEC-reported shares outstanding, not public float",
-        "filed_at": str(row["filed_at"] or ""),
+        "filed_at": _stored_text(row.get("filed_at")),
         "accession": row.get("accession"),
         "source_url": row.get("source_url"),
-        "known_at": str(row["known_at"] or ""),
+        "known_at": _stored_text(row.get("known_at")),
     }
 
 

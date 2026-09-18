@@ -70,6 +70,7 @@ def test_xbrl_lineage_as_of_excludes_restatement(tmp_path: Path) -> None:
             "period_end": "2024-12-31",
             "filed_at": "2025-02-01",
             "known_at": "2025-02-01",
+            "retrieved_at": "2025-02-01T00:00:00Z",
             "accession": "a1",
         },
         {
@@ -80,6 +81,7 @@ def test_xbrl_lineage_as_of_excludes_restatement(tmp_path: Path) -> None:
             "period_end": "2024-12-31",
             "filed_at": "2025-03-01",
             "known_at": "2025-03-01",
+            "retrieved_at": "2025-03-01T00:00:00Z",
             "accession": "a2",
         },
     ]

@@ -2502,7 +2502,10 @@ class _Resp:
 
 def _mocks(monkeypatch: pytest.MonkeyPatch, get_script: list[object], page_script: list[object]) -> None:
     def _fake_get(url: str, **k: object) -> object:
-        return get_script.pop(0)
+        item = get_script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     def _fake_page(g: object, n: object, p: object) -> object:
         return page_script.pop(0)
@@ -2510,7 +2513,7 @@ def _mocks(monkeypatch: pytest.MonkeyPatch, get_script: list[object], page_scrip
     def _no_sleep(s: float) -> None:
         return None
 
-    monkeypatch.setattr(research_data.requests, "get", _fake_get)
+    monkeypatch.setattr(research_data, "_edgar_get", _fake_get)
     monkeypatch.setattr(research_data.finra_client, "ingestion_post_query", _fake_page)
     monkeypatch.setattr(research_data.time, "sleep", _no_sleep)
 
@@ -2530,7 +2533,7 @@ def test_refresh_sec_tickers_skips_malformed(monkeypatch: pytest.MonkeyPatch) ->
     def _fake_now() -> str:
         return "2026-08-01T00:00:00Z"
 
-    monkeypatch.setattr(research_data, "_sec_get", _fake_sec)
+    monkeypatch.setattr(research_data, "_edgar_get", _fake_sec)
     monkeypatch.setattr(research_data, "_utc_now", _fake_now)
     import tempfile
 
@@ -2565,7 +2568,7 @@ def test_prepare_unresolved_and_enrichment_failure(tmp_path: Path, monkeypatch: 
     finra_rows = [{"symbolCode": "AAPL", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 5}]
     _mocks(
         monkeypatch,
-        [_Resp(json.dumps(ticks).encode()), _Resp(b"boom", 500), _Resp(json.dumps(facts).encode())],
+        [json.dumps(ticks).encode(), RuntimeError("boom"), json.dumps(facts).encode()],
         [(json.dumps(finra_rows).encode(), finra_rows, {"record-total": "1"})],
     )
     out = prepare_short_interest_data("2026-08-14", tickers=["AAPL", "ZZZ"], data_root=tmp_path)
@@ -3012,7 +3015,7 @@ def _fact_row(
 
 
 def test_parquet_write_stages(tmp_path: Path) -> None:
-    """Partition/key/append stages: empty, unknown part, dedup, unpartitioned."""
+    """Warehouse write stages: empty, dedup, typed-timestamp rejection."""
     root = tmp_path / "data" / "parquet"
     assert parquet.write_rows("financial_facts", [], root=root) == 0
     row = _fact_row()
@@ -3021,11 +3024,8 @@ def test_parquet_write_stages(tmp_path: Path) -> None:
     bad = dict(row)
     bad["fact_id"] = "other-id"
     bad["period_end"] = "not-a-date"
-    assert parquet.write_rows("financial_facts", [bad], root=root) == 1
-    assert (root / "financial_facts" / "period_end_year=unknown").is_dir()
-    assert parquet._partition_year(None) is None
-    assert parquet._partition_year("junk") is None
-    assert parquet._group_partitions(parquet.dataset("portfolio_snapshots"), [{}]) == {"none": [{}]}
+    with pytest.raises(Exception, match="(?i)conver|cast|timestamp|format"):
+        parquet.write_rows("financial_facts", [bad], root=root)
 
 
 # ---------------------------------------------------------------------------

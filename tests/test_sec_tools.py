@@ -1783,11 +1783,29 @@ def test_research_read_search_tolerates_malformed_ledger_rows(tmp_path: Path, mo
     context = _read_search_context(tmp_path, monkeypatch)
     rows: list[dict[str, object]] = [
         # request_json absent; forms_covered_json is not JSON at all
-        {"search_id": "s-read-raw-null", "coverage_status": "partial", "forms_covered_json": "{not json"},
+        {
+            "search_id": "s-read-raw-null",
+            "coverage_status": "partial",
+            "forms_covered_json": "{not json",
+            "known_at": "2026-08-21T12:00:00Z",
+            "retrieved_at": "2026-08-21T12:00:00Z",
+        },
         # request_json and pending jobs are not JSON either
-        {"search_id": "s-read-raw-malformed", "request_json": "{not json", "pending_jobs_json": "not json"},
+        {
+            "search_id": "s-read-raw-malformed",
+            "request_json": "{not json",
+            "pending_jobs_json": "not json",
+            "known_at": "2026-08-21T12:00:00Z",
+            "retrieved_at": "2026-08-21T12:00:00Z",
+        },
         # valid JSON of the wrong shape for both columns
-        {"search_id": "s-read-raw-mistyped", "request_json": "[1, 2]", "pending_jobs_json": '{"backfill": 1}'},
+        {
+            "search_id": "s-read-raw-mistyped",
+            "request_json": "[1, 2]",
+            "pending_jobs_json": '{"backfill": 1}',
+            "known_at": "2026-08-21T12:00:00Z",
+            "retrieved_at": "2026-08-21T12:00:00Z",
+        },
     ]
     parquet.write_rows("sec_searches", rows, root=tmp_path / "parquet")
     session_id = _seed_research_session(tmp_path)

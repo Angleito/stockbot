@@ -58,29 +58,21 @@ def _page(
     )
 
 
-class _Resp:
-    def __init__(self, content: bytes, status_code: int, headers: dict[str, str] | None = None) -> None:
-        self.content = content
-        self.status_code = status_code
-        self.headers = headers or {}
-
-    def raise_for_status(self) -> None:
-        if self.status_code >= 400:
-            raise RuntimeError(f"HTTP {self.status_code}")
-
-
 def _install_mocks(
     monkeypatch: pytest.MonkeyPatch,
-    get_script: list[_Resp],
+    get_script: list[bytes | Exception],
     page_script: list[tuple[bytes, list[dict[str, object]], dict[str, str]]],
     sleeps: list[float],
 ) -> list[str]:
-    """Scripted HTTP responses; records SEC URLs and every sleep duration."""
+    """Scripted SEC payloads; records SEC URLs and every sleep duration."""
     get_calls: list[str] = []
 
-    def fake_get(url: str, **kwargs: object) -> _Resp:
+    def fake_get(url: str) -> bytes:
         get_calls.append(url)
-        return get_script.pop(0)  # IndexError when the script is exhausted
+        item = get_script.pop(0)  # IndexError when the script is exhausted
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     def fake_ingestion_post_query(
         group: str, dataset_name: str, payload: dict[str, object]
@@ -90,7 +82,7 @@ def _install_mocks(
     def fake_sleep(seconds: float) -> None:
         sleeps.append(seconds)
 
-    monkeypatch.setattr(research_data.requests, "get", fake_get)
+    monkeypatch.setattr(research_data, "_edgar_get", fake_get)
     monkeypatch.setattr(
         research_data.finra_client,
         "ingestion_post_query",
@@ -101,13 +93,12 @@ def _install_mocks(
 
 
 def test_refresh_data_offline_end_to_end(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
-    """Fetch (with 429 retry) -> archive -> normalize -> Parquet -> market-wide screen."""
+    """Fetch -> archive -> normalize -> Parquet -> market-wide screen."""
     sleeps: list[float] = []
-    get_script = [
-        _Resp(b"429", 429),
-        _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
-        _Resp(json.dumps(_facts_payload(320193, 100)).encode(), 200),
-        _Resp(json.dumps(_facts_payload(2488, 200)).encode(), 200),
+    get_script: list[bytes | Exception] = [
+        json.dumps(TICKERS_PAYLOAD).encode(),
+        json.dumps(_facts_payload(320193, 100)).encode(),
+        json.dumps(_facts_payload(2488, 200)).encode(),
     ]
     page_script = [
         _page([_finra_row("AAPL", 20), _finra_row("AMD", 20)], 3, 0),
@@ -126,13 +117,10 @@ def test_refresh_data_offline_end_to_end(tmp_path: Path, monkeypatch: pytest.Mon
     assert "ticker_ciks" not in sec_tickers  # full map stays internal
     assert sec_tickers["ticker_count"] == 2
     assert get_calls == [
-        research_data.SEC_TICKERS_URL,
-        research_data.SEC_TICKERS_URL,  # retry after 429
+        "https://www.sec.gov/files/company_tickers.json",
         "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
         "https://data.sec.gov/api/xbrl/companyfacts/CIK0000002488.json",
     ]
-    assert 0.13 in sleeps  # throttle
-    assert 0.5 in sleeps  # first backoff: 0.5 * 2**0
 
     assert raw_archive.find("sec", "company_tickers", "company_tickers", root=tmp_path / "raw") is not None
     assert raw_archive.find("sec", "cik0000320193", "companyfacts", root=tmp_path / "raw") is not None
@@ -177,11 +165,10 @@ def test_cli_refresh_data_coverage_report(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, capsys: pytest.CaptureFixture[str]
 ):
     sleeps: list[float] = []
-    get_script = [
-        _Resp(b"429", 429),
-        _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
-        _Resp(json.dumps(_facts_payload(320193, 100)).encode(), 200),
-        _Resp(json.dumps(_facts_payload(2488, 200)).encode(), 200),
+    get_script: list[bytes | Exception] = [
+        json.dumps(TICKERS_PAYLOAD).encode(),
+        json.dumps(_facts_payload(320193, 100)).encode(),
+        json.dumps(_facts_payload(2488, 200)).encode(),
     ]
     page_script = [
         _page([_finra_row("AAPL", 20), _finra_row("AMD", 20)], 3, 0),
@@ -202,9 +189,9 @@ def test_cli_refresh_data_coverage_report(
 
 def test_unresolved_ticker_is_reported_not_fetched(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sleeps: list[float] = []
-    get_script = [
-        _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
-        _Resp(json.dumps(_facts_payload(320193, 100)).encode(), 200),
+    get_script: list[bytes | Exception] = [
+        json.dumps(TICKERS_PAYLOAD).encode(),
+        json.dumps(_facts_payload(320193, 100)).encode(),
     ]
     page_script = [_page([_finra_row("AAPL", 20)], 1, 0)]
     get_calls = _install_mocks(monkeypatch, get_script, page_script, sleeps)
@@ -220,7 +207,7 @@ def test_unresolved_ticker_is_reported_not_fetched(tmp_path: Path, monkeypatch: 
 
 def test_prepare_without_universe_skips_sec_facts(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sleeps: list[float] = []
-    get_script = [_Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200)]
+    get_script: list[bytes | Exception] = [json.dumps(TICKERS_PAYLOAD).encode()]
     page_script = [_page([_finra_row("AAPL", 20)], 1, 0)]
     get_calls = _install_mocks(monkeypatch, get_script, page_script, sleeps)
 
@@ -237,9 +224,9 @@ def test_prepare_without_universe_skips_sec_facts(tmp_path: Path, monkeypatch: p
 
 def test_finra_missing_record_total_raises(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sleeps: list[float] = []
-    get_script = [
-        _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
-        _Resp(json.dumps(_facts_payload(320193, 100)).encode(), 200),
+    get_script: list[bytes | Exception] = [
+        json.dumps(TICKERS_PAYLOAD).encode(),
+        json.dumps(_facts_payload(320193, 100)).encode(),
     ]
     page_script: list[tuple[bytes, list[dict[str, object]], dict[str, str]]] = [
         (b"[]", [], {})
@@ -253,12 +240,10 @@ def test_finra_missing_record_total_raises(tmp_path: Path, monkeypatch: pytest.M
 def test_enrichment_failure_does_not_block_finra_or_siblings(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """P1: a failed facts request must never prevent the FINRA snapshot."""
     sleeps: list[float] = []
-    get_script = [
-        _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
-        _Resp(json.dumps(_facts_payload(320193, 100)).encode(), 200),
-        _Resp(b"", 500),
-        _Resp(b"", 500),
-        _Resp(b"", 500),  # AMD: exhausted retries
+    get_script: list[bytes | Exception] = [
+        json.dumps(TICKERS_PAYLOAD).encode(),
+        json.dumps(_facts_payload(320193, 100)).encode(),
+        RuntimeError("HTTP 500"),
     ]
     page_script = [_page([_finra_row("AAPL", 20)], 1, 0)]
     get_calls = _install_mocks(monkeypatch, get_script, page_script, sleeps)
@@ -275,21 +260,17 @@ def test_enrichment_failure_does_not_block_finra_or_siblings(tmp_path: Path, mon
         {"ticker": "AMD", "cik": 2488, "error": "RuntimeError: HTTP 500"},
     ]
     assert get_calls == [
-        research_data.SEC_TICKERS_URL,
+        "https://www.sec.gov/files/company_tickers.json",
         "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
-        "https://data.sec.gov/api/xbrl/companyfacts/CIK0000002488.json",
-        "https://data.sec.gov/api/xbrl/companyfacts/CIK0000002488.json",
         "https://data.sec.gov/api/xbrl/companyfacts/CIK0000002488.json",
     ]
 
 
 def test_cik_only_enrichment_failure_reports_null_ticker(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     sleeps: list[float] = []
-    get_script = [
-        _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
-        _Resp(b"", 500),
-        _Resp(b"", 500),
-        _Resp(b"", 500),
+    get_script: list[bytes | Exception] = [
+        json.dumps(TICKERS_PAYLOAD).encode(),
+        RuntimeError("HTTP 500"),
     ]
     page_script = [_page([_finra_row("AAPL", 20)], 1, 0)]
     _install_mocks(monkeypatch, get_script, page_script, sleeps)
@@ -308,10 +289,10 @@ def test_coverage_counters_truthful_with_invalid_short_interest(
     """P2 regression: invalid rows never reach mapping/shares checks, so the
     CLI must print the screen's stage counters, not derived complements."""
     sleeps: list[float] = []
-    get_script = [
-        _Resp(json.dumps(TICKERS_PAYLOAD).encode(), 200),
-        _Resp(json.dumps(_facts_payload(320193, 100)).encode(), 200),
-        _Resp(json.dumps(_facts_payload(2488, 200)).encode(), 200),
+    get_script: list[bytes | Exception] = [
+        json.dumps(TICKERS_PAYLOAD).encode(),
+        json.dumps(_facts_payload(320193, 100)).encode(),
+        json.dumps(_facts_payload(2488, 200)).encode(),
     ]
     page_script = [
         _page([_finra_row("AAPL", 20), _finra_row("AMD", 20), _finra_row("BAD", -1)], 4, 0),
@@ -671,12 +652,9 @@ def test_backfill_recovers_interrupted_swap(tmp_path: Path) -> None:
         root=tmp_path / "parquet",
     )
     assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 1}
-    dataset_dir = tmp_path / "parquet" / "short_interest"
-    backup_dir = tmp_path / "parquet" / "short_interest-backfill-bak"
-    dataset_dir.rename(backup_dir)
+    # No staging-dir swap machinery remains: the backfill is a single-writer
+    # DuckDB UPDATE, so a second run is a clean no-op with the row intact.
     assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
-    assert dataset_dir.exists()
-    assert not backup_dir.exists()
     (row,) = parquet.read_table("short_interest", root=tmp_path / "parquet").to_pylist()
     assert row["symbol_code"] == "AAA"
     assert row["known_at"] == "2026-08-30T12:00:00Z"
@@ -709,11 +687,8 @@ def test_backfill_clears_stale_backup(tmp_path: Path) -> None:
         ],
         root=tmp_path / "parquet",
     )
-    backup_dir = tmp_path / "parquet" / "short_interest-backfill-bak"
-    backup_dir.mkdir(parents=True)
-    (backup_dir / "junk.parquet").write_bytes(b"junk")
+    # No backup dirs exist under the DuckDB store; a clean table backfills nothing.
     assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
-    assert not backup_dir.exists()
 
 
 def test_backfill_targets_only_legacy_v1_rows(tmp_path: Path) -> None:
@@ -774,23 +749,13 @@ def test_backfill_targets_only_legacy_v1_rows(tmp_path: Path) -> None:
     assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
 
 
-def test_finra_short_interest_lock_excludes(tmp_path: Path) -> None:
-    import subprocess
-    import sys
+def test_finra_short_interest_single_writer_no_lock(tmp_path: Path) -> None:
+    """No fcntl lock remains: concurrent backfills serialize on the warehouse."""
+    import app.services.research_data as research_data
+    from app.services.research_data import backfill_finra_known_at
 
-    from app.services.research_data import _finra_short_interest_lock
-
-    parquet_root = tmp_path / "parquet"
-    lock_path = parquet_root / "short_interest.lock"
-    probe = "import fcntl, sys; fh = open(sys.argv[1], 'a+b'); fcntl.flock(fh.fileno(), fcntl.LOCK_EX | fcntl.LOCK_NB)"
-    with _finra_short_interest_lock(parquet_root):
-        held = subprocess.run(
-            [sys.executable, "-c", probe, str(lock_path)], capture_output=True, text=True, check=False
-        )
-        assert held.returncode != 0
-        assert "BlockingIOError" in held.stderr
-    free = subprocess.run([sys.executable, "-c", probe, str(lock_path)], capture_output=True, text=True, check=False)
-    assert free.returncode == 0
+    assert not hasattr(research_data, "_finra_short_interest_lock")
+    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
 
 
 def test_short_interest_has_legacy_v1_probe(tmp_path: Path) -> None:
@@ -875,11 +840,8 @@ def test_backfill_skips_clean_table_without_rewrite(tmp_path: Path) -> None:
             }
         )
     parquet.write_rows("short_interest", rows, root=tmp_path / "parquet")
-    backup_dir = tmp_path / "parquet" / "short_interest-backfill-bak"
-    backup_dir.mkdir(parents=True)
-    (backup_dir / "junk.parquet").write_bytes(b"junk")
+    # No backup dirs exist under the DuckDB store; a clean table backfills nothing.
     assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
-    assert not backup_dir.exists()
     stored = {
         str(r.get("symbol_code")): r
         for r in parquet.read_table("short_interest", root=tmp_path / "parquet").to_pylist()

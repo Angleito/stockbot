@@ -20,7 +20,7 @@ from typing import TYPE_CHECKING, Protocol, runtime_checkable
 
 from .. import normalization
 from ..domain.market import ids
-from ..storage import duckdb, parquet, raw_archive
+from ..storage import duckdb, raw_archive
 from .cusip import normalize_cusip, normalize_isin
 from .models import (
     BeneficialOwnership,
@@ -131,8 +131,7 @@ def store_filing(
         **_filing_linkage(filing, amendment_of),
         **_filing_provenance(canonical, raw_submission_path, raw_primary_path, retrieved_at),
     }
-    parquet_root = Path(root) / "parquet" if root is not None else None
-    return parquet.write_rows("sec_filings", [row], root=parquet_root)
+    return duckdb.insert_ignore("sec_filings", [row], data_root=_duckdb_root(root))
 
 
 def _filings_identity_where(
@@ -163,10 +162,10 @@ def _filings_date_where(
 ) -> None:
     """Filings date filters (filed window plus PIT as_of)."""
     if start_date is not None:
-        where.append("substr(filed_at, 1, 10) >= ?")
+        where.append("substr(CAST(filed_at AS VARCHAR), 1, 10) >= ?")
         params.append(_validate_date(start_date, "start_date"))
     if end_date is not None:
-        where.append("substr(filed_at, 1, 10) <= ?")
+        where.append("substr(CAST(filed_at AS VARCHAR), 1, 10) <= ?")
         params.append(_validate_date(end_date, "end_date"))
     if as_of is not None:
         clause, param = duckdb.as_of_clause(_validate_as_of(as_of), "known_at")
@@ -205,8 +204,6 @@ FTS_TABLE = "document_text_fts"
 FTS_ID = "fts_id"
 
 
-def _parquet_root(root: Path | str | None = None) -> Path | None:
-    return Path(root) / "parquet" if root is not None else None
 
 
 class _HasToDict(Protocol):
@@ -270,12 +267,12 @@ def _pass_through(dataset: str, row: Mapping[str, object], root: Path | str | No
     """Minimal nullable writer: fills provenance/hash/parser, returns rows written."""
     d: dict[str, object] = dict(row)
     now = d.get("retrieved_at") or _utcnow()
-    d.setdefault("retrieved_at", now)
+    d["retrieved_at"] = now
     d["known_at"] = d.get("known_at") or now
     d["parser_version"] = d.get("parser_version") or PARSER_VERSION
     if not d.get("content_hash"):
         d["content_hash"] = raw_archive.content_hash(json.dumps(d, sort_keys=True, default=str).encode("utf-8"))
-    return parquet.write_rows(dataset, [d], root=_parquet_root(root))
+    return duckdb.insert_ignore(dataset, [d], data_root=_duckdb_root(root))
 
 
 def _party_identity(
@@ -344,7 +341,7 @@ def store_filing_party(
     now = retrieved_at or _utcnow()
     row = _party_row(d, now, source_url, raw_archive_path, document_name, filed_at)
     _hash_party_row(row, d)
-    return parquet.write_rows("filing_parties", [row], root=_parquet_root(root))
+    return duckdb.insert_ignore("filing_parties", [row], data_root=_duckdb_root(root))
 
 
 def query_parties(
@@ -452,7 +449,7 @@ def _persist_text_dividends(
     for event in events:
         event["known_at"] = known_value
     if events:
-        parquet.write_rows("dividend_events", events, root=_parquet_root(root))
+        duckdb.insert_ignore("dividend_events", events, data_root=_duckdb_root(root))
 
 
 def _extract_text_dividends(
@@ -509,7 +506,7 @@ def store_document_text(
         filed_at,
         known_at,
     )
-    written = parquet.write_rows("document_text", [row], root=_parquet_root(root))
+    written = duckdb.insert_ignore("document_text", [row], data_root=_duckdb_root(root))
     _extract_text_dividends(accession, source_url, text_value, content_value, filed_at, known_value, root)
     return written
 
@@ -863,7 +860,7 @@ def store_attempt(
     """Append one search-attempt ledger row."""
     d = _as_dict(attempt)
     row = _attempt_row(attempt, str(d.get("search_id") or ""), retrieved_at or _utcnow())
-    return parquet.write_rows("sec_search_attempts", [row], root=_parquet_root(root))
+    return duckdb.insert_ignore("sec_search_attempts", [row], data_root=_duckdb_root(root))
 
 
 def store_hit(
@@ -875,7 +872,7 @@ def store_hit(
     """Append one text-hit ledger row."""
     d = _as_dict(hit)
     row = _hit_row(hit, str(d.get("search_id") or ""), retrieved_at or _utcnow())
-    return parquet.write_rows("sec_text_hits", [row], root=_parquet_root(root))
+    return duckdb.insert_ignore("sec_text_hits", [row], data_root=_duckdb_root(root))
 
 
 def _ledger_search_row(
@@ -996,11 +993,11 @@ def persist_search_ledger(
     )
     attempt_rows = [_attempt_row(attempt, search_id, now) for attempt in attempt_list]
     hit_rows = [_hit_row(hit, search_id, now) for hit in hit_list]
-    proot = _parquet_root(root)
+    db_root = _duckdb_root(root)
     return {
-        "searches": parquet.write_rows("sec_searches", [search_row], root=proot),
-        "attempts": parquet.write_rows("sec_search_attempts", attempt_rows, root=proot),
-        "hits": parquet.write_rows("sec_text_hits", hit_rows, root=proot),
+        "searches": duckdb.insert_ignore("sec_searches", [search_row], data_root=db_root),
+        "attempts": duckdb.insert_ignore("sec_search_attempts", attempt_rows, data_root=db_root),
+        "hits": duckdb.insert_ignore("sec_text_hits", hit_rows, data_root=db_root),
     }
 
 
@@ -1078,6 +1075,18 @@ def query_hits_count(
     return count if isinstance(count, int) else 0
 
 
+_QUARTER_ENDS = {"1": "03-31", "2": "06-30", "3": "09-30", "4": "12-31"}
+
+
+def _quarter_end_for(date_partition: str) -> str | None:
+    """Quarter-end date for a ``YYYY-QN`` partition label (None when unparseable)."""
+    year, sep, quarter = date_partition.partition("-Q")
+    if not sep or not year.isdigit() or len(year) != 4:
+        return date_partition[:10] or None
+    end = _QUARTER_ENDS.get(quarter)
+    return f"{year}-{end}" if end else None
+
+
 def store_coverage(
     source: str,
     form: str,
@@ -1099,7 +1108,7 @@ def store_coverage(
         "form": form,
         "family": family,
         "date_partition": date_partition,
-        "coverage_date": coverage_date or date_partition[:10],
+        "coverage_date": coverage_date or _quarter_end_for(date_partition),
         "status": status,
         "accession_count": accession_count or 0,
         "last_key": last_key,
@@ -1107,7 +1116,7 @@ def store_coverage(
         "known_at": known_at or now,
         "retrieved_at": now,
     }
-    return parquet.write_rows("sec_ingestion_coverage", [row], root=_parquet_root(root))
+    return duckdb.insert_ignore("sec_ingestion_coverage", [row], data_root=_duckdb_root(root))
 
 
 def query_coverage(
@@ -1159,7 +1168,7 @@ def store_checkpoint(
         "error": error,
         "totals_json": _json(totals),
     }
-    return parquet.write_rows("ingestion_checkpoints", [row], root=_parquet_root(root))
+    return duckdb.insert_ignore("ingestion_checkpoints", [row], data_root=_duckdb_root(root))
 
 
 def _checkpoint_order(row: dict[str, object]) -> tuple[str, str]:
@@ -1673,8 +1682,8 @@ def _query_former_issuer_names(
             "FROM entity_aliases a JOIN entities e ON e.entity_id = a.entity_id "
             "WHERE a.alias_type = 'former_name' "
             "AND LOWER(TRIM(a.alias_value)) = LOWER(TRIM(?)) "
-            "AND (a.valid_from IS NULL OR substr(a.valid_from, 1, 10) <= ?) "
-            "AND (a.valid_to IS NULL OR ? < substr(a.valid_to, 1, 10))",
+            "AND (a.valid_from IS NULL OR substr(CAST(a.valid_from AS VARCHAR), 1, 10) <= ?) "
+            "AND (a.valid_to IS NULL OR ? < substr(CAST(a.valid_to AS VARCHAR), 1, 10))",
             [target, period, period],
             data_root=_duckdb_root(root),
         )
@@ -1724,8 +1733,8 @@ def _issuer_holdings_asof(
         return None, "", ""
     return (
         as_of_val,
-        "AND (h.known_at IS NULL OR substr(h.known_at, 1, 10) <= ?) ",
-        "AND (a.known_at IS NULL OR substr(a.known_at, 1, 10) <= ?) ",
+        "AND (h.known_at IS NULL OR substr(CAST(h.known_at AS VARCHAR), 1, 10) <= ?) ",
+        "AND (a.known_at IS NULL OR substr(CAST(a.known_at AS VARCHAR), 1, 10) <= ?) ",
     )
 
 
@@ -1746,13 +1755,13 @@ def _issuer_holdings_sql(holding_asof: str, alias_asof: str) -> str:
         " AND a.security_id IS NOT NULL"
         " AND a.entity_id LIKE 'sec:cik:%' " + alias_asof + "), "
         "mapping AS ("
-        " SELECT h._prov AS _prov, substr(h.report_period, 1, 10) AS _period,"
+        " SELECT h._prov AS _prov, substr(CAST(h.report_period AS VARCHAR), 1, 10) AS _period,"
         " COUNT(DISTINCT a._eid) AS _n, MAX(a._eid) AS _sole"
         " FROM holdings h JOIN visible_aliases a ON a._skey = h._prov"
         " WHERE h._prov IS NOT NULL AND h.report_period IS NOT NULL"
-        " AND (a._vf IS NULL OR substr(a._vf, 1, 10) <= substr(h.report_period, 1, 10))"
-        " AND (a._vt IS NULL OR substr(h.report_period, 1, 10) < substr(a._vt, 1, 10))"
-        " GROUP BY h._prov, substr(h.report_period, 1, 10)), "
+        " AND (a._vf IS NULL OR substr(CAST(a._vf AS VARCHAR), 1, 10) <= substr(CAST(h.report_period AS VARCHAR), 1, 10))"
+        " AND (a._vt IS NULL OR substr(CAST(h.report_period AS VARCHAR), 1, 10) < substr(CAST(a._vt AS VARCHAR), 1, 10))"
+        " GROUP BY h._prov, substr(CAST(h.report_period AS VARCHAR), 1, 10)), "
         "sole AS (SELECT _prov, _period, _sole FROM mapping WHERE _n = 1 AND _sole = ?) "
         "SELECT * EXCLUDE (_rn) FROM ("
         " SELECT h.*, f.form AS filing_form, f.is_amendment AS is_amendment,"
@@ -1766,7 +1775,7 @@ def _issuer_holdings_sql(holding_asof: str, alias_asof: str) -> str:
         " THEN 0 ELSE 1 END,"
         " h.cusip) AS _rn"
         " FROM holdings h JOIN sole s ON s._prov = h._prov"
-        " AND s._period = substr(h.report_period, 1, 10)"
+        " AND s._period = substr(CAST(h.report_period AS VARCHAR), 1, 10)"
         " LEFT JOIN sec_filings f ON f.accession = h.accession"
         " ) WHERE _rn = 1 ORDER BY known_at DESC"
     )

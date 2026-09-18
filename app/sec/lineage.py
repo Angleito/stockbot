@@ -2,6 +2,7 @@
 
 import re
 from collections.abc import Mapping, Sequence
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 _KEYS = (
@@ -20,17 +21,29 @@ _KEYS = (
 _AS_OF_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
+def _iso_cell(value: object) -> object:
+    """Warehouse date/datetime to ISO text so lineage groups and projects."""
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
 def fact_lineage(row: Mapping[str, object]) -> dict[str, object]:
     """Pure projection; missing keys -> None.
 
     Rows arrive as plain dicts from the duckdb parquet views, so the
     boundary takes a Mapping and projects only the known lineage keys.
+    Warehouse timestamp columns arrive as datetimes (TIMESTAMPTZ) and are
+    ISO-coerced so grouping and display stay text-based.
     """
     try:
         items: dict[str, object] = dict(row) if isinstance(row, dict) else {}
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         items = {}
-    return {key: items.get(key) for key in _KEYS}
+    return {key: _iso_cell(items.get(key)) for key in _KEYS}
 
 
 def period_lineage(
@@ -44,7 +57,7 @@ def period_lineage(
     groups: dict[str, list[Mapping[str, object]]] = {}
     for row in rows or []:
         try:
-            end = row.get("period_end")
+            end = _iso_cell(row.get("period_end"))
         except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
         if not isinstance(end, str) or not end:

@@ -832,14 +832,16 @@ def test_partial_write_does_not_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_
             return []
         return _three_dma_rows()
 
-    orig_write = parquet_backend.write_rows
+    from app.storage import duckdb as _duckdb_spy
 
-    def _drop_one(name: str, rows: list[_Row], root: Path | None = None, **kwargs: object) -> int:
-        if name == "google_observations" and len(rows) > 1:
+    orig_insert = _duckdb_spy.insert_ignore
+
+    def _drop_one(table: str, rows: list[_Row], data_root: Path | None = None, **kwargs: object) -> int:
+        if table == "google_observations" and len(rows) > 1:
             rows = list(rows)[:-1]
-        return orig_write(name, rows, root=root, **kwargs)
+        return orig_insert(table, rows, data_root=data_root)
 
-    monkeypatch.setattr(parquet_backend, "write_rows", _drop_one)
+    monkeypatch.setattr(_duckdb_spy, "insert_ignore", _drop_one)
     result = trends.collect_trends(
         start_date="2026-09-02",
         end_date="2026-09-02",
@@ -927,14 +929,16 @@ def test_partial_write_retry_never_checkpoints_incomplete_batch(
             return {"status": "ok", "rows": [dict(r) for r in rows], "source": "bigquery", "job_id": job_id}
         return {"status": "ok", "cached": True, "job_id": job_id, "rows": list[_Row](), "source": "bigquery"}
 
-    orig_write = parquet_backend.write_rows
+    from app.storage import duckdb as _duckdb_spy
 
-    def _drop_one(name: str, rows: list[_Row], root: Path | None = None, **kwargs: object) -> int:
-        if name == "google_observations" and len(rows) > 1:
+    orig_insert = _duckdb_spy.insert_ignore
+
+    def _drop_one(table: str, rows: list[_Row], data_root: Path | None = None, **kwargs: object) -> int:
+        if table == "google_observations" and len(rows) > 1:
             rows = list(rows)[:-1]
-        return orig_write(name, rows, root=root, **kwargs)
+        return orig_insert(table, rows, data_root=data_root)
 
-    monkeypatch.setattr(parquet_backend, "write_rows", _drop_one)
+    monkeypatch.setattr(_duckdb_spy, "insert_ignore", _drop_one)
 
     def _collect() -> _Row:
         return trends.collect_trends(

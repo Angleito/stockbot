@@ -9,7 +9,7 @@ reported as absent (empty dicts / None), never estimated or zeroed.
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
 
@@ -80,6 +80,30 @@ def _sec_metrics(entity_id: str, as_of: str, data_root: Path) -> dict[str, objec
     return metrics
 
 
+def _iso_date(value: object) -> str:
+    """Warehouse date/datetime to ISO date text (empty when missing)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return "" if value is None else str(value)
+
+
+def _iso_instant(value: object) -> str:
+    """Warehouse datetime to ISO instant text (empty when missing)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(value, date):
+        return value.isoformat()
+    return "" if value is None else str(value)
+
+
 def _latest_sec_fact(entity_id: str, concept: str, as_of: str, data_root: Path) -> dict[str, object] | None:
     clause, param = duckdb.as_of_clause(as_of)
     rows = duckdb.query(
@@ -96,8 +120,8 @@ def _latest_sec_fact(entity_id: str, concept: str, as_of: str, data_root: Path) 
     row = rows[0]
     return {
         "value": _decimal(row.get("value")),
-        "period_end": str(row.get("period_end") or ""),
-        "filed_at": str(row.get("filed_at") or ""),
+        "period_end": _iso_date(row.get("period_end")),
+        "filed_at": _iso_date(row.get("filed_at")),
         "accession": row.get("accession"),
         "source_url": row.get("source_url"),
     }
@@ -146,10 +170,10 @@ def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, object
         "short_interest_change": change,
         "short_interest_change_pct": change_pct,
         "days_to_cover": _decimal(row.get("days_to_cover")),
-        "settlement_date": str(row.get("settlement_date") or ""),
+        "settlement_date": _iso_date(row.get("settlement_date")),
         "avg_daily_volume": _decimal(row.get("avg_daily_volume")),
-        "known_at": str(row.get("known_at") or ""),
-        "retrieved_at": str(row.get("retrieved_at") or ""),
+        "known_at": _iso_date(row.get("known_at")),
+        "retrieved_at": _iso_instant(row.get("retrieved_at")),
     }
 
 

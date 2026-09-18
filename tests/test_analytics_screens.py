@@ -14,8 +14,6 @@ import json
 from datetime import UTC, date, datetime, tzinfo
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from app.analytics import screens
@@ -255,54 +253,41 @@ def test_same_second_versions_ordered_by_publication(data_root: Path, monkeypatc
 
 
 def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root: Path) -> None:
-    """A pre-stage-counter (11-column) run reads via union-by-name, its
+    """A pre-stage-counter (11-column) run reads with NULL counters, its
     counters reconstruct from exclusions, and it coexists with a
     counter-bearing run written through the production path."""
     _seed_default(data_root)
-    old_dir = data_root / "parquet" / "screen_runs" / "settlement_date_year=2026"
-    old_dir.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.table(
+    parquet.write_rows(
+        "screen_runs",
+        [
             {
-                "run_id": [f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-14"],
-                "screen": [screens.SCREEN_NAME],
-                "settlement_date": [SETTLEMENT],
-                "as_of": ["2026-08-14"],
-                "created_at": ["2026-08-14T00:00:00Z"],
-                "calc_version": [screens.SCREEN_CALC_VERSION],
-                "finra_rows": [6],
-                "eligible_rows": [3],
-                "exclusions_json": [
-                    json.dumps(
-                        {
-                            "unmapped_symbol": 1,
-                            "ambiguous_ticker_mapping": 1,
-                            "not_classified_common_equity": 0,
-                            "missing_shares_outstanding": 0,
-                            "invalid_short_interest": 1,
-                        }
-                    )
-                ],
-                "environment": ["test"],
-                "parser_version": ["pre-counter"],
-            },
-            schema=pa.schema(
-                [
-                    pa.field("run_id", pa.string()),
-                    pa.field("screen", pa.string()),
-                    pa.field("settlement_date", pa.string()),
-                    pa.field("as_of", pa.string()),
-                    pa.field("created_at", pa.string()),
-                    pa.field("calc_version", pa.string()),
-                    pa.field("finra_rows", pa.int64()),
-                    pa.field("eligible_rows", pa.int64()),
-                    pa.field("exclusions_json", pa.string()),
-                    pa.field("environment", pa.string()),
-                    pa.field("parser_version", pa.string()),
-                ]
-            ),
-        ),
-        str(old_dir / "part-old.parquet"),
+                "run_id": f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-14",
+                "screen": screens.SCREEN_NAME,
+                "settlement_date": SETTLEMENT,
+                "as_of": "2026-08-14",
+                "created_at": "2026-08-14T00:00:00Z",
+                "calc_version": screens.SCREEN_CALC_VERSION,
+                "finra_rows": 6,
+                "eligible_rows": 3,
+                "valid_short_interest_rows": None,
+                "mapped_rows": None,
+                "unambiguous_rows": None,
+                "common_equity_rows": None,
+                "shares_outstanding_rows": None,
+                "exclusions_json": json.dumps(
+                    {
+                        "unmapped_symbol": 1,
+                        "ambiguous_ticker_mapping": 1,
+                        "not_classified_common_equity": 0,
+                        "missing_shares_outstanding": 0,
+                        "invalid_short_interest": 1,
+                    }
+                ),
+                "environment": "test",
+                "parser_version": "pre-counter",
+            }
+        ],
+        root=data_root / "parquet",
     )
     result = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     assert result["coverage"] == {
@@ -673,9 +658,6 @@ def test_security_classification_is_consulted(data_root: Path) -> None:
     """Eligibility comes from the securities classification, not a
     fact-presence proxy: reclassifying ETF (unknown type) excludes it even
     though a shares-outstanding fact exists."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "ETF"))
     _seed_facts(
         data_root,
@@ -695,23 +677,23 @@ def test_security_classification_is_consulted(data_root: Path) -> None:
     rows: list[dict[str, object]] = _default_rows() + extra_etf
     _seed_short_interest(data_root, rows)
     # A later classification row reclassifies the ETF as not common equity.
-    reclassified = {
-        "security_id": "sec:equity:0000000004",
-        "entity_id": "sec:cik:0000000004",
-        "security_type": "unknown",
-        "ticker": None,
-        "exchange": None,
-        "source": "provider-test",
-        "known_at": "2026-08-25T12:00:00Z",
-        "retrieved_at": "2026-08-25T12:00:00Z",
-        "content_hash": "x",
-        "parser_version": "t",
-    }
-    directory = data_root / "parquet" / "securities" / "partition=none"
-    directory.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.Table.from_pylist([reclassified], schema=parquet.dataset("securities").schema),
-        str(directory / "part-reclassified.parquet"),
+    parquet.write_rows(
+        "securities",
+        [
+            {
+                "security_id": "sec:equity:0000000004",
+                "entity_id": "sec:cik:0000000004",
+                "security_type": "unknown",
+                "ticker": None,
+                "exchange": None,
+                "source": "provider-test",
+                "known_at": "2026-08-25T12:00:00Z",
+                "retrieved_at": "2026-08-25T12:00:00Z",
+                "content_hash": "x",
+                "parser_version": "t",
+            }
+        ],
+        root=data_root / "parquet",
     )
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
@@ -752,45 +734,38 @@ def test_security_type_map_mixed_offsets_newest_wins(data_root: Path) -> None:
     """A classification revision with mixed offsets: the lexically-larger
     but chronologically older 13:00+01:00 'unknown' row must not beat the
     12:30Z 'equity-common' correction."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC"))
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, _default_rows())
-    directory = data_root / "parquet" / "securities" / "partition=none"
-    directory.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.Table.from_pylist(
-            [
-                {
-                    "security_id": "sec:equity:0000000001",
-                    "entity_id": "sec:cik:0000000001",
-                    "security_type": "unknown",
-                    "ticker": "AAA",
-                    "exchange": None,
-                    "source": "provider-test",
-                    "known_at": "2026-08-10T13:00:00+01:00",
-                    "retrieved_at": "2026-08-10T13:00:00+01:00",
-                    "content_hash": "reclass-old",
-                    "parser_version": "t",
-                },
-                {
-                    "security_id": "sec:equity:0000000001",
-                    "entity_id": "sec:cik:0000000001",
-                    "security_type": "equity-common",
-                    "ticker": "AAA",
-                    "exchange": "NASDAQ",
-                    "source": "provider-test",
-                    "known_at": "2026-08-10T12:30:00Z",
-                    "retrieved_at": "2026-08-10T12:30:00Z",
-                    "content_hash": "reclass-new",
-                    "parser_version": "t",
-                },
-            ],
-            schema=parquet.dataset("securities").schema,
-        ),
-        str(directory / "part-reclass-mixed-offset.parquet"),
+    parquet.write_rows(
+        "securities",
+        [
+            {
+                "security_id": "sec:equity:0000000001",
+                "entity_id": "sec:cik:0000000001",
+                "security_type": "unknown",
+                "ticker": "AAA",
+                "exchange": None,
+                "source": "provider-test",
+                "known_at": "2026-08-10T13:00:00+01:00",
+                "retrieved_at": "2026-08-10T13:00:00+01:00",
+                "content_hash": "reclass-old",
+                "parser_version": "t",
+            },
+            {
+                "security_id": "sec:equity:0000000001",
+                "entity_id": "sec:cik:0000000001",
+                "security_type": "equity-common",
+                "ticker": "AAA",
+                "exchange": "NASDAQ",
+                "source": "provider-test",
+                "known_at": "2026-08-10T12:30:00Z",
+                "retrieved_at": "2026-08-10T12:30:00Z",
+                "content_hash": "reclass-new",
+                "parser_version": "t",
+            },
+        ],
+        root=data_root / "parquet",
     )
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
@@ -838,33 +813,26 @@ def test_all_versions_conflicting_reports_ambiguous_error(data_root: Path) -> No
 
 
 def test_same_instant_conflicting_classifications_exclude_entity(data_root: Path) -> None:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
     _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC"))
     _seed_facts(data_root, _default_facts())
     _seed_short_interest(data_root, _default_rows())
-    directory = data_root / "parquet" / "securities" / "partition=none"
-    directory.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.Table.from_pylist(
-            [
-                {
-                    "security_id": "sec:equity:0000000001",
-                    "entity_id": "sec:cik:0000000001",
-                    "security_type": "unknown",
-                    "ticker": "AAA",
-                    "exchange": None,
-                    "source": "provider-test",
-                    "known_at": "2026-08-10T12:00:00Z",
-                    "retrieved_at": "2026-08-10T12:00:00Z",
-                    "content_hash": "reclass-conflict",
-                    "parser_version": "t",
-                }
-            ],
-            schema=parquet.dataset("securities").schema,
-        ),
-        str(directory / "part-reclass-conflict.parquet"),
+    parquet.write_rows(
+        "securities",
+        [
+            {
+                "security_id": "sec:equity:0000000001",
+                "entity_id": "sec:cik:0000000001",
+                "security_type": "unknown",
+                "ticker": "AAA",
+                "exchange": None,
+                "source": "provider-test",
+                "known_at": "2026-08-10T12:00:00Z",
+                "retrieved_at": "2026-08-10T12:00:00Z",
+                "content_hash": "reclass-conflict",
+                "parser_version": "t",
+            }
+        ],
+        root=data_root / "parquet",
     )
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)

@@ -17,8 +17,10 @@ from .models import (
 # via getattr and validated before building insider/13F domain objects.
 
 
-class _ParquetWriter(Protocol):
-    def write_rows(self, name: str, rows: list[dict[str, object]], root: Path | None = ...) -> int: ...
+class _AliasWriter(Protocol):
+    def insert_ignore(
+        self, table: str, rows: list[dict[str, object]], data_root: Path | None = None
+    ) -> int: ...
 
 
 TRANSACTION_KINDS = {
@@ -1114,8 +1116,8 @@ def _write_alias_rows(
     alias_ret: str | None,
     accession: str,
     source_url: object,
-    parquet_root: Path | None,
-    parquet: _ParquetWriter,
+    data_root: Path | str | None,
+    store: _AliasWriter,
     _hash: Callable[[bytes], str],
 ) -> int:
     written = 0
@@ -1123,7 +1125,7 @@ def _write_alias_rows(
         if not alias_value:
             continue
         seed = f"{alias_type}|{alias_value}|{eid}|{security_id}|{valid_period}|{valid_to}"
-        written += parquet.write_rows(
+        written += store.insert_ignore(
             "entity_aliases",
             [
                 {
@@ -1143,7 +1145,7 @@ def _write_alias_rows(
                     "source_url": source_url,
                 }
             ],
-            root=parquet_root,
+            data_root=Path(data_root) if data_root is not None else None,
         )
     return written
 
@@ -1160,8 +1162,8 @@ def _write_candidate_aliases(
     retrieved_at: str | None,
     accession: str,
     source_url: object,
-    parquet_root: Path | None,
-    parquet: _ParquetWriter,
+    data_root: Path | str | None,
+    store: _AliasWriter,
     _hash: Callable[[bytes], str],
 ) -> int:
     written = 0
@@ -1184,8 +1186,8 @@ def _write_candidate_aliases(
             alias_ret=alias_ret,
             accession=accession,
             source_url=source_url,
-            parquet_root=parquet_root,
-            parquet=parquet,
+            data_root=data_root,
+            store=store,
             _hash=_hash,
         )
     return written
@@ -1211,13 +1213,10 @@ def _write_security_row(
     isin: str | None,
     class_title: str | None,
     root: Path | str | None,
-) -> tuple[int, Path | None]:
-    from pathlib import Path as _Path
+) -> tuple[int, Path | str | None]:
+    from ..storage import duckdb as _store
 
-    from ..storage import parquet
-
-    parquet_root = _Path(root) / "parquet" if root is not None else None
-    written = parquet.write_rows(
+    written = _store.insert_ignore(
         "securities",
         [
             _security_row_of(
@@ -1233,9 +1232,9 @@ def _write_security_row(
                 class_title=class_title,
             )
         ],
-        root=parquet_root,
+        data_root=Path(root) if root is not None else None,
     )
-    return written, parquet_root
+    return written, root
 
 
 def _write_governed_aliases(
@@ -1248,10 +1247,10 @@ def _write_governed_aliases(
     retrieved_at: str | None,
     accession: str,
     source_url: object,
-    parquet_root: Path | None,
+    data_root: Path | str | None,
     root: Path | str | None,
 ) -> int | None:
-    from ..storage import parquet as _parquet
+    from ..storage import duckdb as _store
     from ..storage.raw_archive import content_hash as _hash
 
     issuer_name, valid_period = _valid_period_of(holding)
@@ -1274,8 +1273,8 @@ def _write_governed_aliases(
         retrieved_at=retrieved_at,
         accession=accession,
         source_url=source_url,
-        parquet_root=parquet_root,
-        parquet=_parquet,
+        data_root=Path(data_root) if data_root is not None else None,
+        store=_store,
         _hash=_hash,
     )
 
@@ -1294,14 +1293,11 @@ def observe_13f_security(
     current/former-name candidates valid at the holding report period.
     Returns rows written across the security/alias datasets.
     """
-    from ..storage import parquet
-    from ..storage.raw_archive import content_hash as _hash
-
     cusip, isin, security_id = _holding_identifiers_of(holding)
     if not security_id:
         return 0
     known, accession, source_url, raw_path = _holding_provenance_of(holding, raw_archive_path)
-    written, parquet_root = _write_security_row(
+    written, data_root = _write_security_row(
         security_id=security_id,
         known=known,
         retrieved_at=retrieved_at,
@@ -1323,10 +1319,9 @@ def observe_13f_security(
         retrieved_at=retrieved_at,
         accession=accession,
         source_url=source_url,
-        parquet_root=parquet_root,
+        data_root=data_root,
         root=root,
     )
-    _ = (parquet, _hash)
     return written if extra is None else written + extra
 
 

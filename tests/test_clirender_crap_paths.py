@@ -3275,7 +3275,7 @@ def test_oblig_persist_helpers(tmp_path: Path) -> None:
         "amount_billions": 1.0,
         "filed": "2026-01-01",
         "content_hash": "c",
-        "known_at": "k",
+        "known_at": "2026-01-01T00:00:00Z",
     }
     O._persist_build_event(row, "2026-01-01", [], sink)
     O._persist_build_evidence(row, eid, ch, sink)
@@ -3300,7 +3300,7 @@ def test_oblig_asof_helpers(tmp_path: Path) -> None:
         "amount_billions": 1.0,
         "filed": "2026-01-01",
         "content_hash": "h1",
-        "known_at": "k",
+        "known_at": "2026-01-01T00:00:00Z",
     }
     O.persist_obligation_events([row], data_root=str(tmp_path))
     out = O.get_obligations_as_of("AAA", "2026-06-01", data_root=str(tmp_path))
@@ -4044,10 +4044,10 @@ def test_norm_ticker_helpers():
     assert norm._ticker_cik({"ticker": "ko", "cik_str": "x"}) == ("", None)
     assert norm._ticker_cik({"ticker": "ko", "cik_str": 320193}) == ("KO", 320193)
     assert norm._ticker_cik({"ticker": "  ", "cik_str": 1}) == ("", None)
-    e, a = norm._ticker_rows({"title": "  Acme "}, "KO", 320193, "r", "h")
+    e, a = norm._ticker_rows({"title": "  Acme "}, "KO", 320193, "2026-08-10T12:00:00Z", "h")
     assert e["name"] == "Acme" and a["alias_value"] == "KO"
     out = norm.normalize_sec_tickers(
-        {"0": {"ticker": "ko", "cik_str": 1, "title": "K"}}, retrieved_at="r", content_hash="h"
+        {"0": {"ticker": "ko", "cik_str": 1, "title": "K"}}, retrieved_at="2026-08-10T12:00:00Z", content_hash="h"
     )
     assert len(out["entities"]) == 1
     out2 = norm.normalize_sec_tickers(
@@ -4263,10 +4263,10 @@ def test_norm_finra_helpers():
     assert norm._finra_short_position({"currentShortPositionQuantity": -5}) is None
     assert norm._finra_short_position({"currentShortPositionQuantity": 5}) == 5.0
     assert norm._finra_short_position({}) is None
-    row = norm._finra_row("2026-08-14", "r", None, "h" * 20, "u", "sr", {"issueName": " Alpha "}, "AAA")
-    assert row["known_at"] == "r" and row["issue_name"] == "Alpha"
-    row2 = norm._finra_row("2026-08-14", "r", "k", "h" * 20, "u", "sr", {}, "AAA")
-    assert row2["known_at"] == "k" and row2["issue_name"] is None
+    row = norm._finra_row("2026-08-14", "2026-08-10T12:00:00Z", None, "h" * 20, "u", "sr", {"issueName": " Alpha "}, "AAA")
+    assert row["known_at"] == "2026-08-10T12:00:00Z" and row["issue_name"] == "Alpha"
+    row2 = norm._finra_row("2026-08-14", "2026-08-10T12:00:00Z", "2026-08-10T12:00:00Z", "h" * 20, "u", "sr", {}, "AAA")
+    assert row2["known_at"] == "2026-08-10T12:00:00Z" and row2["issue_name"] is None
     with pytest.raises(ValueError, match="not a parseable date"):
         norm._check_finra_known_at("xx", "r", "k")
     with pytest.raises(ValueError, match="precedes settlement_date"):
@@ -4282,7 +4282,7 @@ def test_norm_finra_helpers():
     out = norm.normalize_finra_short_interest(
         [{"symbolCode": ""}, {"symbolCode": "AAA", "currentShortPositionQuantity": -3}],
         settlement_date="2026-08-14",
-        retrieved_at="r",
+        retrieved_at="2026-08-10T12:00:00Z",
         content_hash="h",
         source_url="u",
         source_record_id="r",

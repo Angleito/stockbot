@@ -1,31 +1,19 @@
-"""Minimal research data refresh service: fetch -> archive -> normalize -> Parquet.
+"""Minimal research data refresh service: fetch -> archive -> normalize -> DuckDB.
 
 The short-interest leaderboard screen (app/analytics/screens.py) is fed by
 these datasets; `python cli.py refresh-data` drives this module.  This is a
 deliberately narrow path — no ingestion framework, no checkpoints: reruns of
 identical payloads are no-ops via the raw-archive write-once dedup and the
-Parquet unique-key dedup.
+DuckDB primary-key dedup.
 """
 
 from __future__ import annotations
 
-import contextlib
 import hashlib
 import json
-import os
-import shutil
-import tempfile
 import time
-from collections.abc import Generator, Mapping, Sequence
+from collections.abc import Mapping, Sequence
 from pathlib import Path
-from types import ModuleType
-
-try:
-    import fcntl  # Linux-only; short-interest locking is explicitly Linux-only.
-except ImportError:  # pragma: no cover
-    fcntl: ModuleType | None = None
-
-import requests
 
 from .. import finra_client
 from ..config import finra_use_mock, get_data_root
@@ -35,26 +23,22 @@ from ..normalization import (
     normalize_sec_company_facts,
     normalize_sec_tickers,
 )
-from ..storage import parquet, raw_archive
+from ..sec.client import ensure_identity
+from ..storage import duckdb, raw_archive
 
 DEFAULT_DATA_ROOT = get_data_root()
 
 _LEGACY_SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v1"
 
 
-@contextlib.contextmanager
-def _finra_short_interest_lock(parquet_root: Path) -> Generator[None]:
-    """Hold one blocking ``fcntl.flock`` across short_interest parquet mutations."""
-    if fcntl is None:  # pragma: no cover
-        raise RuntimeError("finra short-interest lock requires fcntl.flock")
-    lock_path = parquet_root / "short_interest.lock"
-    lock_path.parent.mkdir(parents=True, exist_ok=True)
-    with open(lock_path, "a+b") as fh:
-        fcntl.flock(fh.fileno(), fcntl.LOCK_EX)
-        try:
-            yield
-        finally:
-            fcntl.flock(fh.fileno(), fcntl.LOCK_UN)
+def _iso_stamp(value: object) -> str:
+    """Warehouse datetime (or ISO string) back to ISO-8601 text."""
+    from datetime import UTC, datetime
+
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    return str(value or "")
 
 
 def _is_legacy_settlement_stamped(row: dict[str, object]) -> bool:
@@ -66,83 +50,34 @@ def _is_legacy_settlement_stamped(row: dict[str, object]) -> bool:
     return str(row.get("parser_version") or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION
 
 
-def _parser_version_values(parquet_root: Path) -> list[object] | None:
+def _parser_version_values(data_root: Path) -> list[object] | None:
     """All parser_version values, or None when the table is unreadable."""
     try:
-        table = parquet.read_table("short_interest", root=parquet_root, columns=["parser_version"])
+        rows = duckdb.query("SELECT parser_version FROM short_interest", data_root=data_root)
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
-    try:
-        values: list[object] = []
-        for batch in table.to_batches():
-            try:
-                values.extend(batch.column("parser_version").to_pylist())
-            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-                return None
-        return values
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return None
+    return [row.get("parser_version") for row in rows]
 
 
-def _short_interest_has_legacy_v1(parquet_root: Path) -> bool:
-    values = _parser_version_values(parquet_root)
+def _short_interest_has_legacy_v1(data_root: Path) -> bool:
+    values = _parser_version_values(data_root)
     if values is None:
         return True
     return any(str(v or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION for v in values)
 
 
-SEC_TICKERS_URL = "https://www.sec.gov/files/company_tickers.json"
-SEC_FACTS_URL = "https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json"
+def _edgar_get(url: str) -> bytes:
+    """Fetch one SEC URL via EdgarTools (owns identity, throttle, retry)."""
+    ensure_identity()
+    from edgar.httprequests import get_with_retry, inspect_response
 
-_SEC_THROTTLE_SECONDS = 0.13
-_SEC_MAX_ATTEMPTS = 3
-_SEC_BACKOFF_BASE = 0.5
-_SEC_BACKOFF_CAP = 10.0
-_sec_last_request: float = 0.0
+    resp = get_with_retry(url)
+    inspect_response(resp)
+    return bytes(resp.content)
 
 
 def _utc_now() -> str:
     return time.strftime("%Y-%m-%dT%H:%M:%SZ", time.gmtime())
-
-
-def _sec_headers() -> dict[str, str]:
-    return {
-        "User-Agent": os.getenv("SEC_EDGAR_IDENTITY", "stockbot research contact@example.com"),
-        "Accept-Encoding": "gzip, deflate",
-    }
-
-
-def _sec_throttle() -> None:
-    """Pace SEC requests to at least one per ``_SEC_THROTTLE_SECONDS``."""
-    global _sec_last_request
-    now = time.monotonic()
-    if now - _sec_last_request < _SEC_THROTTLE_SECONDS:
-        time.sleep(_SEC_THROTTLE_SECONDS)
-    _sec_last_request = time.monotonic()
-
-
-def _sec_get(url: str) -> bytes:
-    """GET one SEC endpoint with pacing and bounded retry on 429/5xx.
-
-    Backoff is exponential with an optional Retry-After override; the last
-    response's status is raised once attempts are exhausted.
-    """
-    resp = None
-    for attempt in range(_SEC_MAX_ATTEMPTS):
-        _sec_throttle()
-        resp = requests.get(url, headers=_sec_headers(), timeout=60)
-        if resp.status_code != 429 and resp.status_code < 500:
-            break
-        raw = resp.headers.get("Retry-After")
-        try:
-            retry_after = int(raw) if raw is not None else None
-        except TypeError, ValueError:
-            retry_after = None
-        delay = retry_after if retry_after is not None else _SEC_BACKOFF_BASE * 2**attempt
-        time.sleep(min(delay, _SEC_BACKOFF_CAP))
-    assert resp is not None
-    resp.raise_for_status()
-    return resp.content
 
 
 def _parse_ticker_ciks(payload_json: object) -> dict[str, int]:
@@ -169,8 +104,10 @@ def _parse_ticker_ciks(payload_json: object) -> dict[str, int]:
 def refresh_sec_tickers(*, data_root: Path | None = None) -> dict[str, object]:
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
-    url = SEC_TICKERS_URL
-    payload = _sec_get(url)
+    from edgar.urls import build_company_tickers_url
+
+    url = build_company_tickers_url()
+    payload = _edgar_get(url)
     content_hash = raw_archive.content_hash(payload)
     raw_archive.archive(
         "sec",
@@ -183,7 +120,7 @@ def refresh_sec_tickers(*, data_root: Path | None = None) -> dict[str, object]:
     )
     payload_json = json.loads(payload)
     datasets = normalize_sec_tickers(payload_json, retrieved_at=now, content_hash=content_hash)
-    written = sum(parquet.write_rows(name, rows, root=data_root / "parquet") for name, rows in datasets.items())
+    written = sum(duckdb.insert_ignore(name, rows, data_root=data_root) for name, rows in datasets.items())
     ticker_ciks = _parse_ticker_ciks(payload_json)
     return {
         "source": "sec:company_tickers",
@@ -202,7 +139,7 @@ def _normalize_and_write_company_facts(
     url: str,
     data_root: Path,
 ) -> int:
-    """Shared normalize -> Parquet step behind refresh and archive replay."""
+    """Shared normalize -> DuckDB step behind refresh and archive replay."""
     content_hash = raw_archive.content_hash(payload)
     datasets = normalize_sec_company_facts(
         json.loads(payload),
@@ -211,14 +148,16 @@ def _normalize_and_write_company_facts(
         source_url=url,
         source_record_id=f"cik{cik:010d}",
     )
-    return sum(parquet.write_rows(name, rows, root=data_root / "parquet") for name, rows in datasets.items())
+    return sum(duckdb.insert_ignore(name, rows, data_root=data_root) for name, rows in datasets.items())
 
 
 def refresh_sec_company_facts(cik: int, *, data_root: Path | None = None) -> dict[str, object]:
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
-    url = SEC_FACTS_URL.format(cik=cik)
-    payload = _sec_get(url)
+    from edgar.urls import build_company_facts_url
+
+    url = build_company_facts_url(cik)
+    payload = _edgar_get(url)
     content_hash = raw_archive.content_hash(payload)
     raw_archive.archive(
         "sec",
@@ -246,7 +185,7 @@ def refresh_sec_company_facts(cik: int, *, data_root: Path | None = None) -> dic
 
 
 def replay_sec_facts_from_archive(*, data_root: Path | None = None) -> dict[str, object]:
-    """Replay archived SEC companyfacts payloads through normalize -> Parquet.
+    """Replay archived SEC companyfacts payloads through normalize -> DuckDB.
 
     Offline: already-enriched CIKs gain rows (e.g. EPS) without re-downloading.
     Uses each manifest's ``retrieved_at`` (not the wall clock) so replayed
@@ -361,20 +300,19 @@ def _fetch_finra_snapshot(
 def _write_finra_snapshot(
     all_rows: list[dict[str, object]], settlement_date: str, snapshot_hash: str, url: str, data_root: Path
 ) -> tuple[int, int, str]:
-    """Normalize + write one snapshot; backfill legacy known_at under the lock."""
+    """Normalize + write one snapshot; backfill legacy known_at."""
     retrieved_at = _utc_now()
-    with _finra_short_interest_lock(data_root / "parquet"):
-        datasets = normalize_finra_short_interest(
-            all_rows,
-            settlement_date=settlement_date,
-            retrieved_at=retrieved_at,
-            content_hash=snapshot_hash,
-            source_url=url,
-            source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
-        )
-        written = sum(parquet.write_rows(name, rows, root=data_root / "parquet") for name, rows in datasets.items())
-        backfilled_raw = _backfill_finra_known_at_locked(data_root)["rewritten"]
-        backfilled = int(backfilled_raw) if isinstance(backfilled_raw, int) else 0
+    datasets = normalize_finra_short_interest(
+        all_rows,
+        settlement_date=settlement_date,
+        retrieved_at=retrieved_at,
+        content_hash=snapshot_hash,
+        source_url=url,
+        source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
+    )
+    written = sum(duckdb.insert_ignore(name, rows, data_root=data_root) for name, rows in datasets.items())
+    backfilled_raw = _backfill_finra_known_at_locked(data_root)["rewritten"]
+    backfilled = backfilled_raw if isinstance(backfilled_raw, int) else 0
     return written, backfilled, retrieved_at
 
 
@@ -413,33 +351,6 @@ def _normalize_ticker_ciks(ticker_ciks_raw: object) -> dict[str, int]:
             if isinstance(k, str) and isinstance(v, int):
                 ticker_ciks[k] = v
     return ticker_ciks
-
-
-def _assert_fixed_row_present(staged_by_id: Mapping[str, object], row_id: str) -> dict[str, object]:
-    """Fixed row as found in the staged copy (raises when missing)."""
-    staged_row = staged_by_id.get(row_id)
-    if not isinstance(staged_row, dict):
-        raise RuntimeError(f"backfill validation failed: fixed row {row_id} missing from staged copy")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
-    return staged_row
-
-
-def _assert_fixed_row_stamped(staged_row: dict[str, object], row_id: str) -> None:
-    """Fixed row must carry known_at == retrieved_at and the v2 stamp."""
-    if str(staged_row.get("known_at")) != str(staged_row.get("retrieved_at")):
-        raise RuntimeError(f"backfill validation failed: fixed row {row_id} known_at != retrieved_at")
-    if str(staged_row.get("parser_version") or "") != SHORT_INTEREST_PARSER_VERSION:
-        raise RuntimeError(f"backfill validation failed: fixed row {row_id} missing v2 stamp")
-
-
-def _assert_no_stamped_leftovers(staged: list[object]) -> None:
-    """No staged row may remain legacy settlement-stamped."""
-    for staged_row in staged:
-        if not isinstance(staged_row, dict):
-            continue
-        if _is_legacy_settlement_stamped(staged_row):
-            raise RuntimeError(
-                f"backfill validation failed: staged row {staged_row.get('row_id')} still settlement-stamped"
-            )
 
 
 def _resolve_enrichment_ciks(
@@ -486,7 +397,7 @@ def prepare_short_interest_data(
     enrich SEC company facts only for the explicitly requested tickers/CIKs.
 
     The store accumulates across refreshes (raw-archive write-once dedup +
-    Parquet unique-key dedup), so different ``--ticker`` sets grow the facts
+    DuckDB primary-key dedup), so different ``--ticker`` sets grow the facts
     cache; the leaderboard screen itself is always market-wide.  An
     unresolved ticker fetches nothing and is reported in the summary; an
     enrichment failure is reported in ``failed_enrichments`` and never
@@ -516,19 +427,10 @@ def backfill_finra_known_at(*, data_root: Path | None = None) -> dict[str, objec
     the v2 stamp; reruns return 0.
     """
     root = Path(data_root) if data_root else get_data_root()
-    with _finra_short_interest_lock(root / "parquet"):
-        return _backfill_finra_known_at_locked(root)
+    return _backfill_finra_known_at_locked(root)
 
 
-def _recover_backfill_backup(dataset_dir: Path, backup_dir: Path) -> None:
-    """Restore an interrupted swap, or clear a stale backup."""
-    if backup_dir.exists() and not dataset_dir.exists():
-        backup_dir.rename(dataset_dir)
-    elif backup_dir.exists():
-        shutil.rmtree(backup_dir)
-
-
-def _legacy_stamped_fixes(rows: list[object]) -> list[dict[str, object]]:
+def _legacy_stamped_fixes(rows: Sequence[object]) -> list[dict[str, object]]:
     """Legacy v1 settlement-stamped rows with known_at -> retrieved_at + v2 stamp."""
     fixed: list[dict[str, object]] = []
     for row in rows:
@@ -536,59 +438,42 @@ def _legacy_stamped_fixes(rows: list[object]) -> list[dict[str, object]]:
             continue
         if _is_legacy_settlement_stamped(row):
             row = dict(row)
-            row["known_at"] = str(row.get("retrieved_at") or "")
+            row["known_at"] = _iso_stamp(row.get("retrieved_at"))
+            row["retrieved_at"] = _iso_stamp(row.get("retrieved_at"))
             row["parser_version"] = SHORT_INTEREST_PARSER_VERSION
             fixed.append(row)
     return fixed
 
 
-def _merge_fixed_rows(rows: list[object], fixed: list[dict[str, object]]) -> list[dict[str, object]]:
-    """All rows with fixed revisions overlaid by row_id."""
-    by_id = {str(r.get("row_id")): r for r in rows if isinstance(r, dict)}
-    for row in fixed:
-        by_id[str(row.get("row_id"))] = row
-    return list(by_id.values())
-
-
-def _validate_staged_backfill(
-    staged: list[object], corrected: list[dict[str, object]], fixed: list[dict[str, object]]
-) -> None:
-    """Staged copy must hold every fixed row with known_at == retrieved_at + v2."""
-    if len(staged) != len(corrected):
-        raise RuntimeError(f"backfill validation failed: staged row count {len(staged)} != {len(corrected)}")
-    staged_by_id = {str(r.get("row_id")): r for r in staged if isinstance(r, dict)}
-    for row in fixed:
-        row_id = str(row.get("row_id"))
-        staged_row = _assert_fixed_row_present(staged_by_id, row_id)
-        _assert_fixed_row_stamped(staged_row, row_id)
-    _assert_no_stamped_leftovers(staged)
-
-
 def _backfill_finra_known_at_locked(data_root: Path) -> dict[str, object]:
     root = data_root
-    parquet_root = root / "parquet"
-    dataset_dir = parquet_root / "short_interest"
-    backup_dir = parquet_root / "short_interest-backfill-bak"
-    _recover_backfill_backup(dataset_dir, backup_dir)
-    if not _short_interest_has_legacy_v1(parquet_root):
+    if not _short_interest_has_legacy_v1(root):
         return {"rewritten": 0}
-    table = parquet.read_table("short_interest", root=parquet_root)
-    rows = table.to_pylist()
+    rows = duckdb.query("SELECT * FROM short_interest", data_root=root)
     fixed = _legacy_stamped_fixes(rows)
     if not fixed:
         return {"rewritten": 0}
-    corrected = _merge_fixed_rows(rows, fixed)
-    staging = Path(tempfile.mkdtemp(prefix="short_interest-backfill-", dir=parquet_root))
+    conn = duckdb._connect(root)
     try:
-        parquet.write_rows("short_interest", corrected, root=staging)
-        staged = parquet.read_table("short_interest", root=staging).to_pylist()
-        _validate_staged_backfill(staged, corrected, fixed)
-        # short_interest parquet mutations hold _finra_short_interest_lock; network fetch stays outside
-        if dataset_dir.exists():
-            os.replace(dataset_dir, backup_dir)
-        os.replace(staging / "short_interest", dataset_dir)
-        if backup_dir.exists():
-            shutil.rmtree(backup_dir)
+        conn.execute("BEGIN TRANSACTION")
+        try:
+            for row in fixed:
+                conn.execute(
+                    "UPDATE short_interest SET known_at = ?, parser_version = ?, _tsraw = ? WHERE row_id = ?",
+                    [
+                        str(row.get("known_at")),
+                        str(row.get("parser_version")),
+                        json.dumps(
+                            {"known_at": str(row.get("known_at")), "retrieved_at": str(row.get("retrieved_at"))},
+                            sort_keys=True,
+                        ),
+                        str(row.get("row_id")),
+                    ],
+                )
+            conn.execute("COMMIT")
+        except Exception:
+            conn.execute("ROLLBACK")
+            raise
     finally:
-        shutil.rmtree(staging, ignore_errors=True)
+        conn.close()
     return {"rewritten": len(fixed)}

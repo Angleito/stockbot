@@ -1,27 +1,23 @@
-"""Versioned Parquet datasets for normalized point-in-time records.
+"""Versioned normalized datasets for point-in-time records.
 
-Datasets are append-only and deduplicated on write by their unique key, so
-re-running an ingestion job produces no duplicate normalized facts.  Every
-record carries provenance: source, source record/URL, retrieved time,
-period/effective date, ``known_at``, content hash, and parser version.
-
-Partitioning is by the year of the dataset's primary date column (hive
-format), which keeps historical as-of queries cheap without hiding any
-records behind filters.
+DuckDB tables are the canonical store (see ``app.storage.duckdb``); this
+module owns the dataset schemas plus ``write_rows``/``read_table`` shims that
+delegate to the warehouse. Appending, dedup, and point-in-time reads all run
+inside DuckDB transactions, so re-running an ingestion job writes no
+duplicates. Every record carries provenance: source, source record/URL,
+retrieved time, period/effective date, ``known_at``, content hash, and parser
+version.
 """
 
 from __future__ import annotations
 
-import datetime as _dt
-import uuid
+import json
 from dataclasses import dataclass
 from pathlib import Path
 
 import pyarrow as pa
-import pyarrow.parquet as pq
 
 from ..config import get_data_root
-
 DEFAULT_PARQUET_ROOT = get_data_root() / "parquet"
 
 TEXT = pa.string()
@@ -109,7 +105,7 @@ DATASETS: dict[str, Dataset] = {
                 ("class_title", TEXT),
             )
         ),
-        unique_keys=("security_id",),
+        unique_keys=("security_id", "security_type", "known_at", "retrieved_at", "content_hash"),
     ),
     "documents": Dataset(
         name="documents",
@@ -963,98 +959,73 @@ def dataset_names() -> list[str]:
     return sorted(DATASETS)
 
 
-def _partition_year(date_value: str | None) -> str | None:
-    if not date_value:
+def _duckdb_data_root(root: Path | None) -> Path | None:
+    """A ``.../parquet`` root addresses the warehouse under its parent."""
+    if root is None:
         return None
-    try:
-        return str(_dt.date.fromisoformat(date_value[:10]).year)
-    except TypeError, ValueError:
-        return None
-
-
-def _exclusive_part_path(directory: Path) -> Path:
-    directory.mkdir(parents=True, exist_ok=True)
-    return directory / f"part-{uuid.uuid4().hex}.parquet"
-
-
-def _unique_key(row: dict[str, object], keys: tuple[str, ...]) -> tuple[str, ...]:
-    return tuple(str(row.get(key) or "") for key in keys)
-
-
-def _existing_keys(name: str, root: Path) -> set[tuple[str, ...]]:
-    """Keys already stored for ``name`` (existing boundary)."""
-    ds = dataset(name)
-    existing: set[tuple[str, ...]] = set()
-    for table in read_table(name, root).to_batches():
-        cols = []
-        for key in ds.unique_keys:
-            try:
-                cols.append(table.column(key).to_pylist())
-            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-                cols.append([None] * table.num_rows)
-        existing.update(tuple("" if v is None else str(v) for v in batch) for batch in zip(*cols))
-    return existing
-
-
-def _drop_duplicates(name: str, rows: list[dict[str, object]], root: Path) -> list[dict[str, object]]:
-    """Rows whose unique key is not stored yet (existing boundary)."""
-    ds = dataset(name)
-    existing = _existing_keys(name, root)
-    return [row for row in rows if _unique_key(row, ds.unique_keys) not in existing]
-
-
-def _group_partitions(
-    ds: Dataset,
-    new_rows: list[dict[str, object]],
-) -> dict[str, list[dict[str, object]]]:
-    """New rows grouped by partition label (existing boundary)."""
-    by_partition: dict[str, list[dict[str, object]]] = {}
-    for row in new_rows:
-        if ds.partition_field:
-            year = _partition_year(str(row.get(ds.partition_field) or "")) or "unknown"
-        else:
-            year = "none"
-        by_partition.setdefault(year, []).append(row)
-    return by_partition
-
-
-def _append_partition(ds: Dataset, root: Path, year: str, part_rows: list[dict[str, object]]) -> None:
-    """One hive partition file (existing boundary)."""
-    partition_col = f"{ds.partition_field}_year" if ds.partition_field else "partition"
-    directory = root / ds.name / f"{partition_col}={year}"
-    columns = [f.name for f in ds.schema]
-    clean_rows = [{key: row.get(key) for key in columns} for row in part_rows]
-    table = pa.Table.from_pylist(clean_rows, schema=ds.schema)
-    pq.write_table(table, str(_exclusive_part_path(directory)))
+    resolved = Path(root)
+    return resolved.parent if resolved.name == "parquet" else resolved
 
 
 def read_table(name: str, root: Path | None = None, columns: list[str] | None = None) -> pa.Table:
-    """Read a full dataset (all partitions) as a pyarrow Table."""
-    root = Path(root) if root else get_data_root() / "parquet"
+    """Read a full dataset from the warehouse as a pyarrow Table.
+
+    Timestamp columns come back exactly as written (date-only stays date-only,
+    midnight instants keep their full instant); rows predating raw capture
+    fall back to UTC ISO formatting. The dataset schema is otherwise
+    preserved.
+    """
+    from . import duckdb as _duckdb
+
     ds = dataset(name)
-    directory = root / ds.name
-    if not directory.exists():
-        return ds.schema.empty_table()
-    files = sorted(p for p in directory.rglob("*.parquet") if p.is_file())
-    if not files:
-        return ds.schema.empty_table()
-    tables = [pq.read_table(str(p), columns=columns) for p in files]
-    return pa.concat_tables(tables, promote_options="permissive")
+    wanted = list(columns) if columns else [field.name for field in ds.schema]
+    unknown = [column for column in wanted if column not in ds.schema.names]
+    if unknown:
+        raise ValueError(f"Unknown column for {name}: {unknown[0]}")
+
+    def _ts_select(column: str) -> str:
+        normalized = f'"{column}" AT TIME ZONE \'UTC\''
+        return (
+            f"CASE WHEN \"{column}\" IS NULL THEN NULL "
+            f"WHEN date_trunc('day', \"{column}\") = \"{column}\" "
+            f"THEN strftime({normalized}, '%Y-%m-%d') "
+            f"WHEN date_trunc('second', \"{column}\") = \"{column}\" "
+            f"THEN strftime({normalized}, '%Y-%m-%dT%H:%M:%SZ') "
+            f"ELSE strftime({normalized}, '%Y-%m-%dT%H:%M:%S.%fZ') END AS \"{column}\""
+        )
+
+    select = ", ".join(
+        _ts_select(column) if column in _duckdb.TIMESTAMP_COLS else f'"{column}"' for column in wanted
+    )
+    rows = _duckdb.query(
+        f'SELECT {select}, "_tsraw" AS "_tsraw" FROM "{name}" ORDER BY rowid',
+        data_root=_duckdb_data_root(root),
+    )
+    schema = ds.schema if columns is None else pa.schema([ds.schema.field(column) for column in wanted])
+    if not rows:
+        return schema.empty_table()
+    for row in rows:
+        raw_json = row.pop("_tsraw", None)
+        if not raw_json or not isinstance(raw_json, str):
+            continue
+        try:
+            raw = json.loads(raw_json)
+        except ValueError:
+            continue
+        if isinstance(raw, dict):
+            for column, value in raw.items():
+                if column in row and isinstance(value, str):
+                    row[column] = value
+    return pa.Table.from_pylist(rows, schema=schema)
 
 
 def write_rows(name: str, rows: list[dict[str, object]], root: Path | None = None) -> int:
-    """Append rows deduplicated by the dataset's unique key; returns the
+    """Insert rows deduplicated by the dataset's unique key; returns the
     number of rows actually written (0 on a deterministic rerun)."""
-    root = Path(root) if root else get_data_root() / "parquet"
-    ds = dataset(name)
-    if not rows:
-        return 0
-    new_rows = _drop_duplicates(name, rows, root)
-    if not new_rows:
-        return 0
-    for year, part_rows in _group_partitions(ds, new_rows).items():
-        _append_partition(ds, root, year, part_rows)
-    return len(new_rows)
+    from . import duckdb as _duckdb
+
+    dataset(name)
+    return _duckdb.insert_ignore(name, rows, data_root=_duckdb_data_root(root))
 
 
 def count_rows(name: str, root: Path | None = None) -> int:
