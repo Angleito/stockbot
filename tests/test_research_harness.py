@@ -5257,6 +5257,69 @@ def test_hf_no_cross_job_attach(tmp_path: Path, monkeypatch: pytest.MonkeyPatch)
     assert repo.list_evidence(sid_a) == [] and repo.list_evidence(sid_b) == []
 
 
+def test_hf_replay_rejects_cross_wave_lane(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A wave-1 persisted result cited from a wave-2 job fails ERR_PROVENANCE_MISMATCH."""
+    from app.research import service as _svc
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, _ = _hf_sid(repo, "SEC", "FINRA", "WEB")
+    w1 = str(_svc.start_job(sid, "source_agent", source="FINRA", repo=repo, wave_id=1)["job_id"])
+    w1_rid = _hf_persist_finra(repo, sid, w1, f"{sid}:tr:w1", as_of_date="2025-06-15", published_at="2025-06-15")
+    w1_marker = w1_rid.rsplit(":tr:", 1)[-1]
+    _svc.record_evidence(
+        sid,
+        w1,
+        {
+            "evidence_id": f"{sid}:ev:w1",
+            "content": f"NVDA short interest 12345 shares {w1_marker}",
+            "claim_text": f"NVDA short interest 12345 shares {w1_marker}",
+            "subject": "NVDA",
+            "source_name": "FINRA",
+            "tool_result_id": w1_rid,
+            "matching_passage": f"NVDA short interest 12345 shares {w1_marker}",
+        },
+        repo=repo,
+    )
+    for job in repo.list_jobs(sid):
+        if job.job_type in ("source_agent", "scout") and job.wave_id == 1 and job.status in ("queued", "running"):
+            _svc.complete_job(job.job_id, {}, repo=repo)
+    _svc.freeze_session(sid, 1, repo=repo)
+    w2 = str(_svc.start_job(sid, "source_agent", source="FINRA", repo=repo, wave_id=2)["job_id"])
+    with pytest.raises(ValueError, match="ERR_PROVENANCE_MISMATCH"):
+        _svc.record_evidence(
+            sid,
+            w2,
+            {
+                "evidence_id": f"{sid}:ev:w2-cross",
+                "content": f"NVDA short interest 12345 shares {w1_marker}",
+                "claim_text": f"NVDA short interest 12345 shares {w1_marker}",
+                "subject": "NVDA",
+                "source_name": "FINRA",
+                "tool_result_id": w1_rid,
+                "matching_passage": f"NVDA short interest 12345 shares {w1_marker}",
+            },
+            repo=repo,
+        )
+    w2_rid = _hf_persist_finra(repo, sid, w2, f"{sid}:tr:w2", as_of_date="2025-06-15", published_at="2025-06-15")
+    w2_marker = w2_rid.rsplit(":tr:", 1)[-1]
+    out = _svc.record_evidence(
+        sid,
+        w2,
+        {
+            "evidence_id": f"{sid}:ev:w2",
+            "content": f"NVDA short interest 12345 shares {w2_marker}",
+            "claim_text": f"NVDA short interest 12345 shares {w2_marker}",
+            "subject": "NVDA",
+            "source_name": "FINRA",
+            "tool_result_id": w2_rid,
+            "matching_passage": f"NVDA short interest 12345 shares {w2_marker}",
+        },
+        repo=repo,
+    )
+    assert _hf_prov(out, "tool_result_id") == w2_rid
+
+
 def test_hf_admission_rejects_fabricated_sec_handle(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """No handle, garbage handle, unknown document, and declared-ref mismatch all fail closed."""
     from app.research import service as _svc
@@ -5613,7 +5676,13 @@ def test_hf_stockbot_yml_stays_sync_no_bg() -> None:
 
 
 def _hf_persist_finra(
-    repo: ResearchRepository, sid: str, job_id: str, rid: str, *, as_of_date: str | None = "2025-06-15"
+    repo: ResearchRepository,
+    sid: str,
+    job_id: str,
+    rid: str,
+    *,
+    as_of_date: str | None = "2025-06-15",
+    published_at: str | None = "2025-06-20",
 ) -> str:
     """Persist one staged FINRA result; returns its tool_result_id."""
     from app.research import service as _svc
@@ -5625,6 +5694,8 @@ def _hf_persist_finra(
     }
     if as_of_date is not None:
         payload["as_of_date"] = as_of_date
+    if published_at is not None:
+        payload["published_at"] = published_at
     return str(_svc.persist_tool_result(sid, job_id, "query_finra", rid, payload, repo=repo)["tool_result_id"])
 
 
@@ -5719,7 +5790,7 @@ def test_hf_persist_is_idempotent_first_bytes_win(tmp_path: Path, monkeypatch: p
 
 
 def test_hf_replay_admits_finra_record(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """FINRA job + tool_result_id replay admits finra_record provenance with dataset known_at."""
+    """FINRA job + tool_result_id replay admits finra_record provenance with publication known_at."""
     from app.research import service as _svc
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
@@ -5743,8 +5814,8 @@ def test_hf_replay_admits_finra_record(tmp_path: Path, monkeypatch: pytest.Monke
     )
     assert _hf_prov(out, "kind") == "finra_record"
     assert _hf_prov(out, "tool_name") == "query_finra"
-    assert _hf_prov(out, "known_at") == "2025-06-15"
-    assert out["known_at"] == "2025-06-15T00:00:00+00:00"
+    assert _hf_prov(out, "known_at") == "2025-06-20"
+    assert out["known_at"] == "2025-06-20T00:00:00+00:00"
 
 
 def test_hf_replay_admits_web_source(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -5900,7 +5971,7 @@ def test_hf_replay_wrong_result_fails_closed(tmp_path: Path, monkeypatch: pytest
 
 
 def test_hf_finra_caller_known_at_never_overrides_result_time(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """FINRA known_at is the persisted as_of_date: a caller backdate cannot move it."""
+    """FINRA known_at is the persisted publication time: a caller backdate cannot move it."""
     from app.research import service as _svc
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
@@ -5923,11 +5994,11 @@ def test_hf_finra_caller_known_at_never_overrides_result_time(tmp_path: Path, mo
         },
         repo=repo,
     )
-    assert out["known_at"] == "2025-06-15T00:00:00+00:00"
+    assert out["known_at"] == "2025-06-20T00:00:00+00:00"
 
 
 def test_hf_finra_known_at_gates_pit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """FINRA known_at comes from the persisted as_of_date: early admits, late PIT_VIOLATION, missing PIT_UNVERIFIED."""
+    """FINRA known_at comes from the persisted publication time: early admits, late PIT_VIOLATION, missing PIT_UNVERIFIED."""
     from app.research import service as _svc
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
@@ -5946,13 +6017,16 @@ def test_hf_finra_known_at_gates_pit(tmp_path: Path, monkeypatch: pytest.MonkeyP
         }
 
     early_job = str(_svc.start_job(sid, "source_agent", source="FINRA", repo=repo, wave_id=1)["job_id"])
-    early_rid = _hf_persist_finra(repo, sid, early_job, f"{sid}:tr:pit-early", as_of_date="2025-06-15")
+    early_rid = _hf_persist_finra(
+        repo, sid, early_job, f"{sid}:tr:pit-early", as_of_date="2025-06-15", published_at="2025-06-15"
+    )
     early = _svc.record_evidence(
         sid, early_job, _item(f"{sid}:ev:pit-early", early_rid, "NVDA short interest 12345 shares pit-early"), repo=repo
     )
-    assert early["known_at"] == "2025-06-15T00:00:00+00:00"
     late_job = str(_svc.start_job(sid, "source_agent", source="FINRA", repo=repo, wave_id=1)["job_id"])
-    late_rid = _hf_persist_finra(repo, sid, late_job, f"{sid}:tr:pit-late", as_of_date="2025-07-15")
+    late_rid = _hf_persist_finra(
+        repo, sid, late_job, f"{sid}:tr:pit-late", as_of_date="2025-06-15", published_at="2025-07-15"
+    )
     with pytest.raises(ValueError, match="PIT_VIOLATION|rejected"):
         _svc.record_evidence(
             sid,
@@ -5961,7 +6035,7 @@ def test_hf_finra_known_at_gates_pit(tmp_path: Path, monkeypatch: pytest.MonkeyP
             repo=repo,
         )
     bare_job = str(_svc.start_job(sid, "source_agent", source="FINRA", repo=repo, wave_id=1)["job_id"])
-    bare_rid = _hf_persist_finra(repo, sid, bare_job, f"{sid}:tr:pit-none", as_of_date=None)
+    bare_rid = _hf_persist_finra(repo, sid, bare_job, f"{sid}:tr:pit-none", as_of_date=None, published_at=None)
     with pytest.raises(ValueError, match="PIT_UNVERIFIED|rejected"):
         _svc.record_evidence(
             sid,
@@ -5970,6 +6044,32 @@ def test_hf_finra_known_at_gates_pit(tmp_path: Path, monkeypatch: pytest.MonkeyP
             repo=repo,
         )
     assert [r["evidence_id"] for r in repo.list_evidence(sid)] == [f"{sid}:ev:pit-early"]
+
+
+def test_hf_finra_settlement_is_not_publication(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A pre-cutoff settlementDate published after cutoff is PIT_VIOLATION, never admitted."""
+    from app.research import service as _svc
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    sid, _ = _hf_sid(repo, "SEC", "FINRA", "WEB")
+    job = str(_svc.start_job(sid, "source_agent", source="FINRA", repo=repo, wave_id=1)["job_id"])
+    rid = _hf_persist_finra(repo, sid, job, f"{sid}:tr:pit-settle", as_of_date="2025-06-15", published_at="2025-07-15")
+    with pytest.raises(ValueError, match="PIT_VIOLATION|rejected"):
+        _svc.record_evidence(
+            sid,
+            job,
+            {
+                "evidence_id": f"{sid}:ev:pit-settle",
+                "content": "NVDA short interest 12345 shares pit-settle",
+                "claim_text": "NVDA short interest 12345 shares pit-settle",
+                "subject": "NVDA",
+                "source_name": "FINRA",
+                "tool_result_id": rid,
+                "matching_passage": "NVDA short interest 12345 shares pit-settle",
+            },
+            repo=repo,
+        )
 
 
 def test_hf_get_tool_result_roundtrip_and_unknown(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6321,7 +6421,7 @@ def test_hf_rejected_evidence_journals_event(tmp_path: Path, monkeypatch: pytest
     repo = ResearchRepository()
     sid, _ = _hf_sid(repo, "SEC", "FINRA", "WEB")
     fin, _ = _hf_desks(repo, sid)
-    rid = _hf_persist_finra(repo, sid, fin, f"{sid}:tr:fin-rej", as_of_date="2025-07-15")
+    rid = _hf_persist_finra(repo, sid, fin, f"{sid}:tr:fin-rej", as_of_date="2025-06-15", published_at="2025-07-15")
     marker = rid.rsplit(":tr:", 1)[-1]
     with pytest.raises(ValueError, match="PIT_VIOLATION|rejected"):
         _svc.record_evidence(

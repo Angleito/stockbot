@@ -2113,6 +2113,33 @@ test("research director restart: authorized wave-2 reuses running source until n
 	expectFreezeIds(resumedB.prompt, F2, [E1, E2]);
 });
 
+test("research director restart: wave-2 running source with new evidence keeps fetching without freezing", async () => {
+	const SID = "rs:resume-w2-fetch";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const E2 = `${SID}:ev:2`;
+	const e1run = [{ freeze_id: F1, wave_id: 1, jobs: ["job:s1", "job:u1", "job:b1"] }];
+	const ops: ResumeOp[] = [];
+	const state: ResumeState = {
+		session: resumeSession(SID, {
+			status: "targeted_research", targeted_question: "How did Q3 go?", targeted_domain: "SEC",
+			evidence_ids: [E1, E2], freeze_ids: [F1], committee_runs: e1run, current_wave: 1,
+		}),
+		jobs: [
+			{ job_id: "job:s1", job_type: "stockbot", wave_id: 1, status: "completed" },
+			{ job_id: "job:u1", job_type: "bullbot", wave_id: 1, status: "completed" },
+			{ job_id: "job:b1", job_type: "bearbot", wave_id: 1, status: "completed" },
+			{ job_id: "job:w2src", job_type: "source_agent", wave_id: 2, status: "running" },
+		],
+		freezes: { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } },
+	};
+	setResearchBridge(resumeBridge(state, ops));
+	const resumed = await resumeResearch(SID, "run-resume-w2-fetch");
+	expect(resumeTransitions(ops)).toEqual([]);
+	expect(resumed.prompt).toContain("research_add_evidence");
+	expect(resumed.prompt).toContain("job:w2src");
+});
+
 test("research director restart: E2 resumes committee on F2 without source work", async () => {
 	const SID = "rs:resume-e2";
 	const F1 = `${SID}:1:freeze`;

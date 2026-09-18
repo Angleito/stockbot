@@ -853,11 +853,12 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
   }
   return { done: false, prompt: waveBatchPrompt(N, sid, wanted, started, objective, targeted, asOf, gateFollowUps) };
  }
- // Wave-N source work is underway: without evidence past the latest freeze the
- // driver keeps fetching; the wave-N freeze fires only once new evidence lands
- // AND every requested desk is terminal (insufficient stays freezable).
+ // Wave-N freeze fires only once every requested desk is terminal; novelty
+ // decides finalize vs freeze, never fetch vs freeze.
  const openWave = wanted.map((a) => haveByAgent[a]).filter((x) => x && (x.status === "running" || x.status === "queued"));
- if ((openWave.length > 0 || !wanted.every((a) => haveByAgent[a] && JOB_TERMINAL[haveByAgent[a].status] === true)) && d.unfrozenEvidenceIds.length === 0) {
+ const allTerminal = wanted.every((a) => haveByAgent[a] && JOB_TERMINAL[haveByAgent[a].status] === true);
+ if (openWave.length > 0 || !allTerminal) {
+  // source work underway: keep fetching regardless of novelty
   const started = wanted.map((a) => ({ agent: a, jobId: haveByAgent[a].jobId }));
   return { done: false, prompt: waveBatchPrompt(N, sid, wanted, started, objective, targeted, asOf, gateFollowUps) };
  }

@@ -670,9 +670,9 @@ def _observed_provenance(
     """
     domain = (job.source_domain or "SEC").upper() if job is not None else "SEC"
     if domain == "FINRA":
-        return _finra_provenance(data, store=store, session_id=session_id)
+        return _finra_provenance(data, job, store=store, session_id=session_id)
     if domain == "WEB":
-        return _web_provenance(data, store=store, session_id=session_id)
+        return _web_provenance(data, job, store=store, session_id=session_id)
     return _sec_provenance(data)
 
 
@@ -747,15 +747,18 @@ def _finra_record_texts(result: Mapping[str, object]) -> list[str]:
 
 
 def _finra_known_at(result: Mapping[str, object]) -> str | None:
-    """Dataset authoritative date of one persisted FINRA result; None when unknown."""
+    """Persisted publication/availability time of one FINRA result; None when unknown."""
     payload = result.get("result")
     payload = payload if isinstance(payload, Mapping) else result
-    as_of = payload.get("as_of_date")
-    return as_of.strip() if isinstance(as_of, str) and as_of.strip() else None
+    for key in ("published_at", "publication_date", "available_at"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return value.strip()
+    return None
 
 
 def _finra_provenance(
-    data: Mapping[str, object], *, store: ResearchRepository | None = None, session_id: str | None = None
+    data: Mapping[str, object], job: Job | None = None, *, store: ResearchRepository | None = None, session_id: str | None = None
 ) -> dict[str, JSONValue]:
     """FinraRecordRef replayed against the persisted FINRA tool result."""
     from .repository import ResearchRepository as _RR
@@ -785,6 +788,12 @@ def _finra_provenance(
         raise ValueError(
             f"record_evidence: ERR_PROVENANCE_MISMATCH (tool result {ref_id!r} is {tool_name!r}, not FINRA records)"
         )
+    if job is not None:
+        allowed = _submit_subtree_job_ids(repo, job)
+        if str(result.get("job_id")) not in allowed:
+            raise ValueError(
+                f"record_evidence: ERR_PROVENANCE_MISMATCH (tool result {ref_id!r} not in wave {job.wave_id} {(job.source_domain or 'SEC').upper()} lane)"
+            )
     texts = _finra_record_texts(result)
     if not any(locator in text for text in texts):
         raise ValueError(
@@ -832,7 +841,7 @@ def _web_result_texts(result: Mapping[str, object]) -> list[tuple[str, str, str,
 
 
 def _web_provenance(
-    data: Mapping[str, object], *, store: ResearchRepository | None = None, session_id: str | None = None
+    data: Mapping[str, object], job: Job | None = None, *, store: ResearchRepository | None = None, session_id: str | None = None
 ) -> dict[str, JSONValue]:
     """WebSourceRef replayed against the persisted search_web result."""
     from .repository import ResearchRepository as _RR
@@ -861,6 +870,12 @@ def _web_provenance(
         raise ValueError(
             f"record_evidence: ERR_PROVENANCE_MISMATCH (tool result {ref_id!r} is not a search_web result)"
         )
+    if job is not None:
+        allowed = _submit_subtree_job_ids(repo, job)
+        if str(result.get("job_id")) not in allowed:
+            raise ValueError(
+                f"record_evidence: ERR_PROVENANCE_MISMATCH (tool result {ref_id!r} not in wave {job.wave_id} {(job.source_domain or 'SEC').upper()} lane)"
+            )
     rows = _web_result_texts(result)
     url = data.get("source_record_id") or data.get("url") or data.get("source_uri")
     for row_url, domain, title, published_at, retrieved_at, highlight in rows:
@@ -1228,9 +1243,9 @@ def _provenance_time(caller: object, authoritative: object, *, kind: str = "") -
     """Source time: FINRA/WEB rows use the kernel-replayed result time only; SEC uses caller time.
 
     A model-asserted known_at must never backdate a persisted result past PIT:
-    FINRA known_at is the persisted as_of_date, WEB known_at is the persisted
-    published_at (never retrieval time, never caller time). Missing result time
-    stays None so bounded sessions fail PIT_UNVERIFIED instead of inventing it.
+    FINRA known_at is the persisted publication/availability time, WEB known_at
+    is the persisted published_at (never retrieval time, never caller time).
+    Missing result time stays None so bounded sessions fail PIT_UNVERIFIED
     """
     if kind in ("finra_record", "web_source"):
         return _coerce_dt(authoritative)
