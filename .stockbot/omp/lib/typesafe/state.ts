@@ -42,8 +42,8 @@ const COVERAGE_CRITERION = /^V(0[1-9]|1[0-9]|20)$/;
 const coverageGaps = new Map<string, CoverageGap>();
 const coverageKey = (sessionId: string, freezeId: string, criterion: string): string => `${sessionId}::${freezeId}::${criterion}`;
 export function recordCoverageGaps(sessionId: string, freezeId: string, failed: { id: string; pYes: number; reason: string }[]): void {
- for (const key of [...coverageGaps.keys()]) {
-  if (key.startsWith(`${sessionId}::${freezeId}::`)) coverageGaps.delete(key);
+ for (const [key, gap] of [...coverageGaps]) {
+  if (gap.sessionId === sessionId) coverageGaps.delete(key);
  }
  for (const f of failed) {
   if (!COVERAGE_CRITERION.test(f.id)) continue;
@@ -321,6 +321,8 @@ export async function loadCandidateGap(sessionId: string, gapId: string, deps: S
  if (gapId.startsWith(COVERAGE_PREFIX)) {
   const hit = lookupCoverageGap(sessionId, gapId);
   if (!hit) throw bad();
+  const freezes = strList(session.freeze_ids ?? []);
+  if (freezes.length === 0 || hit.freezeId !== freezes[freezes.length - 1]) throw bad();
   await readRecord(sessionId, "freeze", hit.freezeId, deps).then((rec) => requireId(rec, sessionId, "freeze_id", hit.freezeId));
   return { objective: objectiveOf(session), gap: hit.reason };
  }
