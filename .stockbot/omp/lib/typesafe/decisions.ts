@@ -14,7 +14,7 @@ export function resolveClaim(results: JudgmentMap, actionable: boolean): ClaimRe
  const contradicts = isYes(results, "C02");
  if (supports && contradicts) return "MIXED";
  if (contradicts) return "CONTRADICTED";
- if (supports) return "SUPPORTED";
+ if (supports && isYes(results, "C03") && !isYes(results, "C06") && isYes(results, "C13")) return "SUPPORTED";
  return actionable ? "UNKNOWN_ACTIONABLE" : "UNKNOWN_EXHAUSTED";
 }
 

@@ -90,11 +90,13 @@ test("0.70 boundary on a critical decides accept", async () => {
 test("review runner issues accept_role_output auth only on ACCEPT", async () => {
 	const ids = [...PACKS.common, ...PACKS.bull];
 	const probs = (v: number, except: Record<string, number> = {}): Record<string, { p_yes: number; yes: boolean }> => Object.fromEntries(ids.map((id) => [id, { p_yes: except[id] ?? v, yes: yes(except[id] ?? v) }]));
-	const pass = await runReviewTool("research_review_role_output", { role: "bullbot", objective: "o", evidence: [], output: { text: "ok" }, run_id: "run-role-1" }, { evaluator: new FakeEvaluator(probs(0.9)) });
+	const { hashAction } = await import("../.stockbot/omp/lib/research-control.ts");
+	const roleLoader = (output: unknown) => async () => ({ role: "bullbot", objective: "o", evidence: [], output, freezeId: "f1", freezeEvidenceIds: ["e1"], freezeEvidenceHash: hashAction(["e1"]) });
+	const pass = await runReviewTool("research_review_role_output", { research_session_id: "s", freeze_id: "f1", role_job_id: "job-bull-1" }, { evaluator: new FakeEvaluator(probs(0.9)), getRunId: () => "run-role-1", stateLoader: { role: roleLoader({ text: "ok" }) } });
 	const passDetails = pass?.details as { verdict?: unknown; authorization?: { kind?: unknown } };
 	expect(passDetails.verdict).toBe("ACCEPT");
 	expect(passDetails.authorization?.kind).toBe("accept_role_output");
-	const fail = await runReviewTool("research_review_role_output", { role: "bullbot", objective: "o", evidence: [], output: { text: "bad" }, run_id: "run-role-1" }, { evaluator: new FakeEvaluator(probs(0.9, { Q04: 0.1 })) });
+	const fail = await runReviewTool("research_review_role_output", { research_session_id: "s", freeze_id: "f1", role_job_id: "job-bull-1" }, { evaluator: new FakeEvaluator(probs(0.9, { Q04: 0.1 })), getRunId: () => "run-role-1", stateLoader: { role: roleLoader({ text: "bad" }) } });
 	const failDetails = fail?.details as { verdict?: unknown; authorization?: unknown };
 	expect(failDetails.verdict).toBe("REJECT_FOR_REVISION");
 	expect(failDetails.authorization).toBeUndefined();

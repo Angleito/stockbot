@@ -10,6 +10,7 @@ export type AuthKind =
  | "continue_research"
  | "launch_committee"
  | "accept_role_output"
+ | "committee_accepted"
  | "finalize";
 
 export interface Authorization {
@@ -27,6 +28,7 @@ const KINDS: Record<AuthKind, true> = {
  continue_research: true,
  launch_committee: true,
  accept_role_output: true,
+ committee_accepted: true,
  finalize: true,
 };
 
@@ -67,7 +69,7 @@ export function consumeAuthorization(store: Map<string, Authorization>, id: stri
 // Binding-aware consume: kind-only when actionHash is undefined (waves/
 // committee: future task batch unknown at issuance, stored hash is audit),
 // hash-bound when provided (finalize: reviewed answer must equal intercepted
-// answer). "default" runId stays a single-run/test wildcard.
+// answer). Exact runId match only; no wildcard.
 export function consumeMatchingAuth(store: Map<string, Authorization>, runId: string, kind: AuthKind, actionHash?: string): boolean {
  if (!(store instanceof Map)) throw new Error("research-control: invalid store");
  if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
@@ -75,10 +77,24 @@ export function consumeMatchingAuth(store: Map<string, Authorization>, runId: st
  if (actionHash !== undefined && (typeof actionHash !== "string" || actionHash.length === 0)) throw new Error("research-control: invalid actionHash");
  for (const auth of store.values()) {
   if (!auth || typeof auth !== "object" || auth.consumed) continue;
-  if (!(auth.runId === runId || auth.runId === "default")) continue;
+  if (auth.runId !== runId) continue;
   if (auth.kind !== kind) continue;
   if (actionHash !== undefined && auth.actionHash !== actionHash) continue;
   if (consumeAuthorization(store, auth.id, { runId: auth.runId, kind, ...(actionHash !== undefined ? { actionHash } : {}) })) return true;
+ }
+ return false;
+}
+// Open continue_research for this run (kind-only: the candidate-generation
+// round precedes any bound candidate; per-item binding consumes at the gate).
+export function hasOpenAuth(store: Map<string, Authorization>, runId: string, kind: AuthKind): boolean {
+ if (!(store instanceof Map)) throw new Error("research-control: invalid store");
+ if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
+ if (!kind || !KINDS[kind]) throw new Error("research-control: invalid kind");
+ for (const auth of store.values()) {
+  if (!auth || typeof auth !== "object" || auth.consumed) continue;
+  if (auth.runId !== runId) continue;
+  if (auth.kind !== kind) continue;
+  return true;
  }
  return false;
 }
@@ -89,47 +105,76 @@ export function finalizeActionHash(answer: unknown): string {
  return hashAction({ answer });
 }
 
-// Trio acceptance at finalize (§§15-17 order): role reviews grade AFTER the
-// trio runs, so the gate cannot demand ACCEPTs before launch. Finalize needs
-// one open accept_role_output per role; the finalize auth itself stays
-// hash-bound to the reviewed answer. A successful finalize consumes the three
-// role ACCEPTs (one-time); a new committee launch drains stales (see index).
-export function hasOpenRoleAccepts(store: Map<string, Authorization>, runId: string): boolean {
- if (!(store instanceof Map)) throw new Error("research-control: invalid store");
- if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
- const roles = new Set<string>();
- for (const auth of store.values()) {
-  if (!auth || typeof auth !== "object" || auth.consumed) continue;
-  if (!(auth.runId === runId || auth.runId === "default")) continue;
-  if (auth.kind !== "accept_role_output") continue;
-  try {
-   const role = (JSON.parse(auth.actionHash) as { role?: unknown }).role;
-   if (role === "stockbot" || role === "bullbot" || role === "bearbot") roles.add(role);
-  } catch {
-   continue;
-  }
- }
- return roles.size >= 3;
+// Bound trio acceptance (§§15-17 order): role reviews grade AFTER the trio
+// runs, so the gate cannot demand ACCEPTs before launch. Each ACCEPT binds one
+// recorded output: hashAction({runId, freezeId, role, roleJobId, outputHash,
+// freezeHash}). Finalize needs one open ACCEPT per role matching the actual
+// committee outputs for that freeze; the finalize auth itself stays hash-bound
+// to the reviewed answer. A successful finalize consumes the three role
+// ACCEPTs (one-time); a new committee launch drains stales (see index).
+export interface RoleAcceptBinding {
+ runId: string;
+ freezeId: string;
+ role: string;
+ roleJobId: string;
+ outputHash: string;
+ freezeHash: string;
 }
-// One-time trio acceptance: consume one open ACCEPT per role for the run.
-// All-three-or-none: a partial set burns nothing (fail-closed, retryable).
-export function consumeOpenRoleAccepts(store: Map<string, Authorization>, runId: string): boolean {
+export type RoleAcceptExpected = Record<"stockbot" | "bullbot" | "bearbot", { roleJobId: string; outputHash: string; freezeHash: string }>;
+export function issueRoleAccept(runId: string, binding: RoleAcceptBinding): Authorization {
+ if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
+ if (!binding || typeof binding !== "object") throw new Error("research-control: invalid role binding");
+ for (const k of ["runId", "freezeId", "role", "roleJobId", "outputHash", "freezeHash"] as const) {
+  if (typeof binding[k] !== "string" || binding[k].length === 0) throw new Error("research-control: invalid role binding");
+ }
+ if (binding.role !== "stockbot" && binding.role !== "bullbot" && binding.role !== "bearbot") throw new Error("research-control: invalid role binding");
+ if (binding.runId !== runId) throw new Error("research-control: invalid role binding");
+ return issueAuthorization(runId, "accept_role_output", hashAction({ runId: binding.runId, freezeId: binding.freezeId, role: binding.role, roleJobId: binding.roleJobId, outputHash: binding.outputHash, freezeHash: binding.freezeHash }));
+}
+function roleBindingMatches(auth: Authorization, runId: string, freezeId: string, role: string, exp?: { roleJobId: string; outputHash: string; freezeHash: string }): boolean {
+ if (auth.runId !== runId || auth.kind !== "accept_role_output") return false;
+ let b: unknown;
+ try {
+  b = JSON.parse(auth.actionHash);
+ } catch {
+  return false;
+ }
+ if (!b || typeof b !== "object") return false;
+ const row = b as Record<string, unknown>;
+ if (row.runId !== runId || row.freezeId !== freezeId || row.role !== role) return false;
+ if (exp && (row.roleJobId !== exp.roleJobId || row.outputHash !== exp.outputHash || row.freezeHash !== exp.freezeHash)) return false;
+ return true;
+}
+export function hasOpenRoleAccepts(store: Map<string, Authorization>, runId: string, freezeId: string): boolean {
  if (!(store instanceof Map)) throw new Error("research-control: invalid store");
  if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
- const ids: string[] = [];
+ if (typeof freezeId !== "string" || freezeId.length === 0) throw new Error("research-control: invalid freezeId");
  for (const role of ["stockbot", "bullbot", "bearbot"]) {
+  let found = false;
+  for (const auth of store.values()) {
+   if (!auth || typeof auth !== "object" || auth.consumed) continue;
+   if (roleBindingMatches(auth, runId, freezeId, role)) { found = true; break; }
+  }
+  if (!found) return false;
+ }
+ return true;
+}
+// One-time trio acceptance: consume one open ACCEPT per role matching the
+// actual outputs for the freeze. All-three-or-none: a partial set burns
+// nothing (fail-closed, retryable).
+export function consumeOpenRoleAccepts(store: Map<string, Authorization>, runId: string, freezeId: string, expected: RoleAcceptExpected): boolean {
+ if (!(store instanceof Map)) throw new Error("research-control: invalid store");
+ if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
+ if (typeof freezeId !== "string" || freezeId.length === 0) throw new Error("research-control: invalid freezeId");
+ if (!expected || typeof expected !== "object") throw new Error("research-control: invalid expected");
+ const ids: string[] = [];
+ for (const role of ["stockbot", "bullbot", "bearbot"] as const) {
+  const exp = expected[role];
+  if (!exp || typeof exp.roleJobId !== "string" || typeof exp.outputHash !== "string" || typeof exp.freezeHash !== "string") throw new Error("research-control: invalid expected");
   let found: string | null = null;
   for (const auth of store.values()) {
    if (!auth || typeof auth !== "object" || auth.consumed) continue;
-   if (!(auth.runId === runId || auth.runId === "default")) continue;
-   if (auth.kind !== "accept_role_output") continue;
-   let r: unknown = null;
-   try {
-    r = (JSON.parse(auth.actionHash) as { role?: unknown }).role;
-   } catch {
-    continue;
-   }
-   if (r === role) { found = auth.id; break; }
+   if (roleBindingMatches(auth, runId, freezeId, role, exp)) { found = auth.id; break; }
   }
   if (!found) return false;
   ids.push(found);
@@ -137,7 +182,7 @@ export function consumeOpenRoleAccepts(store: Map<string, Authorization>, runId:
  for (const id of ids) {
   const auth = store.get(id);
   if (!auth || auth.consumed) return false;
-  if (!consumeAuthorization(store, id, { runId: auth.runId, kind: "accept_role_output" })) return false;
+  if (!consumeAuthorization(store, id, { runId: auth.runId, kind: "accept_role_output", actionHash: auth.actionHash })) return false;
  }
  return true;
 }
@@ -149,8 +194,20 @@ export function drainRoleAccepts(store: Map<string, Authorization>, runId: strin
  if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
  for (const auth of store.values()) {
   if (!auth || typeof auth !== "object" || auth.consumed) continue;
-  if (!(auth.runId === runId || auth.runId === "default")) continue;
+  if (auth.runId !== runId) continue;
   if (auth.kind !== "accept_role_output") continue;
+  auth.consumed = true;
+ }
+}
+// Stale committee grades never authorize a later freeze: drained next to
+// drainRoleAccepts at allowed committee launch (see index).
+export function drainCommitteeAccepts(store: Map<string, Authorization>, runId: string): void {
+ if (!(store instanceof Map)) throw new Error("research-control: invalid store");
+ if (typeof runId !== "string" || runId.length === 0) throw new Error("research-control: invalid runId");
+ for (const auth of store.values()) {
+  if (!auth || typeof auth !== "object" || auth.consumed) continue;
+  if (auth.runId !== runId) continue;
+  if (auth.kind !== "committee_accepted") continue;
   auth.consumed = true;
  }
 }

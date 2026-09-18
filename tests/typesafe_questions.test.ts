@@ -14,10 +14,11 @@ const SIZES: Record<string, number> = {
 	bear: 6,
 	committee: 8,
 	final: 4,
+	final_extended: 16,
 };
 
-test("bank version is 1", () => {
-	expect(QUESTION_BANK_VERSION).toBe("1");
+test("bank version is 2", () => {
+	expect(QUESTION_BANK_VERSION).toBe("2");
 });
 
 test("pack sizes match the plan", () => {

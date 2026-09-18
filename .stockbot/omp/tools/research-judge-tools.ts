@@ -4,6 +4,13 @@
  * compact structured state pack, persists raw probabilities, and on success
  * issues a one-time Authorization the tool_call gate consumes. All failures
  * are sanitized fail-closed (never leak keys, transcripts, or SDK detail).
+ *
+ * Tools grade trusted kernel state only: every schema is identifier-only
+ * (session/freeze/evidence/claim/branch-map/gap ids) resolved through an
+ * injected state loader. Model args never reach the evaluator except `answer`
+ * (final, what is being reviewed) and `candidate` (OMP generates, TypeSafe
+ * evaluates; the auth binds its hash). Run identity comes from the injected
+ * getRunId, never from model params: absent run id blocks.
  */
 
 import type { ExtensionAPI, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
@@ -12,12 +19,22 @@ import { buildAudit } from "../lib/typesafe/audit.ts";
 import { authorizeCandidate, judgeContinuation, judgeCoverage, judgeEvidence, resolveClaim } from "../lib/typesafe/decisions.ts";
 import { TypeSafeEvaluator } from "../lib/typesafe/evaluator.ts";
 import { PACKS, QUESTION_BANK } from "../lib/typesafe/questions.ts";
+import { loadCandidateGap, loadClaimState, loadContinuationState, loadCoverageState, loadEvidenceState } from "../lib/typesafe/state.ts";
 import { YES_THRESHOLD } from "../lib/typesafe/thresholds.ts";
 import type { JudgmentMap, JudgeQuestion, SystemOneEvaluator } from "../lib/typesafe/types.ts";
 
 export interface JudgeToolDeps {
  evaluator?: SystemOneEvaluator;
  model?: string;
+ getRunId?: () => string;
+ hasOpenAuth?: (runId: string, kind: AuthKind) => boolean;
+ stateLoader?: {
+  evidence?: (sessionId: string, freezeId: string, evidenceId: string) => Promise<{ objective: string; claim: string; evidence: unknown }>;
+  claim?: (sessionId: string, freezeId: string, claimId: string) => Promise<{ objective: string; claim: string; evidence_set: unknown; actionable: boolean }>;
+  coverage?: (sessionId: string, branchMapId: string) => Promise<{ objective: string; branch_map: unknown; coverage: unknown; claim_states: unknown; actionable: boolean }>;
+  continuation?: (sessionId: string) => Promise<{ objective: string; coverage: unknown; open_questions: unknown; current_conclusions: unknown }>;
+  candidate?: (sessionId: string, gapId: string) => Promise<{ objective: string; gap: string }>;
+ };
 }
 
 type Json = Record<string, unknown>;
@@ -43,8 +60,16 @@ export function toolBag(args: unknown): Json {
  return bag;
 }
 
-export function runIdOf(bag: Json): string {
- return typeof bag.run_id === "string" && bag.run_id ? bag.run_id : "default";
+function requireRunId(deps: JudgeToolDeps): string {
+ const runId = deps.getRunId?.();
+ if (typeof runId !== "string" || runId.length === 0) throw new Error("typesafe_missing_run");
+ return runId;
+}
+
+function idOf(bag: Json, key: string): string {
+ const v = bag[key];
+ if (typeof v !== "string" || v.length === 0) throw new Error("typesafe_missing_id");
+ return v;
 }
 
 // Raw JSON Schema: the host accepts the same wire documents the bridge passes
@@ -62,10 +87,9 @@ function packQuestions(ids: string[]): JudgeQuestion[] {
 function packResults(full: JudgmentMap, ids: string[]): JudgmentMap {
  const out: JudgmentMap = {};
  for (const id of ids) {
-  const e = full[id];
-  const raw = e?.p_yes;
-  const p = typeof raw === "number" && Number.isFinite(raw) && raw >= 0 && raw <= 1 ? raw : 0;
-  out[id] = { p_yes: p, yes: p >= YES_THRESHOLD };
+  const raw = full[id]?.p_yes;
+  if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 1) throw new Error("typesafe_invalid_response");
+  out[id] = { p_yes: raw, yes: raw >= YES_THRESHOLD };
  }
  return out;
 }
@@ -82,10 +106,12 @@ async function evaluatePack(deps: JudgeToolDeps, state: unknown, pack: string[])
 }
 
 async function evidenceTool(args: unknown, deps: JudgeToolDeps): Promise<NativeToolResult> {
- const bag = toolBag(args);
- const runId = runIdOf(bag);
  try {
-  const { results, model } = await evaluatePack(deps, { objective: bag.objective, claim: bag.claim, evidence: bag.evidence }, PACKS.evidence);
+  const runId = requireRunId(deps);
+  const bag = toolBag(args);
+  const load = deps.stateLoader?.evidence ?? loadEvidenceState;
+  const st = await load(idOf(bag, "research_session_id"), idOf(bag, "freeze_id"), idOf(bag, "evidence_id"));
+  const { results, model } = await evaluatePack(deps, { objective: st.objective, claim: st.claim, evidence: st.evidence }, PACKS.evidence);
   const { verdict } = judgeEvidence(results);
   const audit = buildAudit({ runId, phase: "evidence", questions: results, result: verdict, model });
   const yesCount = PACKS.evidence.filter((id) => results[id]?.yes).length;
@@ -96,11 +122,13 @@ async function evidenceTool(args: unknown, deps: JudgeToolDeps): Promise<NativeT
 }
 
 async function claimTool(args: unknown, deps: JudgeToolDeps): Promise<NativeToolResult> {
- const bag = toolBag(args);
- const runId = runIdOf(bag);
  try {
-  const { results, model } = await evaluatePack(deps, { objective: bag.objective, claim: bag.claim, evidence_set: bag.evidence_set }, PACKS.claim);
-  const resolution = resolveClaim(results, bag.actionable === true);
+  const runId = requireRunId(deps);
+  const bag = toolBag(args);
+  const load = deps.stateLoader?.claim ?? loadClaimState;
+  const st = await load(idOf(bag, "research_session_id"), idOf(bag, "freeze_id"), idOf(bag, "claim_id"));
+  const { results, model } = await evaluatePack(deps, { objective: st.objective, claim: st.claim, evidence_set: st.evidence_set }, PACKS.claim);
+  const resolution = resolveClaim(results, st.actionable);
   const audit = buildAudit({ runId, phase: "claim", questions: results, result: resolution, model });
   return { text: `claim ${resolution}`, details: { resolution, questions: results, audit } };
  } catch {
@@ -109,11 +137,13 @@ async function claimTool(args: unknown, deps: JudgeToolDeps): Promise<NativeTool
 }
 
 async function coverageTool(args: unknown, deps: JudgeToolDeps): Promise<NativeToolResult> {
- const bag = toolBag(args);
- const runId = runIdOf(bag);
  try {
-  const { results, model } = await evaluatePack(deps, { objective: bag.objective, branch_map: bag.branch_map, coverage: bag.coverage, claim_states: bag.claim_states }, PACKS.coverage);
-  const verdict = judgeCoverage(results, bag.actionable === true);
+  const runId = requireRunId(deps);
+  const bag = toolBag(args);
+  const load = deps.stateLoader?.coverage ?? loadCoverageState;
+  const st = await load(idOf(bag, "research_session_id"), idOf(bag, "branch_map_id"));
+  const { results, model } = await evaluatePack(deps, { objective: st.objective, branch_map: st.branch_map, coverage: st.coverage, claim_states: st.claim_states }, PACKS.coverage);
+  const verdict = judgeCoverage(results, st.actionable);
   const audit = buildAudit({ runId, phase: "coverage", questions: results, result: verdict, model });
   const auth = verdict === "COMPLETE" ? authFor(runId, "launch_committee", { verdict, results }) : undefined;
   return { text: `coverage ${verdict}`, details: { verdict, questions: results, audit, ...(auth ? { authorization: auth } : {}) } };
@@ -123,11 +153,16 @@ async function coverageTool(args: unknown, deps: JudgeToolDeps): Promise<NativeT
 }
 
 async function continuationTool(args: unknown, deps: JudgeToolDeps): Promise<NativeToolResult> {
- const bag = toolBag(args);
- const runId = runIdOf(bag);
  try {
-  const { results, model } = await evaluatePack(deps, { objective: bag.objective, coverage: bag.coverage, open_questions: bag.open_questions, current_conclusions: bag.current_conclusions }, PACKS.continuation);
-  const { decision } = judgeContinuation(results, bag.has_candidate === true);
+  const runId = requireRunId(deps);
+  const bag = toolBag(args);
+  const load = deps.stateLoader?.continuation ?? loadContinuationState;
+  const st = await load(idOf(bag, "research_session_id"));
+  // hasCandidate derives from open continue_research auth for this run (never
+  // a model flag); tools cannot import the gate store, so it arrives via dep.
+  const hasCandidate = deps.hasOpenAuth ? deps.hasOpenAuth(runId, "continue_research") : hasOpenAuthFallback(runId);
+  const { results, model } = await evaluatePack(deps, { objective: st.objective, coverage: st.coverage, open_questions: st.open_questions, current_conclusions: st.current_conclusions }, PACKS.continuation);
+  const { decision } = judgeContinuation(results, hasCandidate);
   const audit = buildAudit({ runId, phase: "continuation", questions: results, result: decision, model });
   const auth = decision === "continue" ? authFor(runId, "continue_research", { decision, results }) : undefined;
   return { text: `continuation ${decision}`, details: { decision, questions: results, audit, ...(auth ? { authorization: auth } : {}) } };
@@ -136,14 +171,24 @@ async function continuationTool(args: unknown, deps: JudgeToolDeps): Promise<Nat
  }
 }
 
+// Fail-closed default: without an injected open-auth reader there is no known
+// candidate, so the stop path holds.
+function hasOpenAuthFallback(_runId: string): boolean {
+ return false;
+}
+
 async function candidateTool(args: unknown, deps: JudgeToolDeps): Promise<NativeToolResult> {
- const bag = toolBag(args);
- const runId = runIdOf(bag);
  try {
-  const { results, model } = await evaluatePack(deps, { objective: bag.objective, gap: bag.gap, candidate: bag.candidate }, PACKS.candidate);
+  const runId = requireRunId(deps);
+  const bag = toolBag(args);
+  const load = deps.stateLoader?.candidate ?? loadCandidateGap;
+  const st = await load(idOf(bag, "research_session_id"), idOf(bag, "gap_id"));
+  const candidate = bag.candidate;
+  if (candidate === undefined) throw new Error("typesafe_missing_id");
+  const { results, model } = await evaluatePack(deps, { objective: st.objective, gap: st.gap, candidate }, PACKS.candidate);
   const authorized = authorizeCandidate(results);
   const audit = buildAudit({ runId, phase: "candidate", questions: results, result: authorized ? "authorized" : "rejected", model });
-  const auth = authorized ? authFor(runId, "continue_research", { candidate: bag.candidate, results }) : undefined;
+  const auth = authorized ? authFor(runId, "continue_research", { candidate }) : undefined;
   return { text: `candidate ${authorized ? "authorized" : "rejected"}`, details: { authorized, questions: results, audit, ...(auth ? { authorization: auth } : {}) } };
  } catch {
   return { text: "TypeSafe unavailable: candidate judgment failed. Transition blocked.", details: { error: "candidate_judgment_failed" }, isError: true };
@@ -179,9 +224,9 @@ export function registerResearchJudgeTools(pi: ExtensionAPI, deps: JudgeToolDeps
    },
   });
  };
- tool("research_judge_evidence", "Judge one evidence item against its claim (E01-E16). Returns usable/unusable plus raw probabilities.", { objective: anyProp("Research objective under investigation"), claim: anyProp("Claim the evidence supposedly supports"), evidence: anyProp("Single evidence item with source and passage"), run_id: anyProp("OMP run id for audit") });
- tool("research_judge_claim", "Resolve one claim over its evidence set (C01-C16). Returns SUPPORTED/CONTRADICTED/MIXED/UNKNOWN_* plus probabilities.", { objective: anyProp("Research objective under investigation"), claim: anyProp("Claim to resolve"), evidence_set: anyProp("Supporting/contradicting evidence plus unknowns"), actionable: anyProp("Whether further research routes may exist"), run_id: anyProp("OMP run id for audit") });
- tool("research_judge_coverage", "Judge branch-map coverage (V01-V20). Returns COMPLETE/INCOMPLETE_* plus probabilities; COMPLETE authorizes the committee once.", { objective: anyProp("Research objective under investigation"), branch_map: anyProp("Material branches OMP generated"), coverage: anyProp("Investigated/remaining routes"), claim_states: anyProp("Per-claim resolutions"), actionable: anyProp("Whether unsearched routes may help"), run_id: anyProp("OMP run id for audit") });
- tool("research_judge_continuation", "Decide whether another research round is justified (N01-N06). Authorizes continue_research once on continue.", { objective: anyProp("Research objective under investigation"), coverage: anyProp("Current coverage snapshot"), open_questions: anyProp("Material unresolved questions"), current_conclusions: anyProp("Conclusions supportable today"), has_candidate: anyProp("Whether an authorized candidate already exists"), run_id: anyProp("OMP run id for audit") });
- tool("research_judge_candidate", "Authorize one candidate investigation (N07-N12, all critical must pass). Authorizes continue_research once on pass.", { objective: anyProp("Research objective under investigation"), gap: anyProp("Material gap the candidate addresses"), candidate: anyProp("Proposed investigation OMP generated"), run_id: anyProp("OMP run id for audit") });
+ tool("research_judge_evidence", "Judge one evidence item against its claim (E01-E16). Returns usable/unusable plus raw probabilities.", { research_session_id: anyProp("Research session id"), freeze_id: anyProp("Evidence freeze id"), evidence_id: anyProp("Evidence record id") });
+ tool("research_judge_claim", "Resolve one claim over its evidence set (C01-C16). Returns SUPPORTED/CONTRADICTED/MIXED/UNKNOWN_* plus probabilities.", { research_session_id: anyProp("Research session id"), freeze_id: anyProp("Evidence freeze id"), claim_id: anyProp("Claim text: must exactly match kernel-grounded claim text") });
+ tool("research_judge_coverage", "Judge branch-map coverage (V01-V20). Returns COMPLETE/INCOMPLETE_* plus probabilities; COMPLETE authorizes the committee once.", { research_session_id: anyProp("Research session id"), branch_map_id: anyProp("Dossier id carrying the branch map") });
+ tool("research_judge_continuation", "Decide whether another research round is justified (N01-N06). Authorizes continue_research once on continue.", { research_session_id: anyProp("Research session id") });
+ tool("research_judge_candidate", "Authorize one candidate investigation (N07-N12, all critical must pass). Authorizes continue_research once on pass. Post-first-round sec-agent task items must echo the approved candidate verbatim under item.candidate (deep-equal under hashAction); rephrased candidates need a fresh candidate judgment.", { research_session_id: anyProp("Research session id"), gap_id: anyProp("Material gap id or exact gap text"), candidate: anyProp("Proposed investigation OMP generated") });
 }

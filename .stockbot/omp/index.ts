@@ -10,13 +10,14 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
+import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, peekTaskFingerprint, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
 import { registerYoutubeAnalytics } from "./lib/youtube-analytics.ts";
 import { Text, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
-import { authorizationStore, consumeMatchingAuth, consumeOpenRoleAccepts, drainRoleAccepts, finalizeActionHash, hasOpenRoleAccepts, hashAction, isExactRepeat } from "./lib/research-control.ts";
+import { authorizationStore, consumeMatchingAuth, consumeOpenRoleAccepts, drainCommitteeAccepts, drainRoleAccepts, finalizeActionHash, hasOpenAuth, hasOpenRoleAccepts, hashAction, isExactRepeat } from "./lib/research-control.ts";
 import { JUDGE_TOOL_NAMES, registerResearchJudgeTools } from "./tools/research-judge-tools.ts";
 import { REVIEW_TOOL_NAMES, registerOutputReviewTools } from "./tools/output-review-tools.ts";
+import { loadCommitteeState } from "./lib/typesafe/state.ts";
 
 export type Json = Record<string, unknown>;
 
@@ -665,13 +666,13 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   });
  }
  // Native TypeSafe judge/review tools: in-process via the TS SDK, never via
- // the bridge or Python. Registered only when the bridge handshake succeeds so
- // the visible roster keeps its contract (bridge schemas + discovery set);
- // semantic judgments never depend on Python either way. Committee agents never
- // receive them (see agents/*.md).
- if (!bridgeDown) {
-  registerResearchJudgeTools(pi);
-  registerOutputReviewTools(pi);
+ // the bridge or Python. Registered unconditionally: semantic judgments never
+ // depend on Python either way. Committee agents never receive them (see
+ // agents/*.md).
+ {
+  const toolDeps = { getRunId: () => runId, hasOpenAuth: (id: string, kind: Parameters<typeof hasOpenAuth>[2]) => hasOpenAuth(authorizationStore, id, kind) };
+  registerResearchJudgeTools(pi, toolDeps);
+  registerOutputReviewTools(pi, { getRunId: () => runId });
  }
  const NATIVE_TOOLS: Record<string, true> = {};
  for (const name of [...JUDGE_TOOL_NAMES, ...REVIEW_TOOL_NAMES]) NATIVE_TOOLS[name] = true;
@@ -753,13 +754,16 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     }
     const wantsSource = agentNames.includes("sec-agent");
     const wantsCommittee = agentNames.includes("stockbot") || agentNames.includes("bullbot") || agentNames.includes("bearbot");
-    // §47 exact-repeat: same normalized task batch needs no new wave.
+    // §47 retry-safe repeat: composite of normalized task items plus the
+    // kernel snapshot (evidence/freeze/wave), so retries after transient
+    // failure and same-text-with-new-evidence both pass. Only successful
+    // settles mark it (tool_result hook); failures stay retryable.
     // Empty batches are invalid input, not an action: leave them for the
     // batch-form validator below instead of misreporting them as duplicates.
     let taskHash = "";
     if (taskItems.length > 0) {
      try {
-      taskHash = hashAction(taskItems);
+      taskHash = await peekTaskFingerprint(runId, taskItems, dataRoots.get(runId), asOfs.get(runId));
      } catch {
       taskHash = "";
      }
@@ -770,17 +774,38 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
       return { block: true, reason };
      }
     }
-    if (wantsSource && (sourceSpawns.get(runId) ?? 0) >= 1 && !consumeMatchingAuth(authorizationStore, runId, "continue_research")) {
-     const reason = "Another source-agent round needs a TypeSafe continuation or candidate authorization; call research_judge_continuation or research_judge_candidate first.";
-     emit({ event: "security_block", tool: event.toolName, reason });
-     blocks++;
-     return { block: true, reason };
-    }
-    if (wantsCommittee && !consumeMatchingAuth(authorizationStore, runId, "launch_committee")) {
-     const reason = "Committee launch needs a TypeSafe coverage COMPLETE authorization; call research_judge_coverage first.";
-     emit({ event: "security_block", tool: event.toolName, reason });
-     blocks++;
-     return { block: true, reason };
+    if (wantsSource && (sourceSpawns.get(runId) ?? 0) >= 1) {
+     const secItems = taskItems.filter((item) => item && typeof item === "object" && (item as Json).agent === "sec-agent");
+     for (const item of secItems) {
+      const cand = (item as Json).candidate;
+      if (cand !== undefined && (!cand || typeof cand !== "object" || Array.isArray(cand))) {
+       const reason = "sec-agent task item 'candidate' must be an object echoing the approved candidate verbatim.";
+       emit({ event: "security_block", tool: event.toolName, reason });
+       blocks++;
+       return { block: true, reason };
+      }
+     }
+     const allBound = secItems.length > 0 && secItems.every((item) => (item as Json).candidate !== undefined);
+     let authed = false;
+     if (allBound) {
+      // Per-item binding: each echoed candidate consumes its own approval.
+      // consumeMatchingAuth finds one unconsumed matching auth per call, so
+      // distinct sec-agent items need distinct approvals; a miss here means
+      // the batch already spent one below and blocks (no partial retry: the
+      // spent approvals stay spent, fail-closed).
+      authed = true;
+      for (const item of secItems) {
+       if (!consumeMatchingAuth(authorizationStore, runId, "continue_research", hashAction({ candidate: (item as Json).candidate }))) { authed = false; break; }
+      }
+     } else {
+      authed = consumeMatchingAuth(authorizationStore, runId, "continue_research");
+     }
+     if (!authed) {
+      const reason = "Another source-agent round needs a TypeSafe continuation or candidate authorization; call research_judge_continuation or research_judge_candidate first.";
+      emit({ event: "security_block", tool: event.toolName, reason });
+      blocks++;
+      return { block: true, reason };
+     }
     }
     const plan = await planTaskCall({ researchKey: runId, toolCallId: event.toolCallId }, taskInput, dataRoots.get(runId), asOfs.get(runId));
     if (plan.block) {
@@ -789,9 +814,9 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
      return { block: true, reason: plan.reason ?? "Stockbot task gate: spawn refused" };
     }
     // Allowed committee launch: prior ACCEPTs graded older outputs, drain them.
-    if (wantsCommittee) drainRoleAccepts(authorizationStore, runId);
-    if (agentNames.includes("sec-agent")) sourceSpawns.set(runId, (sourceSpawns.get(runId) ?? 0) + 1);
-    if (taskHash) seenHashes(runId).add(taskHash);
+    if (wantsCommittee) { drainRoleAccepts(authorizationStore, runId); drainCommitteeAccepts(authorizationStore, runId); }
+    // Settle-time accounting: repeats mark and rounds count only on success
+    // (tool_result hook below); plan-time adds nothing.
     // Durable gate audit: decision fields ride the task_planned sqlite row
     // (agents, hashes, round) — never task text, prompts, or evidence.
     await emit({ event: "task_planned", tool: event.toolName, tool_call_id: event.toolCallId, agents: agentNames, task_hash: taskHash || undefined, source_round: sourceSpawns.get(runId) ?? 0 });
@@ -836,15 +861,37 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
    try {
     const finParams: unknown = finArgs && typeof finArgs === "object" ? (finArgs as Json).arguments : undefined;
     const finAnswer: unknown = finParams && typeof finParams === "object" ? (finParams as Json).answer : undefined;
-    rolesAccepted = hasOpenRoleAccepts(authorizationStore, runId);
-    allowed = typeof finAnswer === "string" && rolesAccepted && consumeMatchingAuth(authorizationStore, runId, "finalize", finalizeActionHash(finAnswer)) && consumeOpenRoleAccepts(authorizationStore, runId);
+    const finSession: unknown = finParams && typeof finParams === "object" ? (finParams as Json).session_id : undefined;
+    if (typeof finAnswer !== "string" || typeof finSession !== "string" || !finSession) {
+     allowed = false;
+    } else {
+     // Freeze for the answer's session: the session's latest freeze is the
+     // only one finalize can close. Loader failure blocks.
+     const insp = await callBridge({ op: "research.session.inspect", session_id: finSession });
+     const sess = insp.result && typeof insp.result === "object" ? ((insp.result as Json).session as Json) : undefined;
+     const freezes = sess && Array.isArray(sess.freeze_ids) ? sess.freeze_ids.filter((f): f is string => typeof f === "string") : [];
+     const finFreeze = freezes[freezes.length - 1] ?? "";
+     if (!finFreeze) {
+      allowed = false;
+     } else {
+      const trio = await loadCommitteeState(finSession, finFreeze, { dataRoot: dataRoots.get(runId), asOf: asOfs.get(runId) });
+      const expected = {
+       stockbot: { roleJobId: trio.roleJobIds.stockbot, outputHash: hashAction(trio.stockbot), freezeHash: trio.freezeHash },
+       bullbot: { roleJobId: trio.roleJobIds.bullbot, outputHash: hashAction(trio.bullbot), freezeHash: trio.freezeHash },
+       bearbot: { roleJobId: trio.roleJobIds.bearbot, outputHash: hashAction(trio.bearbot), freezeHash: trio.freezeHash },
+      };
+      rolesAccepted = hasOpenRoleAccepts(authorizationStore, runId, finFreeze);
+      const committeeOk = consumeMatchingAuth(authorizationStore, runId, "committee_accepted", hashAction({ freezeId: finFreeze }));
+      allowed = rolesAccepted && committeeOk && consumeMatchingAuth(authorizationStore, runId, "finalize", finalizeActionHash(finAnswer)) && consumeOpenRoleAccepts(authorizationStore, runId, finFreeze, expected);
+     }
+    }
    } catch {
     allowed = false;
    }
    if (!allowed) {
     const reason = rolesAccepted
-     ? "Finalization needs a TypeSafe final-gate PASS on this exact answer; call research_review_final with the same answer first."
-     : "Finalization needs TypeSafe ACCEPT on all three role outputs plus a final-gate PASS on this exact answer; call research_review_role_output per role, then research_review_final with the same answer.";
+     ? "Finalization needs a TypeSafe committee PASS plus a final-gate PASS on this exact answer; call research_review_committee then research_review_final with the same freeze and answer first."
+     : "Finalization needs TypeSafe ACCEPT on all three role outputs plus committee and final-gate PASS; call research_review_role_output per role, then research_review_committee, then research_review_final with the same freeze and answer.";
     emit({ event: "security_block", tool: finInner, reason });
     blocks++;
     return { block: true, reason };
@@ -878,7 +925,9 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   if (!isMainSession(ctx)) return;
   if (event.toolName !== "task") return;
   try {
-   await recordTaskResult({ researchKey: runId, toolCallId: event.toolCallId }, ((event.details ?? {}) as unknown as Json), dataRoots.get(runId), asOfs.get(runId));
+   const settled = await recordTaskResult({ researchKey: runId, toolCallId: event.toolCallId }, ((event.details ?? {}) as unknown as Json), dataRoots.get(runId), asOfs.get(runId));
+   for (const h of settled.settledHashes) if (h) seenHashes(runId).add(h);
+   for (const a of settled.settledAgents) if (a === "sec-agent") sourceSpawns.set(runId, (sourceSpawns.get(runId) ?? 0) + 1);
    await emit({ event: "task_result", tool: event.toolName, tool_call_id: event.toolCallId, is_error: event.isError });
   } catch (err) {
    console.error(`[stockbot] task result recording failed: ${err instanceof Error ? err.message : String(err)}`);

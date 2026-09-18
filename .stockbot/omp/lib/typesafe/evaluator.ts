@@ -31,8 +31,8 @@ export class TypeSafeEvaluator implements SystemOneEvaluator {
   const answers = res.answers as Record<string, { noul?: unknown }>;
   for (const q of questions) {
    const raw = answers[q.id]?.noul;
-   const p = typeof raw === "number" ? raw : 0;
-   results[q.id] = { p_yes: p, yes: yes(p) };
+   if (typeof raw !== "number" || !Number.isFinite(raw) || raw < 0 || raw > 1) throw new Error("typesafe_invalid_response");
+   results[q.id] = { p_yes: raw, yes: yes(raw) };
   }
   return { results, model: res.model };
  }

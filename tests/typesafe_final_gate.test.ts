@@ -38,6 +38,20 @@ test("dropped case or hidden uncertainty blocks", async () => {
 	expect((await judged(full(0.9, { F12: 0.2 }))).review.verdict).toBe("BLOCK");
 });
 
+test("unsupported role-output claim (Q04) blocks the final gate via the extended pack", async () => {
+	const { PACKS: P } = await import("../.stockbot/omp/lib/typesafe/questions.ts");
+	expect(P.final_extended).toHaveLength(16);
+	expect(P.final_extended).toContain("Q04");
+	expect(P.final_extended).toContain("F10");
+	const judgments: JudgmentMap = {};
+	for (const id of P.final_extended) judgments[id] = { p_yes: id === "Q04" ? 0.2 : 0.9, yes: yes(id === "Q04" ? 0.2 : 0.9) };
+	const { runReviewTool } = await import("../.stockbot/omp/tools/output-review-tools.ts");
+	const out = await runReviewTool("research_review_final", { research_session_id: "s", freeze_id: "f", answer: "draft" }, { evaluator: new FakeEvaluator(judgments), getRunId: () => "run-final-q04", stateLoader: { final: async () => ({ objective: "o", evidence: [], committee: { stockbot: {}, bullbot: {}, bearbot: {} } }) } });
+	expect(out?.details.verdict).toBe("BLOCK");
+	expect((out?.details.failed as { id: string }[]).map((f) => f.id)).toContain("Q04");
+	expect(out?.details.authorization).toBeUndefined();
+});
+
 test("0.70 boundary decides the final gate", async () => {
 	expect((await judged(full(0.9, { F10: 0.7 }))).review.verdict).toBe("PASS");
 	expect((await judged(full(0.9, { F10: 0.6999 }))).review.verdict).toBe("BLOCK");

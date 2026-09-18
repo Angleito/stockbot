@@ -1,6 +1,6 @@
 import type { JudgeQuestion, Kind, Phase } from "./types.ts";
 
-export const QUESTION_BANK_VERSION = "1";
+export const QUESTION_BANK_VERSION = "2";
 
 function q(id: string, phase: Phase, instruction: string, kind: Kind, critical: boolean): JudgeQuestion {
  return { id, phase, instruction, kind, critical };
@@ -142,4 +142,5 @@ export const PACKS: Record<string, string[]> = {
  bear: ids("R", 1, 6),
  committee: ["F01", "F02", "F03", "F04", "F05", "F06", "F07", "F08"],
  final: ["F09", "F10", "F11", "F12"],
+ final_extended: ["Q04", "Q05", "Q06", "Q07", "Q08", "Q09", "Q13", "Q14", "Q15", "Q16", "Q17", "Q18", "F09", "F10", "F11", "F12"],
 };

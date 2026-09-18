@@ -23,7 +23,7 @@ async function judged(p: Record<string, number>, actionable: boolean) {
 }
 
 test("supported claim resolves SUPPORTED", async () => {
-	expect(await judged(full(0.8, { C02: 0.1 }), true)).toBe("SUPPORTED");
+	expect(await judged(full(0.8, { C02: 0.1, C06: 0.1 }), true)).toBe("SUPPORTED");
 });
 
 test("contradicted claim resolves CONTRADICTED", async () => {
@@ -50,7 +50,7 @@ test("unsupported magnitude keeps direction but is visible in raw p_yes", async 
 	const judgments: JudgmentMap = { C09: { p_yes: 0.2, yes: false } };
 	const { results } = await new FakeEvaluator(judgments).evaluate(state, [QUESTION_BANK["C09"]]);
 	expect(results["C09"]).toEqual({ p_yes: 0.2, yes: false });
-	expect(await judged(full(0.8, { C02: 0.1, C09: 0.2 }), true)).toBe("SUPPORTED");
+	expect(await judged(full(0.8, { C02: 0.1, C06: 0.1, C09: 0.2 }), true)).toBe("SUPPORTED");
 });
 
 test("causality gap without support is UNKNOWN_ACTIONABLE", async () => {
@@ -62,6 +62,10 @@ test("overconfident fact framing cannot rescue an unsupported claim", async () =
 });
 
 test("0.70 boundary on C01 decides SUPPORTED", async () => {
-	expect(await judged(full(0.2, { C01: 0.7 }), true)).toBe("SUPPORTED");
-	expect(await judged(full(0.2, { C01: 0.6999 }), true)).toBe("UNKNOWN_ACTIONABLE");
+	expect(await judged(full(0.2, { C01: 0.7, C03: 0.9, C13: 0.9 }), true)).toBe("SUPPORTED");
+	expect(await judged(full(0.2, { C01: 0.6999, C03: 0.9, C13: 0.9 }), true)).toBe("UNKNOWN_ACTIONABLE");
+});
+
+test("supported direction without sufficiency or counterevidence review is not SUPPORTED", async () => {
+	expect(await judged(full(0.2, { C01: 0.9, C03: 0.1, C06: 0.9, C13: 0.1 }), true)).toBe("UNKNOWN_ACTIONABLE");
 });

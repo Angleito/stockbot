@@ -16,11 +16,15 @@
  */
 
 type Json = Record<string, unknown>;
+import { hashAction } from "./research-control.ts";
 export type BridgeCall = (req: Json) => Promise<Json>;
 
 let bridge: BridgeCall = async () => ({ error: "bridge_unavailable" });
 export function setResearchBridge(fn: BridgeCall): void {
  bridge = fn;
+}
+export function getResearchBridge(): BridgeCall {
+ return bridge;
 }
 
 export type Advance = { done: false; prompt: string } | { done: true; answer: string } | null;
@@ -657,6 +661,8 @@ export interface TaskPlan {
  block?: true;
  reason?: string;
  input?: Json;
+ fingerprint?: string;
+ taskHash?: string;
 }
 interface PlannedItem {
  sessionId: string;
@@ -666,7 +672,7 @@ interface PlannedItem {
  wave: number;
  name: string;
 }
-const plannedByCall = new Map<string, { sessionId: string; items: PlannedItem[] }>();
+const plannedByCall = new Map<string, { sessionId: string; items: PlannedItem[]; fingerprint: string }>();
 function shortSuffix(jobId: string): string {
  const cleaned = jobId.replace(/[^a-zA-Z0-9]/g, "");
  return cleaned.slice(-8).toLowerCase() || "job";
@@ -721,6 +727,26 @@ function failureCategory(result: Json): string {
  if (/schema|structured|invalid output/i.test(error)) return "model_output_failure";
  return "tool_error";
 }
+// Retry-safe repeat fingerprint (§47): normalized task items plus the kernel
+// snapshot from the same inspect, so retries after transient failure and
+// same-text-with-new-evidence both pass. Read-only; never starts jobs.
+function fingerprintFor(session: Json, items: Json[]): string {
+ const norm = items.map((t) => {
+  const row: Json = { agent: str(t.agent), task: str(t.task) };
+  if (t && typeof t === "object" && "candidate" in t) row.candidate = (t as Json).candidate;
+  return row;
+ });
+ const ev = strs(session.evidence_ids).slice().sort();
+ const fr = strs(session.freeze_ids).slice().sort();
+ const cw = typeof session.current_wave === "number" && Number.isInteger(session.current_wave) ? (session.current_wave as number) : 0;
+ return hashAction({ tasks: norm, evidence: ev, freezes: fr, wave: cw });
+}
+export async function peekTaskFingerprint(researchKey: string, tasks: Json[], dataRoot?: string, asOf?: string): Promise<string> {
+ const mem = runs.get(researchKey);
+ if (!mem) return "";
+ const snapshot = await inspect(mem.sessionId, dataRoot, asOf);
+ return fingerprintFor(snapshot.session, tasks);
+}
 export async function planTaskCall(ctx: TaskPlanContext, input: Json, dataRoot?: string, asOf?: string): Promise<TaskPlan> {
  const mem = runs.get(ctx.researchKey);
  if (!mem) return {};
@@ -742,6 +768,11 @@ export async function planTaskCall(ctx: TaskPlanContext, input: Json, dataRoot?:
   const agentType = str(item.agent);
   if (!allowed.includes(agentType))
    return { block: true, reason: `Director may not spawn '${agentType}' in research session ${sessionId} at stage ${stage}; allowed: ${allowed.join(", ") || "none"}.` };
+  if (agentType === "sec-agent" && "candidate" in item) {
+   const cand = (item as Json).candidate;
+   if (!cand || typeof cand !== "object" || Array.isArray(cand))
+    return { block: true, reason: `sec-agent task item 'candidate' must be an object echoing the approved candidate verbatim.` };
+  }
  }
  try {
   const isCommittee = items.some((item) => (ROLES as readonly string[]).includes(str(item.agent)));
@@ -807,11 +838,14 @@ export async function planTaskCall(ctx: TaskPlanContext, input: Json, dataRoot?:
     task: `${researchContextBlock({ sessionId, jobId, wave: itemWave, asOf, freezeId })}${taskText.length > 0 ? `\n\n${taskText}` : ""}`,
    });
   }
-  plannedByCall.set(ctx.toolCallId, { sessionId, items: planned });
+  const fingerprint = fingerprintFor(snapshot.session, items);
+  plannedByCall.set(ctx.toolCallId, { sessionId, items: planned, fingerprint });
   const first = planned[0];
   const contextText = str(input.context);
   const shared = researchContextBlock({ sessionId, jobId: first.jobId, wave: first.wave, asOf, freezeId });
   return {
+   fingerprint,
+   taskHash: hashAction(items),
    input: {
     ...input,
     context: `${shared}\nEach item carries its own research_job_id; use the id in your own item, not this batch-wide one.${contextText.length > 0 ? `\n\n${contextText}` : ""}`,
@@ -822,11 +856,15 @@ export async function planTaskCall(ctx: TaskPlanContext, input: Json, dataRoot?:
   return { block: true, reason: `Research job creation failed (${err instanceof Error ? err.message : String(err)}); the spawn is refused and no child was started.` };
  }
 }
-export async function recordTaskResult(ctx: TaskPlanContext, details: Json, dataRoot?: string, asOf?: string): Promise<void> {
+// Settle accounting: only items that avoid every fail/cancel path mark the
+// composite repeat hash and their agent; the gate counts those at tool_result.
+export async function recordTaskResult(ctx: TaskPlanContext, details: Json, dataRoot?: string, asOf?: string): Promise<{ settledHashes: string[]; settledAgents: string[] }> {
  const plan = plannedByCall.get(ctx.toolCallId);
- if (!plan) return;
+ if (!plan) return { settledHashes: [], settledAgents: [] };
  plannedByCall.delete(ctx.toolCallId);
  const results = objs(details.results);
+ const settledHashes: string[] = [];
+ const settledAgents: string[] = [];
  for (const [index, item] of plan.items.entries()) {
   const result = results[index] ?? {};
   try {
@@ -869,12 +907,18 @@ export async function recordTaskResult(ctx: TaskPlanContext, details: Json, data
      continue;
     }
     await rpc("research.analysis.record", { session_id: plan.sessionId, job_id: item.jobId, role: item.jobType, analysis: data }, dataRoot, asOf);
+    settledHashes.push(plan.fingerprint);
+    settledAgents.push(item.agentType);
     continue;
    }
    const after = await rpc("research.session.inspect", { session_id: plan.sessionId }, dataRoot, asOf);
    const open = objs(after.jobs).some((j) => str(j.job_id) === item.jobId && str(j.status) === "running");
    if (open)
     await rpc("research.job.fail", { job_id: item.jobId, category: "model_output_failure", message: `'${item.agentType}' returned without submitting a source result` }, dataRoot, asOf);
+   else {
+    settledHashes.push(plan.fingerprint);
+    settledAgents.push(item.agentType);
+   }
   } catch (err) {
    try {
     await rpc("research.job.fail", { job_id: item.jobId, category: "synthesis_failed", message: err instanceof Error ? err.message : String(err) }, dataRoot, asOf);
@@ -883,4 +927,5 @@ export async function recordTaskResult(ctx: TaskPlanContext, details: Json, data
    }
   }
  }
+ return { settledHashes, settledAgents };
 }

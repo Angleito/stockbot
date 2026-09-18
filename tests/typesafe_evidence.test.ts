@@ -65,7 +65,7 @@ test("missing ids fail closed to unusable", async () => {
 	expect(judgeEvidence(results).verdict).toBe("unusable");
 });
 
-test("invalid evaluator values clamp to p_yes 0 and block, never throw or audit fake confidence", async () => {
+test("invalid evaluator values block with isError, never clamp or audit fake confidence", async () => {
 	const fake = {
 		evaluate: async () => ({
 			results: {
@@ -78,11 +78,9 @@ test("invalid evaluator values clamp to p_yes 0 and block, never throw or audit 
 		}),
 	};
 	const { runJudgeTool } = await import("../.stockbot/omp/tools/research-judge-tools.ts");
-	const out = await runJudgeTool("research_judge_evidence", { objective: "o", claim: "c", evidence: "e", run_id: "run-invalid" }, { evaluator: fake });
-	expect(out?.details.verdict).toBe("unusable");
-	const questions = out?.details.questions as Record<string, { p_yes: number; yes: boolean }>;
-	for (const id of ["E01", "E02", "E14", "E16"]) {
-		expect(questions[id].yes).toBe(false);
-		expect(Number.isFinite(questions[id].p_yes)).toBe(true);
-	}
+	const out = await runJudgeTool("research_judge_evidence", { research_session_id: "s", freeze_id: "f", evidence_id: "e1" }, { evaluator: fake, getRunId: () => "run-invalid", stateLoader: { evidence: async () => ({ objective: "o", claim: "c", evidence: { evidence_id: "e1" } }) } });
+	expect(out?.isError).toBe(true);
+	expect(out?.details.error).toBe("evidence_judgment_failed");
+	expect(out?.details.verdict).toBeUndefined();
+	expect(out?.details.authorization).toBeUndefined();
 });

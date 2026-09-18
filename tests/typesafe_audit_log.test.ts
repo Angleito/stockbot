@@ -16,8 +16,8 @@ test("judge tool details.audit persists raw probabilities, bank version, thresho
 	const { PACKS } = await import("../.stockbot/omp/lib/typesafe/questions.ts");
 	const out = await runJudgeTool(
 		"research_judge_evidence",
-		{ objective: "o", claim: "c", evidence: "e", run_id: "run-log-1" },
-		{ evaluator: fake(PACKS.evidence, 0.9, { E02: 0.2 }), model: "system-one-x" },
+		{ research_session_id: "s", freeze_id: "f", evidence_id: "e1" },
+		{ evaluator: fake(PACKS.evidence, 0.9, { E02: 0.2 }), model: "system-one-x", getRunId: () => "run-log-1", stateLoader: { evidence: async () => ({ objective: "o", claim: "c", evidence: { evidence_id: "e1" } }) } },
 	);
 	const audit = out?.details.audit as Record<string, unknown>;
 	expect(out?.details.verdict).toBe("unusable");
@@ -33,15 +33,14 @@ test("persisted audit never carries key material even when params do", async () 
 	const out = await runJudgeTool(
 		"research_judge_evidence",
 		{
-			objective: "o",
-			claim: "c",
-			evidence: "e",
-			run_id: "run-log-2",
+			research_session_id: "s",
+			freeze_id: "f",
+			evidence_id: "e1",
 			TYPESAFE_API_KEY: "sk-live-SENTINEL",
 			api_key: "sk-live-SENTINEL",
 			passage: "raw secret passage",
 		},
-		{ evaluator: fake(PACKS.evidence, 0.9) },
+		{ evaluator: fake(PACKS.evidence, 0.9), getRunId: () => "run-log-2", stateLoader: { evidence: async () => ({ objective: "o", claim: "c", evidence: { evidence_id: "e1" } }) } },
 	);
 	const line = JSON.stringify(out?.details.audit);
 	expect(line).not.toContain("sk-live-SENTINEL");
@@ -53,10 +52,9 @@ test("final review details.audit pins BLOCK with failing probabilities", async (
 	const { PACKS } = await import("../.stockbot/omp/lib/typesafe/questions.ts");
 	const out = await runReviewTool(
 		"research_review_final",
-		{ objective: "o", evidence: [], committee: {}, answer: "draft", run_id: "run-log-3" },
-		{ evaluator: fake(PACKS.final, 0.9, { F10: 0.2 }) },
+		{ research_session_id: "s", freeze_id: "f", answer: "draft" },
+		{ evaluator: fake(PACKS.final_extended, 0.9, { F10: 0.2 }), getRunId: () => "run-log-3", stateLoader: { final: async () => ({ objective: "o", evidence: [], committee: { stockbot: {}, bullbot: {}, bearbot: {} } }) } },
 	);
-	expect(out?.details.verdict).toBe("BLOCK");
 	const audit = out?.details.audit as Record<string, unknown>;
 	expect(audit.phase).toBe("final");
 	expect(audit.result).toBe("BLOCK");
