@@ -458,7 +458,7 @@ function bindCallArgs(fnName: string, params: Json, bound: ChildBinding): Json {
   const inner: unknown = params.arguments;
   if (!inner || typeof inner !== "object") return params;
   const bag = inner as Json;
-  const innerName = typeof bag.name === "string" ? bag.name : "";
+  const innerName = typeof params.name === "string" ? (params.name as string) : "";
   const hasIds = "session_id" in bag || "job_id" in bag;
   if (!hasIds && !innerName.startsWith("research")) return params;
   return { ...params, arguments: { ...bag, session_id: bound.sessionId, job_id: bound.jobId } };

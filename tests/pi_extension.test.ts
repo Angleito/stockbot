@@ -3449,6 +3449,28 @@ test("three concurrent children stay in-lane with forged ids overwritten", async
 		const finInner = (finWire.arguments as Json).arguments as Json;
 		expect(finInner.session_id).toBe(SID);
 		expect(finInner.job_id).toBe(ids.fin);
+		// call_tool inner guard: an id-carrying non-research inner keeps no
+		// forgery either — hasIds alone triggers the overwrite, so a forged
+		// job_id on e.g. thesis_show resolves to the bound lane before the
+		// gateway's explicit-beats-bridge precedence ever sees it.
+		const guardWireId = "call-child-finra-guard";
+		await (call as unknown as { execute: Exec }).execute(guardWireId, { name: "thesis_show", arguments: { id: "t-1", session_id: SID, job_id: ids.sec } } as unknown as Json, undefined, undefined, childCtx(lanes[1]));
+		// Id-less research inner through call_tool: no explicit ids, so the
+		// inner name alone (params.name, not params.arguments.name) must
+		// trigger the overwrite — otherwise the gateway resolves the wire
+		// pair correctly but the explicit-ids path stays unpinned.
+		const idlessWireId = "call-child-finra-idless";
+		await (call as unknown as { execute: Exec }).execute(idlessWireId, { name: "research_add_evidence", arguments: { item: { content: "x" } } } as unknown as Json, undefined, undefined, childCtx(lanes[1]));
+		for (const line of readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean)) {
+			const row = JSON.parse(line) as Json;
+			wires.set(String(row.tool_call_id), row);
+		}
+		const guardInner = ((wires.get(guardWireId) as Json).arguments as Json).arguments as Json;
+		expect(guardInner.session_id).toBe(SID);
+		expect(guardInner.job_id).toBe(ids.fin);
+		const idlessInner = ((wires.get(idlessWireId) as Json).arguments as Json).arguments as Json;
+		expect(idlessInner.session_id).toBe(SID);
+		expect(idlessInner.job_id).toBe(ids.fin);
 		const webWire = wires.get("call-child-web") as Json;
 		expect(webWire.active_research_session_id).toBe(SID);
 		expect(webWire.active_research_job_id).toBe(ids.web);
