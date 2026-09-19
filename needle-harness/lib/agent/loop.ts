@@ -1,9 +1,12 @@
+import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { needleRouter } from "../needle/client";
+import { needleRouter, type NeedleDecision } from "../needle/client";
 import { reason, type MuseUsage } from "../muse/client";
 import { tools } from "../tools/index";
+import { setAllowedFetchUrls } from "../tools/fetch-url";
 import { resetEvidenceIds } from "./evidence";
+import { groundingError } from "./grounding";
 import type { AgentEvent, Evidence, Metrics } from "./types";
 
 export type NeedleDecisionRecord = {
@@ -45,6 +48,19 @@ export async function runAgent(
   let escalations = 0;
   let escalated = false;
   let directFallback = false;
+  const sessionId = randomUUID();
+
+  const collectUrls = (): string[] => {
+    const urls: string[] = [];
+    for (const e of evidence) {
+      if (e.url) urls.push(e.url);
+      const matches = e.content.match(/https?:\/\/[^\s"'\)\]]+/g);
+      if (matches) urls.push(...matches);
+      if (urls.length >= 200) break;
+    }
+    return urls.slice(0, 200);
+  };
+  const evidenceText = (): string => evidence.map((e) => e.content).join("\n").slice(0, 24000);
 
   emit({ type: "agent_start", prompt });
   if (isConversational(prompt)) {
@@ -68,79 +84,121 @@ export async function runAgent(
     return;
   }
   const seen = new Set<string>();
-  const history: string[] = [];
   let consecutiveFailures = 0;
-  for (let step = 0; step < 8; step++) {
-    if (opts?.signal?.aborted) break;
-    const context =
-      "If no more retrieval is needed, return no tool call.\n" +
-      (history.length ? `Prior calls (do not repeat ANY listed call - if evidence suffices, return no tool call):\n${history.slice(-4).join("\n")}\n` : "") +
-      evidence.map((e) => `${e.id}:${e.source}`).join(", ") +
-      "\n" +
-      evidence.slice(-2).map((e) => e.content.slice(0, 1000)).join("\n");
+  let decision: NeedleDecision | null = null;
+  try {
     const tn = performance.now();
-    let decision;
-    try {
-      decision = await needleRouter.route({ prompt, context });
-    } catch {
-      escalations += 1;
-      if (evidence.length === 0) escalated = true;
-      directFallback = evidence.length === 0;
-      break;
-    }
+    decision = await needleRouter.start(prompt);
     needleMs += performance.now() - tn;
+  } catch {
+    escalations += 1;
+    if (evidence.length === 0) escalated = true;
+    directFallback = evidence.length === 0;
+    decision = null;
+  }
+  for (let step = 0; step < 8 && decision; step++) {
+    if (opts?.signal?.aborted) break;
+    const current = decision;
+    decision = null;
     needleDecisions.push({
       step,
-      tool: decision.tool,
-      arguments: decision.arguments,
-      confidence: decision.confidence,
-      reasoning: decision.reasoning,
+      tool: current.tool,
+      arguments: current.arguments,
+      confidence: current.confidence,
+      reasoning: current.reasoning,
     });
-    emit({ type: "needle_decision", step, tool: decision.tool, arguments: decision.arguments, confidence: decision.confidence });
-    if (decision.escalate || !decision.tool) {
+    emit({ type: "needle_decision", step, tool: current.tool, arguments: current.arguments, confidence: current.confidence });
+    if (current.escalate || !current.tool) {
       escalations += 1;
       if (evidence.length === 0) escalated = true;
       break;
     }
     const stripped = prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
     const timeWord = /\b(time|clock|date|today|now|utc|hour|minute|second|day|week|month|year|morning|afternoon|evening)\b/i.test(prompt);
-    if (stripped.length < 2 || (decision.tool === "get_current_time" && !timeWord)) {
+    if (stripped.length < 2 || (current.tool === "get_current_time" && !timeWord)) {
       escalations += 1;
       if (evidence.length === 0) escalated = true;
       directFallback = evidence.length === 0;
       break;
     }
-    const tool = tools[decision.tool];
+    const tool = tools[current.tool];
     if (!tool) {
       escalations += 1;
       if (evidence.length === 0) escalated = true;
       directFallback = evidence.length === 0;
       break;
     }
-    const key = decision.tool + JSON.stringify(decision.arguments);
+    const key = current.tool + JSON.stringify(current.arguments);
     if (seen.has(key)) break;
     seen.add(key);
-    emit({ type: "tool_start", tool: decision.tool });
-    const tt = performance.now();
-    const result = await tool.execute(decision.arguments);
-    toolMs += performance.now() - tt;
-    toolCalls.push({ tool: decision.tool, ok: result.ok, evidenceId: result.ok ? result.evidence.id : undefined });
-    if (!result.ok) {
-      emit({ type: "tool_result", tool: decision.tool, preview: result.error.slice(0, 160) });
-      history.push(`${decision.tool}${JSON.stringify(decision.arguments)} -> FAILED: ${result.error.slice(0, 120)}`);
+    const urls = collectUrls();
+    setAllowedFetchUrls(urls);
+    const rejection = groundingError(current.tool, current.arguments, {
+      prompt,
+      evidenceText: evidenceText(),
+      seenUrls: new Set(urls),
+    });
+    if (rejection) {
+      emit({ type: "tool_result", tool: current.tool, preview: rejection.slice(0, 160) });
+      toolCalls.push({ tool: current.tool, ok: false });
       consecutiveFailures += 1;
       if (consecutiveFailures >= 2) {
         escalations += 1;
         if (evidence.length === 0) escalated = true;
         break;
       }
+      try {
+        const tn = performance.now();
+        decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: rejection });
+        needleMs += performance.now() - tn;
+      } catch {
+        escalations += 1;
+        if (evidence.length === 0) escalated = true;
+        directFallback = evidence.length === 0;
+        break;
+      }
+      continue;
+    }
+    emit({ type: "tool_start", tool: current.tool });
+    const tt = performance.now();
+    const result = await tool.execute({ ...current.arguments, sessionId });
+    toolMs += performance.now() - tt;
+    toolCalls.push({ tool: current.tool, ok: result.ok, evidenceId: result.ok ? result.evidence.id : undefined });
+    if (!result.ok) {
+      emit({ type: "tool_result", tool: current.tool, preview: result.error.slice(0, 160) });
+      consecutiveFailures += 1;
+      if (consecutiveFailures >= 2) {
+        escalations += 1;
+        if (evidence.length === 0) escalated = true;
+        break;
+      }
+      try {
+        const tn = performance.now();
+        decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: result.error });
+        needleMs += performance.now() - tn;
+      } catch {
+        escalations += 1;
+        if (evidence.length === 0) escalated = true;
+        directFallback = evidence.length === 0;
+        break;
+      }
       continue;
     }
     consecutiveFailures = 0;
     evidence.push(result.evidence);
-    history.push(`${decision.tool}${JSON.stringify(decision.arguments)} -> ok ${result.evidence.id}`);
-    emit({ type: "tool_result", tool: decision.tool, evidenceId: result.evidence.id, preview: result.evidence.content.slice(0, 160) });
+    setAllowedFetchUrls(collectUrls());
+    emit({ type: "tool_result", tool: current.tool, evidenceId: result.evidence.id, preview: result.evidence.content.slice(0, 160) });
     if (evidence.length >= 5 || evidence.reduce((n, e) => n + e.content.length, 0) >= 24000) break;
+    try {
+      const tn = performance.now();
+      decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: true, evidence: result.evidence });
+      needleMs += performance.now() - tn;
+    } catch {
+      escalations += 1;
+      if (evidence.length === 0) escalated = true;
+      directFallback = evidence.length === 0;
+      break;
+    }
   }
 
   emit({ type: "reasoning_start", model: MUSE_MODEL });

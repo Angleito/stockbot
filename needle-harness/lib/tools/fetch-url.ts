@@ -1,6 +1,12 @@
 import { makeEvidence } from "../agent/evidence";
 import type { Tool } from "../agent/types";
 
+let allowed: Set<string> | null = null;
+
+export function setAllowedFetchUrls(urls: string[]): void {
+  allowed = new Set(urls);
+}
+
 export const fetch_url: Tool = {
   description: "Fetch a URL and extract readable text",
   parameters: {
@@ -14,13 +20,15 @@ export const fetch_url: Tool = {
       if (!/^https?:\/\//.test(url)) {
         return { ok: false, error: "fetch_url requires http(s) url" };
       }
+      if (allowed !== null && !allowed.has(url)) {
+        return { ok: false, error: "fetch_url target not in evidence" };
+      }
       const res = await fetch(url, { signal: AbortSignal.timeout(10000) });
       if (!res.ok) return { ok: false, error: `fetch failed: ${res.status}` };
       const ct = res.headers.get("content-type") ?? "";
       if (!ct.includes("text/") && !ct.includes("application/json")) {
         return { ok: false, error: `unsupported content-type: ${ct || "unknown"}` };
       }
-      // ~500KB guard on raw body before text processing.
       const raw = (await res.text()).slice(0, 500_000);
       const text = raw
         .replace(/<script[\s\S]*?<\/script>/gi, " ")

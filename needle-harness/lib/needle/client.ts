@@ -2,7 +2,6 @@ import { spawn, type ChildProcess } from "node:child_process";
 import { once } from "node:events";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
-import type { JSONSchema } from "../agent/types";
 
 export type NeedleRouteResult = {
   tool: string | null;
@@ -21,43 +20,11 @@ const ROOT = process.cwd();
 const SERVER = `${ROOT}/lib/needle/server.py`;
 const VENV_PYTHON = `${homedir()}/.cache/needle-harness/.needle/bin/python`;
 
-export const TOOL_SCHEMAS: Record<string, JSONSchema> = {
-  web_search: {
-    type: "object",
-    properties: {
-      query: { type: "string" },
-      limit: { type: "integer", minimum: 1, maximum: 5, default: 5 },
-    },
-    required: ["query"],
-  },
-  fetch_url: {
-    type: "object",
-    properties: { url: { type: "string" } },
-    required: ["url"],
-  },
-  get_sec_filings: {
-    type: "object",
-    properties: {
-      ticker: { type: "string", description: "Stock ticker symbol, e.g. NVDA (not the company name)" },
-      forms: { type: "array", items: { type: "string" } },
-      limit: { type: "integer", minimum: 1, maximum: 10, default: 5 },
-    },
-    required: ["ticker"],
-  },
-  get_current_time: { type: "object", properties: {} },
-};
-
 type Pending = {
   resolve: (v: NeedleRouteResult) => void;
   reject: (e: Error) => void;
   cancel: () => void;
 };
-
-function floor(): number {
-  const raw = process.env.CONFIDENCE_FLOOR ?? process.env.NEEDLE_CONFIDENCE_FLOOR ?? "0.5";
-  const n = Number(raw);
-  return Number.isFinite(n) ? n : 0.5;
-}
 
 export class NeedleRouter {
   private child: ChildProcess | null = null;
@@ -160,11 +127,11 @@ export class NeedleRouter {
     }
   }
 
-  async route({ prompt, context }: { prompt: string; context: string }): Promise<NeedleDecision> {
+  private call(body: Record<string, unknown>): Promise<NeedleRouteResult> {
     const child = this.ensure();
     if (!child.stdin) throw new Error("needle spawn failed");
     const id = String((this.nextId += 1));
-    const result = await new Promise<NeedleRouteResult>((resolve, reject) => {
+    return new Promise<NeedleRouteResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         delete this.pending[id];
         child.kill();
@@ -172,7 +139,7 @@ export class NeedleRouter {
         reject(new Error(`needle route timeout; stderr tail: ${this.bridgeStderrTail || "(empty)"}`));
       }, TOOL_TIMEOUT_MS);
       this.pending[id] = { resolve, reject, cancel: () => clearTimeout(timer) };
-      child.stdin?.write(JSON.stringify({ id, action: "route", prompt, context }) + "\n", (err) => {
+      child.stdin?.write(JSON.stringify({ id, ...body }) + "\n", (err) => {
         if (err) {
           const p = this.pending[id];
           if (p) {
@@ -183,11 +150,18 @@ export class NeedleRouter {
         }
       });
     });
-    const f = floor();
-    return {
-      ...result,
-      escalate: result.tool === null || (result.confidence !== null && result.confidence < f),
-    };
+  }
+
+  // confidence stays on the record for observability but never gates: tuned
+  // weights report None, so any floor only pretends to protect.
+  async start(prompt: string): Promise<NeedleDecision> {
+    const result = await this.call({ action: "start", prompt });
+    return { ...result, escalate: result.tool === null };
+  }
+
+  async step(result: unknown): Promise<NeedleDecision> {
+    const r = await this.call({ action: "step", result });
+    return { ...r, escalate: r.tool === null };
   }
 
   async close(): Promise<void> {

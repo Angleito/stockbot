@@ -34,7 +34,7 @@ BENCHMARK=1 bun run needle   # write benchmarks/*.json per run
 
 ```
 prompt → Needle 3 (local routing, JSONL bridge) → Bun loop (max 8 steps)
-  → Tools (web_search, fetch_url, get_sec_filings, get_current_time)
+  → Tools (search_web, find_sec_entities, search_sec_filings, get_sec_document via pi_bridge; fetch_url evidence-gated; get_current_time local)
   → Evidence[] → Muse Spark 1.3 (single reasoning call) → answer + metrics
 Next.js streams AgentEvents as SSE to the terminal UI.
 ```
