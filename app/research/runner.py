@@ -1205,6 +1205,14 @@ class _LiveRun:
             )
             return None, "discovery", False, locator
         passage = provenance.get("passage")
+        from app.research.service import _take_verified_source_bytes
+
+        handle_map: Mapping[str, object] = handle if isinstance(handle, Mapping) else {}
+        _take_verified_source_bytes(
+            str(provenance.get("accession_no") or handle_map.get("accession_no") or ""),
+            str(provenance.get("document_name") or handle_map.get("document_name") or ""),
+            str(provenance.get("text_hash") or handle_map.get("text_hash") or ""),
+        )
         return (
             provenance,
             "evidence",

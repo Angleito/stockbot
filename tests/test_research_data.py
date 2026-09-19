@@ -447,6 +447,34 @@ def test_refresh_sec_tickers_archives_and_returns_inline_counts(
     )
 
 
+def test_ticker_candidates_reads_snapshot_history(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Historical ticker views resolve from archived company_tickers snapshots, not the live universe."""
+    from datetime import UTC, datetime
+
+    from app import data_sources as _ds
+    from app.domain.market.identity import resolve_ticker_aliases
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    old = {"0": {"cik_str": 111, "ticker": "AAA", "title": "Old AAA"}}
+    new = {"0": {"cik_str": 222, "ticker": "AAA", "title": "New AAA"}}
+    raw_archive.archive(
+        "sec", "company_tickers", "company_tickers", json.dumps(old).encode(),
+        url="https://www.sec.gov/files/company_tickers.json",
+        retrieved_at="2024-05-01T00:00:00Z", root=tmp_path / "raw",
+    )
+    raw_archive.archive(
+        "sec", "company_tickers", "company_tickers", json.dumps(new).encode(),
+        url="https://www.sec.gov/files/company_tickers.json",
+        retrieved_at="2026-05-01T00:00:00Z", root=tmp_path / "raw",
+    )
+    mid = datetime(2025, 6, 1, tzinfo=UTC)
+    aliases = _ds.SourceGateway().ticker_candidates("AAA", mid)
+    assert [a.entity_id for a in aliases] == ["sec:cik:0000000111"]
+    assert resolve_ticker_aliases("AAA", aliases, as_of=mid).entity_id == "sec:cik:0000000111"
+    assert resolve_ticker_aliases("AAA", aliases, as_of=datetime(2023, 1, 1, tzinfo=UTC)).resolved is False
+    late = datetime(2026, 6, 1, tzinfo=UTC)
+    assert [a.entity_id for a in _ds.SourceGateway().ticker_candidates("AAA", late)] == ["sec:cik:0000000222"]
+
 def test_refresh_sec_company_facts_archives_and_returns_inline_counts(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ):

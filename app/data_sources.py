@@ -44,6 +44,52 @@ def _known_as_of(row: object, as_of: str) -> bool:
     return value is not None and value[:10] <= as_of
 
 
+def _ticker_aliases_of(alias_rows: object) -> list[TickerAlias]:
+    """TickerAlias rows for one normalized entity_aliases frame (skips malformed rows)."""
+    built: list[TickerAlias] = []
+    if isinstance(alias_rows, list):
+        for row in alias_rows:
+            if not isinstance(row, dict):
+                continue
+            built.append(
+                TickerAlias(
+                    alias_type=str(row.get("alias_type")),
+                    alias_value=str(row.get("alias_value")),
+                    entity_id=str(row.get("entity_id")),
+                    security_id=str(row.get("security_id")) if row.get("security_id") else None,
+                    source=str(row.get("source")),
+                    valid_from=str(row.get("valid_from")) if row.get("valid_from") else None,
+                    valid_to=str(row.get("valid_to")) if row.get("valid_to") else None,
+                    known_at=str(row.get("known_at")) if row.get("known_at") else None,
+                    retrieved_at=str(row.get("retrieved_at")) if row.get("retrieved_at") else None,
+                )
+            )
+    return built
+
+
+def _archived_ticker_aliases(want: str, as_of: datetime) -> list[TickerAlias] | None:
+    """Aliases for one ticker from the latest company_tickers snapshot at or before ``as_of``."""
+    from .config import get_data_root
+    from .storage import raw_archive
+
+    horizon = as_of.astimezone(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+    latest: raw_archive.ArchiveRecord | None = None
+    latest_retrieved = ""
+    for record in raw_archive.iter_archive("sec", "company_tickers", "company_tickers", root=get_data_root() / "raw"):
+        retrieved = record.retrieved_at if isinstance(record.retrieved_at, str) else ""
+        if retrieved and retrieved <= horizon and (latest is None or retrieved >= latest_retrieved):
+            latest, latest_retrieved = record, retrieved
+    if latest is None:
+        return None
+    try:
+        payload = json.loads(latest.payload_path.read_bytes())
+        datasets = _norm.normalize_sec_tickers(payload, retrieved_at=latest.retrieved_at, content_hash=latest.sha256)
+        return [alias for alias in _ticker_aliases_of(datasets.get("entity_aliases")) if alias.alias_value == want]
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return None
+
+
+
 class SourceGateway:
     def __init__(self):
         self._cache: dict[tuple[object, ...], object] = {}
@@ -57,10 +103,7 @@ class SourceGateway:
             _sec.ensure_identity()
             from edgar.entity.entity_facts import download_company_facts_from_sec
 
-            try:
-                raw = download_company_facts_from_sec(cik_int)
-            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-                raw = None
+            raw = download_company_facts_from_sec(cik_int)
             if not isinstance(raw, dict):
                 cached = dict(_EMPTY_FACTS)
             else:
@@ -180,13 +223,17 @@ class SourceGateway:
         return out
 
     def ticker_candidates(self, ticker: str, as_of: datetime) -> list[TickerAlias]:
-        """Live company-tickers aliases for one ticker (current knowledge only).
+        """Company-tickers aliases for one ticker; historical views read archived snapshots.
 
-        Rows are now-stamped (``known_at == retrieved_at``), so a historical
-        ``as_of`` view resolves ``unresolved`` in ``resolve_ticker_aliases``;
-        intended, never papered over. PIT stays with the resolver (the caller).
+        With an archive snapshot at or before ``as_of``, rows carry that snapshot's
+        ``retrieved_at`` as ``known_at`` so ``resolve_ticker_aliases`` admits them.
+        Without one, the live universe applies (still now-stamped, so a historical
+        view honestly resolves ``unresolved``). PIT stays with the resolver.
         """
         want = str(ticker).strip().upper()
+        archived = _archived_ticker_aliases(want, as_of)
+        if archived is not None:
+            return archived
         key = ("company_tickers",)
         cached: object = self._cache.get(key)
         if cached is None:
@@ -204,32 +251,7 @@ class SourceGateway:
             datasets = _norm.normalize_sec_tickers(
                 raw, retrieved_at=retrieved_at, content_hash=content_hash
             )
-            alias_rows = datasets.get("entity_aliases")
-            built: list[TickerAlias] = []
-            if isinstance(alias_rows, list):
-                for row in alias_rows:
-                    if not isinstance(row, dict):
-                        continue
-                    built.append(
-                        TickerAlias(
-                            alias_type=str(row.get("alias_type")),
-                            alias_value=str(row.get("alias_value")),
-                            entity_id=str(row.get("entity_id")),
-                            security_id=str(row.get("security_id"))
-                            if row.get("security_id")
-                            else None,
-                            source=str(row.get("source")),
-                            valid_from=str(row.get("valid_from"))
-                            if row.get("valid_from")
-                            else None,
-                            valid_to=str(row.get("valid_to")) if row.get("valid_to") else None,
-                            known_at=str(row.get("known_at")) if row.get("known_at") else None,
-                            retrieved_at=str(row.get("retrieved_at"))
-                            if row.get("retrieved_at")
-                            else None,
-                        )
-                    )
-            cached = built
+            cached = _ticker_aliases_of(datasets.get("entity_aliases"))
             self._cache[key] = cached
         assert isinstance(cached, list)
         return [alias for alias in cached if alias.alias_value == want]

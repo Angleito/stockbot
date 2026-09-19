@@ -1580,7 +1580,10 @@ def test_record_evidence_rejects_bad_metadata(tmp_path: Path, monkeypatch: pytes
     good["evidence_id"] = f"{sid}:ev:goodmeta"
     good["metadata"] = {"source": "sec", "page": 3}
     out = _svc.record_evidence(sid, src, good, repo=repo)
-    assert out["metadata"] == {"source": "sec", "page": 3}
+    meta = out["metadata"]
+    assert isinstance(meta, dict)
+    assert meta["source"] == "sec" and meta["page"] == 3
+    assert meta["source_bytes"] == "archived" and "identity_key" in meta
 
 
 # ---------------------------------------------------------------------------

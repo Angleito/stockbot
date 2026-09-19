@@ -496,6 +496,29 @@ def cancel_job(
     return store.get_job(job.job_id).to_dict()
 
 
+_VERIFIED_SOURCE_BYTES: dict[tuple[str, str, str], tuple[bytes, str]] = {}
+"""Verify-time windows keyed (accession, document, text_hash); process memory only, never persisted."""
+
+_VERIFIED_SOURCE_BYTES_MAX = 64
+
+
+def _stash_verified_source_bytes(
+    accession: str, document: str, text_hash: str, window: str, representation: str | None
+) -> None:
+    """Hold the verified window bytes + representation for the accept-time archive (bounded, oldest evicted)."""
+    if len(_VERIFIED_SOURCE_BYTES) >= _VERIFIED_SOURCE_BYTES_MAX:
+        _VERIFIED_SOURCE_BYTES.pop(next(iter(_VERIFIED_SOURCE_BYTES)))
+    _VERIFIED_SOURCE_BYTES[(accession, document, text_hash)] = (
+        window.encode("utf-8"),
+        representation or "source_bytes",
+    )
+
+
+def _take_verified_source_bytes(accession: str, document: str, text_hash: str) -> tuple[bytes, str] | None:
+    """Pop the stashed verify-time bytes + representation; None when the window was never verified here."""
+    return _VERIFIED_SOURCE_BYTES.pop((accession, document, text_hash), None)
+
+
 def _coerce_dt(value: object) -> datetime | None:
     if value is None:
         return None
@@ -838,6 +861,9 @@ def materialize_sec_passage(handle: Mapping[str, object], locator: object) -> di
             "with get_sec_document and cite the new handle)"
         )
     start, end = _locate_passage(window, locator if isinstance(locator, str) else "")
+    document = fields.document or str(reloaded.get("document_name") or "")
+    representation = str(reloaded.get("source_representation") or "source_bytes")
+    _stash_verified_source_bytes(fields.accession, document, fields.text_hash, window, representation)
     uri = reloaded.get("source_uri")
     return sec_source_ref(
         accession_no=fields.accession,
@@ -1055,9 +1081,11 @@ def _persist_evidence_record(
     job_id: str,
     found: ResearchSession,
     record: Evidence,
-    metadata: dict[str, JSONValue],
+    *,
+    source_bytes: bytes | None = None,
+    source_representation: str | None = None,
 ) -> dict[str, JSONValue]:
-    """PIT-gate + append the record, link it to the session, return the stored dict."""
+    """PIT-gate + archive the verified window + append the record, link it, return the stored dict."""
     from .evidence import EvidenceLedger
 
     ledger = EvidenceLedger()
@@ -1069,7 +1097,34 @@ def _persist_evidence_record(
         except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
     ingest_evidence(ledger, record, as_of=found.as_of)
+    provenance = record.provenance if isinstance(record.provenance, dict) else {}
+    accession = provenance.get("accession_no")
+    document = provenance.get("document_name")
+    bytes_status = "unavailable"
+    if source_bytes is not None and isinstance(accession, str) and accession:
+        from app.sec.archive import archive_sec_document
+
+        known_at = record.known_at.isoformat() if record.known_at is not None else None
+        filed_at = record.published_at.isoformat() if record.published_at is not None else None
+        archive_sec_document(
+            accession,
+            document if isinstance(document, str) and document else "primary",
+            source_bytes,
+            url=record.source_uri or "",
+            retrieved_at=record.retrieved_at.isoformat(),
+            metadata={
+                "evidence_id": record.evidence_id,
+                "session_id": session_id,
+                "source_content_hash": sha256(source_bytes).hexdigest(),
+                "known_at": known_at,
+                "filed_at": filed_at,
+                "representation": source_representation or "source_bytes",
+            },
+        )
+        bytes_status = "archived"
     stored = evidence_to_dict(record)
+    stored_meta = stored.get("metadata")
+    stored["metadata"] = {**(stored_meta if isinstance(stored_meta, dict) else {}), "source_bytes": bytes_status}
     try:
         store.save_evidence(stored)
     except ValueError as exc:
@@ -1077,49 +1132,20 @@ def _persist_evidence_record(
             raise
         return _duplicate_response(store, session_id, record)
     _emit(store, session_id, "evidence.accepted", {"job_id": job_id, "evidence_id": record.evidence_id})
-    provenance = record.provenance if isinstance(record.provenance, dict) else {}
-    accession = provenance.get("accession_no")
-    document = provenance.get("document_name")
-    source_bytes: bytes | None = None
     try:
-        from app.sec.documents import get_sec_source_bytes
-
-        if isinstance(accession, str) and accession:
-            source_bytes = get_sec_source_bytes(
-                accession, document if isinstance(document, str) and document else None
-            )
-    except Exception:
-        source_bytes = None
-    try:
-        from app.sec.archive import archive_sec_document
         from app.storage import raw_archive as _artifacts
 
-        if source_bytes is not None and isinstance(accession, str) and accession:
-            archive_sec_document(
-                accession,
-                document if isinstance(document, str) and document else "primary",
-                source_bytes,
-                url=record.source_uri or "",
-                retrieved_at=record.retrieved_at.isoformat(),
-                metadata={
-                    "evidence_id": record.evidence_id,
-                    "session_id": session_id,
-                    "source_content_hash": sha256(source_bytes).hexdigest(),
-                },
-            )
         _artifacts.store_evidence_artifact(
             record.content.encode("utf-8"),
             url=record.source_uri or "",
             metadata={
                 "evidence_id": record.evidence_id,
                 "session_id": session_id,
-                "source_bytes": "archived" if source_bytes is not None else "unavailable",
+                "source_bytes": bytes_status,
             },
         )
     except Exception:
         pass
-    stored = dict(stored)
-    stored["metadata"] = {k: v for k, v in metadata.items()}
     if record.evidence_id not in found.evidence_ids:
         store.save_session(
             replace(
@@ -1267,7 +1293,16 @@ def record_evidence(
         claim_kind="observed_fact",
         provenance=provenance,
     )
-    return _persist_evidence_record(store, session_id, job_id, found, record, metadata)
+    stashed = _take_verified_source_bytes(
+        str(provenance.get("accession_no") or ""),
+        str(provenance.get("document_name") or ""),
+        str(provenance.get("text_hash") or ""),
+    )
+    verified_bytes, verified_representation = stashed if stashed is not None else (None, None)
+    return _persist_evidence_record(
+        store, session_id, job_id, found, record,
+        source_bytes=verified_bytes, source_representation=verified_representation,
+    )
 
 
 def _submit_str_list_field(cov: dict[str, object], key: str, *, required: bool = False) -> list[str]:

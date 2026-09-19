@@ -732,5 +732,9 @@ def evidence_bundle_entry(evidence: Evidence, *, accepted_at: str | None = None)
         "source_locator": _bundle_locator(evidence),
         # source_hash pins model-visible text, not filing bytes; exact bytes live in raw_archive on acceptance.
         "source_hash": f"sha256:{evidence.content_hash}",
-        "source_artifact": (f"source://sec/{accession}/{document_name}" if accession and document_name else None),
+        "source_artifact": (
+            f"source://sec/{accession}/{document_name}"
+            if accession and document_name and evidence.metadata.get("source_bytes") == "archived"
+            else None
+        ),
     }

@@ -323,20 +323,6 @@ def _resolve_in(filing: EdgarFiling, accession_no: str, document_name: str | Non
     return _named_attachment_of(filing, accession_no, document_name)
 
 
-def get_sec_source_bytes(
-    accession_no: str, document_name: str | None = None, *, data_root: Path | str | None = None
-) -> bytes | None:
-    """Exact source bytes for one accession/document; None when only derived text exists."""
-    _ = data_root
-    attachment = _resolve_in(_filing(accession_no), accession_no, document_name)
-    source_bytes, _representation = _source_bytes_of(attachment)
-    return source_bytes
-
-
-def _resolve(accession_no: str, document_name: str | None = None) -> object:
-    return _resolve_in(_filing(accession_no), accession_no, document_name)
-
-
 def _attr_text_of(attachment: object, attr: str) -> str | None:
     try:
         value = getattr(attachment, attr)
@@ -780,9 +766,15 @@ def _archived_row_of(record: object, *, accession_no: str, document_name: str) -
         "source_representation": meta.get("representation", "source_bytes"),
         "raw_archive_path": str(payload_path) if payload_path is not None else None,
         "filed_at": meta.get("filed_at"),
-        "known_at": meta.get("known_at") or meta.get("filed_at"),
+        "known_at": meta.get("known_at"),
         "retrieved_at": getattr(record, "retrieved_at", None),
     }
+
+
+def _known_at_or_before(row: dict[str, object], as_of: str) -> bool:
+    """A row passes a historical read only with a real known_at on or before ``as_of``."""
+    known = str(row.get("known_at") or "").strip()
+    return bool(known) and known[:10] <= as_of
 
 
 def _archived_rows_of(
@@ -805,7 +797,7 @@ def _archived_rows_of(
         return []
     rows = [_archived_row_of(record, accession_no=accession_no, document_name=effective) for record in records]
     if as_of is not None:
-        rows = [row for row in rows if str(row.get("known_at") or "")[:10] <= as_of]
+        rows = [row for row in rows if _known_at_or_before(row, as_of)]
     rows.sort(
         key=lambda row: (
             str(row.get("known_at") or ""),

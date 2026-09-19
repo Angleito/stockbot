@@ -883,24 +883,18 @@ def test_evidence_identity_conflict_names_identity_key(tmp_path: Path, monkeypat
     assert repo.list_evidence_ids(sid) == [str(first["evidence_id"])]
 
 
-def test_acceptance_archives_exact_source_bytes_not_rendered_text(
+def test_acceptance_archives_verified_window_bytes_not_rendered_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Accepted SEC evidence archives exact filing bytes; the derived text write stays."""
-    import app.sec.documents as _docs
+    """Accepted SEC evidence archives the verified window bytes; the derived text write stays."""
     from app.sec.archive import find_archived_document
 
     monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
-    exact = b"<html>EXACT SOURCE</html>"
-
-    def _fake_exact_bytes(accession_no: str, document_name: str | None = None) -> bytes | None:
-        del accession_no, document_name
-        return exact
-
-    monkeypatch.setattr(_docs, "get_sec_source_bytes", _fake_exact_bytes)
-    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    eid = f"{sid}:ev:1"
+    window = "passage-" + eid
+    out = svc.record_evidence(sid, src, _item(eid), repo=repo)
     stored = repo.get_evidence(str(out["evidence_id"]))
     provenance = stored["provenance"]
     assert isinstance(provenance, dict)
@@ -908,51 +902,58 @@ def test_acceptance_archives_exact_source_bytes_not_rendered_text(
         str(provenance["accession_no"]), str(provenance["document_name"]), root=tmp_path / "raw"
     )
     assert found is not None
-    assert found.payload_path.read_bytes() == exact
-    assert exact != str(stored["content"]).encode("utf-8")
+    assert found.payload_path.read_bytes() == window.encode("utf-8")
 
 
-def test_acceptance_without_source_bytes_keeps_derived_artifact(
+
+
+def test_acceptance_archive_failure_raises_without_row_event_or_link(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """String-only attachments accept without an exact-bytes revision."""
-    import app.sec.documents as _docs
-    from app.sec.archive import find_archived_document
+    """A preservation failure can never masquerade as accepted evidence."""
+    import app.sec.archive as _archive
 
     monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
 
-    def _fake_no_bytes(accession_no: str, document_name: str | None = None) -> bytes | None:
-        del accession_no, document_name
-        return None
-    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
-    stored = repo.get_evidence(str(out["evidence_id"]))
-    provenance = stored["provenance"]
-    assert isinstance(provenance, dict)
-    assert (
-        find_archived_document(
-            str(provenance["accession_no"]), str(provenance["document_name"]), root=tmp_path / "raw"
-        )
-        is None
-    )
+    def _boom(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise OSError("disk down")
+
+    monkeypatch.setattr(_archive, "archive_sec_document", _boom)
+    with __import__("pytest").raises(OSError, match="disk down"):
+        svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    assert repo.list_evidence(sid) == []
+    assert repo.list_evidence_ids(sid) == []
+    assert [e for e in repo.list_events(sid) if e.event_type == "evidence.accepted"] == []
 
 
-def test_bundle_entry_pins_rendered_text_and_names_source_bytes(
+def test_source_bytes_unavailable_emits_no_source_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """source_hash stays the rendered-text hash; source_artifact names the exact-bytes key."""
+    """source_bytes unavailable rows persist and bundle with source_artifact None."""
+    from app.research import service as _svc
     from app.research.evidence import evidence_bundle_entry, evidence_from_dict
 
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
-    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    item = _item(f"{sid}:ev:1")
+    provenance = _svc._observed_provenance(dict(item))
+    assert _svc._take_verified_source_bytes(
+        str(provenance.get("accession_no") or ""),
+        str(provenance.get("document_name") or ""),
+        str(provenance.get("text_hash") or ""),
+    ) is not None
+    def _no_stash(*args: object, **kwargs: object) -> None:
+        del args, kwargs
+        return None
+
+    monkeypatch.setattr(_svc, "_take_verified_source_bytes", _no_stash)
+    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:2"), repo=repo)
     stored = repo.get_evidence(str(out["evidence_id"]))
-    entry = evidence_bundle_entry(evidence_from_dict(stored))
-    assert entry["source_hash"] == f"sha256:{stored['content_hash']}"
-    provenance = stored["provenance"]
-    assert isinstance(provenance, dict)
-    assert entry["source_artifact"] == (f"source://sec/{provenance['accession_no']}/{provenance['document_name']}")
+    assert evidence_from_dict(stored).metadata.get("source_bytes") == "unavailable"
 
 
 def test_evidence_no_per_job_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:

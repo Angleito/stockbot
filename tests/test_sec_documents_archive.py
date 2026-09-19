@@ -348,3 +348,85 @@ def test_archived_pdf_row_extracts_text_and_drops_control_chars(
     raw_out = documents.get_sec_document(acc, "form8k2.pdf", data_root=tmp_path, raw=True)
     assert raw_out["view"] == "raw"
     assert raw_out["text"] == PDF_TEXT + "\n"
+
+
+def test_archived_row_without_known_at_rejected_historically_but_served_latest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row archived without known_at never passes a historical as_of; latest still wins."""
+    from app.sec import archive as _archive
+
+    acc = "0000000000-26-000009"
+    _archive.archive_sec_document(
+        acc,
+        DOC,
+        b"legacy archived text",
+        url="https://sec/legacy",
+        retrieved_at="2026-01-15T00:00:00Z",
+        metadata={"evidence_id": "legacy", "session_id": "legacy"},
+        root=tmp_path / "raw",
+    )
+    latest = documents.get_sec_document(acc, DOC, data_root=tmp_path)
+    assert latest["text"] == "legacy archived text"
+    assert latest["cache_hit"] is True
+    calls: list[str] = []
+
+    def _down(accession_no: str) -> NoReturn:
+        calls.append(accession_no)
+        raise AssertionError("live fetch must not run when archive rows exist but fail PIT")
+
+    monkeypatch.setattr(documents, "get_by_accession_number", _down)
+    rows = documents._archived_rows_of(acc, DOC, "2026-03-01", tmp_path, None)
+    assert rows == []
+    assert calls == []
+
+
+def test_accepted_2026_filing_rejected_at_2025_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """P0 end-to-end: a 2026 acceptance is never served to a 2025 historical read."""
+    import tests.research_source_seam as seam
+    from app.research import service as svc
+    from app.research.repository import ResearchRepository
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    real_get_sec_document = documents.get_sec_document
+    seam.install(monkeypatch)
+    try:
+        sid = svc.create_research("NVDA demand?", "o", as_of="2026-06-30T00:00:00+00:00", repo=repo)
+        src = repo.list_jobs(sid)[0].job_id
+        passage = "Data center revenue grew 142 percent in fiscal 2026."
+        handle = seam.handle_for(passage, accession=ACC, document=DOC)
+        svc.record_evidence(
+            sid,
+            src,
+            {
+                "evidence_id": f"{sid}:ev:1",
+                "wave_id": 1,
+                "content": "c",
+                "claim_text": "c",
+                "subject": "NVDA",
+                "source_name": "SEC",
+                "source_uri": "https://sec.gov/x",
+                "source_record_id": ACC,
+                "document_name": DOC,
+                "matching_passage": passage,
+                "known_at": "2026-01-20T00:00:00+00:00",
+                "source_handle": handle,
+            },
+            repo=repo,
+        )
+    finally:
+        monkeypatch.setattr(documents, "get_sec_document", real_get_sec_document)
+    latest = documents.get_sec_document(ACC, DOC, data_root=tmp_path)
+    assert latest["text"] == passage
+    assert latest["cache_hit"] is True
+
+    assert documents._archived_rows_of(ACC, DOC, "2025-01-01", tmp_path, None) == []
+
+    def _fake_2026_filing(accession_no: str) -> _FakeFiling:
+        return _FakeFiling(BIG, accession=ACC)
+
+    monkeypatch.setattr(documents, "get_by_accession_number", _fake_2026_filing)
+    with pytest.raises(ValueError, match="not known as of"):
+        documents.get_sec_document(ACC, DOC, as_of="2025-01-01", data_root=tmp_path)

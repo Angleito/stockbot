@@ -403,6 +403,23 @@ def test_shares_live_fallback_empty_store(gateway: _Gateway, monkeypatch: pytest
     assert result["error_type"] == "pit_data_unavailable"
 
 
+def test_company_facts_failure_returns_pit_unavailable(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
+    """A down companyfacts provider with an explicit as_of keeps the pit_data_unavailable envelope."""
+    from app import data_sources as _ds
+
+    _seed_ticker(gateway, NVDA_CIK, "NVDA")
+
+    def _down(cik: int) -> object:
+        del cik
+        raise RuntimeError("SEC down")
+
+    monkeypatch.setattr("edgar.entity.entity_facts.download_company_facts_from_sec", _down)
+    monkeypatch.setattr(_ds._sec, "ensure_identity", lambda: None)
+    with pytest.raises(RuntimeError, match="SEC down"):
+        _ds.SourceGateway().company_facts(NVDA_CIK)
+    result = sec_facts.get_fundamentals("NVDA", "shares_outstanding", as_of="2026-08-10")
+    assert result["error_type"] == "pit_data_unavailable"
+
 # ---------------------------------------------------------------------------
 # Always-live metrics + XBRL envelope
 # ---------------------------------------------------------------------------
