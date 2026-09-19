@@ -1,9 +1,11 @@
-"""Deterministic offering history (no network, no invented terms)."""
+"""Deterministic offering history (no network, no invented terms).
+
+Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind these live readers, never inside normalization.
+"""
 
 import re
 import threading
 from datetime import date, datetime
-from pathlib import Path
 from typing import TypedDict
 
 # `object` marks the edgar SDK dynamic boundary (no stubs): attrs are read
@@ -600,29 +602,4 @@ def get_offering_history(
     return _link_registrations(_history_offerings(ticker_or_cik, filings, wanted=_wanted_terms_forms(terms_forms)))
 
 
-def _split_registrant(
-    registrant: str | int | None,
-    registrant_cik: str | int | None,
-) -> tuple[str | None, str | int | None]:
-    if isinstance(registrant, int):
-        registrant = str(registrant)
-    if registrant_cik is None and isinstance(registrant, str) and registrant.strip().isdigit():
-        return None, registrant.strip()
-    return registrant, registrant_cik
-
-
-def query_registrant_offerings(
-    registrant: str | int | None,
-    *,
-    registrant_cik: str | int | None = None,
-    as_of: str | None = None,
-    root: Path | str | None = None,
-    limit: int = 200,
-) -> list[dict[str, object]]:
-    """Registrant -> offerings over ``sec_offerings`` (PIT)."""
-    from . import store as _store
-
-    registrant, registrant_cik = _split_registrant(registrant, registrant_cik)
-    return _store.query_offerings(
-        registrant=registrant, registrant_cik=registrant_cik, as_of=as_of, root=root, limit=limit
-    )
+# Seam: registrant-filtered reads normalize live per filing via SourceGateway + normalization + raw_archive + write_bundle; NOTE: warehouse slots behind live readers.

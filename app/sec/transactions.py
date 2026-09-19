@@ -1,5 +1,7 @@
 """M&A transaction normalization: best-effort regex over filing text.
 
+Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind these live readers, never inside normalization.
+
 One Transaction per filing; amendments update/diff the same transaction.
 Missing values are None/'unknown', never fabricated.
 """
@@ -7,7 +9,6 @@ Missing values are None/'unknown', never fabricated.
 import re
 from dataclasses import fields, replace
 from datetime import date, datetime
-from pathlib import Path
 
 from .context import TRANSACTION_FORMS
 from .models import Filing, Transaction
@@ -507,19 +508,4 @@ def get_transaction_status(
     return out
 
 
-def query_target_transactions(
-    target: str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
-) -> list[dict[str, object]]:
-    """Target -> transactions over ``sec_transactions`` (PIT)."""
-    from . import store as _store
-
-    return _store.query_transactions(target=target, as_of=as_of, root=root, limit=limit)
-
-
-def query_acquirer_transactions(
-    acquirer: str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
-) -> list[dict[str, object]]:
-    """Acquirer -> transactions over ``sec_transactions`` (PIT)."""
-    from . import store as _store
-
-    return _store.query_transactions(acquirer=acquirer, as_of=as_of, root=root, limit=limit)
+# Seam: target/acquirer-filtered reads normalize live per filing via SourceGateway + normalization + raw_archive + write_bundle; NOTE: warehouse slots behind live readers.

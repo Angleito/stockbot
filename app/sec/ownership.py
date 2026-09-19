@@ -1,10 +1,12 @@
-"""Deterministic SC 13D/G beneficial-ownership normalization (no network)."""
+"""Deterministic SC 13D/G beneficial-ownership normalization (no network).
+
+Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind these live readers, never inside normalization.
+"""
 
 from __future__ import annotations
 
 import itertools
 from datetime import date, datetime
-from pathlib import Path
 from typing import TYPE_CHECKING
 
 from .models import BeneficialOwnership, Filing, OwnershipChangeEvent
@@ -340,30 +342,7 @@ def get_beneficial_ownership(
     return out
 
 
-def query_subject_owners(
-    subject_cik: int | str,
-    *,
-    as_of: str | None = None,
-    root: Path | str | None = None,
-    limit: int = 200,
-) -> list[dict[str, object]]:
-    """Subject -> reporting owners over ``sec_beneficial_ownership`` (PIT)."""
-    from . import store as _store
-
-    return _store.query_beneficial_ownership(subject_cik=subject_cik, as_of=as_of, root=root, limit=limit)
-
-
-def query_owner_subjects(
-    owner_cik: int | str,
-    *,
-    as_of: str | None = None,
-    root: Path | str | None = None,
-    limit: int = 200,
-) -> list[dict[str, object]]:
-    """Owner/reporter -> subjects over ``sec_beneficial_ownership`` (PIT)."""
-    from . import store as _store
-
-    return _store.query_beneficial_ownership(owner_cik=owner_cik, as_of=as_of, root=root, limit=limit)
+# Seam: subject/owner-filtered reads normalize live per filing via SourceGateway + normalization + raw_archive + write_bundle; NOTE: warehouse slots behind live readers.
 
 
 def _filer_key(record: BeneficialOwnership) -> str:
