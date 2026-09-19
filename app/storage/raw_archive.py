@@ -1,11 +1,11 @@
-"""Immutable raw archive for source payloads.
+"""ArtifactStore: persist-on-acceptance raw payloads for admitted evidence.
 
-Every source response is stored once, keyed by its content hash, together
-with a manifest of retrieval metadata (URL, request parameters, response
-headers, retrieved time, parser version).  Files are write-once: re-archiving
-identical content is a no-op, and a different payload for the same source
-key produces a new hash-named file.  Nothing in the archive is ever
-overwritten or mutated, so ingestion can be replayed deterministically.
+Callers persist the exact official HTML/text bytes under artifacts/sha256_<hex>
+only when the document became evidence or the upstream response is
+non-reproducible (live quotes/trends/news ranking). SEC search lists,
+opened-but-unused filings, PDFs/screenshots/attachments-never-shown stay
+trace-metadata-only and are never archived here. Content-hash dedup keeps one
+copy per payload; files are write-once and never mutated.
 """
 
 from __future__ import annotations
@@ -65,10 +65,13 @@ def archive(
     metadata: dict[str, object] | None = None,
     root: Path | None = None,
 ) -> ArchiveRecord:
-    """Store one immutable payload and its manifest.
+    """Persist one accepted payload and its manifest (persist-on-acceptance).
 
-    Idempotent: archiving the same bytes for the same (source, kind, key)
-    returns the existing record without rewriting anything.
+    Archive only evidence-bearing docs or non-reproducible live responses;
+    search lists, opened-but-unused filings, and PDFs/mirrors stay
+    trace-metadata-only (do not call this for them). Idempotent: archiving the
+    same bytes for the same (source, kind, key) returns the existing record
+    without rewriting anything; content-hash dedup means no per-run copies.
     """
     root = Path(root) if root else get_data_root() / "raw"
     digest = content_hash(payload)
@@ -175,3 +178,36 @@ def has_payload(
 ) -> bool:
     """True when a payload with this content hash is already archived."""
     return find(source, kind, key, sha256=sha256, root=root) is not None
+
+
+def store_evidence_artifact(
+    payload: bytes,
+    *,
+    url: str = "",
+    retrieved_at: str | None = None,
+    metadata: dict[str, object] | None = None,
+    root: Path | None = None,
+) -> ArchiveRecord:
+    """ArtifactStore write: one evidence-bearing (or non-reproducible live) payload.
+
+    Content-addressed under artifacts/sha256_<hex> with dedup; no per-run copies.
+    Search lists, opened-but-unused filings, and PDFs/mirrors are never stored.
+    """
+    digest = content_hash(payload)
+    return archive(
+        "artifacts",
+        "sha256",
+        digest,
+        payload,
+        url=url,
+        retrieved_at=retrieved_at,
+        metadata=metadata,
+        root=root,
+    )
+
+
+def should_archive(*, became_evidence: bool, non_reproducible: bool, is_pdf_or_mirror: bool = False) -> bool:
+    """Persist-on-acceptance gate: evidence or non-reproducible live only; never PDFs/mirrors."""
+    if is_pdf_or_mirror:
+        return False
+    return became_evidence or non_reproducible
