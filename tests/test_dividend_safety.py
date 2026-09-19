@@ -1,15 +1,15 @@
-"""Dividend safety tests (Phase 5): FCF-based coverage on SEC inputs only."""
+"""Dividend safety tests (Phase 5): FCF-based coverage on SEC inputs only.
+Warehouse-removal seam: providers + raw_archive, no persisted facts; future warehouse slots in behind SourceGateway."""
 
 from collections.abc import Mapping
-from pathlib import Path
 
 import pytest
 
 from app import valuation
+from app.domain.market.securities import TickerAlias
 from app.normalization import normalize_sec_company_facts, normalize_sec_tickers
 from app.services import sec_facts
 from app.services.sec_facts import _assemble_dividend_safety
-from app.storage import parquet
 
 KO_CIK = 21344
 RETRIEVED_AT = "2026-08-01T00:00:00Z"
@@ -33,27 +33,84 @@ QUARTERS = [
 ]
 
 
+class _Gateway:
+    """SourceGateway double: normalized rows in, PIT-filtered company_facts out."""
+
+    def __init__(self) -> None:
+        self.alias_rows: list[dict[str, object]] = []
+        self.facts_by_cik: dict[int, dict[str, list[dict[str, object]]]] = {}
+
+    def ticker_candidates(self, ticker: str, as_of: object = None) -> list["TickerAlias"]:
+        """All aliases for the ticker, unfiltered (PIT stays in resolve_ticker_aliases)."""
+        del as_of
+        want = str(ticker).strip().upper()
+        out: list["TickerAlias"] = []
+        for row in self.alias_rows:
+            if str(row.get("alias_value") or "").strip().upper() != want:
+                continue
+            security_id = row.get("security_id")
+            out.append(
+                TickerAlias(
+                    alias_type=str(row.get("alias_type")),
+                    alias_value=str(row.get("alias_value")),
+                    entity_id=str(row.get("entity_id")),
+                    security_id=str(security_id) if security_id else None,
+                    source=str(row.get("source")),
+                    valid_from=str(row.get("valid_from")) if row.get("valid_from") else None,
+                    valid_to=str(row.get("valid_to")) if row.get("valid_to") else None,
+                    known_at=str(row.get("known_at")) if row.get("known_at") else None,
+                    retrieved_at=str(row.get("retrieved_at")) if row.get("retrieved_at") else None,
+                )
+            )
+        return out
+
+    def company_facts(self, cik: int, as_of: str | None = None) -> dict[str, object]:
+        """Full normalized dict, PIT-filtered to as_of like the live gateway."""
+        facts = self.facts_by_cik.get(int(cik))
+        if facts is None:
+            return {"documents": [], "financial_facts": [], "securities": [], "dividend_events": []}
+        out: dict[str, object] = {name: list(rows) for name, rows in facts.items()}
+        if as_of is None:
+            return out
+        for name in ("financial_facts", "dividend_events"):
+            rows = out.get(name)
+            if isinstance(rows, list):
+                out[name] = [
+                    row
+                    for row in rows
+                    if isinstance(row, dict) and str(row.get("known_at") or "")[:10] <= as_of
+                ]
+        return out
+
+
 @pytest.fixture
-def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", tmp_path)
-    return tmp_path
+def gateway(monkeypatch: pytest.MonkeyPatch) -> _Gateway:
+    """SourceGateway double behind sec_facts._gateway (no warehouse)."""
+    gw = _Gateway()
+    monkeypatch.setattr(sec_facts, "_gateway", lambda: gw)
+    return gw
 
 
-def _seed_ticker(tmp_path: Path, cik: int, ticker: str) -> None:
+def _merge(gw: _Gateway, cik: int, datasets: dict[str, list[dict[str, object]]]) -> None:
+    merged = dict(gw.facts_by_cik.get(cik, {}))
+    for name, rows in datasets.items():
+        merged[name] = list(merged.get(name, [])) + list(rows)
+    gw.facts_by_cik[cik] = merged
+
+
+def _seed_ticker(gw: _Gateway, cik: int, ticker: str) -> None:
     datasets = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}},
         retrieved_at=RETRIEVED_AT,
         content_hash=f"tickers-{cik}",
     )
-    for name, rows in datasets.items():
-        parquet.write_rows(name, rows, root=tmp_path / "parquet")
-
+    gw.alias_rows.extend(datasets.get("entity_aliases", []))
 
 def _qfact(val: float, start: str, end: str, fy: int, fp: str, filed: str, accn: str) -> dict[str, object]:
     return {"start": start, "end": end, "val": val, "accn": accn, "fy": fy, "fp": fp, "filed": filed}
 
 
-def _seed_concepts(tmp_path: Path, cik: int, concepts: Mapping[str, object], suffix: str) -> None:
+def _seed_concepts(gw: _Gateway, cik: int, concepts: Mapping[str, object], suffix: str) -> None:
     """Seed canonical + per-share facts through normalization (unit-aware)."""
     payload = {
         "cik": cik,
@@ -69,8 +126,7 @@ def _seed_concepts(tmp_path: Path, cik: int, concepts: Mapping[str, object], suf
         source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
         source_record_id=f"safety-{suffix}-cik{cik:010d}",
     )
-    for name, rows in datasets.items():
-        parquet.write_rows(name, rows, root=tmp_path / "parquet")
+    _merge(gw, cik, datasets)
 
 
 def _quarters(
@@ -89,7 +145,7 @@ def _quarters(
 
 
 def _seed_healthy(
-    tmp_path: Path,
+    gw: _Gateway,
     *,
     dps: tuple[float, ...] = (0.51,) * 4,
     eps: tuple[float, ...] = (0.80,) * 4,
@@ -97,9 +153,9 @@ def _seed_healthy(
     capx: tuple[float, ...] = (-200.0,) * 4,
     paid: tuple[float, ...] = (-260.0,) * 4,
 ) -> None:
-    _seed_ticker(tmp_path, KO_CIK, "KO")
+    _seed_ticker(gw, KO_CIK, "KO")
     _seed_concepts(
-        tmp_path,
+        gw,
         KO_CIK,
         _quarters(
             [
@@ -139,9 +195,9 @@ def _seed_healthy(
             ]
         },
     }
-    _seed_concepts(tmp_path, KO_CIK, fy, "fy")
+    _seed_concepts(gw, KO_CIK, fy, "fy")
     _seed_concepts(
-        tmp_path,
+        gw,
         KO_CIK,
         {
             DPS_TAG: {
@@ -206,11 +262,11 @@ def _flags(safety: dict[str, object]) -> dict[str, dict[str, object]]:
     return out
 
 
-def test_healthy_safety_ratios(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_healthy_safety_ratios(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_healthy(store)
+    _seed_healthy(gateway)
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["data_source"] == "store"
+    assert result["data_source"] == "live"
     safety = result["safety"]
     assert isinstance(safety, dict)
     assert safety["methodology"] == "common-stock EPS/FCF basis; not AFFO/FFO"
@@ -233,9 +289,9 @@ def test_healthy_safety_ratios(store: Path, monkeypatch: pytest.MonkeyPatch) -> 
     assert safety["dividend_vs_fcf_growth_5y"]["verdict"] == "insufficient_data"
 
 
-def test_negative_eps_nulls_payout_with_flag(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_negative_eps_nulls_payout_with_flag(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_healthy(store, eps=(-0.50,) * 4)
+    _seed_healthy(gateway, eps=(-0.50,) * 4)
     safety = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["safety"]
     assert isinstance(safety, dict)
     assert safety["earnings_payout_ratio"] is None
@@ -246,9 +302,9 @@ def test_negative_eps_nulls_payout_with_flag(store: Path, monkeypatch: pytest.Mo
     assert safety["fcf_coverage"] == 3.0769
 
 
-def test_negative_fcf_nulls_payout_and_coverage_with_flag(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_negative_fcf_nulls_payout_and_coverage_with_flag(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_healthy(store, ocf=(100.0,) * 4, capx=(-500.0,) * 4)
+    _seed_healthy(gateway, ocf=(100.0,) * 4, capx=(-500.0,) * 4)
     safety = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["safety"]
     assert isinstance(safety, dict)
     assert safety["ttm_fcf"] == -1600.0
@@ -258,9 +314,9 @@ def test_negative_fcf_nulls_payout_and_coverage_with_flag(store: Path, monkeypat
     assert safety["earnings_payout_ratio"] == 0.6375
 
 
-def test_zero_dividend_nulls_coverage_with_flag(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_zero_dividend_nulls_coverage_with_flag(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_healthy(store, dps=(0.0,) * 4, paid=(0.0,) * 4)
+    _seed_healthy(gateway, dps=(0.0,) * 4, paid=(0.0,) * 4)
     safety = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["safety"]
     assert isinstance(safety, dict)
     assert safety["ttm_dividends_paid"] == 0.0
@@ -270,11 +326,11 @@ def test_zero_dividend_nulls_coverage_with_flag(store: Path, monkeypatch: pytest
     assert safety["cash_to_annual_dividend"] is None
 
 
-def test_payout_expanding_verdict(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_payout_expanding_verdict(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_ticker(store, KO_CIK, "KO")
+    _seed_ticker(gateway, KO_CIK, "KO")
     _seed_concepts(
-        store,
+        gateway,
         KO_CIK,
         {
             DPS_TAG: {

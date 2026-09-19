@@ -1,6 +1,5 @@
 """Offline tests for app/sec/offerings.py (no network)."""
 
-from pathlib import Path
 from types import SimpleNamespace
 
 import pytest
@@ -89,28 +88,20 @@ def test_atm_detected_from_type_text() -> None:
     assert rec.is_atm is True
 
 
-def test_store_offering_both_directions_registration_not_issuance(tmp_path: Path) -> None:
-    from app.sec.store import query_offerings, store_offering
-
-    assert (
-        store_offering(
-            {
-                "accession": "0000000000-25-000017",
-                "form": "S-3",
-                "filer_cik": 320193,
-                "filer_name": "Issuer Inc",
-                "registrant_cik": 320193,
-                "registrant_name": "Issuer Inc",
-                "security_title": "Common Stock",
-                "known_at": "2024-06-01",
-            },
-            root=tmp_path,
-        )
-        == 1
+def test_registration_is_not_issuance() -> None:
+    rec = offerings.normalize_offering(
+        "0000000000-25-000017",
+        "S-3",
+        issuer="Issuer Inc",
+        filed_at="2024-06-01",
+        filer_cik=320193,
+        filer_name="Issuer Inc",
+        registrant_cik=320193,
+        registrant_name="Issuer Inc",
+        security_title="Common Stock",
+        known_at="2024-06-01",
     )
-    by_filer = query_offerings(filer_cik=320193, root=tmp_path)
-    assert by_filer[0]["form"] == "S-3"
-    by_registrant = query_offerings(registrant="Issuer Inc", root=tmp_path)
-    assert [r["accession"] for r in by_registrant] == ["0000000000-25-000017"]
+    assert rec.form == "S-3"
     # A shelf registration records proposed terms only; nothing here claims issuance.
-    assert "issued" not in str(by_filer[0]).lower()
+    assert rec.amount_basis == "registered"
+    assert "issued" not in str(rec.to_dict()).lower()

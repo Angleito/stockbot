@@ -1,4 +1,4 @@
-"""Offline tests for the SEC raw archive + normalized sec_filings store."""
+"""Offline tests for the SEC live read seam (raw archive + typed filing reads)."""
 
 from pathlib import Path
 
@@ -6,7 +6,7 @@ import pytest
 
 from app.sec.archive import archive_sec_filing, find_archived
 from app.sec.models import Filing
-from app.sec.store import query_filings, store_filing
+from app.sec.store import query_filings
 from app.storage import raw_archive
 
 URL = "https://www.sec.gov/Archives/edgar/data/1234567/000000000025000001/"
@@ -38,6 +38,26 @@ def _filing(
     )
 
 
+def _stub_live_list(filings: list[Filing]):
+    """app.sec.filings.list_sec_filings double: PIT-gate then limit (no warehouse)."""
+    def _fake_list(
+        cik: object,
+        forms: object = None,
+        start_date: object = None,
+        end_date: object = None,
+        as_of: object = None,
+        limit: object = 50,
+    ) -> list[Filing]:
+        del cik, forms, start_date, end_date
+        bound = str(as_of) if isinstance(as_of, str) else None
+        kept = [f for f in filings if bound is None or f.known_at[:10] <= bound]
+        if isinstance(limit, int):
+            return kept[:limit]
+        return kept
+
+    return _fake_list
+
+
 def test_rearchive_same_bytes_is_idempotent(tmp_path: Path) -> None:
     raw_root = tmp_path / "raw"
     filing = _filing("0000000000-25-000001")
@@ -55,8 +75,14 @@ def test_rearchive_same_bytes_is_idempotent(tmp_path: Path) -> None:
     assert find_archived("0000000000-25-000001", "primary", root=tmp_path / "elsewhere") is None
 
 
-def test_store_two_accessions_and_point_in_time(tmp_path: Path) -> None:
-    raw_root = tmp_path / "raw"
+def test_unseeded_queries_are_empty(tmp_path: Path) -> None:
+    """No persisted universe: unseeded live queries stay empty (providers authoritative)."""
+    assert query_filings(root=tmp_path) == []
+    assert query_filings(cik=1234567, forms=["10-K"], root=tmp_path) == []
+
+
+def test_query_filings_gateway_pit_and_limit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+
     original = _filing("0000000000-25-000001", filed_at="2024-02-01", known_at="2024-02-01")
     amendment = _filing(
         "0000000000-25-000002",
@@ -66,24 +92,19 @@ def test_store_two_accessions_and_point_in_time(tmp_path: Path) -> None:
         is_amendment=True,
         amendment_of="0000000000-25-000001",
     )
+    monkeypatch.setattr(
+        "app.sec.filings.list_sec_filings", _stub_live_list([original, amendment])
+    )
 
-    recs = archive_sec_filing(original, {"primary": b"v1"}, url=URL, root=raw_root)
-    assert store_filing(original, raw_primary_path=recs["primary"].payload_path, root=tmp_path) == 1
-    # Deterministic rerun writes nothing.
-    assert store_filing(original, raw_primary_path=recs["primary"].payload_path, root=tmp_path) == 0
+    rows = query_filings(cik=1234567, root=tmp_path)
+    assert [f.accession_no for f in rows] == ["0000000000-25-000001", "0000000000-25-000002"]
+    assert rows[1].amendment_of == "0000000000-25-000001"
+    assert rows[1].is_amendment is True
 
-    recs_a = archive_sec_filing(amendment, {"primary": b"v2"}, url=URL, root=raw_root)
-    assert store_filing(amendment, raw_primary_path=recs_a["primary"].payload_path, root=tmp_path) == 1
+    earlier_only = query_filings(cik=1234567, as_of="2024-02-15", root=tmp_path)
+    assert [f.accession_no for f in earlier_only] == ["0000000000-25-000001"]
 
-    rows = query_filings(root=tmp_path)
-    assert [r["accession"] for r in rows] == ["0000000000-25-000002", "0000000000-25-000001"]  # newest first
-    assert rows[0]["amendment_of"] == "0000000000-25-000001"
-    assert rows[0]["is_amendment"] is True
-
-    earlier_only = query_filings(as_of="2024-02-15", root=tmp_path)
-    assert [r["accession"] for r in earlier_only] == ["0000000000-25-000001"]
-
-    assert len(query_filings(cik=1234567, forms=["10-K"], root=tmp_path)) == 1
+    assert query_filings(cik=1234567, forms=["10-K"], root=tmp_path, limit=1) == [rows[0]]
 
 
 def test_query_filings_rejects_non_date_as_of(tmp_path: Path) -> None:
@@ -118,83 +139,26 @@ def test_archive_document_revisions_retained(tmp_path: Path) -> None:
     assert again.sha256 == second.sha256
 
 
-def test_search_ledger_round_trip(tmp_path: Path) -> None:
-    from app.sec.models import (
-        SearchAttempt,
-        SECSearchRequest,
-        SECTextHit,
-    )
+
+
+def test_coverage_reads_derive_from_jobs(tmp_path: Path) -> None:
+    """Coverage derives from the job ledger; no persisted coverage table remains."""
     from app.sec.store import (
-        persist_search_ledger,
-        query_attempts,
-        query_hits,
-        query_search,
-    )
-
-    request = SECSearchRequest(query="Acme", as_of="2024-06-01")
-    attempt = SearchAttempt(
-        attempt_id="s9-efts-1",
-        search_id="s9",
-        backend="efts",
-        query="Acme",
-        status="complete",
-        results_reported=1,
-        results_retrieved=1,
-        pages_retrieved=1,
-        pit_basis="known_at",
-    )
-    hit = SECTextHit(
-        search_id="s9",
-        attempt_id="s9-efts-1",
-        query="Acme",
-        accession_no="0000000000-25-000001",
-        form="10-K",
-        filed_at="2024-02-01",
-        filer_cik=1234567,
-        filer_name="Test Co",
-        matched_document="primary.htm",
-        score=1.0,
-    )
-    written = persist_search_ledger(
-        search_id="s9",
-        request=request,
-        text_hits=(hit,),
-        attempts=(attempt,),
-        coverage_status="complete",
-        sources_attempted=("efts",),
-        sources_completed=("efts",),
-        results_reported=1,
-        results_retrieved=1,
-        pages=1,
-        pending_backfill_jobs=("job-1",),
-        root=tmp_path,
-    )
-    assert written == {"searches": 1, "attempts": 1, "hits": 1}
-    search = query_search("s9", root=tmp_path)
-    assert search is not None
-    assert search["coverage_status"] == "complete"
-    pending_jobs_json = search["pending_jobs_json"]
-    assert isinstance(pending_jobs_json, str)
-    assert "job-1" in pending_jobs_json
-    attempts = query_attempts("s9", root=tmp_path)
-    assert [a["backend"] for a in attempts] == ["efts"]
-    assert attempts[0]["pit_basis"] == "known_at"
-    hits = query_hits("s9", root=tmp_path)
-    assert hits[0]["matched_document"] == "primary.htm"
-    assert hits[0]["filer_name"] == "Test Co"
-    assert query_search("missing", root=tmp_path) is None
-
-
-def test_coverage_partition_lifecycle(tmp_path: Path) -> None:
-    from app.sec.store import (
+        complete_job,
+        enqueue_backfill_job,
+        get_job,
         is_partition_covered,
         query_coverage,
-        store_coverage,
     )
 
-    assert store_coverage("sec-global", "10-K", "2024-Q1", "complete", root=tmp_path) == 1
-    assert is_partition_covered("sec-global", "10-K", "2024-Q1", root=tmp_path)
-    assert not is_partition_covered("sec-global", "10-K", "2024-Q2", root=tmp_path)
+    assert not is_partition_covered("sec-global", "10-K", "2024-01-01:2024-03-31", root=tmp_path)
+    assert query_coverage(source="sec-global", form="10-K", root=tmp_path) == []
+
+    job_id = enqueue_backfill_job("sec-global", "10-K", "2024-01-01", "2024-03-31", root=tmp_path)
+    assert job_id and get_job(job_id, root=tmp_path) is not None
+    assert query_coverage(source="sec-global", form="10-K", root=tmp_path) == []
+    assert complete_job(job_id, root=tmp_path) is not None
+    assert is_partition_covered("sec-global", "10-K", "2024-01-01:2024-03-31", root=tmp_path)
     rows = query_coverage(source="sec-global", form="10-K", root=tmp_path)
     assert rows and rows[0]["status"] == "complete"
 
@@ -213,98 +177,54 @@ def test_backfill_jobs_idempotent_queue_and_resume(tmp_path: Path) -> None:
     first = enqueue_backfill_job("sec-global", "10-K", "2024-01-01", "2024-03-31", root=tmp_path)
     assert enqueue_backfill_job("sec-global", "10-K", "2024-01-01", "2024-03-31", root=tmp_path) == first
     assert [j["id"] for j in list_jobs(root=tmp_path)] == [first]
-    claimed = claim_job(root=tmp_path)
-    assert claimed is not None and claimed["status"] == "running"
-    completed = complete_job(first, root=tmp_path)
-    assert completed is not None and completed["status"] == "complete"
-    assert claim_job(root=tmp_path) is None  # complete jobs are not auto-claimed
-    failed = fail_job(first, "boom", root=tmp_path)
-    assert failed is not None and failed["status"] == "failed"
-    requeued = requeue_job(first, root=tmp_path)
-    assert requeued is not None and requeued["status"] == "queued"
-    fetched = get_job(first, root=tmp_path)
-    assert fetched is not None and fetched["status"] == "queued"
+def test_document_text_reads_need_accession(tmp_path: Path) -> None:
+    """No persisted text index: reads need an accession; empty query rejected."""
+    from app.sec.store import query_document_text, search_document_text
+
+    assert query_document_text(root=tmp_path) == []
+    with pytest.raises(ValueError):
+        search_document_text("", root=tmp_path)
 
 
-def test_document_text_literal_and_term_paths(tmp_path: Path) -> None:
-    from app.sec.store import (
-        search_document_text,
-        store_document_text,
-    )
+def test_typed_rows_without_accession_are_empty(tmp_path: Path) -> None:
+    """No persisted typed index: accession-less queries stay empty."""
+    from app.sec.store import query_beneficial_ownership
 
-    assert (
-        store_document_text(
-            "ACC:doc1",
-            "Risk Factors: supply chainoso disruption",
-            accession="ACC",
-            document_name="doc1",
-            filed_at="2024-02-01",
-            known_at="2024-02-01",
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert (
-        store_document_text(
-            "ACC:doc2",
-            "UnrelatedMD&A prose here",
-            accession="ACC",
-            document_name="doc2",
-            filed_at="2024-05-01",
-            known_at="2024-05-01",
-            root=tmp_path,
-        )
-        == 1
-    )
-    literal = search_document_text("supply chainoso", literal=True, root=tmp_path)
-    assert [r["document_name"] for r in literal] == ["doc1"]
-    terms = search_document_text("supply disruption", root=tmp_path)
-    assert "doc1" in [r["document_name"] for r in terms]
-    assert "doc2" not in [r["document_name"] for r in terms]
-    # PIT excludes the later document.
-    early = search_document_text("prose", as_of="2024-03-01", root=tmp_path)
-    assert early == []
-
-
-def test_typed_rows_pit_exclusion(tmp_path: Path) -> None:
-    from app.sec.store import (
-        query_beneficial_ownership,
-        store_beneficial_ownership,
-    )
-
-    assert (
-        store_beneficial_ownership(
-            {
-                "accession": "0000000000-25-000009",
-                "form": "SC 13D",
-                "subject_cik": 320193,
-                "subject_name": "Subject Co",
-                "filer_cik": 999999,
-                "filer_name": "Owner LP",
-                "shares": 100,
-                "percent": 6.0,
-                "known_at": "2024-06-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert query_beneficial_ownership(subject_cik=320193, root=tmp_path)
+    assert query_beneficial_ownership(subject_cik=320193, root=tmp_path) == []
     assert query_beneficial_ownership(subject_cik=320193, as_of="2024-01-01", root=tmp_path) == []
 
 
-def test_query_filings_date_bounds_before_limit(tmp_path: Path) -> None:
-    from app.sec.store import query_filings, store_filing
+def test_query_filings_date_validation(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.sec.store import query_filings
 
-    # Newer Form 4s plus one older 2024-Q1 row; limit=1 must still return Q1 when bounded.
-    for i, day in enumerate(["2024-06-15", "2024-06-10", "2024-05-20"]):
-        store_filing(_filing(f"0000000000-25-00010{i}", form="4", filed_at=day, known_at=day), root=tmp_path)
-    store_filing(_filing("0000000000-25-000109", form="4", filed_at="2024-02-15", known_at="2024-02-15"), root=tmp_path)
-    rows = query_filings(forms=["4"], start_date="2024-01-01", end_date="2024-03-31", limit=1, root=tmp_path)
-    assert len(rows) == 1 and rows[0]["accession"] == "0000000000-25-000109"
-    # Unbounded limit=None returns all.
-    assert len(query_filings(forms=["4"], limit=None, root=tmp_path)) == 4
+    forms = ["4"]
+    old = _filing("0000000000-25-000109", form="4", filed_at="2024-02-15", known_at="2024-02-15")
+    new = _filing("0000000000-25-000101", form="4", filed_at="2024-06-15", known_at="2024-06-15")
+
+    def _fake_list(
+        cik: object,
+        forms: object = None,
+        start_date: object = None,
+        end_date: object = None,
+        as_of: object = None,
+        limit: object = 50,
+    ) -> list[Filing]:
+        del cik, forms, as_of
+        assert start_date == "2024-01-01" or start_date is None
+        assert end_date == "2024-03-31" or end_date is None
+        picked = [old] if end_date == "2024-03-31" else [new, old]
+        if isinstance(limit, int):
+            return picked[:limit]
+        return picked
+
+    monkeypatch.setattr("app.sec.filings.list_sec_filings", _fake_list)
+    rows = query_filings(
+        cik=1234567, forms=forms, start_date="2024-01-01", end_date="2024-03-31", limit=1, root=tmp_path
+    )
+    assert len(rows) == 1 and rows[0].accession_no == "0000000000-25-000109"
+    # Unbounded limit=None returns all provider filings.
+    assert len(query_filings(cik=1234567, forms=forms, limit=None, root=tmp_path)) == 2
     with pytest.raises(ValueError):
-        query_filings(forms=["4"], start_date="2024/01/01", root=tmp_path)
+        query_filings(cik=1234567, forms=forms, start_date="2024/01/01", root=tmp_path)
     with pytest.raises(ValueError):
-        query_filings(forms=["4"], end_date="2024-13-01", root=tmp_path)
+        query_filings(cik=1234567, forms=forms, end_date="2024-13-01", root=tmp_path)

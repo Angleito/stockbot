@@ -3,7 +3,7 @@
 Covers decision paths (auth/budget/routing/parsing/error-fallback) for:
 app/pi_gateway.py, app/research/service.py, app/research/repository.py,
 app/research/jobs.py, app/research/director.py, app/research/agents/**,
-app/services/**, app/storage/runs.py, app/storage/parquet.py,
+app/services/**, app/storage/runs.py,
 app/domain/**, app/analytics/**, app/tools.py, app/research/runner.py.
 Plain pytest, tmp_path DBs, fakes for models/dispatch.
 """
@@ -85,18 +85,15 @@ from app.services import research_data, sec_facts
 from app.services.account_identity import local_account_id
 from app.services.dividend_analysis import cadence_from_events, lifecycle_from_events
 from app.services.evidence_claims import build_evidence_claims
-from app.services.evidence_resolution import resolve_subject, warehouse_name_to_ticker
+from app.services.evidence_resolution import resolve_subject
 from app.services.herdr_client import HerdrClient, WorkerMap
 from app.services.portfolio_sync import persist_snapshot, read_latest_snapshot
 from app.services.research_data import (
-    _short_interest_has_legacy_v1,
-    backfill_finra_known_at,
     prepare_short_interest_data,
     refresh_finra_short_interest,
     refresh_sec_tickers,
 )
 from app.services.sec_facts import DividendEventRow, FinancialFactRow
-from app.storage import parquet
 from app.storage import runs as runs_mod
 from app.storage.runs import RunRecorder, get_runs_db_path
 from app.thesis.models import Thesis
@@ -2456,16 +2453,28 @@ def test_safety_ratio_arms() -> None:
     assert growth["verdict"] == "insufficient_data"
 
 
-# --- _dividend_fundamental via store: store hit + PIT miss ---
-def test_dividend_fundamental_store_and_pit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+# --- _dividend_fundamental via gateway: live hit + PIT miss ---
+def test_dividend_fundamental_store_and_pit(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.normalization import normalize_sec_company_facts, normalize_sec_tickers
 
-    monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", tmp_path)
     cik, ret = 21344, "2026-08-01T00:00:00Z"
-    for name, rows in normalize_sec_tickers(
+    alias_rows = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": "KO", "title": "KO Corp"}}, retrieved_at=ret, content_hash="t"
-    ).items():
-        parquet.write_rows(name, rows, root=tmp_path / "parquet")
+    )["entity_aliases"]
+    aliases = [
+        TickerAlias(
+            alias_type=str(r.get("alias_type")),
+            alias_value=str(r.get("alias_value")),
+            entity_id=str(r.get("entity_id")),
+            security_id=r.get("security_id") if isinstance(r.get("security_id"), str) else None,
+            source=str(r.get("source")),
+            known_at=r.get("known_at") if isinstance(r.get("known_at"), str) else None,
+            retrieved_at=r.get("retrieved_at") if isinstance(r.get("retrieved_at"), str) else None,
+            valid_from=None,
+            valid_to=None,
+        )
+        for r in alias_rows
+    ]
     div_units = [
         {"start": s, "end": e, "val": v, "accn": a, "fy": fy, "fp": fp, "filed": f}
         for v, s, e, fy, fp, f, a in [
@@ -2480,12 +2489,25 @@ def test_dividend_fundamental_store_and_pit(tmp_path: Path, monkeypatch: pytest.
         "entityName": "KO",
         "facts": {"us-gaap": {"CommonStockDividendsPerShareDeclared": {"units": {"USD/shares": div_units}}}},
     }
-    for name, rows in normalize_sec_company_facts(
+    facts = normalize_sec_company_facts(
         payload, retrieved_at=ret, content_hash="d", source_url="u", source_record_id="r"
-    ).items():
-        parquet.write_rows(name, rows, root=tmp_path / "parquet")
+    )
+
+    class _Gateway:
+        def ticker_candidates(self, ticker: str, as_of: object) -> list[TickerAlias]:
+            del as_of
+            return list(aliases) if ticker == "KO" else []
+
+        def company_facts(self, cik_no: int, as_of: str | None = None) -> dict[str, list[dict[str, object]]]:
+            assert cik_no == cik
+            rows = [dict(r) for r in facts.get("financial_facts", [])]
+            if as_of is not None:
+                rows = [r for r in rows if str(r.get("known_at", ""))[:10] <= as_of]
+            return {"financial_facts": rows, "dividend_events": []}
+
+    monkeypatch.setattr(sec_facts, "_gateway", lambda: _Gateway())
     hit = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-08-10")
-    assert hit["data_source"] == "store" and hit["ttm_dividend_per_share"] == 2.10
+    assert hit["data_source"] == "live" and hit["ttm_dividend_per_share"] == 2.10
     miss = sec_facts.get_fundamentals("KO", "dividends", as_of="2020-01-01")
     assert miss.get("error_type") == "pit_data_unavailable"
 
@@ -2576,33 +2598,6 @@ def test_prepare_unresolved_and_enrichment_failure(tmp_path: Path, monkeypatch: 
     assert out["failed_enrichments"] == [] or isinstance(out["failed_enrichments"], list)
 
 
-def test_short_interest_legacy_probe_and_backfill(tmp_path: Path) -> None:
-    root = tmp_path / "parquet"
-    root.mkdir(parents=True, exist_ok=True)
-    assert _short_interest_has_legacy_v1(root) is False  # empty table, no legacy rows
-    v2: dict[str, object] = {
-        "row_id": "r1",
-        "entity_id": None,
-        "security_id": None,
-        "symbol_code": "A",
-        "issue_name": "A",
-        "settlement_date": "2026-08-14",
-        "short_position": 1.0,
-        "prev_position": None,
-        "avg_daily_volume": None,
-        "days_to_cover": None,
-        "source_url": "u",
-        "source_record_id": "r",
-        "known_at": "2026-08-30T00:00:00Z",
-        "retrieved_at": "2026-08-30T00:00:00Z",
-        "content_hash": "h",
-        "parser_version": "finra-short-interest-v2",
-    }
-    parquet.write_rows("short_interest", [v2], root=root)
-    assert _short_interest_has_legacy_v1(root) is False
-    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
-
-
 # --- evidence_resolution: match-arm boundaries ---
 def _aliases_one(t: str) -> list[TickerAlias]:
     return [_svcs_alias()]
@@ -2652,10 +2647,14 @@ def test_resolve_subject_ticker_name_unresolved() -> None:
     assert not r4.resolved
 
 
-def test_warehouse_name_to_ticker_guards() -> None:
-    assert warehouse_name_to_ticker("") is None
-    assert warehouse_name_to_ticker("   ") is None
-    assert warehouse_name_to_ticker("No Such Company XYZ 123") is None
+def test_resolve_subject_unresolved_guards() -> None:
+    asof = datetime(2026, 6, 1, tzinfo=_dt.UTC)
+    assert resolve_subject(
+        ticker=None, name="", aliases_by_ticker=_aliases_empty, name_to_ticker=_name_none, as_of=asof
+    ).resolved is False
+    assert resolve_subject(
+        ticker=None, name="No Such Company XYZ 123", aliases_by_ticker=_aliases_empty, name_to_ticker=_name_none, as_of=asof
+    ).resolved is False
 
 
 # --- dividend_analysis: cadence + lifecycle arms ---
@@ -2734,12 +2733,6 @@ def test_read_latest_snapshot_empty_and_legacy(tmp_path: Path) -> None:
     persist_snapshot(snap, data_root=tmp_path)
     restored = read_latest_snapshot(data_root=tmp_path)
     assert restored is not None and restored.cash is not None
-    # legacy: drop portfolio_accounts -> reconstruct from positions is empty-safe
-    import shutil
-
-    shutil.rmtree(tmp_path / "parquet" / "portfolio_accounts", ignore_errors=True)
-    restored2 = read_latest_snapshot(data_root=tmp_path)
-    assert restored2 is not None
 
 
 # --- herdr_client: fake transport for init/read/subscribe/request ---
@@ -2977,55 +2970,19 @@ def test_runs_db_path_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 # ---------------------------------------------------------------------------
-# parquet.py: write stages
+# ids.py: deterministic SEC identity helpers (replaces warehouse dedup pin)
 # ---------------------------------------------------------------------------
 
 
-def _fact_row(
-    entity_id: str = "sec:cik:0000320193",
-    value: float = 100.0,
-    period_end: str = "2026-08-01",
-    filed: str = "2026-08-02",
-    accession: str = "0000320193-26-000001",
-    known_at: str = "2026-08-02T00:00:00Z",
-) -> dict[str, object]:
+def test_sec_identity_helpers_deterministic() -> None:
     from app.domain.market import ids
 
-    cik = int(entity_id.removeprefix("sec:cik:"))
-    return {
-        "fact_id": ids.sec_fact_id(cik, accession, "EntityCommonStockSharesOutstanding", period_end, value),
-        "entity_id": entity_id,
-        "security_id": ids.sec_security_id(cik),
-        "concept": "EntityCommonStockSharesOutstanding",
-        "original_concept": "dei:EntityCommonStockSharesOutstanding",
-        "value": value,
-        "unit": "shares",
-        "duration_type": "instant",
-        "period_end": period_end,
-        "filed_at": filed,
-        "accession": accession,
-        "frame": None,
-        "known_at": known_at,
-        "retrieved_at": "2026-08-21T12:00:00Z",
-        "source_url": "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
-        "source_record_id": "cik0000320193",
-        "content_hash": "abc",
-        "parser_version": "financial-facts-v1",
-    }
-
-
-def test_parquet_write_stages(tmp_path: Path) -> None:
-    """Warehouse write stages: empty, dedup, typed-timestamp rejection."""
-    root = tmp_path / "data" / "parquet"
-    assert parquet.write_rows("financial_facts", [], root=root) == 0
-    row = _fact_row()
-    assert parquet.write_rows("financial_facts", [row], root=root) == 1
-    assert parquet.write_rows("financial_facts", [row], root=root) == 0
-    bad = dict(row)
-    bad["fact_id"] = "other-id"
-    bad["period_end"] = "not-a-date"
-    with pytest.raises(Exception, match="(?i)conver|cast|timestamp|format"):
-        parquet.write_rows("financial_facts", [bad], root=root)
+    cik = 320193
+    accession = "0000320193-26-000001"
+    first = ids.sec_fact_id(cik, accession, "EntityCommonStockSharesOutstanding", "2026-08-01", 100.0)
+    assert first == ids.sec_fact_id(cik, accession, "EntityCommonStockSharesOutstanding", "2026-08-01", 100.0)
+    assert ids.sec_security_id(cik) == ids.sec_security_id(cik)
+    assert sec_facts._validated_fact_row({}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -3738,8 +3695,7 @@ def test_leaderboard_explicit_date_arms(tmp_path: Path, monkeypatch: pytest.Monk
     hist = screens.get_short_interest_leaderboard(settlement_date="2026-08-14", as_of="2026-08-14", data_root=data_root)
     assert "error" in hist and calls == []
     live = screens.get_short_interest_leaderboard(settlement_date="2026-08-14", data_root=data_root)
-    assert "error" in live and calls == ["2026-08-14"]
-    assert screens._refresh_published_cycle("2099-01-31", data_root) is None or True
+    assert "error" in live
 
 
 # --- tools: envelopes/routing (from /tmp/rc_coretools.py) ---
@@ -4104,21 +4060,9 @@ def test_alternative_signals_import_failure(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_alternative_signals_ok_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.google_data.signals as sig
-
-    def _qs_ok(**k: object) -> list[dict[str, object]]:
-        return [{"id": 1}] * 3
-
-    monkeypatch.setattr(sig, "query_signals", _qs_ok)
     out = tools_mod._find_alternative_signals({"limit": 2}, "m")
-    assert out["status"] == "ok" and out["continuation"] is True
-
-    def _qs_boom(**k: object) -> list[dict[str, object]]:
-        raise RuntimeError("x")
-
-    monkeypatch.setattr(sig, "query_signals", _qs_boom)
-    err = tools_mod._find_alternative_signals({}, "m")
-    assert err["soft"] is True
+    assert out["status"] == "ok" and out["continuation"] is False
+    assert out["signals"] == [] and out["count"] == 0
 
 
 def test_trend_geos_window_and_handler(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4212,12 +4156,6 @@ def test_suggest_queries_edges() -> None:
 
 
 def test_investigate_arms(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.google_data.signals as sig
-
-    def _sig_down(**k: object) -> list[dict[str, object]]:
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(sig, "query_signals", _sig_down)
     out = execute_tool("investigate_social_arbitrage_candidate", {"term": "Stanley"}, "m", context=RCTX)
     gaps = out["gaps"]
     assert isinstance(gaps, list)
@@ -4539,16 +4477,6 @@ def test_diff_filings_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_resolve_and_obligations(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.services.evidence_resolution as er
-
-    def _wtk(n: str) -> str | None:
-        if n == "Apple":
-            return " aapl "
-        raise RuntimeError("x")
-
-    monkeypatch.setattr(er, "warehouse_name_to_ticker", _wtk)
-    assert tools_mod._warehouse_ticker("Apple") == "AAPL"
-    assert tools_mod._warehouse_ticker("Nope") is None
     import app.sec.client as cli
 
     def _find_msft(n: str, limit: int = 3) -> list[dict[str, object]]:
@@ -4562,7 +4490,6 @@ def test_resolve_and_obligations(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(cli, "find_sec_company", _find_boom)
     assert tools_mod._edgar_ticker("X") is None
-    assert tools_mod._resolve_company_to_ticker("Apple") == "AAPL"
 
     def _rct(n: str) -> str | None:
         return "AAPL" if n == "apple" else None

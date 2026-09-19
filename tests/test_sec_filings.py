@@ -157,7 +157,16 @@ def test_get_sec_filing_invalid_accession(monkeypatch: pytest.MonkeyPatch) -> No
         filings.get_sec_filing("nope")
 
 
-def test_documents_list_get_text_primary(monkeypatch: pytest.MonkeyPatch) -> None:
+def test_documents_list_get_text_primary(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _no_stored_text(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        return []
+
+    monkeypatch.setattr("app.sec.store.query_document_text", _no_stored_text)
+    roots = iter(["r-list", "r-primary", "r-filing-text", "r-exhibit", "r-missing"])
+
+    def _doc(accession: str, name: str | None = None, **kwargs: object) -> dict[str, object]:
+        return documents.get_sec_document(accession, name, data_root=tmp_path / next(roots), **kwargs)  # type: ignore[arg-type]
+
     atts = [_FakeAttachment("primary.htm", text="hello"), _FakeAttachment("ex-99.htm", text="exhibit")]
     fake = _FakeFiling(accession="0003", attachments=atts)
 
@@ -170,14 +179,14 @@ def test_documents_list_get_text_primary(monkeypatch: pytest.MonkeyPatch) -> Non
     assert [d.document_name for d in listed] == ["primary.htm", "ex-99.htm"]
     assert listed[0].to_dict()["accession_no"] == "0003"
 
-    doc = documents.get_sec_document("0003")
+    doc = _doc("0003")
     assert doc["document_name"] == "primary.htm"
     assert doc["text"] == "hello"
 
     assert documents.get_sec_filing_text("0003") == "hello"
-    assert documents.get_sec_document("0003", "ex-99.htm")["text"] == "exhibit"
+    assert _doc("0003", "ex-99.htm")["text"] == "exhibit"
     with pytest.raises(ValueError):
-        documents.get_sec_document("0003", "missing.htm")
+        _doc("0003", "missing.htm")
 
 
 def test_normalize_accession_tolerates_variants() -> None:
@@ -185,8 +194,11 @@ def test_normalize_accession_tolerates_variants() -> None:
     assert documents._normalize_accession("000032019325000079") == "0000320193-25-000079"
     assert documents._normalize_accession("0003") == "0003"
 
+def test_missing_document_names_available(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+    def _no_stored_text(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        return []
 
-def test_missing_document_names_available(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr("app.sec.store.query_document_text", _no_stored_text)
     atts = [_FakeAttachment("primary.htm", text="hello")]
     fake = _FakeFiling(accession="0003", attachments=atts)
 
@@ -195,7 +207,7 @@ def test_missing_document_names_available(monkeypatch: pytest.MonkeyPatch) -> No
 
     monkeypatch.setattr(documents, "get_by_accession_number", _fake_by_accession)
     with pytest.raises(ValueError, match="primary.htm"):
-        documents.get_sec_document("0003", "missing.htm")
+        documents.get_sec_document("0003", "missing.htm", data_root=tmp_path)
 
 
 def test_find_sec_company_normalizes_and_preserves_order(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -610,6 +622,7 @@ def test_bounded_entity_discovery_probes_limit_plus_one(tmp_path: Path, monkeypa
 
 
 def test_entity_writes_land_only_in_explicit_root(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Verified entities need no warehouse persistence (providers authoritative)."""
     import app.sec.discovery.service as _svc
 
     explicit = tmp_path / "explicit"
@@ -640,8 +653,8 @@ def test_entity_writes_land_only_in_explicit_root(tmp_path: Path, monkeypatch: p
     monkeypatch.setattr("app.sec.client.get_submissions_metadata", _metadata)
     out = _svc.find_sec_entities("ACME", max_results=20, data_root=explicit)
     assert [e for e in out.entities if e.verification_status == "verified"]
-    assert (explicit / "parquet").exists()
-    assert not (other / "parquet").exists()
+    assert list(explicit.iterdir()) == []
+    assert list(other.iterdir()) == []
 
 
 def test_exhaustive_filer_and_current_pass_none_and_complete(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -790,11 +803,6 @@ def test_exhaustive_display_cap_warns_packet_not_retrieval(tmp_path: Path, monke
         )
 
     monkeypatch.setattr(client, "search_sec_filings", _fake_efts)
-
-    def _no_persist(**_kwargs: object) -> None:
-        """Ledger persistence is exercised by store tests; skip the parquet write."""
-
-    monkeypatch.setattr("app.sec.store.persist_search_ledger", _no_persist)
     svc = SECDiscoveryService(data_root=tmp_path)
 
     exhaustive = svc.search(

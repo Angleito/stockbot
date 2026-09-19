@@ -1,6 +1,5 @@
 """Offline tests for M&A transaction parsing (no network)."""
 
-from pathlib import Path
 from types import SimpleNamespace
 from typing import NoReturn
 
@@ -88,33 +87,21 @@ def test_get_transaction_status_newest_first(monkeypatch: pytest.MonkeyPatch) ->
     assert all(t.target == "" for t in out)
 
 
-def test_store_transaction_unknown_status_both_directions(tmp_path: Path) -> None:
-    from app.sec.store import query_transactions, store_transaction
-
-    assert (
-        store_transaction(
-            {
-                "accession": "0000000000-25-000016",
-                "form": "S-4",
-                "filer_cik": 111111,
-                "filer_name": "Acquirer Inc",
-                "subject_cik": 222222,
-                "subject_name": "Target Co",
-                "target_cik": 222222,
-                "target_name": "Target Co",
-                "known_at": "2024-05-01",
-            },
-            root=tmp_path,
-        )
-        == 1
+def test_registration_without_closing_evidence_stays_unknown() -> None:
+    txn = normalize_transaction(
+        "0000000000-25-000016",
+        "S-4",
+        target="Target Co",
+        filer_cik=111111,
+        filer_name="Acquirer Inc",
+        subject_cik=222222,
+        subject_name="Target Co",
+        known_at="2024-05-01",
     )
-    by_filer = query_transactions(filer_cik=111111, root=tmp_path)
-    assert by_filer[0]["status"] == "unknown"
-    assert by_filer[0]["target_name"] == "Target Co"
-    by_subject = query_transactions(subject_cik=222222, root=tmp_path)
     # Registration without closing evidence keeps status unknown.
-    assert [r["status"] for r in by_subject] == ["unknown"]
-    assert by_subject[0]["filer_name"] == "Acquirer Inc"
+    assert txn.status == "unknown"
+    assert txn.target == "Target Co"
+    assert txn.filer_name == "Acquirer Inc"
 
 
 def test_empty_target_falls_back_to_text_span():

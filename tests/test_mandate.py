@@ -14,8 +14,7 @@ from app.domain.risk.evaluation import UNKNOWN_SECTOR, EvaluationIssue, evaluate
 from app.domain.risk.mandate import Mandate, RiskLimit, parse_mandate
 from app.services import risk as risk_service
 from app.services.mandate import load_mandate_file
-from app.services.portfolio_sync import persist_snapshot
-from app.storage import parquet
+from app.services.portfolio_sync import persist_snapshot, read_latest_snapshot
 from cli import _cmd_evaluate_mandate
 
 
@@ -495,85 +494,57 @@ def test_empty_mandate_zero_breaches():
 # ---------------------------------------------------------------------------
 
 
-def _sector_row(entity_id: str, sector: str, known_at: str) -> dict[str, object]:
-    return {
-        "entity_id": entity_id,
-        "sector": sector,
-        "source": "test",
-        "known_at": known_at,
-        "retrieved_at": "2026-08-25T12:00:00Z",
-        "content_hash": "abc",
-        "parser_version": "sector-mapping-v1",
+def _positions(entity_id: str | None) -> list[Position]:
+    return [_position("snap-1:acc-1:WING", "WING", entity_id, Decimal("0.75"))]
+
+
+def _sector(monkeypatch: pytest.MonkeyPatch, sector: str | None = "semiconductors") -> None:
+    def _fake(cik: int) -> str | None:
+        return sector if cik == 320193 else None
+
+    monkeypatch.setattr(risk_service, "_provider_sector", _fake)
+
+
+def test_load_sector_map_live_provider_sector(monkeypatch: pytest.MonkeyPatch):
+    _sector(monkeypatch)
+    assert risk_service.load_sector_map(_positions("sec:cik:0000320193")) == {
+        "sec:cik:0000320193": "semiconductors"
     }
 
 
-def test_load_sector_map_newest_wins(data_root: Path):
-    parquet.write_rows(
-        "sector_mappings",
-        [
-            _sector_row("sec:cik:0000320193", "aero", "2026-08-25T00:00:00Z"),
-            _sector_row("sec:cik:0000320193", "defense", "2026-08-26T00:00:00Z"),
-        ],
-        root=data_root / "parquet",
-    )
-    assert risk_service.load_sector_map(data_root=data_root) == {"sec:cik:0000320193": "defense"}
+def test_load_sector_map_unknown_and_provider_failure(monkeypatch: pytest.MonkeyPatch):
+    assert risk_service.load_sector_map(_positions(None)) == {}
+
+    def _boom(cik: int) -> str | None:
+        raise RuntimeError("provider down")
+
+    monkeypatch.setattr(risk_service, "_provider_sector", _boom)
+    assert risk_service.load_sector_map(_positions("sec:cik:0000320193")) == {}
 
 
-def test_load_sector_map_mixed_offsets_newest_wins(data_root: Path):
-    parquet.write_rows(
-        "sector_mappings",
-        [
-            _sector_row("sec:cik:0000320193", "aero", "2026-08-25T13:00:00+01:00"),
-            _sector_row("sec:cik:0000320193", "semiconductors", "2026-08-25T12:30:00Z"),
-        ],
-        root=data_root / "parquet",
-    )
-    # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
-    # older than 12:30Z — semiconductors must win.
-    assert risk_service.load_sector_map(data_root=data_root) == {"sec:cik:0000320193": "semiconductors"}
+def test_load_sector_map_dedups_entity(monkeypatch: pytest.MonkeyPatch):
+    seen: list[int] = []
 
+    def _count(cik: int) -> str | None:
+        seen.append(cik)
+        return "aero"
 
-def test_load_sector_map_as_of_prefers_older(data_root: Path):
-    parquet.write_rows(
-        "sector_mappings",
-        [
-            _sector_row("sec:cik:0000320193", "aero", "2026-08-25T00:00:00Z"),
-            _sector_row("sec:cik:0000320193", "defense", "2026-08-26T00:00:00Z"),
-        ],
-        root=data_root / "parquet",
-    )
-    as_of = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
-    assert risk_service.load_sector_map(data_root=data_root, as_of=as_of) == {"sec:cik:0000320193": "aero"}
-
-
-def test_load_sector_map_empty_dataset(data_root: Path):
-    assert risk_service.load_sector_map(data_root=data_root) == {}
-
-
-def test_load_sector_map_same_instant_conflict_drops_entity(data_root: Path):
-    parquet.write_rows(
-        "sector_mappings",
-        [
-            _sector_row("sec:cik:0000320193", "semiconductors", "2026-08-25T12:00:00Z"),
-            _sector_row("sec:cik:0000320193", "technology", "2026-08-25T12:00:00Z"),
-        ],
-        root=data_root / "parquet",
-    )
-    assert risk_service.load_sector_map(data_root=data_root) == {}
-
+    monkeypatch.setattr(risk_service, "_provider_sector", _count)
+    positions = _positions("sec:cik:0000320193") + _positions("sec:cik:0000320193")
+    assert risk_service.load_sector_map(positions) == {"sec:cik:0000320193": "aero"}
+    assert seen == [320193]
 
 # ---------------------------------------------------------------------------
 # CLI command
 # ---------------------------------------------------------------------------
 
 
-def _seed_snapshot_and_mandate(data_root: Path, mandate_payload: Mapping[str, object] | None = None) -> Path:
+def _seed_snapshot_and_mandate(
+    data_root: Path, mandate_payload: Mapping[str, object] | None = None, monkeypatch: pytest.MonkeyPatch | None = None
+) -> Path:
     persist_snapshot(_hand_built_snapshot(), data_root=data_root)
-    parquet.write_rows(
-        "sector_mappings",
-        [_sector_row("sec:cik:0000320193", "semiconductors", "2026-08-25T00:00:00Z")],
-        root=data_root / "parquet",
-    )
+    if monkeypatch is not None:
+        _sector(monkeypatch)
     mandate_path = data_root / "mandate.json"
     return _write_mandate(
         mandate_path,
@@ -589,8 +560,10 @@ def _seed_snapshot_and_mandate(data_root: Path, mandate_payload: Mapping[str, ob
     )
 
 
-def test_cli_evaluate_mandate_reports(capsys: pytest.CaptureFixture[str], data_root: Path):
-    mandate_path = _seed_snapshot_and_mandate(data_root)
+def test_cli_evaluate_mandate_reports(
+    capsys: pytest.CaptureFixture[str], data_root: Path, monkeypatch: pytest.MonkeyPatch
+):
+    mandate_path = _seed_snapshot_and_mandate(data_root, monkeypatch=monkeypatch)
     _cmd_evaluate_mandate(mandate_path, str(data_root))
     out = capsys.readouterr().out
     assert f"Mandate: {mandate_path}" in out
@@ -602,13 +575,16 @@ def test_cli_evaluate_mandate_reports(capsys: pytest.CaptureFixture[str], data_r
     assert "No breaches." not in out
 
 
-def test_cli_evaluate_mandate_no_breaches(capsys: pytest.CaptureFixture[str], data_root: Path):
+def test_cli_evaluate_mandate_no_breaches(
+    capsys: pytest.CaptureFixture[str], data_root: Path, monkeypatch: pytest.MonkeyPatch
+):
     mandate_path = _seed_snapshot_and_mandate(
         data_root,
         {
             "limits": [{"metric": "single_position_weight", "operator": "<=", "threshold": 0.99}],
             "prohibited_assets": [],
         },
+        monkeypatch,
     )
     _cmd_evaluate_mandate(mandate_path, str(data_root))
     out = capsys.readouterr().out
@@ -652,8 +628,8 @@ def test_tool_evaluate_mandate_missing_snapshot_error(data_root: Path):
     assert "snapshot" in error.lower()
 
 
-def test_tool_evaluate_mandate_happy_path(data_root: Path):
-    mandate_path = _seed_snapshot_and_mandate(data_root)
+def test_tool_evaluate_mandate_happy_path(data_root: Path, monkeypatch: pytest.MonkeyPatch):
+    mandate_path = _seed_snapshot_and_mandate(data_root, monkeypatch=monkeypatch)
     result = tools.evaluate_mandate(data_root=data_root, mandate_path=mandate_path)
     assert result["result_type"] == "mandate_evaluation"
     assert result["snapshot_id"] == "portfolio:robinhood:2026-08-25T12:00:00+00:00"
@@ -667,3 +643,11 @@ def test_tool_evaluate_mandate_happy_path(data_root: Path):
     assert all(breach["unit"] == "ratio" for breach in breaches)
     assert result["issues"] == []
     assert result["source"] == "mandate"
+
+
+def test_snapshot_seeded_via_persist_reads_back_via_read_latest(data_root: Path):
+    persist_snapshot(_hand_built_snapshot(), data_root=data_root)
+    snapshot = read_latest_snapshot(data_root=data_root)
+    assert snapshot is not None
+    assert snapshot.snapshot_id == "portfolio:robinhood:2026-08-25T12:00:00+00:00"
+    assert {p.ticker for p in snapshot.positions} == {"WING", "ZZZZ"}

@@ -245,6 +245,7 @@ def test_miscpy_fundamentals_dividends_quarterly_and_fy_only(monkeypatch: pytest
 
     monkeypatch.setattr(edgar_client, "Company", _DivCompany)
     monkeypatch.setattr(edgar_client, "cache", _DivCache())
+    monkeypatch.setattr(edgar_client, "_ensure_init", lambda: None)
     rows = [
         _q_row(0.50, "2025-07-01", "2025-09-30", 2025, "Q3"),
         _q_row(0.50, "2025-10-01", "2025-12-31", 2025, "Q4"),
@@ -283,11 +284,24 @@ def test_miscpy_thesis_show_live_branch(tmp_path: Path) -> None:
     assert live["thesis_id"] == tid and live["user_thesis"] == "NVDA thesis"
 
 
-# -- evidence_resolution: nothing over 10 (max 9.0); guard the warehouse miss --
+# -- evidence_resolution: nothing over 10 (max 9.0); guard the unresolved miss --
 
 
-def test_miscpy_warehouse_name_to_ticker_blank_and_miss():
+def test_miscpy_resolve_subject_blank_and_miss():
+    from datetime import datetime, timezone
+
     import app.services.evidence_resolution as er
 
-    assert er.warehouse_name_to_ticker("   ") is None
-    assert er.warehouse_name_to_ticker("no-such-company-xyz") is None
+    as_of = datetime(2026, 1, 1, tzinfo=timezone.utc)
+    blank = er.resolve_subject(
+        ticker=None, name="   ", aliases_by_ticker=lambda t: [], name_to_ticker=lambda n: None, as_of=as_of
+    )
+    assert blank.resolved is False
+    miss = er.resolve_subject(
+        ticker=None,
+        name="no-such-company-xyz",
+        aliases_by_ticker=lambda t: [],
+        name_to_ticker=lambda n: None,
+        as_of=as_of,
+    )
+    assert miss.resolved is False

@@ -5,7 +5,7 @@ from __future__ import annotations
 
 import argparse
 import json
-from pathlib import Path
+from pathlib import Path  # noqa: F401 - kept for test-slice import shape
 
 import pytest
 
@@ -14,7 +14,6 @@ from app import finra_client
 from app.google_data import (
     geo_context,
     patents,
-    signals,
     stackoverflow,
     trends_api,
     youtube,
@@ -141,12 +140,12 @@ def test_geo_invalid_limit_refuses(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["status"] == "error" and out["error_type"] == "invalid_params"
 
 
-def test_trends_api_terms_and_interval_validated() -> None:
+def test_trends_api_terms_and_interval_validated(monkeypatch: pytest.MonkeyPatch) -> None:
+    _enable(monkeypatch)
     err = trends_api.get_interest_over_time(terms=[])
     assert err["status"] == "error" and err["error_type"] == "invalid_params"
     err2 = trends_api.get_interest_over_time(terms=["x"], interval="fortnightly")
     assert err2["status"] == "error" and "interval" in str(err2["error"])
-
 
 def test_trends_api_pending_shape(monkeypatch: pytest.MonkeyPatch) -> None:
     _enable(monkeypatch)
@@ -175,35 +174,7 @@ def test_youtube_quota_ledger_validated() -> None:
     assert youtube._validate_days({today: {"search": 1, "videos": 0}})
 
 
-# --- backfill resume -----------------------------------------------------------
-
-
-def test_migrate_jsonl_resumes_skipping_bad_lines(tmp_path: Path) -> None:
-    root = tmp_path / "google_data"
-    root.mkdir(parents=True)
-    rec: dict[str, object] = {
-        "table": "trends",
-        "period": "2026-W35",
-        "geo": "US",
-        "term": "alpha",
-        "list_kind": "top",
-        "observed_at": "2026-09-01",
-        "known_at": "2026-09-02T00:00:00+00:00",
-        "retrieved_at": "2026-09-02T00:00:00+00:00",
-        "metrics": {"rank": 1},
-        "evidence": [],
-        "features": {"velocity": 2.0},
-    }
-    (root / "signals.jsonl").write_text("not json\n" + json.dumps(rec) + "\n[1,2]\n\n" + json.dumps(rec) + "\n")
-    written = signals.migrate_jsonl_once(tmp_path)
-    assert written >= 1
-    # rerun is a no-op via marker
-    assert signals.migrate_jsonl_once(tmp_path) == 0
-    assert (root / ".signals_jsonl_migrated").exists()
-
-
 # --- CLI arg validation --------------------------------------------------------
-
 
 def test_cli_google_data_bad_subcommand_exits() -> None:
     args = argparse.Namespace(

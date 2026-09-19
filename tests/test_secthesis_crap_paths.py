@@ -55,26 +55,12 @@ from app.sec.models import (
     SECTextHit,
 )
 from app.sec.store import (
-    _encode_power,
-    _ledger_hit_id,
+    canonical_json,
+    content_hash,
     enqueue_backfill_job,
     get_job,
-    persist_search_ledger,
+    ledger_hash,
     query_13f_holdings,
-    query_13f_issuer_candidates,
-    query_offerings,
-    query_parties,
-    rebuild_fts,
-    search_document_text,
-    store_13f_holding,
-    store_attempt,
-    store_beneficial_ownership,
-    store_document_text,
-    store_filing_party,
-    store_hit,
-    store_insider_transaction,
-    store_offering,
-    store_transaction,
 )
 from app.thesis import monitor as mon
 from app.thesis.intake import IntakeProposal
@@ -304,10 +290,7 @@ def _disc_fuzzy_top(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
 
     monkeypatch.setattr(client, "get_submissions_metadata", _fake_93)
 
-    def _fake_92(*a: object, **k: object) -> object:
-        return None
-
-    monkeypatch.setattr(disc, "_persist_entity", _fake_92)
+    # _persist_entity deleted with the warehouse; entities resolve live only.
     cli_name, _cli_score, _ = disc._classify_name("Xyzzy", "Xyzzy Unrelated Corp", None, None)
     assert cli_name in ("fuzzy", None)
     out = disc.find_sec_entities("Xyzzy Unrelated Corp", data_root=tmp_path)
@@ -359,24 +342,6 @@ def _disc_job(
     return job
 
 
-def test_backfill_skips_complete_partitions(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.sec import store
-
-    qs, qe = disc._quarter_dates(2024, 1)
-    part = disc._partition_for_quarter(2024, 1)
-    key = f"10-K/{part}"
-    for src in (disc.BACKFILL_SOURCE, disc.DOC_SOURCE):
-        store.store_coverage(src, "10-K", part, "complete", coverage_date=qe, root=tmp_path)
-        store.store_checkpoint("sec-backfill", src, key, "complete", root=tmp_path)
-    job: dict[str, object] = {
-        "id": store.enqueue_backfill_job(disc.BACKFILL_SOURCE, "10-K", qs, qe, root=tmp_path),
-        "source": disc.BACKFILL_SOURCE,
-        "form": "10-K",
-        "start_date": qs,
-        "end_date": qe,
-        "batch_size": 5,
-    }
-    assert disc.run_backfill_job(job, tmp_path) is True
 
 
 def test_backfill_partial_retry_current_feed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -394,25 +359,16 @@ def test_backfill_partial_retry_current_feed(tmp_path: Path, monkeypatch: pytest
         return {"submission": SimpleNamespace(payload_path="/tmp/p"), "primary": SimpleNamespace(payload_path="/tmp/q")}
 
     monkeypatch.setattr(archive, "archive_sec_filing", _fake_88)
-    from app.sec import store
-
-    def _fake_87(*a: object, **k: object) -> object:
-        return 1
-
-    monkeypatch.setattr(store, "store_filing", _fake_87)
     job = _disc_job(form="10-K", qs="2024-01-01", qe="2024-03-31")
     # unbounded window -> current-feed snapshot path (partial, still True)
     job2 = dict(job, start_date=None, end_date=None)
     assert disc.run_backfill_job(job2, tmp_path) is True
 
 
-def test_backfill_warehouse_failure_retryable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_provider_failure_retryable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import store
 
     qs, qe = disc._quarter_dates(2024, 1)
-    part = disc._partition_for_quarter(2024, 1)
-    key = "10-K/" + part
-    store.store_checkpoint("sec-backfill", disc.BACKFILL_SOURCE, key, "complete", root=tmp_path)
     job: dict[str, object] = {
         "id": store.enqueue_backfill_job(disc.BACKFILL_SOURCE, "10-K", qs, qe, root=tmp_path),
         "source": disc.BACKFILL_SOURCE,
@@ -423,7 +379,7 @@ def test_backfill_warehouse_failure_retryable(tmp_path: Path, monkeypatch: pytes
     }
 
     def _boom(*a: object, **k: object) -> object:
-        raise RuntimeError("warehouse down")
+        raise RuntimeError("provider down")
 
     monkeypatch.setattr(store, "query_filings", _boom)
     assert disc.run_backfill_job(job, tmp_path) is False
@@ -757,31 +713,15 @@ def test_search_covered_and_parse_row(tmp_path: Path, monkeypatch: pytest.Monkey
 
     state = disc._SearchState("s", None, "2024-01-01T00:00:00Z")
 
-    def _fake_77(*a: object, **k: object) -> object:
-        return [
-            {
-                "accession": "A1",
-                "form": "4",
-                "filer_cik": "1",
-                "filer_name": "A",
-                "filed_at": "2024-02-15T00:00:00Z",
-                "known_at": "2024-02-15T00:00:00Z",
-            }
-        ]
+    def _boom(*a: object, **k: object) -> object:
+        raise RuntimeError("down")
 
-    monkeypatch.setattr(store, "query_filings", _fake_77)
+    monkeypatch.setattr(store, "query_filings", _boom)
     disc._search_covered_partition(state, store, "4", 2024, 1, None, 10, tmp_path)
-    assert any(a.backend == "local-filings" for a in state.attempts)
+    assert any(a.backend == "live-filings" for a in state.attempts)
     assert (
         disc._search_parse_covered_row(
-            {
-                "accession": "A1",
-                "form": "4",
-                "filer_cik": 1,
-                "filer_name": "A",
-                "filed_at": "2024-02-15T00:00:00Z",
-                "known_at": "2024-02-15T00:00:00Z",
-            },
+            _disc_filing(accession="A1", filed_at="2024-02-15T00:00:00Z", known_at="2024-02-15T00:00:00Z"),
             "2024-01-01",
             "2024-03-31",
             state,
@@ -790,14 +730,7 @@ def test_search_covered_and_parse_row(tmp_path: Path, monkeypatch: pytest.Monkey
     )
     assert (
         disc._search_parse_covered_row(
-            {
-                "accession": "A1",
-                "form": "4",
-                "filer_cik": 1,
-                "filer_name": "A",
-                "filed_at": "2025-02-15T00:00:00Z",
-                "known_at": "2025-02-15T00:00:00Z",
-            },
+            _disc_filing(accession="A1", filed_at="2025-02-15T00:00:00Z", known_at="2025-02-15T00:00:00Z"),
             "2024-01-01",
             "2024-03-31",
             state,
@@ -829,18 +762,6 @@ def test_search_local_paths_with_ciks(tmp_path: Path, monkeypatch: pytest.Monkey
         return out
 
     monkeypatch.setattr(store, "query_13f_holdings", _fake_74)
-
-    def _fake_73(*a: object, **k: object) -> object:
-        out: list[object] = []
-        return out
-
-    monkeypatch.setattr(store, "query_transactions", _fake_73)
-
-    def _fake_72(*a: object, **k: object) -> object:
-        out: list[object] = []
-        return out
-
-    monkeypatch.setattr(store, "query_offerings", _fake_72)
 
     def _fake_71(*a: object, **k: object) -> object:
         return True
@@ -883,50 +804,18 @@ def test_rel_routes_with_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -
 
     state = disc._RelState(None)
 
-    def _fake_70(*a: object, **k: object) -> object:
-        return [
-            {"filer_cik": "2", "subject_cik": "1", "accession": "A1", "document_name": "d", "known_at": "2024-01-01"}
-        ]
-
-    monkeypatch.setattr(store, "query_beneficial_ownership", _fake_70)
-
-    def _fake_69(*a: object, **k: object) -> object:
+    def _empty(*a: object, **k: object) -> object:
         out: list[object] = []
         return out
 
-    monkeypatch.setattr(store, "query_insider_transactions", _fake_69)
-
-    def _fake_68(*a: object, **k: object) -> object:
-        out: list[object] = []
-        return out
-
-    monkeypatch.setattr(store, "query_13f_holdings", _fake_68)
-
-    def _fake_67(*a: object, **k: object) -> object:
-        out: list[object] = []
-        return out
-
-    monkeypatch.setattr(store, "query_transactions", _fake_67)
-
-    def _fake_66(*a: object, **k: object) -> object:
-        out: list[object] = []
-        return out
-
-    monkeypatch.setattr(store, "query_offerings", _fake_66)
     disc._rel_typed_route(state, store, ["1"], None, tmp_path)
-    assert state.typed
+    # No cik/index scans remain: typed stays empty, the route is complete-with-0.
+    assert state.typed == []
+    assert next(a for a in state.attempts if a["backend"] == "local-typed")["status"] == "complete"
 
-    def _fake_65(*a: object, **k: object) -> object:
-        return [{"relationship_id": "r1", "relationship_type": "Supplier Of"}]
-
-    monkeypatch.setattr(store, "query_relationship_evidence", _fake_65)
-
-    def _fake_64(*a: object, **k: object) -> object:
-        return [{"revision_id": "r1:r0", "new_status": "candidate"}]
-
-    monkeypatch.setattr(store, "query_relationship_revisions", _fake_64)
     disc._rel_workflow_route(state, store, ["1"], None, tmp_path, False, 50)
-    assert state.workflow
+    # No persisted evidence ledger remains: workflow stays empty.
+    assert state.workflow == []
 
     def _fake_63(*a: object, **k: object) -> object:
         return [{"accession": "A1", "document_name": "d", "text": "x" * 10, "known_at": "2024-01-01"}]
@@ -955,59 +844,20 @@ def test_classify_and_record_branches() -> None:
     assert disc._party_entity_id(None) is None
     assert disc._verify_conflict(None, True, None) is False
 
-
 def test_rel_workflow_row_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import store
 
     state = disc._RelState({"supplier_of"})
-    assert disc._workflow_label([{"relationship_type": "Supplier Of"}]) == "Supplier Of"
-    assert disc._workflow_label([{}]) == "relationship"
-
-    def _fake_62(*a: object, **k: object) -> object:
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(store, "query_relationship_revisions", _fake_62)
-    assert disc._workflow_revisions(store, "r1", tmp_path) == []
+    # No persisted evidence/revision ledger remains: workflow rows never keep.
     assert disc._rel_workflow_row(state, store, "r1", [{"relationship_type": "Other"}], tmp_path) is False
-
-    def _fake_61(*a: object, **k: object) -> object:
-        return [{"revision_id": "r1:r2", "new_status": "verified"}]
-
-    monkeypatch.setattr(store, "query_relationship_revisions", _fake_61)
     assert (
         disc._rel_workflow_row(
             state, store, "r1", [{"relationship_id": "r1", "relationship_type": "Supplier Of"}], tmp_path
         )
-        is True
+        is False
     )
-
-
-def test_cap_mapping_and_warn() -> None:
-    state = disc._SearchState("s", None, "now")
-    m: dict[object, object] = {1: "a", 2: "b", 3: "c"}
-    assert disc._cap_mapping(m, 2) is True and len(m) == 2
-    assert disc._cap_mapping(m, 5) is False
-    disc._warn_capped(state, 2, True)
-    assert any("capped at 2" in w for w in state.warnings)
-    disc._warn_capped(state, 2, True)
-    assert sum("capped at 2" in w for w in state.warnings) == 1
-
-
-def test_append_selector_dedupes() -> None:
-    from app.sec.models import SECSearchRequest
-
-    sel = disc._search_entity_selectors(SECSearchRequest(cik="1", ticker="1", query="1"), "1")
-    assert sel == ["1"]
-    sel = disc._search_entity_selectors(SECSearchRequest(), None)
-    assert sel == []
-
-
-def test_filing_row_name_fallbacks() -> None:
-    assert disc._row_filer_name({"filer_name": "A"}) == "A"
-    assert disc._row_filer_name({"company": "B"}) == "B"
-    assert disc._row_filer_name({}) == ""
-    assert disc._row_known_at({"known_at": "k"}) == "k"
-    assert disc._row_known_at({"filed_at": "f"}) == "f"
+    assert state.workflow == []
+    assert disc._party_name_text("A", 1) == "A"
     assert disc._identity_attr_text(object(), "query") is None
 
     class _BadStr:
@@ -1020,15 +870,6 @@ def test_filing_row_name_fallbacks() -> None:
 
 # --- wave 5: cover final survivors' uncovered branches ---
 
-
-def test_filing_identity_variants() -> None:
-    assert disc._filing_identity({"accession": "A"}, None)["filer_cik"] == 0
-    assert (
-        disc._filing_identity(
-            {"accession": "A", "form": "4", "filer_cik": 5, "filed_at": "2024-01-01", "source_url": "u"}, 5
-        )["form"]
-        == "4"
-    )
 
 
 def test_backfill_write_typed_skipped_and_failed(tmp_path: Path) -> None:
@@ -1081,14 +922,6 @@ def test_fetch_filer_and_record_branches(tmp_path: Path) -> None:
     assert any(a.backend == "local-relationships" for a in state3.attempts)
 
 
-def test_filing_identity_all_branches() -> None:
-    # form present vs missing; filed_at missing; source missing
-    a = disc._filing_identity({"accession": "A", "form": "4", "filed_at": "2024-01-01", "source_url": "u"}, 3)
-    assert a["form"] == "4" and a["filed_at"] == "2024-01-01"
-    b = disc._filing_identity({"accession": "B"}, None)
-    assert b["form"] == "" and b["filed_at"] == "" and b["source"] == ""
-
-
 def test_record_local_relationships_complete_path() -> None:
     state = disc._SearchState("s", None, "now")
     disc._search_record_local_relationships(state, ["1"], False, 2, (0, 0), "2024-01-01")
@@ -1098,8 +931,8 @@ def test_record_local_relationships_complete_path() -> None:
 
 
 def test_row_text_and_rel_status() -> None:
-    assert disc._row_text({"form": "4"}, "form") == "4"
-    assert disc._row_text({}, "form") == ""
+    assert disc._party_text("4", None) == "4"
+    assert disc._party_text(None, None) is None
     state = disc._SearchState("s", None, "now")
     assert disc._local_rel_status(state, True, (0, 0)) == "partial"
     assert disc._local_rel_status(state, False, (0, 0)) == "complete"
@@ -1249,13 +1082,11 @@ def test_rows_of_infotable_generator() -> None:
 
 
 def test_holding_provenance_missing_attrs() -> None:
-    prov_untyped: Callable[..., tuple[object, object, object, object]] = insider._holding_provenance_of
-    field_untyped: Callable[..., object] = insider._provenance_field_of
-    known, accession, _url, _path = prov_untyped(SimpleNamespace(), None)
-    assert known is None  # falsy attrs skipped, no str(None) leak
-    assert accession == ""
-    assert field_untyped(SimpleNamespace(a="x"), "a") == "x"
-    assert field_untyped(SimpleNamespace(), "a") is None
+    assert insider._holding_known_at(None, "2024-02-01") == "2024-02-01"
+    assert insider._holding_known_at(None, None) is None
+    assert insider.normalize_cusip("037833100") == "037833100"
+    assert insider._13f_security_id("037833100", None) == "cusip:037833100"
+    assert insider._13f_security_id(None, None) is None
 
 
 def test_normalize_144_seller_and_form_branches() -> None:
@@ -1466,12 +1297,6 @@ def test_normalize_offering_terms_not_dict() -> None:
         text="200 shares of ACME common stock",
     )
     assert rec2.shares == 100
-
-
-def test_query_registrant_split() -> None:
-    assert offerings._split_registrant(123, None) == (None, "123")
-    assert offerings._split_registrant(" 456 ", None) == (None, "456")
-    assert offerings._split_registrant("ACME", None) == ("ACME", None)
 
 
 def test_get_offering_history_bad_filing_and_terms(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1801,24 +1626,31 @@ def test_resolve_in_primary_raises() -> None:
 
     with pytest.raises(ValueError):
         resolve_untyped(_Boom(), "a", None)
-
-
 def test_stored_candidates_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import store
+    from app.sec.models import Filing
 
-    def _fake_44(**k: object) -> object:
-        return [{"primary_document": 123}]
+    filing = Filing(
+        accession_no="a",
+        form="10-K",
+        filer_cik=1,
+        filer_name="Acme",
+        filed_at="2024-02-01",
+        accepted_at=None,
+        known_at="2024-02-01T00:00:00Z",
+        report_period=None,
+        primary_document="p.htm",
+        is_amendment=False,
+        amendment_of=None,
+        source="http://x",
+    )
 
-    monkeypatch.setattr(store, "query_filings", _fake_44)
+    def _fake_filings(**k: object) -> object:
+        return [filing]
 
-    def _fake_43(**k: object) -> object:
-        return [{"document_name": "d"}]
-
-    monkeypatch.setattr(store, "query_document_text", _fake_43)
-    filing, rows = documents._stored_candidates("a", None, None, None)
-    assert rows and filing is not None
-
-
+    monkeypatch.setattr(store, "query_filings", _fake_filings)
+    got_filing, rows = documents._stored_candidates("a", None, None, None)
+    assert got_filing is not None and rows == []
 def test_stored_candidates_store_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import store
 
@@ -3306,156 +3138,6 @@ def test_pi_wait_reap_branches(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 # --- from /tmp/secthesis_store.py ---
-def _store_party(accession: str = "ACC-P1") -> dict[str, object]:
-    return {
-        "accession_no": accession,
-        "role": "issuer",
-        "entity_id": "sec:cik:0000001",
-        "cik": 1,
-        "name": "Party Co",
-        "source": "sec",
-        "known_at": "2024-02-01T00:00:00Z",
-    }
-
-
-def _store_hit(search_id: str = "s1") -> dict[str, object]:
-    return {
-        "search_id": search_id,
-        "attempt_id": f"{search_id}-p1",
-        "query": "Acme",
-        "accession_no": "ACC-H1",
-        "form": "10-K",
-        "filed_at": "2024-02-01",
-        "filer_cik": 1,
-        "filer_name": "Acme",
-        "matched_document": "p.htm",
-        "score": 2.0,
-        "page": 1,
-    }
-
-
-def test_store_filing_party_upsert_and_hash_paths(tmp_path: Path) -> None:
-    assert store_filing_party(_store_party(), root=tmp_path) == 1
-    assert store_filing_party(_store_party(), root=tmp_path) == 0  # deterministic rerun
-    other = _store_party("ACC-P2")
-    other["content_hash"] = "preset"
-    assert store_filing_party(other, root=tmp_path) == 1  # preset hash kept
-
-
-def test_store_hit_upsert_and_deterministic_id(tmp_path: Path) -> None:
-    assert store_hit(_store_hit(), root=tmp_path) == 1
-    assert store_hit(_store_hit(), root=tmp_path) == 0  # same key rerun
-    keyed = _store_hit()
-    keyed["hit_id"] = "explicit"  # same dedupe key: still a rerun
-    assert store_hit(keyed, root=tmp_path) == 0
-    assert _ledger_hit_id("s1", dict(_store_hit())) == _ledger_hit_id("s1", dict(_store_hit()))
-
-
-def test_store_attempt_and_ledger_empty_collections(tmp_path: Path) -> None:
-    from app.sec.models import SearchAttempt
-
-    attempt = SearchAttempt(
-        attempt_id="a1",
-        search_id="s-empty",
-        backend="efts",
-        query="q",
-        status="complete",
-    )
-    assert store_attempt(attempt, root=tmp_path) == 1
-    assert store_attempt(attempt, root=tmp_path) == 0  # rerun
-    from app.sec.models import SECSearchRequest
-
-    written = persist_search_ledger(search_id="s-empty", request=SECSearchRequest(query="q"), root=tmp_path)
-    assert written == {"searches": 1, "attempts": 0, "hits": 0}
-
-
-def test_query_parties_empty_and_asof_reject(tmp_path: Path) -> None:
-    assert query_parties(accession="missing", root=tmp_path) == []
-    store_filing_party(_store_party("ACC-QP"), root=tmp_path)
-    assert len(query_parties(accession="ACC-QP", root=tmp_path)) == 1
-    with pytest.raises(ValueError):
-        query_parties(as_of="not-a-date", root=tmp_path)
-
-
-def test_rebuild_fts_reports_count_or_health_signal(tmp_path: Path) -> None:
-    store_document_text(
-        "ACC:d1",
-        "alpha beta gamma",
-        accession="ACC",
-        document_name="d1",
-        filed_at="2024-02-01",
-        known_at="2024-02-01T00:00:00Z",
-        root=tmp_path,
-    )
-    try:
-        count = rebuild_fts(root=tmp_path)
-    except RuntimeError:
-        return  # FTS extension unavailable offline: explicit health signal
-    assert count == 1
-
-
-def test_search_document_text_fts_fallback_literal_and_blank(tmp_path: Path) -> None:
-    store_document_text(
-        "ACC:d1",
-        "Risk Factors: supply chainoso disruption",
-        accession="ACC",
-        document_name="d1",
-        filed_at="2024-02-01",
-        known_at="2024-02-01T00:00:00Z",
-        root=tmp_path,
-    )
-    assert [r["document_name"] for r in search_document_text("supply chainoso", literal=True, root=tmp_path)] == ["d1"]
-    terms = search_document_text("supply disruption", root=tmp_path)  # FTS or fallback
-    assert "d1" in [r["document_name"] for r in terms]
-    with pytest.raises(ValueError):
-        search_document_text("   ", root=tmp_path)
-
-
-def test_store_document_text_bytes_and_dividend_skip(tmp_path: Path) -> None:
-    assert (
-        store_document_text(
-            "ACC:b1",
-            b"bytes-payload",
-            accession="ACC",
-            document_name="b1",
-            filed_at="2024-02-01",
-            known_at="2024-02-01T00:00:00Z",
-            root=tmp_path,
-        )
-        == 1
-    )  # no filing row: dividend phase skips
-
-
-def test_13f_holdings_invalid_cusip_and_security_branches(tmp_path: Path) -> None:
-    assert (
-        store_13f_holding(
-            {
-                "accession": "ACC-13F",
-                "manager_cik": 7,
-                "manager_name": "M",
-                "issuer_name": "I",
-                "class_title": "COM",
-                "cusip": "037833100",
-                "shares": 5,
-                "value": 9,
-                "known_at": "2024-02-14",
-                "source_row": 1,
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert query_13f_holdings(cusip="!!!", root=tmp_path) == []  # invalid binds no-match
-    assert len(query_13f_holdings(cusip="037833100", root=tmp_path)) == 1
-    assert len(query_13f_holdings(security="CUSIP:037833100", root=tmp_path)) == 1
-    assert len(query_13f_holdings(security="037833100", root=tmp_path)) == 1
-    with pytest.raises(ValueError):
-        store_13f_holding({"accession": "ACC-BAD", "source_row": 0}, root=tmp_path)
-
-
-def test_issuer_candidates_blank_and_bad_period(tmp_path: Path) -> None:
-    assert query_13f_issuer_candidates("", report_period=None, holding_known_at=None, root=tmp_path) == []
-    assert query_13f_issuer_candidates("Nope", report_period="not-a-date", holding_known_at=None, root=tmp_path) == []
 
 
 def test_enqueue_validation_branches(tmp_path: Path) -> None:
@@ -3471,95 +3153,6 @@ def test_enqueue_validation_branches(tmp_path: Path) -> None:
         enqueue_backfill_job("sec-global", "10-K", "2024/01/01", "2024-03-31", root=tmp_path)
     job = enqueue_backfill_job("sec-global", "10-K", "2024-01-01", "2024-03-31", root=tmp_path)
     assert get_job(job, root=tmp_path) is not None
-
-
-def test_query_offerings_registrant_branches(tmp_path: Path) -> None:
-    assert (
-        store_offering(
-            {
-                "accession": "ACC-O1",
-                "form": "S-1",
-                "filer_cik": 8,
-                "registrant_cik": 9,
-                "registrant_name": "Reg Co",
-                "known_at": "2024-02-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert len(query_offerings(registrant_cik=9, root=tmp_path)) == 1
-    assert len(query_offerings(registrant_cik="0000000009", root=tmp_path)) == 1
-    assert query_offerings(registrant_cik="not-a-cik", root=tmp_path) == []
-
-
-def test_store_transaction_fallbacks(tmp_path: Path) -> None:
-    assert (
-        store_transaction(
-            {
-                "accession": "ACC-T1",
-                "form": "S-4",
-                "filer_cik": 3,
-                "subject_cik": 4,
-                "subject_name": "Target Co",
-                "known_at": "2024-02-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )  # target falls back to subject; status unknown
-    assert (
-        store_transaction(
-            {
-                "accession": "ACC-T2",
-                "acquirer_name": "Buyer",
-                "buyer": "Buyer",
-                "announced_at": "2024-03-01",
-                "known_at": "2024-03-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )  # announced_at fallbacks
-
-
-def test_store_insider_owner_fallbacks(tmp_path: Path) -> None:
-    assert (
-        store_insider_transaction(
-            {
-                "accession": "ACC-I1",
-                "form": "4",
-                "issuer_cik": 5,
-                "insider_cik": 6,
-                "insider_name": "Owner",
-                "holdings_after": 10,
-                "known_at": "2024-02-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-
-
-def test_store_beneficial_power_branches(tmp_path: Path) -> None:
-    assert (
-        store_beneficial_ownership(
-            {
-                "accession": "ACC-B1",
-                "form": "SC 13D",
-                "subject_cik": 1,
-                "filer_cik": 2,
-                "sole_voting": 5,
-                "shared_dispositive": 7,
-                "known_at": "2024-02-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert _encode_power(None, None) is None
-    assert _encode_power(object(), 3) == "shared=3"
-    assert _encode_power("bad", "alsobad") is None
 
 
 def test_search_first_page_failure_is_failed_packet(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3725,52 +3318,10 @@ def test_lookup_and_company_branches(monkeypatch: pytest.MonkeyPatch) -> None:
         client.find_sec_company("Acme", limit=0)
 
 
-def test_dividend_extract_persist_and_guard_branches(tmp_path: Path) -> None:
-    from app.sec.models import Filing
-    from app.sec.store import (
-        _dividend_filing_cik,
-        _persist_text_dividends,
-        store_filing,
-    )
+def test_dividend_extract_guard_branches(tmp_path: Path) -> None:
+    from app.sec.store import query_filings
 
-    filing = Filing(
-        accession_no="ACC-DIV",
-        form="10-K",
-        filer_cik=7,
-        filer_name="Div Co",
-        filed_at="2024-02-01",
-        accepted_at="2024-02-01T00:00:00Z",
-        known_at="2024-02-01T00:00:00Z",
-        report_period=None,
-        primary_document="p.htm",
-        is_amendment=False,
-        amendment_of=None,
-        source="http://x/div",
-    )
-    assert store_filing(filing, root=tmp_path) == 1
-    row = _dividend_filing_cik("ACC-DIV", tmp_path)
-    assert row is not None and str(row["filer_cik"]) == "7"
-    assert _dividend_filing_cik("ACC-MISSING", tmp_path) is None
-    _persist_text_dividends(
-        row,
-        "ACC-DIV",
-        "http://x/div",
-        "The board declared a dividend of $0.50 per share.",
-        "hash-div",
-        "2024-02-01",
-        "2024-02-01T00:00:00Z",
-        tmp_path,
-    )
-    _persist_text_dividends(
-        {"filer_cik": 7, "filed_at": None},
-        "ACC-DIV",
-        "http://x/div",
-        "no dividend language here",
-        "hash-none",
-        None,
-        "2024-02-01T00:00:00Z",
-        tmp_path,
-    )
+    assert query_filings(root=tmp_path) == []
 
 
 def test_search_failed_packet_and_lookup_scan_branches(
@@ -3812,57 +3363,6 @@ def test_search_failed_packet_and_lookup_scan_branches(
     assert scan_untyped(frame, "zzz-no-match") == []
 
 
-def test_store_coverage_beneficial_and_transaction_branches(tmp_path: Path) -> None:
-    from app.sec.store import query_coverage, store_coverage
-
-    assert store_coverage("s", "10-K", "2024-Q1", "complete", root=tmp_path) == 1
-    assert store_coverage("s", "10-K", "2024-Q1", "complete", root=tmp_path) == 0
-    assert query_coverage(source="s", root=tmp_path)
-    assert (
-        store_beneficial_ownership(
-            {
-                "accession_no": "ACC-B2",
-                "form": "SC 13D",
-                "subject_cik": 1,
-                "reporter_name": "Rep",
-                "sole_voting": 1,
-                "known_at": "2024-02-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert (
-        store_transaction(
-            {
-                "accession_no": "ACC-T3",
-                "deal_type": "merger",
-                "filer_cik": 1,
-                "acquirer_cik": 2,
-                "buyer": "B",
-                "status": "pending",
-                "announced_at": "2024-04-01",
-                "known_at": "2024-04-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert (
-        store_offering(
-            {
-                "accession_no": "ACC-O2",
-                "offering_type": "debt",
-                "gross_proceeds": 100,
-                "issuer": "Iss Co",
-                "known_at": "2024-02-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-
-
 def test_hit_helper_error_branches() -> None:
     from app.sec.client import _hit_filer_cik, _hit_items, _hit_score
 
@@ -3890,78 +3390,6 @@ def test_hit_helper_error_branches() -> None:
 
     assert score_untyped(_BadScore()) == 0.0
     assert cik_untyped(_BadScore()) == 1
-
-
-def test_store_checkpoint_row_dict_and_revision_branches(tmp_path: Path) -> None:
-    from app.sec.store import (
-        _row_dict,
-        advance_checkpoint,
-        get_checkpoint,
-        store_checkpoint,
-        store_relationship_revision,
-    )
-
-    assert store_checkpoint("p", "s", "k", "complete", root=tmp_path) == 1
-    assert store_checkpoint("p", "s", "k", "complete", root=tmp_path) == 0
-    assert get_checkpoint("p", "s", "k", root=tmp_path) is not None
-    assert advance_checkpoint("p", "s", "k", root=tmp_path) == 0  # rerun after complete
-    assert get_checkpoint("p", "s", "missing", root=tmp_path) is None
-    assert (
-        store_relationship_revision(
-            {
-                "revision_id": "r1",
-                "relationship_id": "rel",
-                "new_status": "active",
-                "known_at": "2024-02-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert _row_dict({}) == {}
-    row_untyped: Callable[..., dict[str, object]] = _row_dict
-    with pytest.raises(TypeError):
-        row_untyped(42)
-
-
-def test_relationship_evidence_and_eval_store_branches(tmp_path: Path) -> None:
-    from app.sec.store import (
-        query_relationship_evidence,
-        query_relationship_type_evaluations,
-        store_relationship_evidence,
-        store_relationship_type_evaluation,
-    )
-
-    assert (
-        store_relationship_evidence(
-            {
-                "evidence_id": "e1",
-                "relationship_id": "rel",
-                "relationship_type": "supplier_of",
-                "from_entity_id": "a",
-                "to_entity_id": "b",
-                "known_at": "2024-02-01",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert len(query_relationship_evidence(relationship_id="rel", include_counterevidence=False, root=tmp_path)) == 1
-    assert (
-        store_relationship_type_evaluation(
-            {
-                "evaluation_id": "ev1",
-                "relationship_type": "supplier_of",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    with pytest.raises(ValueError):
-        store_relationship_type_evaluation({"relationship_type": "x"}, root=tmp_path)
-    with pytest.raises(ValueError):
-        store_relationship_type_evaluation({"evaluation_id": "e"}, root=tmp_path)
-    assert query_relationship_type_evaluations("supplier_of", root=tmp_path)
 
 
 def test_lookup_fetch_and_rank_error_branches(
@@ -3994,112 +3422,19 @@ def test_lookup_fetch_and_rank_error_branches(
 
 
 def test_row_dict_and_holding_source_error_branches() -> None:
-    from app.sec.store import _holding_source_row, _row_dict
+    from app.sec.store import canonical_json, content_hash, ledger_hash
 
-    class _D:
-        def to_dict(self) -> dict[str, object]:
-            return {"a": 1}
-
-    assert _row_dict(_D()) == {"a": 1}
-    assert _row_dict({}) == {}
-    with pytest.raises(ValueError):
-        _holding_source_row({"source_row": "bad"})
+    assert canonical_json({"b": 1, "a": 2}) == b'{"a": 2, "b": 1}'
+    assert content_hash(b"x") == content_hash(b"x")
+    assert ledger_hash("a", "b") == ledger_hash("a", "b")
+    assert ledger_hash("a") != ledger_hash("b")
 
 
 def test_holding_sid_isin_and_fts_rows_description_branches() -> None:
-    from app.sec.store import _fts_rows, _holding_sid
-
-    assert _holding_sid(None, "US0378331005") == "isin:US0378331005"
-    assert _holding_sid(None, None) is None
-
-    class _Conn:
-        description: object = None
-
-        def execute(self, *a: object, **k: object) -> _Conn:
-            return self
-
-        def fetchall(self) -> list[object]:
-            return []
-
-    with pytest.raises(RuntimeError):
-        _fts_rows(_Conn(), "SELECT 1", [], 10)
-
-
-def test_offering_identity_and_transaction_dates_branches() -> None:
-    from app.sec.store import _offering_identity, _transaction_dates
-
-    assert _offering_identity({})["registrant_name"] is None
-    assert _transaction_dates({}) == {"status": "unknown", "filed_at": None, "known_at": None}
-
-
-def test_issuer_holdings_for_issuer_branches(tmp_path: Path) -> None:
-    from app.sec.store import (
-        query_13f_holdings_for_issuer,
-        store_13f_holding,
-    )
-    from app.storage import parquet as _pq
-
-    now = "2024-06-01T00:00:00Z"
-    _pq.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": "sec:cik:0000000009",
-                "name": "New Co",
-                "entity_type": "company",
-                "sic": None,
-                "source": "sec-submissions",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    _pq.write_rows(
-        "entity_aliases",
-        [
-            {
-                "alias_type": "cusip",
-                "alias_value": "x",
-                "entity_id": "sec:cik:0000000009",
-                "security_id": "cusip:037833100",
-                "source": "sec-submissions",
-                "valid_from": None,
-                "valid_to": None,
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    assert query_13f_holdings_for_issuer("", root=tmp_path) == []
-    assert (
-        store_13f_holding(
-            {
-                "accession": "ACC-ISS",
-                "document_name": "d",
-                "manager_cik": "6",
-                "manager_name": "LM",
-                "report_period": "2024-03-31",
-                "issuer_name": "New Co",
-                "entity_id": None,
-                "security_id": None,
-                "class_title": "COM",
-                "cusip": "037833100",
-                "filed_at": "2024-05-15",
-                "known_at": "2024-05-15T00:00:00Z",
-                "source_row": 1,
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert len(query_13f_holdings_for_issuer("sec:cik:0000000009", root=tmp_path)) == 1
-    assert query_13f_holdings_for_issuer("sec:cik:0000000009", as_of="2024-01-01", root=tmp_path) == []
+    assert insider.normalize_cusip("037833100") == "037833100"
+    assert insider.normalize_isin("US0378331005") == "US0378331005"
+    assert insider._13f_security_id(None, "US0378331005") == "isin:US0378331005"
+    assert insider._13f_security_id(None, None) is None
 
 
 def test_failed_packet_branch_forms_and_dates() -> None:
@@ -4112,24 +3447,6 @@ def test_failed_packet_branch_forms_and_dates() -> None:
     assert dated.coverage.date_coverage == "2024-01-01:2024-03-31"
     assert dated.coverage.forms_covered == ("10-K",)
     assert packet.coverage.forms_covered == ()
-
-
-def test_offering_identity_missing_ciks_and_beneficial_identity() -> None:
-    from app.sec.store import _beneficial_identity, _offering_identity
-
-    assert _offering_identity({})["filer_cik"] is None
-    assert _offering_identity({})["registrant_cik"] is None
-    assert _beneficial_identity({}, None)["filer_cik"] is None
-    assert _beneficial_identity({}, None)["subject_cik"] is None
-
-
-def test_store_coverage_defaults_and_transaction_dates_known() -> None:
-    from app.sec.store import _transaction_dates, store_coverage
-
-    assert _transaction_dates({"filed_at": "2024-01-01"})["known_at"] == "2024-01-01"
-    import tempfile as _tf
-
-    assert store_coverage("sd", "10-K", "2024-Q2", "complete", root=_tf.mkdtemp()) in (0, 1)
 
 
 def test_context_history_and_pointer_branches(
@@ -4232,73 +3549,6 @@ def test_governance_empty_and_contested(monkeypatch: pytest.MonkeyPatch) -> None
     monkeypatch.setattr(sec_filings, "list_sec_filings", _fake_1)
     with pytest.raises(ValueError):
         context.get_governance_context("ACME")
-
-
-def test_store_row_fallback_branches(tmp_path: Path) -> None:
-    from app.sec.store import (
-        _beneficial_economics,
-        _beneficial_identity,
-        _beneficial_provenance,
-        _document_row,
-        _hit_ledger_provenance,
-        _offering_identity,
-        _transaction_dates,
-        store_coverage,
-        store_offering,
-    )
-
-    assert _offering_identity({}) == {
-        "accession": None,
-        "document_name": None,
-        "form": None,
-        "filer_cik": None,
-        "filer_name": None,
-        "registrant_cik": None,
-        "registrant_name": None,
-    }
-    assert _offering_identity({"accession_no": "A", "filer_cik": 7})["filer_cik"] == "7"
-    assert _beneficial_identity({}, None)["reporter_name"] is None
-    econ = _beneficial_economics({"voting_power": "V", "dispositive_power": "D"})
-    assert econ["voting_power"] == "V" and econ["dispositive_power"] == "D"
-    prov = _beneficial_provenance({"filed_at": "2024-01-01"})
-    assert prov["known_at"] == "2024-01-01" and prov["retrieved_at"] is None
-    assert _transaction_dates({}) == {"status": "unknown", "filed_at": None, "known_at": None}
-    assert _hit_ledger_provenance({}, "NOW")["known_at"] == "NOW"
-    _row, text_v, content_v, known_v = _document_row(
-        "d1", b"bytes", "NOW", None, None, None, None, None, None, None, None, None, None
-    )
-    assert known_v == "NOW" and text_v == "bytes" and content_v
-    assert (
-        store_coverage(
-            "s",
-            "10-K",
-            "2024-Q9",
-            "partial",
-            family="f",
-            coverage_date="2024-01-01",
-            accession_count=3,
-            last_key="k",
-            known_at="2024-01-02",
-            retrieved_at="2024-01-03",
-            root=tmp_path,
-        )
-        == 1
-    )
-    assert (
-        store_offering(
-            {
-                "accession_no": "ACC-OFB",
-                "registrant_cik": 9,
-                "amount": 5,
-                "known_at": "2024-02-01",
-                "retrieved_at": "2024-02-02",
-                "source_url": "http://s",
-                "content_hash": "h",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
 
 
 def test_client_failed_packet_and_runner_grants_and_pi_helpers() -> None:

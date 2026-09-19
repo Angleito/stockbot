@@ -13,109 +13,69 @@ The resolution rules under test:
 
 from collections.abc import Callable
 from datetime import UTC, date, datetime, timedelta, timezone
-from pathlib import Path
 
 import pytest
 
+from app.data_sources import SourceGateway
 from app.domain.market.identity import resolve_ticker_aliases
 from app.domain.market.securities import TickerAlias
 from app.services.portfolio_sync import resolve_security
-from app.storage import parquet
-
 AMD_ENTITY = "sec:cik:0000320193"
 AMD_SECURITY = "sec:equity:0000320193"
 
 
-@pytest.fixture
-def data_root(tmp_path: Path) -> Path:
-    return tmp_path / "data"
+_ALIASES: list[TickerAlias] = []
 
 
-def _write(rows: list[dict[str, object]], name: str, data_root: Path) -> None:
-    parquet.write_rows(name, rows, root=data_root / "parquet")
-
-
-def _seed_entity(data_root: Path, entity_id: str = AMD_ENTITY, name: str = "Advanced Micro Devices Inc") -> None:
-    _write(
-        [
-            {
-                "entity_id": entity_id,
-                "name": name,
-                "entity_type": "company",
-                "sic": "3674",
-                "source": "sec",
-                "known_at": "2026-01-01T00:00:00Z",
-                "retrieved_at": "2026-01-01T00:00:00Z",
-                "content_hash": f"entity-{entity_id}",
-                "parser_version": "test",
-            }
-        ],
-        "entities",
-        data_root,
-    )
-
-
-def _seed_alias(
-    data_root: Path,
+def _alias_row(
+    *,
     entity_id: str = AMD_ENTITY,
     security_id: str | None = AMD_SECURITY,
     alias: str = "AMD",
     known_at: str = "2026-01-01T00:00:00Z",
     source: str = "sec",
-) -> None:
-    _write(
-        [
-            {
-                "alias_type": "ticker",
-                "alias_value": alias,
-                "entity_id": entity_id,
-                "security_id": security_id,
-                "source": source,
-                "valid_from": "2026-01-01",
-                "valid_to": None,
-                "known_at": known_at,
-                "retrieved_at": known_at,
-                "content_hash": f"alias-{entity_id}-{known_at}",
-                "parser_version": "test",
-            }
-        ],
-        "entity_aliases",
-        data_root,
+    valid_from: str | None = "2026-01-01",
+    valid_to: str | None = None,
+) -> TickerAlias:
+    return TickerAlias(
+        alias_type="ticker",
+        alias_value=alias,
+        entity_id=entity_id,
+        security_id=security_id,
+        source=source,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        known_at=known_at,
+        retrieved_at=known_at,
     )
 
 
-def _seed_security(
-    data_root: Path, security_id: str = AMD_SECURITY, entity_id: str = AMD_ENTITY, ticker: str = "AMD"
-) -> None:
-    _write(
-        [
-            {
-                "security_id": security_id,
-                "entity_id": entity_id,
-                "security_type": "equity-common",
-                "ticker": ticker,
-                "exchange": "NASDAQ",
-                "source": "sec",
-                "known_at": "2026-01-01T00:00:00Z",
-                "retrieved_at": "2026-01-01T00:00:00Z",
-                "content_hash": f"security-{security_id}",
-                "parser_version": "test",
-            }
-        ],
-        "securities",
-        data_root,
-    )
+@pytest.fixture(autouse=True)
+def _stub_gateway(monkeypatch: pytest.MonkeyPatch):
+    """Seed the live-alias double; PIT stays in the resolver, never here."""
+    _ALIASES.clear()
+    _ALIASES.append(_alias_row())
+
+    def _candidates(self: object, ticker: str, as_of: datetime) -> list[TickerAlias]:
+        del self, as_of
+        want = ticker.strip().upper()
+        return [alias for alias in _ALIASES if alias.alias_value == want]
+
+    monkeypatch.setattr(SourceGateway, "ticker_candidates", _candidates)
 
 
-def _seed_amd(data_root: Path, known_at: str = "2026-01-01T00:00:00Z") -> None:
-    _seed_entity(data_root)
-    _seed_alias(data_root, known_at=known_at)
-    _seed_security(data_root)
+def _seed_aliases(*rows: TickerAlias) -> None:
+    _ALIASES.clear()
+    _ALIASES.extend(rows)
 
 
-def test_ticker_resolves_to_entity_and_security_ids(data_root: Path) -> None:
-    _seed_amd(data_root)
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
+def _seed_amd(known_at: str = "2026-01-01T00:00:00Z") -> None:
+    _seed_aliases(_alias_row(known_at=known_at))
+
+
+def test_ticker_resolves_to_entity_and_security_ids() -> None:
+    _seed_amd()
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
     assert resolution.resolved is True
     assert resolution.resolution_method == "entity_alias"
     assert resolution.ticker == "AMD"
@@ -123,17 +83,17 @@ def test_ticker_resolves_to_entity_and_security_ids(data_root: Path) -> None:
     assert resolution.security_id == AMD_SECURITY
 
 
-def test_lookup_is_case_insensitive(data_root: Path) -> None:
-    _seed_amd(data_root)
-    resolution = resolve_security("amd", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
+def test_lookup_is_case_insensitive() -> None:
+    _seed_amd()
+    resolution = resolve_security("amd", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
     assert resolution.resolved is True
     assert resolution.entity_id == AMD_ENTITY
     assert resolution.security_id == AMD_SECURITY
 
 
-def test_unknown_ticker_is_unresolved_without_crashing(data_root: Path) -> None:
-    _seed_amd(data_root)
-    resolution = resolve_security("NOTREAL", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
+def test_unknown_ticker_is_unresolved_without_crashing() -> None:
+    _seed_amd()
+    resolution = resolve_security("NOTREAL", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
     assert resolution.resolved is False
     assert resolution.resolution_method == "unresolved"
     assert resolution.entity_id is None
@@ -141,126 +101,116 @@ def test_unknown_ticker_is_unresolved_without_crashing(data_root: Path) -> None:
     assert resolution.ticker == "NOTREAL"
 
 
-def test_alias_known_after_as_of_is_invisible(data_root: Path) -> None:
-    _seed_amd(data_root, known_at="2026-09-01T12:00:00Z")
-    early = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
+def test_alias_known_after_as_of_is_invisible() -> None:
+    _seed_amd(known_at="2026-09-01T12:00:00Z")
+    early = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
     assert early.resolved is False
     assert early.resolution_method == "unresolved"
-    on_day = resolve_security("AMD", as_of=datetime(2026, 9, 1, 13, 0, tzinfo=UTC), data_root=data_root)
+    on_day = resolve_security("AMD", as_of=datetime(2026, 9, 1, 13, 0, tzinfo=UTC))
     assert on_day.resolved is True
     assert on_day.entity_id == AMD_ENTITY
 
 
-def test_ambiguous_when_multiple_entities_knowable(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_entity(data_root, entity_id="sec:cik:0000320194", name="AMD Relabeled")
-    _seed_security(data_root, security_id="sec:equity:0000320194", entity_id="sec:cik:0000320194", ticker="AMD")
-    _seed_alias(data_root, known_at="2026-01-01T12:00:00Z")
-    _seed_alias(
-        data_root,
-        entity_id="sec:cik:0000320194",
-        security_id="sec:equity:0000320194",
-        known_at="2026-06-01T12:00:00Z",
+def test_ambiguous_when_multiple_entities_knowable() -> None:
+    _seed_aliases(
+        _alias_row(known_at="2026-01-01T12:00:00Z"),
+        _alias_row(
+            entity_id="sec:cik:0000320194",
+            security_id="sec:equity:0000320194",
+            known_at="2026-06-01T12:00:00Z",
+        ),
     )
-    before_relabel = resolve_security("AMD", as_of=datetime(2026, 3, 1, 0, 0, tzinfo=UTC), data_root=data_root)
+    before_relabel = resolve_security("AMD", as_of=datetime(2026, 3, 1, 0, 0, tzinfo=UTC))
     assert before_relabel.resolved is True
     assert before_relabel.entity_id == AMD_ENTITY
     assert before_relabel.security_id == AMD_SECURITY
-    after_relabel = resolve_security("AMD", as_of=datetime(2026, 8, 1, 0, 0, tzinfo=UTC), data_root=data_root)
+    after_relabel = resolve_security("AMD", as_of=datetime(2026, 8, 1, 0, 0, tzinfo=UTC))
     assert after_relabel.resolved is False
     assert after_relabel.resolution_method == "ambiguous"
     assert after_relabel.entity_id is None
     assert after_relabel.security_id is None
 
 
-def test_provider_instrument_id_does_not_change_resolution(data_root: Path) -> None:
-    _seed_amd(data_root)
-    plain = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
+def test_provider_instrument_id_does_not_change_resolution() -> None:
+    _seed_amd()
+    plain = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
     with_instrument = resolve_security(
         "AMD",
         provider_instrument_id="instr-amd",
         as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC),
-        data_root=data_root,
     )
     assert with_instrument == plain
 
 
-def test_default_as_of_is_today_and_resolves(data_root: Path) -> None:
-    _seed_amd(data_root, known_at="2026-01-01T00:00:00Z")
-    resolution = resolve_security("AMD", data_root=data_root)
-    assert resolution.resolved is True
+def test_default_as_of_is_today_and_resolves() -> None:
+    _seed_amd(known_at="2026-01-01T00:00:00Z")
+    resolution = resolve_security("AMD")
     assert resolution.entity_id == AMD_ENTITY
     assert datetime.now(UTC).date() >= date(2026, 1, 1)
 
 
-def test_same_instant_z_and_offset_visible(data_root: Path) -> None:
-    _seed_amd(data_root, known_at="2026-08-25T12:00:00Z")
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
-    assert resolution.resolved is True
-    assert resolution.entity_id == AMD_ENTITY
+def test_same_instant_z_and_offset_visible() -> None:
+    _seed_amd(known_at="2026-08-25T12:00:00Z")
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
 
 
-def test_record_one_microsecond_after_as_of_invisible(data_root: Path) -> None:
-    _seed_amd(data_root, known_at="2026-08-25T12:00:00.000001Z")
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
+def test_record_one_microsecond_after_as_of_invisible() -> None:
+    _seed_amd(known_at="2026-08-25T12:00:00.000001Z")
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
     assert resolution.resolved is False
     assert resolution.resolution_method == "unresolved"
 
 
-def test_non_utc_offset_compares_chronologically(data_root: Path) -> None:
-    _seed_amd(data_root, known_at="2026-08-25T13:00:00+01:00")
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
+def test_non_utc_offset_compares_chronologically() -> None:
+    _seed_amd(known_at="2026-08-25T13:00:00+01:00")
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
     assert resolution.resolved is True
     assert resolution.entity_id == AMD_ENTITY
 
 
-def test_naive_as_of_rejected(data_root: Path) -> None:
-    _seed_amd(data_root)
+def test_naive_as_of_rejected() -> None:
+    _seed_amd()
     with pytest.raises(ValueError):
-        resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0), data_root=data_root)  # noqa: DTZ001 - naive input is the case under test
+        resolve_security("AMD", as_of=datetime(2026, 8, 25, 12, 0))  # noqa: DTZ001 - naive input is the case under test
 
 
-def test_date_as_of_rejected(data_root: Path) -> None:
-    _seed_amd(data_root)
+def test_date_as_of_rejected() -> None:
+    _seed_amd()
     with pytest.raises(TypeError):
         _resolve: Callable[..., object] = resolve_security
-        _resolve(
-            "AMD", as_of=date(2026, 8, 25), data_root=data_root
-        )  # runtime TypeError guard: date is not a valid as_of
+        _resolve("AMD", as_of=date(2026, 8, 25))  # runtime TypeError guard: date is not a valid as_of
 
 
-def test_newest_alias_wins_chronologically_not_lexically(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_alias(data_root, known_at="2026-08-25T13:00:00+01:00", security_id=None)
-    # Distinct source so both rows persist: entity_aliases dedups on
-    # (alias_type, alias_value, entity_id, source, valid_from).
-    _seed_alias(data_root, known_at="2026-08-25T12:30:00Z", security_id=AMD_SECURITY, source="control")
-    _seed_security(data_root)
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC), data_root=data_root)
-    # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
-    # older than 12:30Z — the 12:30Z alias must win.
+def test_newest_alias_wins_chronologically_not_lexically() -> None:
+    _seed_aliases(
+        _alias_row(known_at="2026-08-25T13:00:00+01:00", security_id=None),
+        _alias_row(known_at="2026-08-25T12:30:00Z", security_id=AMD_SECURITY, source="control"),
+    )
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC))
     assert resolution.resolved is True
     assert resolution.security_id == AMD_SECURITY
 
 
-def test_same_instant_conflicting_securities_are_ambiguous(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id=AMD_SECURITY)
-    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id="sec:equity:0000999999", source="control")
-    _seed_security(data_root)
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC), data_root=data_root)
+def test_same_instant_conflicting_securities_are_ambiguous() -> None:
+    _seed_aliases(
+        _alias_row(known_at="2026-08-25T12:00:00Z", security_id=AMD_SECURITY),
+        _alias_row(
+            known_at="2026-08-25T12:00:00Z", security_id="sec:equity:0000999999", source="control"
+        ),
+    )
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC))
     assert resolution.resolved is False
     assert resolution.resolution_method == "ambiguous"
     assert resolution.entity_id == AMD_ENTITY
     assert resolution.security_id is None
 
 
-def test_same_instant_null_and_explicit_security_not_conflict(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id=None)
-    _seed_alias(data_root, known_at="2026-08-25T12:00:00Z", security_id=AMD_SECURITY, source="control")
-    _seed_security(data_root)
-    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC), data_root=data_root)
+def test_same_instant_null_and_explicit_security_not_conflict() -> None:
+    _seed_aliases(
+        _alias_row(known_at="2026-08-25T12:00:00Z", security_id=None),
+        _alias_row(known_at="2026-08-25T12:00:00Z", security_id=AMD_SECURITY, source="control"),
+    )
+    resolution = resolve_security("AMD", as_of=datetime(2026, 8, 26, 0, 0, tzinfo=UTC))
     assert resolution.resolved is True
     assert resolution.security_id == AMD_SECURITY
 

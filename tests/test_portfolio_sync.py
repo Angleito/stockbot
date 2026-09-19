@@ -10,8 +10,11 @@ Coverage under test:
 - the persistence round trip through ``read_latest_snapshot``;
 - missing quote prices degrading the snapshot without crashing;
 - no OAuth/token data in any persisted row.
+
+Warehouse-removal seam: identity resolution reads live providers via SourceGateway; snapshots persist to the portfolio.sqlite ops store only — a future warehouse slots in behind the gateway.
 """
 
+import dataclasses
 import json
 from datetime import UTC, datetime, tzinfo
 from decimal import Decimal
@@ -20,7 +23,8 @@ from typing import override
 
 import pytest
 
-from app.domain.market.securities import SecurityResolution
+from app.data_sources import SourceGateway
+from app.domain.market.securities import SecurityResolution, TickerAlias
 from app.domain.portfolio import BrokeragePositionInput, PortfolioSnapshot, Position
 from app.domain.portfolio.snapshot import build_portfolio_snapshot
 from app.domain.portfolio.valuation import build_position
@@ -32,7 +36,6 @@ from app.services.portfolio_sync import (
     resolve_security,
     sync_robinhood_portfolio,
 )
-from app.storage import parquet
 
 FIXTURES = Path(__file__).parent / "fixtures" / "robinhood"
 
@@ -181,76 +184,29 @@ def _happy_payloads() -> dict[str, object]:
     }
 
 
-def _alias_row(**overrides: object) -> dict[str, object]:
-    """One entity_aliases row for WING/sec:cik:0000320193; overrides win."""
-    row: dict[str, object] = {
-        "alias_type": "ticker",
-        "alias_value": "WING",
-        "entity_id": "sec:cik:0000320193",
-        "security_id": "sec:equity:0000320193",
-        "source": "sec",
-        "valid_from": "2026-01-01",
-        "known_at": "2026-08-25T00:00:00Z",
-        "retrieved_at": "2026-08-25T00:00:00Z",
-        "content_hash": "alias-wing",
-        "parser_version": "test",
-    }
-    row.update(overrides)
-    return row
+def _wing_alias(
+    *,
+    entity_id: str = "sec:cik:0000320193",
+    security_id: str | None = "sec:equity:0000320193",
+    known_at: str = "2026-08-25T00:00:00Z",
+    source: str = "sec",
+    valid_from: str | None = "2026-01-01",
+    valid_to: str | None = None,
+) -> TickerAlias:
+    """Fixture WING alias; PIT stays in the resolver, never in the stub."""
+    return TickerAlias(
+        alias_type="ticker",
+        alias_value="WING",
+        entity_id=entity_id,
+        security_id=security_id,
+        source=source,
+        valid_from=valid_from,
+        valid_to=valid_to,
+        known_at=known_at,
+        retrieved_at=known_at,
+    )
 
 
-def _seed_wing_alias(data_root: Path) -> None:
-    parquet.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": "sec:cik:0000320193",
-                "name": "Wing Stop Inc",
-                "entity_type": "company",
-                "source": "sec",
-                "known_at": "2026-01-01T00:00:00Z",
-                "retrieved_at": "2026-01-01T00:00:00Z",
-                "content_hash": "entity-wing",
-                "parser_version": "test",
-            }
-        ],
-        root=data_root / "parquet",
-    )
-    parquet.write_rows(
-        "entity_aliases",
-        [
-            {
-                "alias_type": "ticker",
-                "alias_value": "WING",
-                "entity_id": "sec:cik:0000320193",
-                "security_id": "sec:equity:0000320193",
-                "source": "sec",
-                "valid_from": "2026-01-01",
-                "known_at": "2026-01-01T00:00:00Z",
-                "retrieved_at": "2026-01-01T00:00:00Z",
-                "content_hash": "alias-wing",
-                "parser_version": "test",
-            }
-        ],
-        root=data_root / "parquet",
-    )
-    parquet.write_rows(
-        "securities",
-        [
-            {
-                "security_id": "sec:equity:0000320193",
-                "entity_id": "sec:cik:0000320193",
-                "security_type": "equity-common",
-                "ticker": "WING",
-                "source": "sec",
-                "known_at": "2026-01-01T00:00:00Z",
-                "retrieved_at": "2026-01-01T00:00:00Z",
-                "content_hash": "security-wing",
-                "parser_version": "test",
-            }
-        ],
-        root=data_root / "parquet",
-    )
 
 
 def _run_sync(
@@ -260,6 +216,28 @@ def _run_sync(
     provider = RobinhoodPortfolioProvider(client)
     snapshot = sync_robinhood_portfolio(provider, data_root=data_root, now=NOW)
     return client, provider, snapshot
+
+@pytest.fixture(autouse=True)
+def _wing_candidates(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Live-alias double: WING resolves, every other ticker is unknown."""
+    wing = _wing_alias()
+
+    def _candidates(self: object, ticker: str, as_of: datetime) -> list[TickerAlias]:
+        del self, as_of
+        return [wing] if ticker.strip().upper() == "WING" else []
+
+    monkeypatch.setattr(SourceGateway, "ticker_candidates", _candidates)
+
+
+def _stub_candidates(monkeypatch: pytest.MonkeyPatch, aliases: list[TickerAlias]) -> None:
+    """Point the gateway at an explicit alias list (PIT stays in the resolver)."""
+
+    def _candidates(self: object, ticker: str, as_of: datetime) -> list[TickerAlias]:
+        del self, as_of
+        want = ticker.strip().upper()
+        return [alias for alias in aliases if alias.alias_value == want]
+
+    monkeypatch.setattr(SourceGateway, "ticker_candidates", _candidates)
 
 
 def test_sync_uses_exact_readonly_call_sequence(data_root: Path) -> None:
@@ -276,7 +254,6 @@ def test_sync_uses_exact_readonly_call_sequence(data_root: Path) -> None:
 
 
 def test_sync_builds_valued_snapshot_with_two_accounts(data_root: Path) -> None:
-    _seed_wing_alias(data_root)
     _, _, snapshot = _run_sync(data_root)
     assert isinstance(snapshot, PortfolioSnapshot)
     assert snapshot.broker == "robinhood"
@@ -335,21 +312,17 @@ def test_zero_quantity_position_is_valued_at_zero(data_root: Path) -> None:
 
 
 def test_snapshot_and_positions_are_persisted_once(data_root: Path) -> None:
-    _seed_wing_alias(data_root)
-    _client, _, _ = _run_sync(data_root)
-    snapshots = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
-    positions = parquet.read_table("portfolio_positions", root=data_root / "parquet")
-    assert snapshots.num_rows == 1
-    assert snapshots.column("snapshot_id").to_pylist() == [SNAPSHOT_ID]
-    assert snapshots.column("account_count").to_pylist() == [2]
-    assert snapshots.column("position_count").to_pylist() == [5]
-    assert snapshots.column("priced_position_count").to_pylist() == [5]
-    assert snapshots.column("unresolved_position_count").to_pylist() == [3]
-    assert snapshots.column("total_value").to_pylist() == [Decimal("6624.8")]
-    assert snapshots.column("parser_version").to_pylist() == ["robinhood-mcp-account-v1"]
-    assert snapshots.column("calculation_version").to_pylist() == ["portfolio-snapshot-v1"]
-    assert positions.num_rows == 5
-    assert positions.column("price_type").to_pylist() == ["last"] * 5
+    _, _, snapshot = _run_sync(data_root)
+    restored = read_latest_snapshot(data_root=data_root)
+    assert restored is not None
+    assert restored.snapshot_id == SNAPSHOT_ID
+    assert len(restored.positions) == 5
+    assert [position.price_type for position in restored.positions] == ["last"] * 5
+    assert restored.total_value == Decimal("6624.80")
+    assert sum(1 for position in restored.positions if position.market_value is not None) == 5
+    assert sum(1 for position in restored.positions if position.entity_id is None) == 3
+    persist_snapshot(snapshot, data_root=data_root)
+    assert read_latest_snapshot(data_root=data_root) == restored
 
 
 def _assert_position_close(actual: Position, expected: Position) -> None:
@@ -544,14 +517,12 @@ def test_missing_quote_price_degrades_snapshot_but_persists(data_root: Path) -> 
     assert snapshot.invested_value is None
     assert snapshot.total_value is None
     assert snapshot.cash == Decimal("3234.56")
-    snapshots = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
-    positions = parquet.read_table("portfolio_positions", root=data_root / "parquet")
-    assert snapshots.num_rows == 1
-    assert snapshots.column("priced_position_count").to_pylist() == [0]
-    assert snapshots.column("position_count").to_pylist() == [1]
-    assert snapshots.column("total_value").to_pylist() == [None]
-    assert positions.num_rows == 1
-    assert positions.column("market_price").to_pylist() == [None]
+    restored = read_latest_snapshot(data_root=data_root)
+    assert restored is not None
+    assert len(restored.positions) == 1
+    assert sum(1 for position in restored.positions if position.market_value is not None) == 0
+    assert restored.total_value is None
+    assert restored.positions[0].market_price is None
     restored = read_latest_snapshot(data_root=data_root)
     assert restored is not None
     assert restored.invested_value is None
@@ -680,47 +651,41 @@ def test_empty_accounts_still_persists_empty_snapshot(data_root: Path) -> None:
     assert snapshot.invested_value is None
     assert snapshot.total_value is None
     assert snapshot.account_ids == ()
-    assert parquet.count_rows("portfolio_snapshots", root=data_root / "parquet") == 1
-    assert parquet.count_rows("portfolio_positions", root=data_root / "parquet") == 0
-    assert parquet.count_rows("portfolio_accounts", root=data_root / "parquet") == 0
+    restored = read_latest_snapshot(data_root=data_root)
+    assert restored is not None
+    assert restored.snapshot_id == SNAPSHOT_ID
+    assert restored.positions == ()
+    assert restored.account_ids == ()
     assert snapshot.snapshot_id == SNAPSHOT_ID
 
 
-def test_persisted_rows_contain_no_oauth_data(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.storage import duckdb
-
-    captured: list[tuple[str, list[dict[str, object]]]] = []
-    real_insert = duckdb.insert_ignore
-
-    def spy(table: str, rows: list[dict[str, object]], data_root: Path | None = None) -> int:
-        captured.append((table, list(rows)))
-        return real_insert(table, rows, data_root=data_root)
-
-    monkeypatch.setattr(duckdb, "insert_ignore", spy)
-    _run_sync(data_root)
+def test_persisted_rows_contain_no_oauth_data(data_root: Path) -> None:
+    _, _, snapshot = _run_sync(data_root)
     forbidden = ("token", "oauth", "secret", "access", "refresh", "authorization")
-    assert captured
-    for name, rows in captured:
-        for row in rows:
-            for key, value in row.items():
-                assert not any(part in key.lower() for part in forbidden), f"{name}.{key} is a forbidden column"
-                assert not any(part in str(value).lower() for part in forbidden), f"{name}.{key} carries forbidden data"
+
+    def _texts(node: object) -> list[str]:
+        if isinstance(node, dict):
+            return [str(key) for key in node] + [text for value in node.values() for text in _texts(value)]
+        if isinstance(node, (list, tuple)):
+            return [text for item in node for text in _texts(item)]
+        return [] if node is None else [str(node)]
+
+    cells = _texts(dataclasses.asdict(snapshot))
+    assert cells
+    for text in cells:
+        assert not any(part in text.lower() for part in forbidden), (
+            f"persisted snapshot carries forbidden data: {text!r}"
+        )
 
 
 def test_persisted_rows_never_contain_raw_account_ids(data_root: Path) -> None:
-    _seed_wing_alias(data_root)
-    _run_sync(data_root)
-    snapshots = parquet.read_table("portfolio_snapshots", root=data_root / "parquet")
-    positions = parquet.read_table("portfolio_positions", root=data_root / "parquet")
-    accounts = parquet.read_table("portfolio_accounts", root=data_root / "parquet")
-    for table in (snapshots, positions, accounts):
-        for column_index in range(table.num_columns):
-            for cell in table.column(column_index).to_pylist():
-                if cell is not None:
-                    assert "100000001" not in str(cell) and "100000002" not in str(cell), (
-                        f"raw broker account id leaked into persisted cell: {cell!r}"
-                    )
-    assert positions.column("account_id").to_pylist() == [
+    _, _, snapshot = _run_sync(data_root)
+    assert snapshot.account_ids == (local_account_id("100000001"), local_account_id("100000002"))
+    restored = read_latest_snapshot(data_root=data_root)
+    assert restored is not None
+    for position in restored.positions:
+        assert "100000001" not in position.account_id and "100000002" not in position.account_id
+    assert [position.account_id for position in restored.positions] == [
         local_account_id("100000001"),
         local_account_id("100000001"),
         local_account_id("100000001"),
@@ -770,113 +735,78 @@ def test_sync_without_explicit_now_uses_utc_now(data_root: Path, monkeypatch: py
 # ---------------------------------------------------------------------------
 
 
-def test_resolve_security_alias_learned_after_as_of_unresolved(data_root: Path) -> None:
+def test_resolve_security_alias_learned_after_as_of_unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
     as_of = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
-    parquet.write_rows(
-        "entity_aliases",
-        [
-            _alias_row(
-                known_at="2026-08-26T00:00:00Z", retrieved_at="2026-08-26T00:00:00Z", content_hash="learned-later"
-            ),
-        ],
-        root=data_root / "parquet",
-    )
-    late = resolve_security("WING", as_of=as_of, data_root=data_root)
+    _stub_candidates(monkeypatch, [_wing_alias(known_at="2026-08-26T00:00:00Z")])
+    late = resolve_security("WING", as_of=as_of)
     assert late.resolved is False
     assert late.resolution_method == "unresolved"
-    parquet.write_rows(
-        "entity_aliases",
+    _stub_candidates(
+        monkeypatch,
         [
-            _alias_row(
-                known_at="2026-08-25T00:00:00Z",
-                retrieved_at="2026-08-25T00:00:00Z",
-                source="control",
-                content_hash="knowable",
-            ),
+            _wing_alias(known_at="2026-08-26T00:00:00Z"),
+            _wing_alias(known_at="2026-08-25T00:00:00Z", source="control"),
         ],
-        root=data_root / "parquet",
     )
-    known = resolve_security("WING", as_of=as_of, data_root=data_root)
+    known = resolve_security("WING", as_of=as_of)
     assert known.resolved is True
     assert known.resolution_method == "entity_alias"
     assert known.entity_id == "sec:cik:0000320193"
 
-
-def test_resolve_security_expired_alias_unresolved(data_root: Path) -> None:
-    parquet.write_rows(
-        "entity_aliases",
+def test_resolve_security_expired_alias_unresolved(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_candidates(
+        monkeypatch,
         [
-            _alias_row(
-                valid_from="2026-01-01",
-                valid_to="2026-08-24",
-                known_at="2026-08-01T00:00:00Z",
-                retrieved_at="2026-08-01T00:00:00Z",
-                content_hash="expired",
-            ),
-            _alias_row(
-                valid_from="2026-01-01",
-                valid_to="2026-08-25",
-                known_at="2026-08-02T00:00:00Z",
-                retrieved_at="2026-08-02T00:00:00Z",
-                source="control",
-                content_hash="boundary",
-            ),
+            _wing_alias(valid_to="2026-08-24", known_at="2026-08-01T00:00:00Z"),
+            _wing_alias(valid_to="2026-08-25", known_at="2026-08-02T00:00:00Z", source="control"),
         ],
-        root=data_root / "parquet",
     )
     as_of = datetime(2026, 8, 25, 12, 0, tzinfo=UTC)
-    expired = resolve_security("WING", as_of=as_of, data_root=data_root)
+    expired = resolve_security("WING", as_of=as_of)
     assert expired.resolved is False
     assert expired.resolution_method == "unresolved"
     # Half-open boundary: a date-only valid_to is midnight, so
     # valid_to="2026-08-25" is already expired at 00:00 on the 25th.
-    boundary = resolve_security("WING", as_of=datetime(2026, 8, 25, 0, 0, tzinfo=UTC), data_root=data_root)
+    boundary = resolve_security("WING", as_of=datetime(2026, 8, 25, 0, 0, tzinfo=UTC))
     assert boundary.resolved is False
     assert boundary.resolution_method == "unresolved"
 
 
-def test_resolve_security_ambiguous_ticker(data_root: Path) -> None:
-    parquet.write_rows(
-        "entity_aliases",
+def test_resolve_security_ambiguous_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_candidates(
+        monkeypatch,
         [
-            _alias_row(entity_id="sec:cik:0000320193", security_id="sec:equity:0000320193", content_hash="alias-a"),
-            _alias_row(
+            _wing_alias(entity_id="sec:cik:0000320193", security_id="sec:equity:0000320193"),
+            _wing_alias(
                 entity_id="sec:cik:0000999999",
                 security_id="sec:equity:0000999999",
                 source="control",
-                content_hash="alias-b",
             ),
         ],
-        root=data_root / "parquet",
     )
-    resolution = resolve_security("WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
+    resolution = resolve_security("WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
     assert resolution.resolved is False
     assert resolution.resolution_method == "ambiguous"
     assert resolution.entity_id is None
     assert resolution.security_id is None
 
 
-def test_resolve_security_same_entity_multiple_rows_resolves(data_root: Path) -> None:
-    parquet.write_rows(
-        "entity_aliases",
+def test_resolve_security_same_entity_multiple_rows_resolves(monkeypatch: pytest.MonkeyPatch) -> None:
+    _stub_candidates(
+        monkeypatch,
         [
-            _alias_row(
+            _wing_alias(
                 security_id=None,
                 known_at="2026-08-01T00:00:00Z",
-                retrieved_at="2026-08-01T00:00:00Z",
-                content_hash="older",
             ),
-            _alias_row(
+            _wing_alias(
                 security_id="sec:equity:0000320193",
                 known_at="2026-08-02T00:00:00Z",
-                retrieved_at="2026-08-02T00:00:00Z",
                 source="control",
-                content_hash="newer",
             ),
         ],
-        root=data_root / "parquet",
     )
-    resolution = resolve_security("WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC), data_root=data_root)
+    resolution = resolve_security("WING", as_of=datetime(2026, 8, 25, 12, 0, tzinfo=UTC))
     assert resolution.resolved is True
     assert resolution.resolution_method == "entity_alias"
     assert resolution.entity_id == "sec:cik:0000320193"

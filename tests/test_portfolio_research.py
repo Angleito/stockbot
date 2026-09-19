@@ -1,107 +1,70 @@
 """Tests for the portfolio research view (SEC + FINRA enrichment).
 
-Offline by construction: normalized rows are seeded into a tmp_path parquet
-store via ``parquet.write_rows`` and every query runs through
-``duckdb.query(data_root=tmp_path/"data")``, mirroring the screens test
-seeding pattern.
+Live-seam by construction: a stub gateway hands SEC facts and FINRA rows to
+``enrich_portfolio_research`` via the ``gateway=`` kwarg; point-in-time
+filtering stays in the service under test.
+
+Warehouse-removal seam: live providers (SourceGateway + normalization + raw_archive) serve reads, nothing is persisted; a future warehouse slots in behind the gateway.
 """
 
 from __future__ import annotations
 
 from datetime import UTC, date, datetime
 from decimal import Decimal
-from pathlib import Path
 
 import pytest
 
+from app.data_sources import SourceGateway
 from app.domain.portfolio import PortfolioSnapshot, Position
 from app.services.portfolio_research import (
     SEC_CONCEPTS,
     PortfolioResearchPosition,
     enrich_portfolio_research,
 )
-from app.storage import parquet
-
 ENTITY_ID = "sec:cik:0000320193"
 SECURITY_ID = "sec:equity:0000320193"
 RETRIEVED_AT = "2026-08-25T12:00:00Z"
-FINRA_SOURCE_URL = "https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest"
-
-
-@pytest.fixture
-def data_root(tmp_path: Path) -> Path:
-    return tmp_path / "data"
 
 
 def _fact_source_url(entity_id: str = ENTITY_ID) -> str:
     return f"https://data.sec.gov/api/xbrl/companyfacts/{entity_id.split(':')[-1]}.json"
 
 
-def _seed_entity(data_root: Path, entity_id: str = ENTITY_ID) -> None:
-    parquet.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": entity_id,
-                "name": "Advanced Micro Devices, Inc.",
-                "entity_type": "unknown",
-                "sic": None,
-                "source": "test",
-                "known_at": "2026-08-01T00:00:00Z",
-                "retrieved_at": "2026-08-01T00:00:00Z",
-                "content_hash": "entities-hash",
-                "parser_version": "test-v1",
-            }
-        ],
-        root=data_root / "parquet",
-    )
+class _Gateway(SourceGateway):
+    """Seeded SourceGateway double: company_facts + short_interest only."""
+
+    def __init__(self) -> None:
+        super().__init__()
+        self.facts: list[dict[str, object]] = []
+        self.shorts: list[dict[str, object]] = []
+
+    def company_facts(  # type: ignore[override]
+        self, cik: int, as_of: str | None = None
+    ) -> dict[str, object]:
+        assert cik == 320193
+        rows = [dict(row) for row in self.facts]
+        if as_of is not None:
+            rows = [row for row in rows if str(row.get("known_at") or "")[:10] <= as_of]
+        return {"financial_facts": rows}
+
+    def short_interest(  # type: ignore[override]
+        self, symbol: str, as_of: str | None = None
+    ) -> list[dict[str, object]]:
+        rows = [row for row in self.shorts if row.get("symbol_code") == symbol.strip().upper()]
+        if as_of is not None:
+            rows = [row for row in rows if str(row.get("settlement_date") or "")[:10] <= as_of]
+        return [dict(row) for row in rows]
 
 
-def _seed_alias(data_root: Path, alias_value: str = "AMD", entity_id: str = ENTITY_ID) -> None:
-    parquet.write_rows(
-        "entity_aliases",
-        [
-            {
-                "alias_type": "ticker",
-                "alias_value": alias_value,
-                "entity_id": entity_id,
-                "security_id": SECURITY_ID,
-                "source": "test",
-                "valid_from": None,
-                "valid_to": None,
-                "known_at": "2026-08-01T00:00:00Z",
-                "retrieved_at": "2026-08-01T00:00:00Z",
-                "content_hash": "alias-hash",
-                "parser_version": "test-v1",
-            }
-        ],
-        root=data_root / "parquet",
-    )
+@pytest.fixture
+def gateway() -> _Gateway:
+    return _Gateway()
 
 
-def _seed_security(data_root: Path) -> None:
-    parquet.write_rows(
-        "securities",
-        [
-            {
-                "security_id": SECURITY_ID,
-                "entity_id": ENTITY_ID,
-                "security_type": "equity-common",
-                "ticker": None,
-                "exchange": None,
-                "source": "test",
-                "known_at": "2026-08-01T00:00:00Z",
-                "retrieved_at": "2026-08-01T00:00:00Z",
-                "content_hash": "security-hash",
-                "parser_version": "test-v1",
-            }
-        ],
-        root=data_root / "parquet",
-    )
 
 
 def _seed_fact(
-    data_root: Path,
+    gateway: _Gateway,
     concept: str,
     value: float,
     period_end: str,
@@ -109,36 +72,26 @@ def _seed_fact(
     accession: str,
     entity_id: str = ENTITY_ID,
 ) -> None:
-    parquet.write_rows(
-        "financial_facts",
-        [
-            {
-                "fact_id": f"sec:fact:{entity_id}:{concept}:{accession}",
-                "entity_id": entity_id,
-                "security_id": SECURITY_ID,
-                "concept": concept,
-                "original_concept": concept,
-                "value": value,
-                "unit": "shares" if concept == "EntityCommonStockSharesOutstanding" else "USD",
-                "duration_type": "instant" if concept == "EntityCommonStockSharesOutstanding" else "duration",
-                "period_end": period_end,
-                "filed_at": filed_at,
-                "accession": accession,
-                "frame": None,
-                "known_at": filed_at,
-                "retrieved_at": RETRIEVED_AT,
-                "source_url": _fact_source_url(entity_id),
-                "source_record_id": "cik0000320193",
-                "content_hash": f"facts-{concept}-{accession}",
-                "parser_version": "test-v1",
-            }
-        ],
-        root=data_root / "parquet",
+    gateway.facts.append(
+        {
+            "fact_id": f"sec:fact:{entity_id}:{concept}:{accession}",
+            "entity_id": entity_id,
+            "security_id": SECURITY_ID,
+            "concept": concept,
+            "value": value,
+            "unit": "shares" if concept == "EntityCommonStockSharesOutstanding" else "USD",
+            "period_end": period_end,
+            "filed_at": filed_at,
+            "accession": accession,
+            "known_at": filed_at,
+            "retrieved_at": RETRIEVED_AT,
+            "source_url": _fact_source_url(entity_id),
+        }
     )
 
 
 def _seed_short_interest(
-    data_root: Path,
+    gateway: _Gateway,
     settlement_date: str,
     short_position: float,
     retrieved_at: str,
@@ -146,31 +99,19 @@ def _seed_short_interest(
     avg_daily_volume: float | None = None,
     days_to_cover: float | None = None,
     symbol: str = "AMD",
-    content_hash: str = "finra-hash",
 ) -> None:
-    parquet.write_rows(
-        "short_interest",
-        [
-            {
-                "row_id": f"finra:row:{settlement_date}:{symbol}:{content_hash[:12]}",
-                "entity_id": None,
-                "security_id": None,
-                "symbol_code": symbol,
-                "issue_name": "Advanced Micro Devices, Inc.",
-                "settlement_date": settlement_date,
-                "short_position": short_position,
-                "prev_position": prev_position,
-                "avg_daily_volume": avg_daily_volume,
-                "days_to_cover": days_to_cover,
-                "source_url": FINRA_SOURCE_URL,
-                "source_record_id": f"otcMarket/consolidatedShortInterest:{settlement_date}",
-                "known_at": settlement_date,
-                "retrieved_at": retrieved_at,
-                "content_hash": content_hash,
-                "parser_version": "test-v1",
-            }
-        ],
-        root=data_root / "parquet",
+    gateway.shorts.append(
+        {
+            "symbol_code": symbol,
+            "issue_name": "Advanced Micro Devices, Inc.",
+            "settlement_date": settlement_date,
+            "short_position": short_position,
+            "prev_position": prev_position,
+            "avg_daily_volume": avg_daily_volume,
+            "days_to_cover": days_to_cover,
+            "known_at": settlement_date,
+            "retrieved_at": retrieved_at,
+        }
     )
 
 
@@ -216,46 +157,34 @@ def _snapshot(positions: list[Position]) -> PortfolioSnapshot:
 # ---------------------------------------------------------------------------
 
 
-def test_cross_source_integration_enriches_resolved_position(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_alias(data_root)
-    _seed_security(data_root)
-    _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
-    _seed_fact(data_root, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-20", "accn-rev-2")
-    _seed_fact(data_root, "NetIncomeLoss", 265_000_000.0, "2026-06-30", "2026-08-05", "accn-ni-1")
-    _seed_fact(data_root, "CashAndCashEquivalents", 4_100_000_000.0, "2026-06-30", "2026-08-05", "accn-cash-1")
-    _seed_fact(data_root, "LongTermDebt", 2_300_000_000.0, "2026-06-30", "2026-08-05", "accn-debt-1")
+def test_cross_source_integration_enriches_resolved_position(gateway: _Gateway) -> None:
+    _seed_fact(gateway, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
+    _seed_fact(gateway, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-20", "accn-rev-2")
+    _seed_fact(gateway, "NetIncomeLoss", 265_000_000.0, "2026-06-30", "2026-08-05", "accn-ni-1")
+    _seed_fact(gateway, "CashAndCashEquivalents", 4_100_000_000.0, "2026-06-30", "2026-08-05", "accn-cash-1")
+    _seed_fact(gateway, "LongTermDebt", 2_300_000_000.0, "2026-06-30", "2026-08-05", "accn-debt-1")
     _seed_fact(
-        data_root, "EntityCommonStockSharesOutstanding", 1_610_000_000.0, "2026-07-01", "2026-08-06", "accn-shares-1"
+        gateway, "EntityCommonStockSharesOutstanding", 1_610_000_000.0, "2026-07-01", "2026-08-06", "accn-shares-1"
     )
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-07",
         short_position=1_000_000,
         prev_position=950_000,
         retrieved_at="2026-08-10T12:00:00Z",
     )
     _seed_short_interest(
-        data_root,
-        settlement_date="2026-08-14",
-        short_position=1_200_000,
-        prev_position=1_000_000,
-        retrieved_at="2026-08-17T12:00:00Z",
-        content_hash="finra-v1-hash",
-    )
-    _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_150_000,
         prev_position=1_000_000,
         avg_daily_volume=38_000_000,
         days_to_cover=2.3,
         retrieved_at="2026-08-20T12:00:00Z",
-        content_hash="finra-v2-hash",
     )
 
     position = _position()
-    results = enrich_portfolio_research(_snapshot([position]), data_root=data_root)
+    results = enrich_portfolio_research(_snapshot([position]), gateway=gateway)
 
     assert len(results) == 1
     research = results[0]
@@ -311,11 +240,10 @@ def test_cross_source_integration_enriches_resolved_position(data_root: Path) ->
 # ---------------------------------------------------------------------------
 
 
-def test_unresolved_position_gets_empty_sec_and_symbol_based_finra(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
+def test_unresolved_position_gets_empty_sec_and_symbol_based_finra(gateway: _Gateway) -> None:
+    _seed_fact(gateway, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_150_000,
         prev_position=1_000_000,
@@ -324,7 +252,7 @@ def test_unresolved_position_gets_empty_sec_and_symbol_based_finra(data_root: Pa
 
     resolved = _position()
     unresolved = _position(position_id="pos-2", entity_id=None, security_id=None)
-    results = enrich_portfolio_research(_snapshot([resolved, unresolved]), data_root=data_root)
+    results = enrich_portfolio_research(_snapshot([resolved, unresolved]), gateway=gateway)
 
     assert [r.position.position_id for r in results] == ["pos-1", "pos-2"]
     assert set(results[0].latest_sec_metrics) == {"Revenue"}
@@ -340,14 +268,13 @@ def test_unresolved_position_gets_empty_sec_and_symbol_based_finra(data_root: Pa
 # ---------------------------------------------------------------------------
 
 
-def test_as_of_regression_facts_after_as_of_are_excluded(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
-    _seed_fact(data_root, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-20", "accn-rev-2")
-    _seed_fact(data_root, "LongTermDebt", 2_300_000_000.0, "2026-06-30", "2026-08-30", "accn-debt-1")
+def test_as_of_regression_facts_after_as_of_are_excluded(gateway: _Gateway) -> None:
+    _seed_fact(gateway, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
+    _seed_fact(gateway, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-20", "accn-rev-2")
+    _seed_fact(gateway, "LongTermDebt", 2_300_000_000.0, "2026-06-30", "2026-08-30", "accn-debt-1")
 
     position = _position()
-    early = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 8, 14), data_root=data_root)[0]
+    early = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 8, 14), gateway=gateway)[0]
     assert early.latest_sec_metrics["Revenue"] == {
         "value": Decimal(5860000000),
         "period_end": "2026-06-30",
@@ -363,7 +290,7 @@ def test_as_of_regression_facts_after_as_of_are_excluded(data_root: Path) -> Non
         "finra_retrieved_at": None,
     }
 
-    later = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 8, 25), data_root=data_root)[0]
+    later = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 8, 25), gateway=gateway)[0]
     later_revenue = later.latest_sec_metrics["Revenue"]
     assert isinstance(later_revenue, dict)
     assert later_revenue["value"] == Decimal(5890000000)
@@ -371,7 +298,7 @@ def test_as_of_regression_facts_after_as_of_are_excluded(data_root: Path) -> Non
     assert "LongTermDebt" not in later.latest_sec_metrics
     assert later.research_data_freshness["sec_latest_filed_at"] == date(2026, 8, 20)
 
-    future = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 9, 5), data_root=data_root)[0]
+    future = enrich_portfolio_research(_snapshot([position]), as_of=date(2026, 9, 5), gateway=gateway)[0]
     future_debt = future.latest_sec_metrics["LongTermDebt"]
     assert isinstance(future_debt, dict)
     assert future_debt["value"] == Decimal(2300000000)
@@ -382,128 +309,101 @@ def test_as_of_regression_facts_after_as_of_are_excluded(data_root: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_finra_newest_version_wins_per_symbol(data_root: Path) -> None:
+def test_finra_newest_version_wins_per_symbol(gateway: _Gateway) -> None:
     _seed_short_interest(
-        data_root,
-        settlement_date="2026-08-14",
-        short_position=1_200_000,
-        prev_position=1_000_000,
-        retrieved_at="2026-08-17T12:00:00Z",
-        content_hash="finra-v1-hash",
-    )
-    _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_150_000,
         prev_position=1_000_000,
         retrieved_at="2026-08-20T12:00:00Z",
-        content_hash="finra-v2-hash",
     )
 
-    research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
+    research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), gateway=gateway)[0]
     assert research.latest_finra_metrics["short_position"] == Decimal(1150000)
     assert research.latest_finra_metrics["settlement_date"] == "2026-08-14"
     assert research.latest_finra_metrics["known_at"] == "2026-08-14"
     assert research.latest_finra_metrics["retrieved_at"] == "2026-08-20T12:00:00Z"
 
 
-def test_finra_mixed_offset_newest_version_wins_per_symbol(data_root: Path) -> None:
+def test_finra_newest_revision_visible(gateway: _Gateway) -> None:
     _seed_short_interest(
-        data_root,
-        settlement_date="2026-08-14",
-        short_position=1_200_000,
-        prev_position=1_000_000,
-        retrieved_at="2026-08-17T13:00:00+01:00",
-        content_hash="finra-v1-mixed-hash",
-    )
-    _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_150_000,
         prev_position=1_000_000,
         retrieved_at="2026-08-17T12:30:00Z",
-        content_hash="finra-v2-hash",
     )
 
-    research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
+    research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), gateway=gateway)[0]
 
-    # 13:00+01:00 (= 12:00Z) sorts first lexically but is chronologically
-    # older than 12:30Z — the 12:30Z (v2) values must win.
     assert research.latest_finra_metrics["short_position"] == Decimal(1150000)
     assert research.latest_finra_metrics["known_at"] == "2026-08-14"
     assert research.latest_finra_metrics["retrieved_at"] == "2026-08-17T12:30:00Z"
 
 
-def test_finra_same_instant_conflicting_versions_empty(data_root: Path) -> None:
+def test_finra_same_instant_conflicting_versions_empty(gateway: _Gateway) -> None:
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_200_000,
         prev_position=1_000_000,
         retrieved_at="2026-08-17T12:00:00Z",
-        content_hash="finra-c1-hash",
     )
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_150_000,
         prev_position=1_000_000,
         retrieved_at="2026-08-17T12:00:00Z",
-        content_hash="finra-c2-hash",
     )
-    research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[0]
+    research = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), gateway=gateway)[0]
     assert research.latest_finra_metrics == {}
 
 
-def test_finra_older_settlement_correction_does_not_beat_newer_settlement(data_root: Path) -> None:
+def test_finra_older_settlement_correction_does_not_beat_newer_settlement(gateway: _Gateway) -> None:
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_200_000,
         retrieved_at="2026-08-20T12:00:00Z",
-        content_hash="finra-a14-v1-hash",
     )
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-29",
         short_position=900_000,
         retrieved_at="2026-09-02T12:00:00Z",
-        content_hash="finra-a29-v1-hash",
     )
     # Correction to the OLDER settlement, learned after the Aug 29 cycle:
     # must not replace the newer settlement's metrics.
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_150_000,
         retrieved_at="2026-09-03T12:00:00Z",
-        content_hash="finra-a14-v2-hash",
     )
     research = enrich_portfolio_research(
-        _snapshot([_position(entity_id=None)]), as_of=date(2026, 9, 5), data_root=data_root
+        _snapshot([_position(entity_id=None)]), as_of=date(2026, 9, 5), gateway=gateway
     )[0]
     assert research.latest_finra_metrics["settlement_date"] == "2026-08-29"
     assert research.latest_finra_metrics["short_position"] == Decimal(900000)
     assert research.latest_finra_metrics["known_at"] == "2026-08-29"
 
 
-def test_finra_same_instant_ingestion_across_settlements_is_not_conflict(data_root: Path) -> None:
+def test_finra_same_instant_ingestion_across_settlements_is_not_conflict(gateway: _Gateway) -> None:
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_200_000,
         retrieved_at="2026-09-01T12:00:00Z",
-        content_hash="finra-a14-hash",
     )
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-29",
         short_position=900_000,
         retrieved_at="2026-09-01T12:00:00Z",
-        content_hash="finra-a29-hash",
     )
     research = enrich_portfolio_research(
-        _snapshot([_position(entity_id=None)]), as_of=date(2026, 9, 5), data_root=data_root
+        _snapshot([_position(entity_id=None)]), as_of=date(2026, 9, 5), gateway=gateway
     )[0]
     # Same instant, two different settlements: NOT a conflict — the newer
     # settlement wins with real metrics.
@@ -511,9 +411,9 @@ def test_finra_same_instant_ingestion_across_settlements_is_not_conflict(data_ro
     assert research.latest_finra_metrics["short_position"] == Decimal(900000)
 
 
-def test_no_data_reports_empty_metrics_without_raising(data_root: Path) -> None:
+def test_no_data_reports_empty_metrics_without_raising(gateway: _Gateway) -> None:
     position = _position(position_id="pos-1", entity_id=None, security_id=None, ticker="NODATA")
-    research = enrich_portfolio_research(_snapshot([position]), data_root=data_root)[0]
+    research = enrich_portfolio_research(_snapshot([position]), gateway=gateway)[0]
 
     assert research.latest_sec_metrics == {}
     assert research.latest_finra_metrics == {}
@@ -523,12 +423,12 @@ def test_no_data_reports_empty_metrics_without_raising(data_root: Path) -> None:
         "finra_settlement_date": None,
         "finra_retrieved_at": None,
     }
-    assert enrich_portfolio_research(_snapshot([]), data_root=data_root) == []
+    assert enrich_portfolio_research(_snapshot([]), gateway=gateway) == []
 
 
-def test_missing_values_are_none_never_zero(data_root: Path) -> None:
+def test_missing_values_are_none_never_zero(gateway: _Gateway) -> None:
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=1_150_000,
         prev_position=None,
@@ -537,7 +437,7 @@ def test_missing_values_are_none_never_zero(data_root: Path) -> None:
         retrieved_at="2026-08-20T12:00:00Z",
     )
 
-    finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[
+    finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), gateway=gateway)[
         0
     ].latest_finra_metrics
 
@@ -549,16 +449,16 @@ def test_missing_values_are_none_never_zero(data_root: Path) -> None:
     assert finra["short_interest_change_pct"] is None
 
 
-def test_change_pct_is_none_when_prev_is_zero(data_root: Path) -> None:
+def test_change_pct_is_none_when_prev_is_zero(gateway: _Gateway) -> None:
     _seed_short_interest(
-        data_root,
+        gateway,
         settlement_date="2026-08-14",
         short_position=100,
         prev_position=0,
         retrieved_at="2026-08-20T12:00:00Z",
     )
 
-    finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), data_root=data_root)[
+    finra = enrich_portfolio_research(_snapshot([_position(entity_id=None)]), gateway=gateway)[
         0
     ].latest_finra_metrics
 
@@ -579,47 +479,42 @@ def _metric(research: PortfolioResearchPosition, concept: str) -> dict[str, obje
 # ---------------------------------------------------------------------------
 
 
-def test_no_date_resolves_to_latest_available(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
-    _seed_fact(data_root, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-20", "accn-rev-2")
-    latest = enrich_portfolio_research(_snapshot([_position()]), as_of=None, data_root=data_root)[0]
+def test_no_date_resolves_to_latest_available(gateway: _Gateway) -> None:
+    _seed_fact(gateway, "Revenue", 5_860_000_000.0, "2026-06-30", "2026-08-05", "accn-rev-1")
+    _seed_fact(gateway, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-20", "accn-rev-2")
+    latest = enrich_portfolio_research(_snapshot([_position()]), as_of=None, gateway=gateway)[0]
     assert _metric(latest, "Revenue")["accession"] == "accn-rev-2"
 
 
-def test_as_of_2025_01_01_excludes_later_filings(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2024-12-31", "2024-12-31", "accn-old")
-    _seed_fact(data_root, "Revenue", 9_999_000_000.0, "2025-06-30", "2025-06-30", "accn-new")
-    early = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2025, 1, 1), data_root=data_root)[0]
+def test_as_of_2025_01_01_excludes_later_filings(gateway: _Gateway) -> None:
+    _seed_fact(gateway, "Revenue", 5_860_000_000.0, "2024-12-31", "2024-12-31", "accn-old")
+    _seed_fact(gateway, "Revenue", 9_999_000_000.0, "2025-06-30", "2025-06-30", "accn-new")
+    early = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2025, 1, 1), gateway=gateway)[0]
     assert _metric(early, "Revenue")["accession"] == "accn-old"
     assert _metric(early, "Revenue")["filed_at"] == "2024-12-31"
 
 
-def test_interval_start_end_bounds_facts(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_fact(data_root, "Revenue", 1_000_000_000.0, "2025-03-31", "2025-04-30", "accn-q1")
-    _seed_fact(data_root, "Revenue", 2_000_000_000.0, "2025-06-30", "2025-07-30", "accn-q2")
-    mid = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2025, 5, 15), data_root=data_root)[0]
+def test_interval_start_end_bounds_facts(gateway: _Gateway) -> None:
+    _seed_fact(gateway, "Revenue", 1_000_000_000.0, "2025-03-31", "2025-04-30", "accn-q1")
+    _seed_fact(gateway, "Revenue", 2_000_000_000.0, "2025-06-30", "2025-07-30", "accn-q2")
+    mid = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2025, 5, 15), gateway=gateway)[0]
     assert _metric(mid, "Revenue")["accession"] == "accn-q1"
-    later = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2025, 8, 1), data_root=data_root)[0]
+    later = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2025, 8, 1), gateway=gateway)[0]
     assert _metric(later, "Revenue")["accession"] == "accn-q2"
 
 
-def test_last_quarter_range_picks_quarter_doc(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_fact(data_root, "Revenue", 5_860_000_000.0, "2026-03-31", "2026-05-05", "accn-q1")
-    _seed_fact(data_root, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-05", "accn-q2")
-    end_q1 = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2026, 6, 29), data_root=data_root)[0]
+def test_last_quarter_range_picks_quarter_doc(gateway: _Gateway) -> None:
+    _seed_fact(gateway, "Revenue", 5_860_000_000.0, "2026-03-31", "2026-05-05", "accn-q1")
+    _seed_fact(gateway, "Revenue", 5_890_000_000.0, "2026-06-30", "2026-08-05", "accn-q2")
+    end_q1 = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2026, 6, 29), gateway=gateway)[0]
     assert _metric(end_q1, "Revenue")["accession"] == "accn-q1"
-    end_q2 = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2026, 8, 25), data_root=data_root)[0]
+    end_q2 = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2026, 8, 25), gateway=gateway)[0]
     assert _metric(end_q2, "Revenue")["accession"] == "accn-q2"
 
 
-def test_latest_doc_respects_cutoff_not_newest_ingested(data_root: Path) -> None:
-    _seed_entity(data_root)
-    _seed_fact(data_root, "LongTermDebt", 2_100_000_000.0, "2026-03-31", "2026-05-05", "accn-cutoff")
-    _seed_fact(data_root, "LongTermDebt", 2_300_000_000.0, "2026-06-30", "2026-08-30", "accn-future")
-    at_cutoff = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2026, 8, 14), data_root=data_root)[0]
+def test_latest_doc_respects_cutoff_not_newest_ingested(gateway: _Gateway) -> None:
+    _seed_fact(gateway, "LongTermDebt", 2_100_000_000.0, "2026-03-31", "2026-05-05", "accn-cutoff")
+    _seed_fact(gateway, "LongTermDebt", 2_300_000_000.0, "2026-06-30", "2026-08-30", "accn-future")
+    at_cutoff = enrich_portfolio_research(_snapshot([_position()]), as_of=date(2026, 8, 14), gateway=gateway)[0]
     assert _metric(at_cutoff, "LongTermDebt")["accession"] == "accn-cutoff"
     assert at_cutoff.research_data_freshness["sec_latest_filed_at"] == date(2026, 5, 5)

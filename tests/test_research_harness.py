@@ -4692,14 +4692,6 @@ def test_telemetry_ledger_unresolvable_and_journal_fallback(tmp_path: Path, monk
     assert telemetry.get("queries_attempted") == ["NVDA 10-K"]  # journal fallback: the ledger holds no query
     assert telemetry.get("telemetry_gaps") == []
 
-    def _boom(_search_id: str, **_kwargs: object) -> None:
-        raise RuntimeError("ledger unavailable")
-
-    monkeypatch.setattr("app.sec.store.query_search", _boom)
-    degraded = _svc._derive_telemetry(repo, sid, coverage, [])
-    assert degraded.get("searches_count") == 1 and degraded.get("queries_attempted") == ["NVDA 10-K"]
-    assert degraded.get("telemetry_gaps") == []
-
 
 def test_telemetry_no_coverage_relationships_and_storage_degradation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch

@@ -542,6 +542,7 @@ def test_complete_wave_tail_synth_and_none(tmp_path: Path, monkeypatch: pytest.M
         "wave_decision",
         "novelty",
         "waves",
+        "bundle_dir",
     }
     assert tail["stop_reason"] == "complete:wave2"
     assert tail["wave_id"] == 2

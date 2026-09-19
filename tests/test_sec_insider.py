@@ -138,59 +138,58 @@ def test_get_insider_activity_skips_failed_loads(monkeypatch: pytest.MonkeyPatch
     assert txns[0].transaction_kind == "open_market_purchase"
 
 
-def test_store_queries_insider_both_directions(tmp_path: Path) -> None:
-    from app.sec.store import query_insider_transactions, store_insider_transaction
+def test_store_no_persist_and_live_insider_per_accession(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.sec.models import Filing
+    from app.sec.store import query_insider_transactions
 
-    assert (
-        store_insider_transaction(
-            {
-                "accession": "0000000000-25-000015",
-                "form": "4",
-                "issuer_cik": 320193,
-                "issuer_name": "Issuer Inc",
-                "owner_cik": 1206472,
-                "owner_name": "Jane Doe",
-                "is_director": True,
-                "transaction_code": "P",
-                "shares": 100,
-                "known_at": "2024-04-01",
-            },
-            root=tmp_path,
-        )
-        == 1
+    # Unseeded live queries stay empty; the per-accession live path below pins the contract.
+    assert query_insider_transactions(issuer_cik=320193, root=tmp_path) == []
+    assert query_insider_transactions(root=tmp_path) == []
+    filing = Filing(
+        form="4",
+        accession_no="ACC-4",
+        filed_at="2024-04-01",
+        filer_cik=320193,
+        filer_name="Issuer Inc",
+        accepted_at=None,
+        known_at="2024-04-01T00:00:00Z",
+        report_period=None,
+        primary_document="primary",
+        is_amendment=False,
+        amendment_of=None,
+        source="http://x",
     )
-    by_issuer = query_insider_transactions(issuer_cik=320193, root=tmp_path)
-    assert by_issuer[0]["owner_name"] == "Jane Doe"
-    assert by_issuer[0]["is_director"] is True
-    by_owner = query_insider_transactions(owner_cik=1206472, root=tmp_path)
-    assert [r["issuer_cik"] for r in by_owner] == ["320193"]
+
+    import app.sec.store as sec_store_mod
+
+    def _fake_meta(accession: str, as_of: str | None = None) -> Filing:
+        if accession == "ACC-4":
+            return filing
+        raise ValueError(f"unknown accession {accession!r}")
+
+    monkeypatch.setattr(sec_store_mod, "_gateway_get_filing", _fake_meta)
+
+    def _fake_load(accession_no: str) -> _Obj:
+        if accession_no == "ACC-4":
+            return _Obj([_Activity(code="P", shares=100)], name="Jane Doe", cik="1206472")
+        raise RuntimeError(f"unknown accession {accession_no!r}")
+
+    monkeypatch.setattr(insider, "load_ownership", _fake_load)
+    rows = query_insider_transactions(accession="ACC-4", root=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["insider_name"] == "Jane Doe"
+    assert rows[0]["insider_cik"] == "1206472"
+    assert rows[0]["issuer"] == "Issuer Inc"
+    assert rows[0]["transaction_kind"] == "open_market_purchase"
     # Roles stay on their own side: issuer is never the owner.
-    assert by_owner[0]["issuer_name"] != by_owner[0]["owner_name"]
+    assert rows[0]["issuer"] != rows[0]["insider_name"]
 
 
-def test_13f_provisional_security_id_and_governed_mapping(tmp_path: Path) -> None:
+def test_13f_live_per_accession_and_no_persist(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import insider as _ins
-    from app.sec.store import query_13f_holdings_for_issuer, store_13f_holding
-    from app.storage import parquet as _pq
+    from app.sec.models import Filing
+    from app.sec.store import query_13f_holdings
 
-    now = "2024-05-20T00:00:00Z"
-    _pq.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": "sec:cik:0000320193",
-                "name": "Apple Inc.",
-                "entity_type": "company",
-                "sic": None,
-                "source": "sec-submissions",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
     rec = _ins._holding_row_to_record(
         {"Cusip": "037833100", "Issuer": "Apple Inc.", "ReportPeriod": "2024-03-31", "Class": "Common Stock"},
         manager_name="Berkshire",
@@ -204,62 +203,44 @@ def test_13f_provisional_security_id_and_governed_mapping(tmp_path: Path) -> Non
         source_row=1,
     )
     assert rec.security_id == "cusip:037833100" and rec.entity_id is None
-    assert (
-        _ins.observe_13f_security(rec, raw_archive_path="/tmp/p", content_hash="h1", retrieved_at=now, root=tmp_path)
-        >= 2
-    )
-    store_13f_holding(rec.to_dict(), root=tmp_path)
-    inv = query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path)
-    assert len(inv) == 1 and inv[0]["entity_id"] == "sec:cik:0000320193"
-    rec2 = _ins._holding_row_to_record(
-        {"Cusip": "594918104", "Issuer": "Apple Inc.", "ReportPeriod": "bad", "Class": "Common"},
-        manager_name="M",
-        manager_cik="1",
-        accession_no="ACC-BAD",
-        report_period="bad",
+    # Unseeded live queries stay empty; the per-accession live path below pins the contract.
+    assert query_13f_holdings(manager_cik="1067983", root=tmp_path) == []
+    filing = Filing(
+        form="13F-HR",
+        accession_no="ACC-13F-1",
         filed_at="2024-05-15",
-        document_name="d",
+        filer_cik=1067983,
+        filer_name="Berkshire",
+        accepted_at=None,
         known_at="2024-05-15T00:00:00Z",
-        source_url=None,
-        source_row=1,
-    )
-    assert (
-        _ins.observe_13f_security(rec2, raw_archive_path="/tmp/p", content_hash="h2", retrieved_at=now, root=tmp_path)
-        == 1
-    )
-    # Ambiguous candidates exclude mapping.
-    _pq.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": "sec:cik:0000000002",
-                "name": "Apple Inc.",
-                "entity_type": "company",
-                "sic": None,
-                "source": "sec-submissions",
-                "known_at": "2024-02-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    rec3 = _ins._holding_row_to_record(
-        {"Cusip": "037833100", "Issuer": "Apple Inc.", "ReportPeriod": "2024-03-31"},
-        manager_name="M2",
-        manager_cik="2",
-        accession_no="ACC-AMB",
         report_period="2024-03-31",
-        filed_at="2024-05-15",
-        document_name="d",
-        known_at="2024-05-15T00:00:00Z",
-        source_url=None,
-        source_row=1,
+        primary_document="infotable.xml",
+        is_amendment=False,
+        amendment_of=None,
+        source="http://x",
     )
-    _ins.observe_13f_security(rec3, raw_archive_path="/tmp/p2", content_hash="h3", retrieved_at=now, root=tmp_path)
-    store_13f_holding(rec3.to_dict(), root=tmp_path)
-    assert query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path) == []
+
+    import app.sec.documents as sec_docs
+    import app.sec.store as sec_store_mod
+
+    def _fake_meta(accession: str, as_of: str | None = None) -> Filing:
+        if accession == "ACC-13F-1":
+            return filing
+        raise ValueError(f"unknown accession {accession!r}")
+
+    monkeypatch.setattr(sec_store_mod, "_gateway_get_filing", _fake_meta)
+    table = [{"Cusip": "037833100", "Issuer": "Apple Inc.", "ReportPeriod": "2024-03-31", "Class": "Common Stock"}]
+
+    def _fake_edgar(accession: str) -> SimpleNamespace:
+        assert accession == "ACC-13F-1"
+        return SimpleNamespace(obj=lambda: SimpleNamespace(infotable=table))
+
+    monkeypatch.setattr(sec_docs, "get_by_accession_number", _fake_edgar)
+    rows = query_13f_holdings(accession="ACC-13F-1", root=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["cusip"] == "037833100"
+    assert rows[0]["security_id"] == "cusip:037833100"
+    assert rows[0]["manager_cik"] == "1067983"
 
 
 def test_values_by_column_getitem_fast_path() -> None:

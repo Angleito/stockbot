@@ -4,7 +4,7 @@ Fixture payloads mirror the shapes seeded in tests/test_analytics_screens.py;
 no network access.
 """
 
-from pathlib import Path
+import pytest
 
 from app.normalization import (
     COMPANY_FACTS_PARSER_VERSION,
@@ -15,7 +15,6 @@ from app.normalization import (
     normalize_sec_company_facts,
     normalize_sec_tickers,
 )
-from app.storage import parquet
 
 RETRIEVED_AT = "2026-08-10T12:00:00Z"
 
@@ -393,19 +392,16 @@ def test_malformed_eps_facts_are_skipped_without_crash():
     assert datasets["financial_facts"] == []
 
 
-def test_eps_rows_dedup_on_rerun(tmp_path: Path):
-    datasets = _normalize(
-        _eps_payload(
-            diluted=[{"end": "2025-07-31", "val": 1.5, "accn": "a1", "filed": "2025-08-28"}],
-            basic=[{"end": "2025-07-31", "val": 1.52, "accn": "a2", "filed": "2025-08-28"}],
-        )
+def test_eps_rows_deterministic_on_rerun():
+    payload = _eps_payload(
+        diluted=[{"end": "2025-07-31", "val": 1.5, "accn": "a1", "filed": "2025-08-28"}],
+        basic=[{"end": "2025-07-31", "val": 1.52, "accn": "a2", "filed": "2025-08-28"}],
     )
-    root = tmp_path / "parquet"
-    assert parquet.write_rows("financial_facts", datasets["financial_facts"], root=root) == 2
-    assert parquet.write_rows("financial_facts", datasets["financial_facts"], root=root) == 0
-    table = parquet.read_table("financial_facts", root=root)
-    assert table.num_rows == 2
-    assert set(table.column("concept").to_pylist()) == {"EarningsPerShareDiluted", "EarningsPerShareBasic"}
+    first = _normalize(payload)["financial_facts"]
+    second = _normalize(payload)["financial_facts"]
+    assert len(first) == 2
+    assert first == second  # pure normalizer: same payload, same rows
+    assert {f["concept"] for f in first} == {"EarningsPerShareDiluted", "EarningsPerShareBasic"}
 
 
 def test_ambiguous_xbrl_group_emits_undated_events():
@@ -512,46 +508,55 @@ def test_multiple_record_dates_emit_undated():
     assert event["payment_date"] is None
 
 
-def test_store_document_text_extracts_filing_text_event(tmp_path: Path):
-    from app.sec import store as sec_store
-    from app.storage import duckdb
+def test_xbrl_lineage_over_gateway_shaped_rows(monkeypatch: pytest.MonkeyPatch):
+    """xbrl_lineage(entity_id, concept, as_of=...) over live gateway fact rows."""
+    from app.sec import lineage
 
-    parquet.write_rows(
-        "sec_filings",
-        [
-            {
-                "accession": "0000999999",
-                "form": "10-Q",
-                "cik": "21344",
-                "company": "KO",
-                "filer_cik": "21344",
-                "filer_name": "KO",
-                "filed_at": "2026-08-01",
-                "known_at": "2026-08-02T00:00:00Z",
-                "retrieved_at": "2026-08-02T00:00:00Z",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    prose = (
-        "The board declared a quarterly cash dividend of $0.54 per share, "
-        "payable October 1, 2026, to stockholders of record September 1, 2026."
-    )
-    assert (
-        sec_store.store_document_text(
-            "d1",
-            prose,
-            accession="0000999999",
-            source_url="u",
-            filed_at="2026-08-01",
-            known_at="2026-08-02T00:00:00Z",
-            root=tmp_path,
+    rows = _normalize(
+        _facts_payload(
+            facts=[
+                {"end": "2026-06-30", "val": 100, "accn": "a1", "filed": "2026-08-02"},
+                {"end": "2026-06-30", "val": 120, "accn": "a2", "filed": "2026-09-05"},
+            ]
         )
-        == 1
-    )
-    rows = duckdb.query("SELECT * FROM dividend_events", [], data_root=tmp_path)
-    assert len(rows) == 1
-    assert rows[0]["source_type"] == "filing_text"
-    assert rows[0]["amount_per_share"] == 0.54
-    assert str(rows[0]["known_at"]) != ""
-    assert rows[0]["evidence_excerpt"] == prose
+    )["financial_facts"]
+    class _Gateway:
+        def company_facts(self, cik: int, as_of: str | None = None) -> dict[str, object]:
+            assert cik == 1
+            if as_of is None:
+                return {"financial_facts": rows}
+            gated = [r for r in rows if str(r.get("known_at") or "")[:10] <= as_of]
+            return {"financial_facts": gated}
+
+    monkeypatch.setattr("app.data_sources.SourceGateway", _Gateway)
+
+
+    full = lineage.xbrl_lineage("sec:cik:0000000001", SHARES_OUTSTANDING_CONCEPT)
+    assert [r["value"] for r in full] == [120.0, 100.0]  # newest period_end first
+    assert full[0]["accession"] == "a2"
+    gated = lineage.xbrl_lineage("sec:cik:0000000001", SHARES_OUTSTANDING_CONCEPT, as_of="2026-08-15")
+    assert [r["value"] for r in gated] == [100.0]  # a2 known 2026-09-05 is gated out
+
+
+def test_xbrl_period_lineage_detects_restatement():
+    """period_lineage groups one period_end: earliest filed is original, later restated."""
+    from app.sec import lineage
+
+    rows = _normalize(
+        _facts_payload(
+            facts=[
+                {"end": "2026-06-30", "val": 100, "accn": "a1", "filed": "2026-08-02"},
+                {"end": "2026-06-30", "val": 120, "accn": "a2", "filed": "2026-09-05"},
+            ]
+        )
+    )["financial_facts"]
+
+    groups = lineage.period_lineage(rows)
+    assert len(groups) == 1
+    group = groups[0]
+    assert group["period_end"] == "2026-06-30"
+    original = group["originally_reported"]
+    latest = group["latest"]
+    assert isinstance(original, dict) and original["value"] == 100.0
+    assert isinstance(latest, dict) and latest["value"] == 120.0
+    assert group["restated"] is True

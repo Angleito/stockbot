@@ -27,7 +27,6 @@ from app.google_data import (
     trends,
     youtube,
 )
-from app.storage import parquet as parquet_backend
 from app.thesis.models import Thesis
 
 GOOGLE_ENV = (
@@ -58,7 +57,7 @@ def _observations(result: _Row) -> list[_Row]:
 
 
 def _metrics(row: _Row) -> _Row:
-    """Narrow a warehouse/signal row metrics payload for strict typing."""
+    """Narrow a signal row metrics payload for strict typing."""
     metrics = row.get("metrics")
     assert isinstance(metrics, dict)
     return metrics
@@ -337,11 +336,11 @@ def test_normalize_signal_id_and_first_known_at() -> None:
         "list_kind": "rising",
         "rank": 3,
     }
-    first = signals.normalize_candidate(record, retrieved_at="2026-09-01T00:00:00+00:00", persist=False)
+    first = signals.normalize_candidate(record, retrieved_at="2026-09-01T00:00:00+00:00")
     assert first["signal_id"] == hashlib.sha256(b"t|2026-W01|US|alpha|rising").hexdigest()
     assert first["status"] == "candidate"
     recollected = signals.normalize_candidate(
-        record, retrieved_at="2026-09-02T00:00:00+00:00", known_at=first["known_at"], persist=False
+        record, retrieved_at="2026-09-02T00:00:00+00:00", known_at=first["known_at"]
     )
     assert recollected["signal_id"] == first["signal_id"]
     assert recollected["known_at"] == first["known_at"]
@@ -390,16 +389,8 @@ def test_asof_excludes_future_evidence_and_recollect_idempotent(
     )
     first, second = run(), run()
     assert first["status"] == second["status"] == "ok"
-    before = signals.query_signals(as_of="2000-01-01", data_root=tmp_path)
-    assert before == []
-    after = signals.query_signals(data_root=tmp_path)
-    assert after, "expected retained evidence"
-    first_ids = sorted(str(s["signal_id"]) for s in signals.query_signals(data_root=tmp_path))
-    assert [s["signal_id"] for s in after] == first_ids
-    known = {s["signal_id"]: s["known_at"] for s in after}
-    rerun = {s["signal_id"]: s["known_at"] for s in signals.query_signals(data_root=tmp_path)}
-    assert rerun == known
-    assert len(first_ids) == len(set(first_ids))
+    assert [o["signal_id"] for o in _observations(first)] == [o["signal_id"] for o in _observations(second)]
+    assert len({o["signal_id"] for o in _observations(first)}) == len(_observations(first))
 
 
 # Trends durability regressions -------------------------------------------------
@@ -545,12 +536,6 @@ def test_national_rollup_emits_every_refresh(monkeypatch: pytest.MonkeyPatch, tm
             assert _child(obs, "features")["diffusion"] is None
             assert _nested(obs, "features", "coverage", "missing", "diffusion") == "subregion rows aggregated"
             assert _nested(obs, "features", "rules", "diffusion", "value") is None
-    table = trends._template_table("trends_us_top_national")
-    for refresh in refreshes:
-        durable = trends._warehouse_rows(tmp_path, table, refresh)
-        assert durable, f"expected durable rows for {refresh}"
-        assert {str(_metrics(r).get("refresh_date")) for r in durable} == {refresh}
-        assert {_metrics(r).get("dma_count") for r in durable} == {2, 3}
 
 
 def test_intl_national_nulls_diffusion_and_marks_score_basis(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -674,16 +659,6 @@ def test_national_sentinel_fires_post_aggregation(monkeypatch: pytest.MonkeyPatc
         assert result["reason"] == "query_scope_too_large"
         assert result["error_type"] == "missing_coverage"
         assert template in {t for t, _ in seen}
-    try:
-        observations: list[_Row] = parquet_backend.read_table("google_observations", tmp_path / "parquet").to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        observations = []
-    assert observations == []
-    try:
-        stored: list[_Row] = parquet_backend.read_table("ingestion_checkpoints", tmp_path / "parquet").to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        stored = []
-    assert [r for r in stored if r.get("status") == "complete"] == []
 
 
 def test_national_ok_below_sentinel_preserves_counts(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -743,7 +718,7 @@ def test_explicit_dma_keeps_row_level_sql(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert {o["geo"] for o in _observations(result)} == {"New York"}
 
 
-def test_limit_truncates_response_not_warehouse(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_limit_truncates_response_not_retained(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
     seen: _Seen = []
@@ -770,8 +745,6 @@ def test_limit_truncates_response_not_warehouse(monkeypatch: pytest.MonkeyPatch,
     warnings = result["warnings"]
     assert isinstance(warnings, list)
     assert result["continuation"] is True and "truncated" in warnings
-    retained = signals.query_signals(data_root=tmp_path)
-    assert sorted(str(s["term"]) for s in retained) == ["alpha", "beta", "gamma"]
 
 
 def test_term_filter_applies_before_limit_slice(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -804,9 +777,6 @@ def test_term_filter_applies_before_limit_slice(monkeypatch: pytest.MonkeyPatch,
     assert result["count"] == 1 and len(_observations(result)) == 1
     assert "Stanley" in str(_observations(result)[0]["term"])
     assert result["continuation"] is False
-    retained = signals.query_signals(data_root=tmp_path)
-    assert len(retained) == 101
-    assert any("Stanley" in str(s["term"]) for s in retained)
 
     unfiltered = trends.collect_trends(
         start_date="2026-09-02",
@@ -822,152 +792,10 @@ def test_term_filter_applies_before_limit_slice(monkeypatch: pytest.MonkeyPatch,
     assert unfiltered["continuation"] is True
 
 
-def test_partial_write_does_not_checkpoint(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _enable(monkeypatch)
-    refreshes = ["2026-09-02"]
-    seen: _Seen = []
-
-    def _rows(template: str, params: _Params) -> list[_Row]:
-        if template != "trends_us_top":
-            return []
-        return _three_dma_rows()
-
-    from app.storage import duckdb as _duckdb_spy
-
-    orig_insert = _duckdb_spy.insert_ignore
-
-    def _drop_one(table: str, rows: list[_Row], data_root: Path | None = None, **kwargs: object) -> int:
-        if table == "google_observations" and len(rows) > 1:
-            rows = list(rows)[:-1]
-        return orig_insert(table, rows, data_root=data_root)
-
-    monkeypatch.setattr(_duckdb_spy, "insert_ignore", _drop_one)
-    result = trends.collect_trends(
-        start_date="2026-09-02",
-        end_date="2026-09-02",
-        geos=["Chicago", "Los Angeles", "New York"],
-        limit=10,
-        data_root=tmp_path,
-        week_start="2026-08-01",
-        week_end="2026-08-31",
-        executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen),
-    )
-    assert result["status"] in ("unavailable", "error")
-    assert "warehouse verify failed" in str(result.get("error", ""))
-    try:
-        stored: list[_Row] = parquet_backend.read_table("ingestion_checkpoints", tmp_path / "parquet").to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        stored = []
-    complete = {row.get("key") for row in stored if row.get("status") == "complete"}
-    scoped = {
-        trends._checkpoint_key(template, str(params["start_date"]), params)
-        for template, params in seen
-        if template != "trends_refreshes"
-    }
-    assert scoped
-    assert not (scoped & complete)
 
 
-def test_checkpoint_scope_distinguishes_dmas(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _enable(monkeypatch)
-    refreshes = ["2026-09-02"]
-    seen: _Seen = []
-
-    def _rows(template: str, params: _Params) -> list[_Row]:
-        if template != "trends_us_top":
-            return []
-        dmas = params.get("dmas", [])
-        assert isinstance(dmas, list)
-        return [_dma_row(dma, refresh=_start_date(params), rank=1) for dma in dmas]
-
-    def _collect(geos: list[str]) -> _Row:
-        return trends.collect_trends(
-            start_date="2026-09-01",
-            end_date="2026-09-02",
-            geos=geos,
-            limit=10,
-            data_root=tmp_path,
-            week_start="2026-08-01",
-            week_end="2026-08-31",
-            executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=seen),
-        )
-
-    first = _collect(["New York"])
-    assert first["status"] == "ok"
-    assert {obs["geo"] for obs in _observations(first)} == {"New York"}
-    first_seen = len(seen)
-    second = _collect(["Los Angeles"])
-    assert second["status"] == "ok"
-    assert {obs["geo"] for obs in _observations(second)} == {"Los Angeles"}
-    assert [t for t, _ in seen[first_seen:] if t != "trends_refreshes"], "scoped miss must re-execute data templates"
-
-    def _scoped_keys(calls: _Seen) -> set[str]:
-        return {trends._checkpoint_key(t, str(p["start_date"]), p) for t, p in calls if t != "trends_refreshes"}
-
-    ny_keys, la_keys = _scoped_keys(seen[:first_seen]), _scoped_keys(seen[first_seen:])
-    assert ny_keys and la_keys and not (ny_keys & la_keys)
 
 
-def test_partial_write_retry_never_checkpoints_incomplete_batch(
-    monkeypatch: pytest.MonkeyPatch, tmp_path: Path
-) -> None:
-    _enable(monkeypatch)
-    refreshes = ["2026-09-02"]
-    seen: _Seen = []
-    calls: dict[tuple[str, str], int] = {}
-
-    def _run(template: str, params: _Params) -> _Row:
-        seen.append((template, dict(params)))
-        if template == "trends_refreshes":
-            return {"status": "ok", "rows": [{"refresh_date": r} for r in refreshes], "source": "bigquery"}
-        key = (template, json.dumps(params, sort_keys=True, default=str))
-        n = calls.get(key, 0)
-        calls[key] = n + 1
-        job_id = f"job-{template}-{params['start_date']}"
-        if n == 0:
-            rows: list[_Row] = _three_dma_rows() if template == "trends_us_top" else []
-            return {"status": "ok", "rows": [dict(r) for r in rows], "source": "bigquery", "job_id": job_id}
-        return {"status": "ok", "cached": True, "job_id": job_id, "rows": list[_Row](), "source": "bigquery"}
-
-    from app.storage import duckdb as _duckdb_spy
-
-    orig_insert = _duckdb_spy.insert_ignore
-
-    def _drop_one(table: str, rows: list[_Row], data_root: Path | None = None, **kwargs: object) -> int:
-        if table == "google_observations" and len(rows) > 1:
-            rows = list(rows)[:-1]
-        return orig_insert(table, rows, data_root=data_root)
-
-    monkeypatch.setattr(_duckdb_spy, "insert_ignore", _drop_one)
-
-    def _collect() -> _Row:
-        return trends.collect_trends(
-            start_date="2026-09-02",
-            end_date="2026-09-02",
-            geos=["Chicago", "Los Angeles", "New York"],
-            limit=10,
-            data_root=tmp_path,
-            week_start="2026-08-01",
-            week_end="2026-08-31",
-            executor=_run,
-        )
-
-    first, second = _collect(), _collect()
-    for result in (first, second):
-        assert result["status"] in ("unavailable", "error")
-        assert "warehouse verify failed" in str(result.get("error", ""))
-    try:
-        stored: list[_Row] = parquet_backend.read_table("ingestion_checkpoints", tmp_path / "parquet").to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        stored = []
-    complete = {row.get("key") for row in stored if row.get("status") == "complete"}
-    scoped = {
-        trends._checkpoint_key(template, str(params["start_date"]), params)
-        for template, params in seen
-        if template != "trends_refreshes"
-    }
-    assert scoped
-    assert not (scoped & complete)
 
 
 def test_query_scope_over_1000_never_checkpoints(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1010,16 +838,6 @@ def test_query_scope_over_1000_never_checkpoints(monkeypatch: pytest.MonkeyPatch
         assert result["status"] == "unavailable"
         assert result["error_type"] == "missing_coverage"
         assert result["reason"] == "query_scope_too_large"
-    try:
-        observations: list[_Row] = parquet_backend.read_table("google_observations", tmp_path / "parquet").to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        observations = []
-    assert observations == []
-    try:
-        stored: list[_Row] = parquet_backend.read_table("ingestion_checkpoints", tmp_path / "parquet").to_pylist()
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        stored = []
-    assert [r for r in stored if r.get("status") == "complete"] == []
 
 
 def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1064,25 +882,11 @@ def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch: pytest.Mo
     assert features["acceleration"] == pytest.approx(0.0)
     assert features["rank_improvement"] == -3
     assert features["percentile"] == pytest.approx(1.0)
-    table = trends._template_table("trends_us_top")
-    old = trends._warehouse_rows(tmp_path, table, "2026-09-01")
-    new = trends._warehouse_rows(tmp_path, table, "2026-09-02")
-    assert {r.get("week") for r in old} >= {w4}
-    assert {r.get("week") for r in new} == {w4}
-    assert {_metrics(r).get("score") for r in old if r.get("week") == w4} == {100}
-    assert {_metrics(r).get("score") for r in new if r.get("week") == w4} == {40}
-    queried = signals.query_signals(query="alpha", geo="New York", data_root=tmp_path)
-    week4 = [s for s in queried if s.get("period") == w4]
-    assert len(week4) == 1
-    latest = week4[0]
-    latest_metrics = latest.get("metrics")
-    assert isinstance(latest_metrics, dict)
-    assert latest_metrics.get("refresh_date") == "2026-09-02"
-    assert latest_metrics.get("score") == 40
-    assert latest.get("features") == features
-    latest_scopes = latest.get("available_feature_scopes")
-    assert isinstance(latest_scopes, list)
-    assert len(latest_scopes) == 1
+    week4 = [o for o in _observations(result) if o.get("period") == w4 and o.get("term") == "alpha"]
+    assert len(week4) == 2
+    by_refresh = {_metrics(o).get("refresh_date"): o for o in week4}
+    assert set(by_refresh) == {"2026-09-01", "2026-09-02"}
+    assert _metrics(by_refresh["2026-09-02"]).get("score") == 40
     seen.clear()
     replayed = trends.collect_trends(
         start_date="2026-09-01",
@@ -1109,10 +913,10 @@ def test_feature_calculation_uses_latest_refresh_per_week(monkeypatch: pytest.Mo
     )
     replayed_alpha = [o for o in _observations(replayed) if o.get("term") == "alpha"]
     assert replayed_alpha and (replayed_alpha[0].get("features") or {}) == features
-    assert seen and all(t == "trends_refreshes" for t, _ in seen)
+    assert seen and {t for t, _ in seen} >= {"trends_refreshes", "trends_us_top"}
 
 
-def test_trend_features_persist_through_query_signals(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
+def test_trend_features_stable_across_recollect(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
     refreshes = ["2026-09-02"]
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
@@ -1139,41 +943,10 @@ def test_trend_features_persist_through_query_signals(monkeypatch: pytest.Monkey
     assert result["observations"]
     collected = {str(o["term"]): _child(o, "features") for o in _observations(result)}
     assert collected["alpha"]
-    queried = {s["term"]: s for s in signals.query_signals(data_root=tmp_path)}
-    assert queried["alpha"]["features"] == collected["alpha"]
-    from app.storage import parquet as _pq
-
-    raw = _pq.read_table("google_observations", tmp_path / "parquet").to_pylist()
-    assert raw
-    for row in raw:
-        assert row.get("features_json") is None
-        assert row.get("calc_version") == "1"
     for name, rule in _child(collected["alpha"], "rules").items():
         assert isinstance(rule, dict)
         assert rule["rule"] == f"trend_{name}_v2"
         assert rule["calc_version"] == "2"
-    legacy: _Row = {
-        "observation_id": "obs-legacy-no-features",
-        "source": "trends",
-        "table": "trends_top",
-        "term": "legacy-term",
-        "geo": "US",
-        "list_kind": "top",
-        "period": "2026-W99",
-        "observed_at": "2026-W99",
-        "known_at": "2026-09-02T00:00:00+00:00",
-        "retrieved_at": "2026-09-02T00:00:00+00:00",
-        "source_record_id": "trends_top|2026-09-02|US|legacy-term|top",
-        "content_hash": "hash-legacy-no-features",
-        "collector_version": "1",
-        "calc_version": "1",
-        "metrics_json": json.dumps({"rank": 1}, sort_keys=True),
-        "evidence_json": "[]",
-        "source_url": "bq://trends_top",
-    }
-    _pq.write_rows("google_observations", [legacy], root=tmp_path / "parquet")
-    by_term = {s["term"]: s for s in signals.query_signals(data_root=tmp_path)}
-    assert by_term["legacy-term"]["features"] is None
 
 
 def test_feature_calculation_isolates_mixed_geographies(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1247,7 +1020,6 @@ def test_feature_calculation_isolates_mixed_geographies(monkeypatch: pytest.Monk
 
 def test_scope_change_does_not_duplicate_source_observations(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
     _enable(monkeypatch)
-    from app.storage import parquet as _pq
 
     refreshes = ["2026-09-02"]
     w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
@@ -1284,28 +1056,9 @@ def test_scope_change_does_not_duplicate_source_observations(monkeypatch: pytest
         executor=_scoped_trend_executor(refreshes=refreshes, rows_for=_rows, seen=[]),
     )
     assert second["status"] == "ok"
-    table = trends._template_table("trends_us_top")
-    obs_rows = [
-        r
-        for r in _pq.read_table("google_observations", tmp_path / "parquet").to_pylist()
-        if r.get("table") == table and r.get("geo") == "New York" and r.get("term") == "alpha"
-    ]
-    assert len(obs_rows) == 4
-    for row in obs_rows:
-        assert row.get("features_json") is None
-    by_week = {r.get("period"): r for r in obs_rows}
-    assert set(by_week) == set(weeks)
-    target_oid = by_week[w4]["observation_id"]
-    feat_rows = [
-        r
-        for r in _pq.read_table("google_signal_features", tmp_path / "parquet").to_pylist()
-        if str(r.get("observation_id") or "") == str(target_oid)
-    ]
-    assert len(feat_rows) == 2
-    hashes = {r.get("feature_scope_hash") for r in feat_rows}
-    assert len(hashes) == 2
-    diffusions = sorted(json.loads(r.get("features_json") or "{}").get("diffusion") for r in feat_rows)
-    assert diffusions == pytest.approx([0.5, 1.0])
+    ny_first = {o["signal_id"] for o in _observations(first) if o.get("geo") == "New York"}
+    ny_second = {o["signal_id"] for o in _observations(second) if o.get("geo") == "New York"}
+    assert ny_first and ny_first == ny_second
 
 
 def test_checkpoint_replay_is_scope_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
@@ -1346,89 +1099,8 @@ def test_checkpoint_replay_is_scope_exact(monkeypatch: pytest.MonkeyPatch, tmp_p
         assert _nested(obs, "features", "coverage", "geos_covered") == ["New York"]
 
 
-def test_query_signals_prefers_newer_refresh_over_later_backfill(tmp_path: Path) -> None:
-    from app.storage import parquet as _pq
-
-    table, period, geo, term, kind = "trends_top", "2026-W01", "US", "alpha", "top"
-
-    def _rev(refresh: str, known: str, marker: str, content_hash: str, tag: str) -> _Row:
-        return {
-            "observation_id": "obs-alpha",
-            "source": "trends",
-            "table": table,
-            "term": term,
-            "geo": geo,
-            "list_kind": kind,
-            "period": period,
-            "observed_at": period,
-            "known_at": known,
-            "retrieved_at": known,
-            "source_record_id": f"{table}|{refresh}|{geo}|{term}|{kind}#{tag}",
-            "content_hash": content_hash,
-            "collector_version": "1",
-            "calc_version": "1",
-            "metrics_json": json.dumps({"rank": 1, "refresh_date": refresh, "marker": marker}, sort_keys=True),
-            "evidence_json": "[]",
-            "source_url": f"bq://{table}",
-        }
-
-    newer = _rev("2026-09-02", "2026-09-02", "new", "hash-new", "new")
-    backfill = _rev("2026-09-01", "2026-09-03", "backfill", "hash-old", "old")
-    for rev in (newer, backfill):
-        _pq.write_rows("google_observations", [rev], root=tmp_path / "parquet")
-    at_cutoff = signals.query_signals(data_root=tmp_path, as_of="2026-09-03")
-    assert len(at_cutoff) == 1
-    cutoff_metrics = at_cutoff[0]["metrics"]
-    assert isinstance(cutoff_metrics, dict)
-    assert cutoff_metrics["refresh_date"] == "2026-09-02"
-    assert cutoff_metrics["marker"] == "new"
-    uncut = signals.query_signals(data_root=tmp_path)
-    assert len(uncut) == 1
-    uncut_metrics = uncut[0]["metrics"]
-    assert isinstance(uncut_metrics, dict)
-    assert uncut_metrics["refresh_date"] == "2026-09-02"
-    assert signals.query_signals(data_root=tmp_path, as_of="2026-09-01") == []
 
 
-def test_query_signals_tie_breaks_on_refresh_date(tmp_path: Path) -> None:
-    from app.storage import parquet as _pq
-
-    table, period, geo, term, kind = "trends_top", "2026-W01", "US", "alpha", "top"
-    known_at = "2026-09-02T00:00:00+00:00"
-
-    def _rev(refresh: str, marker: str, content_hash: str, tag: str) -> _Row:
-        return {
-            "observation_id": "obs-alpha",
-            "source": "trends",
-            "table": table,
-            "term": term,
-            "geo": geo,
-            "list_kind": kind,
-            "period": period,
-            "observed_at": period,
-            "known_at": known_at,
-            "retrieved_at": f"2026-09-02T00:00:0{'1' if tag == 'old' else '2'}+00:00",
-            "source_record_id": f"{table}|{refresh}|{geo}|{term}|{kind}#{tag}",
-            "content_hash": content_hash,
-            "collector_version": "1",
-            "calc_version": "1",
-            "metrics_json": json.dumps({"rank": 1, "refresh_date": refresh, "marker": marker}, sort_keys=True),
-            "evidence_json": "[]",
-            "source_url": f"bq://{table}",
-        }
-
-    old = _rev("2026-09-01", "old", "zzz-old-hash", "old")
-    new = _rev("2026-09-02", "new", "aaa-new-hash", "new")
-    for name, order in (("a", (old, new)), ("b", (new, old))):
-        for rev in order:
-            _pq.write_rows("google_observations", [rev], root=tmp_path / name / "parquet")
-    for name in ("a", "b"):
-        found = signals.query_signals(data_root=tmp_path / name)
-        assert len(found) == 1
-        found_metrics = found[0]["metrics"]
-        assert isinstance(found_metrics, dict)
-        assert found_metrics["refresh_date"] == "2026-09-02"
-        assert found_metrics["marker"] == "new"
 
 
 # Entity + macro ------------------------------------------------------------
@@ -2088,247 +1760,7 @@ def test_youtube_default_search_ceiling_is_80(monkeypatch: pytest.MonkeyPatch) -
     assert _config.get_bq_monthly_bytes_limit() == 536870912000
 
 
-def test_feature_revisions_are_append_only_and_pit_exact(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _enable(monkeypatch)
-    from app.storage import parquet as _pq
-
-    w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
-    weeks = [w1, w2, w3, w4]
-
-    def _rows(template: str, params: _Params) -> list[_Row]:
-        if template != "trends_us_top":
-            return []
-        refresh = _start_date(params)
-        scores = [10, 20, 30, 50] if refresh == "2026-09-02" else [11, 21, 31, 99]
-        return [
-            _dma_row("New York", term="alpha", week=w, refresh=refresh, rank=r, score=s)
-            for w, r, s in zip(weeks, [4, 3, 2, 1], scores)
-        ]
-
-    def _collect(refresh: str) -> _Row:
-        return trends.collect_trends(
-            start_date=refresh,
-            end_date=refresh,
-            geos=["New York"],
-            limit=20,
-            data_root=tmp_path,
-            week_start="2026-08-01",
-            week_end="2026-08-31",
-            executor=_scoped_trend_executor(refreshes=[refresh], rows_for=_rows, seen=[]),
-        )
-
-    assert _collect("2026-09-02")["status"] == "ok"
-    assert _collect("2026-09-03")["status"] == "ok"
-    table = trends._template_table("trends_us_top")
-    stored = _pq.read_table("google_observations", tmp_path / "parquet").to_pylist()
-    obs_rows = [
-        r
-        for r in stored
-        if r.get("table") == table and r.get("geo") == "New York" and r.get("term") == "alpha" and r.get("period") == w4
-    ]
-    assert len(obs_rows) == 2
-    target_oid = obs_rows[0]["observation_id"]
-    assert {r["observation_id"] for r in obs_rows} == {target_oid}
-    kuts = sorted({r.get("known_at") for r in stored})
-    assert len(kuts) == 2 and kuts[0] < kuts[1]
-    feat_rows = [
-        r
-        for r in _pq.read_table("google_signal_features", tmp_path / "parquet").to_pylist()
-        if str(r.get("observation_id") or "") == str(target_oid)
-    ]
-    assert len(feat_rows) == 2
-    assert len({r.get("feature_scope_hash") for r in feat_rows}) == 1
-    assert len({r.get("inputs_hash") for r in feat_rows}) == 2
-    by_hash = {r.get("inputs_hash"): json.loads(r.get("features_json") or "{}") for r in feat_rows}
-    assert len({json.dumps(v, sort_keys=True) for v in by_hash.values()}) == 2
-
-    def _by_period(as_of: str | None) -> dict[str, _Row]:
-        return {
-            str(s["period"]): s
-            for s in signals.query_signals(data_root=tmp_path, as_of=as_of)
-            if s.get("term") == "alpha" and s.get("geo") == "New York"
-        }
-
-    old, new = _by_period(kuts[0]), _by_period(kuts[1])
-    assert old[w4]["features"] == by_hash[_first_inputs_hash(old[w4])]
-    assert new[w4]["features"] == by_hash[_first_inputs_hash(new[w4])]
-    assert old[w4]["features"] != new[w4]["features"]
-
-    v2 = next(r for r in obs_rows if r.get("known_at") == kuts[1])
-    metrics = json.loads(v2["metrics_json"])
-    metrics["score"] = 123.0
-    evidence = json.loads(v2["evidence_json"])
-    _, new_hash = trends._observation_identity(
-        v2["table"], v2["period"], v2["geo"], v2["term"], v2["list_kind"], metrics, evidence
-    )
-    rev = dict(v2)
-    rev["metrics_json"] = json.dumps(metrics, sort_keys=True, default=str)
-    rev["content_hash"] = new_hash
-    rev["known_at"] = "2099-01-01T00:00:00+00:00"
-    rev["retrieved_at"] = "2099-01-01T00:00:00+00:00"
-    _pq.write_rows("google_observations", [rev], root=tmp_path / "parquet")
-    latest = _by_period(None)
-    assert latest[w4]["features"] is None
-    assert latest[w4]["feature_scope"] is None
-    assert latest[w4]["feature_scope_hash"] is None
-    assert latest[w4]["feature_calculated_at"] is None
 
 
-def test_inputs_hash_includes_shared_period_coverage(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _enable(monkeypatch)
-    from app.storage import parquet as _pq
-
-    w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
-
-    def _rows(template: str, params: _Params) -> list[_Row]:
-        if template != "trends_us_top":
-            return []
-        refresh = params["start_date"]
-        if refresh == "2026-09-02":
-            out = [_dma_row("New York", term="alpha", week=w4, refresh="2026-09-02", rank=1, score=50)]
-            out.extend(
-                _dma_row("New York", term="beta", week=w, refresh="2026-09-02", rank=r, score=s)
-                for w, r, s in zip([w2, w3, w4], [3, 2, 1], [20, 30, 50])
-            )
-            return out
-        out = [_dma_row("New York", term="alpha", week=w4, refresh="2026-09-02", rank=1, score=50)]
-        out.extend(
-            _dma_row("New York", term="beta", week=w, refresh="2026-09-03", rank=r, score=s)
-            for w, r, s in zip([w1, w2, w3, w4], [4, 3, 2, 1], [10, 20, 30, 50])
-        )
-        return out
-
-    def _collect(refresh: str) -> _Row:
-        return trends.collect_trends(
-            start_date=refresh,
-            end_date=refresh,
-            geos=["New York"],
-            limit=20,
-            data_root=tmp_path,
-            week_start="2026-08-01",
-            week_end="2026-08-31",
-            executor=_scoped_trend_executor(refreshes=[refresh], rows_for=_rows, seen=[]),
-        )
-
-    assert _collect("2026-09-02")["status"] == "ok"
-    assert _collect("2026-09-03")["status"] == "ok"
-    table = trends._template_table("trends_us_top")
-    stored = _pq.read_table("google_observations", tmp_path / "parquet").to_pylist()
-    obs_rows = [
-        r
-        for r in stored
-        if r.get("table") == table and r.get("geo") == "New York" and r.get("term") == "alpha" and r.get("period") == w4
-    ]
-    assert len(obs_rows) == 1
-    target_oid = obs_rows[0]["observation_id"]
-    assert len({r["content_hash"] for r in obs_rows}) == 1
-    kuts = sorted({r.get("known_at") for r in stored})
-    assert len(kuts) == 2 and kuts[0] < kuts[1]
-    feat_rows = [
-        r
-        for r in _pq.read_table("google_signal_features", tmp_path / "parquet").to_pylist()
-        if str(r.get("observation_id") or "") == str(target_oid)
-    ]
-    assert len(feat_rows) == 2
-    assert len({r.get("feature_scope_hash") for r in feat_rows}) == 1
-    assert len({r.get("inputs_hash") for r in feat_rows}) == 2
-    by_hash = {r.get("inputs_hash"): json.loads(r.get("features_json") or "{}") for r in feat_rows}
-    narrow = [v for v in by_hash.values() if v.get("coverage", {}).get("periods_covered") == [w2, w3, w4]]
-    expanded = [v for v in by_hash.values() if v.get("coverage", {}).get("periods_covered") == [w1, w2, w3, w4]]
-    assert len(narrow) == 1 and len(expanded) == 1
-    assert narrow[0]["persistence"] == 1 / 3
-    assert expanded[0]["persistence"] == 1 / 4
-
-    def _alpha(as_of: str | None) -> _Row:
-        rows = [
-            s
-            for s in signals.query_signals(data_root=tmp_path, as_of=as_of)
-            if s.get("term") == "alpha" and s.get("geo") == "New York" and s.get("period") == w4
-        ]
-        assert len(rows) == 1
-        return rows[0]
-
-    old, new = _alpha(kuts[0]), _alpha(kuts[1])
-    assert old["features"] == narrow[0]
-    assert new["features"] == expanded[0]
-    assert _alpha(None)["features"] == expanded[0]
 
 
-def test_unscoped_reads_are_order_independent(monkeypatch: pytest.MonkeyPatch, tmp_path: Path) -> None:
-    _enable(monkeypatch)
-    w1, w2, w3, w4 = "2026-08-03", "2026-08-10", "2026-08-17", "2026-08-24"
-    weeks = [w1, w2, w3, w4]
-
-    def _rows(template: str, params: _Params) -> list[_Row]:
-        if template != "trends_us_top":
-            return []
-        refresh = _start_date(params)
-        out: list[_Row] = []
-        for dma, scores in (("New York", [10, 20, 30, 50]), ("Los Angeles", [15, 25, 35, 55])):
-            out.extend(
-                _dma_row(dma, term="alpha", week=w, refresh=refresh, rank=r, score=s)
-                for w, r, s in zip(weeks, [4, 3, 2, 1], scores)
-            )
-        return out
-
-    def _collect(root: Path, geos: list[str]) -> None:
-        result = trends.collect_trends(
-            start_date="2026-09-02",
-            end_date="2026-09-02",
-            geos=geos,
-            limit=20,
-            data_root=root,
-            week_start="2026-08-01",
-            week_end="2026-08-31",
-            executor=_scoped_trend_executor(refreshes=["2026-09-02"], rows_for=_rows, seen=[]),
-        )
-        assert result["status"] == "ok"
-
-    def _scrubbed(root: Path) -> list[_Row]:
-        rows: list[_Row] = []
-        for record in signals.query_signals(data_root=root):
-            record = dict(record)
-            for key in ("known_at", "retrieved_at", "feature_calculated_at"):
-                if key in record:
-                    record[key] = ""
-            raw_scopes = record.get("available_feature_scopes")
-            assert isinstance(raw_scopes, list)
-            record["available_feature_scopes"] = [{**entry, "feature_calculated_at": ""} for entry in raw_scopes]
-            rows.append(record)
-
-        def _sort_key(r: _Row) -> str:
-            return str(r.get("signal_id"))
-
-        rows.sort(key=_sort_key)
-        return rows
-
-    _collect(tmp_path / "a", ["New York"])
-    _collect(tmp_path / "a", ["New York", "Los Angeles"])
-    _collect(tmp_path / "b", ["New York", "Los Angeles"])
-    _collect(tmp_path / "b", ["New York"])
-    a, b = _scrubbed(tmp_path / "a"), _scrubbed(tmp_path / "b")
-    assert json.dumps(a, sort_keys=True, default=str) == json.dumps(b, sort_keys=True, default=str)
-    by_key = {(s["term"], s["geo"], s["period"]): s for s in a}
-    multi = by_key[("alpha", "New York", w4)]
-    assert multi["features"] is None
-    multi_scopes = multi["available_feature_scopes"]
-    assert isinstance(multi_scopes, list)
-    assert len(multi_scopes) == 2
-    assert [e["feature_scope_hash"] for e in multi_scopes] == sorted(e["feature_scope_hash"] for e in multi_scopes)
-    assert by_key[("alpha", "Los Angeles", w4)]["features"] is not None
-    for root in (tmp_path / "a", tmp_path / "b"):
-        unfiltered = {(s["term"], s["geo"], s["period"]): s for s in signals.query_signals(data_root=root)}
-        filtered = signals.query_signals(data_root=root, geo="New York")
-        assert filtered and all(s.get("geo") == "New York" for s in filtered)
-        ny_unfiltered = unfiltered[("alpha", "New York", w4)]
-        ny_filtered = {(s["term"], s["geo"], s["period"]): s for s in filtered}[("alpha", "New York", w4)]
-        assert ny_filtered["features"] is None
-        assert ny_unfiltered["features"] is None
-        assert ny_filtered["available_feature_scopes"] == ny_unfiltered["available_feature_scopes"]
-        ny_scopes = ny_filtered["available_feature_scopes"]
-        assert isinstance(ny_scopes, list)
-        assert len(ny_scopes) == 2
-        assert {tuple(sorted(e["feature_scope"]["geos"])) for e in ny_scopes} == {
-            ("New York",),
-            ("Los Angeles", "New York"),
-        }

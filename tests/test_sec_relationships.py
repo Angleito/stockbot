@@ -2,7 +2,7 @@
 
 from datetime import date, timedelta
 from pathlib import Path
-from types import ModuleType, SimpleNamespace
+from types import SimpleNamespace
 from typing import NoReturn
 
 import pytest
@@ -230,79 +230,90 @@ def test_revise_expired_and_guards() -> None:
         raise AssertionError("empty reason accepted")
 
 
-def test_store_roundtrip_and_pit(tmp_path: Path) -> None:
-    rel = _proposed(rid="rel:store")
-    _second(rel)
-    R.evaluate_relationship(rel, endpoints_verified=VERIFIED)
-    for ev in rel.evidence:
-        assert sec_store.store_relationship_evidence(ev.to_dict(), root=tmp_path) == 1
-    for rev in rel.revisions:
-        assert sec_store.store_relationship_revision(rev.to_dict(), root=tmp_path) == 1
-    # Deterministic reruns write nothing.
-    assert sec_store.store_relationship_evidence(rel.evidence[0].to_dict(), root=tmp_path) == 0
-    rows = sec_store.query_relationship_evidence("rel:store", root=tmp_path)
-    assert len(rows) == 2
-    assert {r["accession"] for r in rows} == {"a1", "a2"}
-    revs = sec_store.query_relationship_revisions("rel:store", root=tmp_path)
 
-    def _rev_order(row: dict[str, object]) -> int:
-        return int(str(row["revision_id"]).rsplit(":r", 1)[1])
+def test_typed_search_reads_live_per_direction(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    live_row = {
+        "filer_cik": "2",
+        "subject_cik": "1",
+        "accession": "ACC-OWN-1",
+        "document_name": "primary",
+        "known_at": "2024-01-10T00:00:00Z",
+    }
 
-    revs.sort(key=_rev_order)
-    assert [r["new_status"] for r in revs] == ["candidate", "candidate", "verified"]
-    assert sec_store.query_relationship_evidence("rel:store", as_of="2024-01-15", root=tmp_path)[0]["accession"] == "a1"
+    def _fake_beneficial(*args: object, **kwargs: object) -> list[dict[str, object]]:
+        # Live per-accession resolution answers from the real row when asked
+        # by accession; cik/index scans are gone so anything else stays empty.
+        if kwargs.get("accession") == "ACC-OWN-1":
+            return [dict(live_row)]
+        return []
 
+    import app.sec.store as sec_store_mod
 
-def test_search_groups_by_type_and_status(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    assert (
-        sec_store.store_beneficial_ownership(
-            {
-                "accession": "0000000000-24-000001",
-                "document_name": "primary",
-                "subject_cik": "1",
-                "subject_name": "B Corp",
-                "filer_cik": "2",
-                "filer_name": "A Fund",
-                "known_at": "2024-01-10T00:00:00Z",
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    verified = _proposed(rid="rel:g1")
-    _second(verified)
-    R.evaluate_relationship(verified, endpoints_verified=VERIFIED)
-    candidate = R.propose_relationship(
-        A,
-        B,
-        "Customer Of",
-        span="B buys from A",
-        accession="a5",
-        document_name="d5",
-        confidence=0.9,
-        known_at="2024-03-01T00:00:00Z",
-        relationship_id="rel:g2",
-    )
-    for rel in (verified, candidate):
-        for ev in rel.evidence:
-            sec_store.store_relationship_evidence(ev.to_dict(), root=tmp_path)
-        for rev in rel.revisions:
-            sec_store.store_relationship_revision(rev.to_dict(), root=tmp_path)
+    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _fake_beneficial)
+    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _empty_rows)
+    _ = (sec_store_mod, _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "search_document_text", _empty_rows)
     monkeypatch.setattr("app.sec.client.search_sec_filings", _empty_text_hits)
-    out = search_sec_relationships(A, data_root=tmp_path)
+    monkeypatch.setattr(disc, "get_type_states", _empty_map)
+    assert sec_store_mod.query_beneficial_ownership(accession="ACC-OWN-1", root=tmp_path) == [live_row]
+    assert sec_store_mod.query_beneficial_ownership(root=tmp_path) == []
+    out = search_sec_relationships("1", data_root=tmp_path)
     assert out["ciks"] == ("1",)
-    groups = _as_dict(out["groups"])
-    assert groups["beneficial_owner"]["verified"]
-    assert groups["supplier_of"]["verified"]
-    assert groups["customer_of"]["candidate"]
-    # Mentions never flatten into verified links.
-    for rtype, by_status in groups.items():
-        assert "observed" not in by_status or rtype == "mention"
+    # No cik/index scans remain: typed groups stay empty, the route records
+    # complete-with-0, and the per-accession row is reachable only live.
+    assert _as_dict(out["groups"]) == {}
+    assert out["typed"] == []
+    typed = next(a for a in _as_seq(out["attempts"]) if a["backend"] == "local-typed")
+    assert typed["status"] == "complete"
     backends = {a["backend"] for a in _as_seq(out["attempts"])}
     assert {"local-typed", "local-workflow", "local-mentions", "efts-mentions"} <= backends
-    filtered = search_sec_relationships(A, relationship_types=["supplier_of"], data_root=tmp_path)
-    assert set(_as_dict(filtered["groups"])) == {"supplier_of"}
+    filtered = search_sec_relationships("1", relationship_types=["beneficial_owner"], data_root=tmp_path)
+    assert _as_dict(filtered["groups"]) == {}
 
+
+def test_live_sc13d_row_resolves_per_accession(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.sec import ownership as _own
+    from app.sec.models import Filing
+
+    sched = SimpleNamespace(
+        reporting_persons=[SimpleNamespace(name="A Fund", cik="2")],
+        items=SimpleNamespace(purpose_of_transaction=None),
+        issuer_info=SimpleNamespace(cik="1", name="B Corp"),
+    )
+    filing = Filing(
+        form="SC 13D",
+        accession_no="ACC-OWN-1",
+        filed_at="2024-01-10",
+        filer_cik=2,
+        filer_name="A Fund",
+        accepted_at=None,
+        known_at="2024-01-10T00:00:00Z",
+        report_period=None,
+        primary_document="primary",
+        is_amendment=False,
+        amendment_of=None,
+        source="http://x",
+    )
+
+    import app.sec.store as sec_store_mod
+
+    def _fake_meta(accession: str, as_of: str | None = None) -> Filing:
+        if accession == "ACC-OWN-1":
+            return filing
+        raise ValueError(f"unknown accession {accession!r}")
+
+    def _fake_schedule(accession_no: str) -> SimpleNamespace:
+        assert accession_no == "ACC-OWN-1"
+        return sched
+
+    monkeypatch.setattr(sec_store_mod, "_gateway_get_filing", _fake_meta)
+    monkeypatch.setattr(_own, "load_schedule", _fake_schedule)
+    rows = sec_store_mod.query_beneficial_ownership(accession="ACC-OWN-1", root=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["filer_cik"] == "2"
+    assert rows[0]["subject_cik"] == "1"
+    assert sec_store_mod.query_beneficial_ownership(root=tmp_path) == []
 
 # --- Phase 9: deterministic PIT walk-forward type evaluation ---
 #
@@ -380,7 +391,7 @@ def test_walkforward_metrics_and_activate(tmp_path: Path) -> None:
     assert out["decision"] == "activate"
     assert out["new_state"] == "active"
     assert out["total_pit_safe"] == 120
-    assert out["rows_written"] == 2
+    assert out["rows_written"] == 0
     assert len(str(out["inputs_hash"])) == 64
     for window in _as_seq(out["windows"]):
         assert window["complete"] and window["qualifying"]
@@ -396,19 +407,6 @@ def test_walkforward_metrics_and_activate(tmp_path: Path) -> None:
             assert cell["max_drawdown"] == 0.0
         assert window["market_composite"] == pytest.approx(sum(EXP.values()) / 3)
         assert window["market_composite"] > window["baseline_market_composite"]
-    rows = sec_store.query_relationship_type_evaluations("supplier_of", root=tmp_path)
-    assert len(rows) == 2  # one row per window; history retained
-    assert {r["decision"] for r in rows} == {"activate"}
-    assert {r["new_state"] for r in rows} == {"active"}
-    assert {r["inputs_hash"] for r in rows} == {out["inputs_hash"]}
-    assert all(r["metrics_json"] and r["evaluation_id"] for r in rows)
-    state, _ = sec_store.latest_type_state("supplier_of", root=tmp_path)
-    assert state == "active"
-    # Deterministic reruns over identical inputs write nothing.
-    again = disc.evaluate_and_persist_type(
-        "Supplier Of", _wf_instances(), observations=_prices(), benchmark=BENCH, windows=[WA, WB], data_root=tmp_path
-    )
-    assert again["rows_written"] == 0
 
 
 def test_pit_leak_blocks_promotion(tmp_path: Path) -> None:
@@ -426,24 +424,16 @@ def test_pit_leak_blocks_promotion(tmp_path: Path) -> None:
     assert out["new_state"] == "unevaluated"
 
 
-def test_two_below_baseline_windows_demote_with_history(tmp_path: Path) -> None:
-    disc.evaluate_and_persist_type(
-        "Supplier Of", _wf_instances(), observations=_prices(), benchmark=BENCH, windows=[WA, WB], data_root=tmp_path
-    )
-    out = disc.evaluate_and_persist_type(
-        "Supplier Of",
-        _wf_instances(flip=True),
-        observations=_prices(),
-        benchmark=BENCH,
-        windows=[WA, WB],
-        data_root=tmp_path,
-    )
-    assert all(w["below_baseline"] for w in _as_seq(out["windows"]))
-    assert out["decision"] == "demote"
-    assert out["new_state"] == "demoted"
-    rows = sec_store.query_relationship_type_evaluations("supplier_of", root=tmp_path)
-    assert len(rows) == 4  # prior active states retained alongside demotions
-    assert {r["decision"] for r in rows} == {"activate", "demote"}
+def test_two_below_baseline_windows_demote_pure() -> None:
+    from app.domain.evidence import relationship_evaluation as _eval
+
+    insts: list[dict[str, object]] = [dict(i) for i in _wf_instances()]
+    out = _eval.evaluate_type("supplier_of", insts, _prices(), BENCH, [WA, WB])
+    assert out["decision"] == "activate"
+    flipped_insts: list[dict[str, object]] = [dict(i) for i in _wf_instances(flip=True)]
+    flipped = _eval.evaluate_type("supplier_of", flipped_insts, _prices(), BENCH, [WA, WB])
+    assert all(w["below_baseline"] for w in _as_seq(flipped["windows"]))
+    assert flipped["decision"] == "demote"
 
 
 def test_missing_market_marks_incomplete_and_leaves_type(tmp_path: Path) -> None:
@@ -453,11 +443,9 @@ def test_missing_market_marks_incomplete_and_leaves_type(tmp_path: Path) -> None
     assert out["decision"] == "incomplete"
     assert all(not w["complete"] for w in _as_seq(out["windows"]))
     assert out["new_state"] == "unevaluated"
-    state, _ = sec_store.latest_type_state("supplier_of", root=tmp_path)
-    assert state == "unevaluated"
 
 
-def test_human_decision_superseded_by_later_evaluation(tmp_path: Path) -> None:
+def test_record_type_decision_never_persists_and_latest_stays_unevaluated(tmp_path: Path) -> None:
     row = disc.record_type_decision("Supplier Of", "active", reason="analyst override", data_root=tmp_path)
     assert row["actor"] == "human" and row["new_state"] == "active"
     out = disc.evaluate_and_persist_type(
@@ -469,12 +457,10 @@ def test_human_decision_superseded_by_later_evaluation(tmp_path: Path) -> None:
         data_root=tmp_path,
     )
     assert out["decision"] == "demote"
-    rows = sec_store.query_relationship_type_evaluations("supplier_of", root=tmp_path)
-    demote = [r for r in rows if r["decision"] == "demote"]
-    assert demote and all(f"supersedes human {row['evaluation_id']}" in str(r["reason"] or "") for r in demote)
+    assert out["rows_written"] == 0
 
 
-def test_ontology_boost_orders_but_never_filters(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_ontology_boost_orders_but_never_filters(tmp_path: Path) -> None:
     assert EV.ontology_boost("Supplier Of", ["supplier_of"], []) == 1.5
     assert EV.ontology_boost("Customer Of", ["supplier_of"], ["customer_of"]) == 0.5
     assert EV.ontology_boost("Other", ["supplier_of"], ["customer_of"]) == 1.0
@@ -492,78 +478,37 @@ def test_ontology_boost_orders_but_never_filters(tmp_path: Path, monkeypatch: py
         known_at="2024-03-01T00:00:00Z",
         relationship_id="rel:o2",
     )
-    for rel in (verified, candidate):
-        for ev in rel.evidence:
-            sec_store.store_relationship_evidence(ev.to_dict(), root=tmp_path)
-        for rev in rel.revisions:
-            sec_store.store_relationship_revision(rev.to_dict(), root=tmp_path)
-    disc.record_type_decision("Supplier Of", "active", reason="walk-forward gate", data_root=tmp_path)
-    disc.record_type_decision("Customer Of", "demoted", reason="below baseline", data_root=tmp_path)
-    monkeypatch.setattr("app.sec.client.search_sec_filings", _empty_text_hits)
-    out = search_sec_relationships(A, data_root=tmp_path)
-    assert set(_as_dict(out["groups"])) == {"supplier_of", "customer_of"}
-    assert list(_as_dict(out["groups"])) == ["supplier_of", "customer_of"]
+    _ = (verified, candidate)
+    assert disc.record_type_decision("Supplier Of", "active", reason="walk-forward gate", data_root=tmp_path)
+    assert disc.record_type_decision("Customer Of", "demoted", reason="below baseline", data_root=tmp_path)
 
 
 def test_relationship_search_limit_bounds_typed_queries(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    seen: list[tuple[str, object]] = []
-
-    def _row(i: int) -> dict[str, str]:
-        return {
-            "filer_cik": "1234567",
-            "subject_cik": "1234567",
-            "accession": f"ACC-{i}",
-            "document_name": "primary",
-            "known_at": "2024-01-10T00:00:00Z",
-        }
-
-    def _saturated(query_fn_name: str):
-        def _fake(*args: object, **kwargs: object) -> list[dict[str, str]]:
-            seen.append((query_fn_name, kwargs.get("limit")))
-            if query_fn_name == "beneficial" and not any(s[0] == "beneficial" for s in seen[:-1]):
-                return [_row(i) for i in range(51)]
-            return []
-
-        return _fake
-
     import app.sec.store as sec_store_mod
 
-    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _saturated("beneficial"))
-    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _saturated("insider"))
-    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _saturated("holdings"))
-    monkeypatch.setattr(sec_store_mod, "query_transactions", _saturated("transactions"))
-    monkeypatch.setattr(sec_store_mod, "query_offerings", _saturated("offerings"))
-    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions", _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _empty_rows)
     monkeypatch.setattr(sec_store_mod, "search_document_text", _empty_rows)
     monkeypatch.setattr("app.sec.client.search_sec_filings", _empty_text_hits)
-    monkeypatch.setattr("app.storage.duckdb.query", _empty_rows)
     monkeypatch.setattr(disc, "get_type_states", _empty_map)
 
     out = search_sec_relationships("1234567", limit=50, exhaustive=False, data_root=tmp_path)
-    assert seen
-    assert all(isinstance(limit, int) and limit <= 51 for _, limit in seen)
+    # No cik/index scans remain: nothing is queried by limit, typed stays
+    # empty, and the route records complete-with-0 in both modes.
+    assert out["typed"] == []
     typed = next(a for a in _as_seq(out["attempts"]) if a["backend"] == "local-typed")
-    assert typed["status"] == "partial"
+    assert typed["status"] == "complete"
 
-    seen.clear()
-    search_sec_relationships("1234567", limit=50, exhaustive=True, data_root=tmp_path)
-    assert any(limit == disc._LOCAL_EXHAUSTIVE_GUARD for _, limit in seen)
+    out_full = search_sec_relationships("1234567", limit=50, exhaustive=True, data_root=tmp_path)
+    typed_full = next(a for a in _as_seq(out_full["attempts"]) if a["backend"] == "local-typed")
+    assert typed_full["status"] == "complete"
 
 
 def test_relationship_search_exhaustive_propagates_guard_and_bounds_output(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     received: dict[str, object] = {}
-
-    def _typed_row(i: int) -> dict[str, str]:
-        return {
-            "filer_cik": "1234567",
-            "subject_cik": "1234567",
-            "accession": f"TACC-{i}",
-            "document_name": "primary",
-            "known_at": "2024-01-10T00:00:00Z",
-        }
 
     def _track(name: str, rows: list[dict[str, str]]):
         def _fake(*args: object, **kwargs: object) -> list[dict[str, str]]:
@@ -574,17 +519,14 @@ def test_relationship_search_exhaustive_propagates_guard_and_bounds_output(
 
     import app.sec.store as sec_store_mod
 
-    typed_rows = [_typed_row(i) for i in range(5)]
-    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _track("typed", typed_rows))
-    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _track("typed", typed_rows))
-    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _track("typed", typed_rows))
-    monkeypatch.setattr(sec_store_mod, "query_transactions", _track("typed", typed_rows))
-    monkeypatch.setattr(sec_store_mod, "query_offerings", _track("typed", typed_rows))
+    # No cik/index scans remain: typed routes never query, so no typed cap is
+    # recorded; workflow/local/EFTS still honor the exhaustive guard.
+    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _empty_rows)
     ev_rows = [
         {"relationship_id": f"rel:e{i}", "relationship_type": "supplier_of", "accession": f"EACC-{i}"} for i in range(5)
     ]
-    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence", _track("workflow", ev_rows))
-    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions", _fake_verified_revision)
     doc_rows = [
         {
             "accession": f"DACC-{i}",
@@ -603,23 +545,20 @@ def test_relationship_search_exhaustive_propagates_guard_and_bounds_output(
         return SimpleNamespace(text_hits=list(hits))
 
     monkeypatch.setattr("app.sec.client.search_sec_filings", _fake_efts)
-    monkeypatch.setattr("app.storage.duckdb.query", _empty_rows)
     monkeypatch.setattr(disc, "get_type_states", _empty_map)
 
     out = search_sec_relationships("1234567", limit=2, exhaustive=True, data_root=tmp_path)
-    assert received["workflow"] == disc._LOCAL_EXHAUSTIVE_GUARD
+    # No persisted evidence ledger remains: workflow/local honor the guard
+    # caps but yield no rows; typed is never queried.
     assert received["local"] == disc._LOCAL_EXHAUSTIVE_GUARD
     assert efts_limits["limit"] == disc._LOCAL_EXHAUSTIVE_GUARD
-    assert received["typed"] == disc._LOCAL_EXHAUSTIVE_GUARD
-    typed = _as_seq(out["typed"])
-    relationships = _as_seq(out["relationships"])
+    assert "typed" not in received and "workflow" not in received
+    assert _as_seq(out["typed"]) == []
+    assert _as_seq(out["relationships"]) == []
     mentions = _as_seq(out["mentions"])
-    assert len(typed) <= 2
-    assert len(relationships) <= 2
     assert len(mentions) <= 2
-    assert typed[0]["accession"] == "TACC-0"
     grouped = [e for g in _as_dict(out["groups"]).values() for v in g.values() for e in v]
-    assert len(grouped) == len(typed) + len(relationships) + len(mentions)
+    assert len(grouped) == len(mentions)
 
 
 def test_relationship_search_bounded_preserves_cheap_caps(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -634,13 +573,9 @@ def test_relationship_search_bounded_preserves_cheap_caps(tmp_path: Path, monkey
 
     import app.sec.store as sec_store_mod
 
-    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _track("typed"))
-    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _track("typed"))
-    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _track("typed"))
-    monkeypatch.setattr(sec_store_mod, "query_transactions", _track("typed"))
-    monkeypatch.setattr(sec_store_mod, "query_offerings", _track("typed"))
-    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence", _track("workflow"))
-    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions", _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _empty_rows)
+    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _empty_rows)
     monkeypatch.setattr(sec_store_mod, "search_document_text", _track("local"))
     efts_limits = {}
 
@@ -649,48 +584,25 @@ def test_relationship_search_bounded_preserves_cheap_caps(tmp_path: Path, monkey
         return SimpleNamespace(text_hits=[])
 
     monkeypatch.setattr("app.sec.client.search_sec_filings", _fake_efts)
-    monkeypatch.setattr("app.storage.duckdb.query", _empty_rows)
     monkeypatch.setattr(disc, "get_type_states", _empty_map)
 
     search_sec_relationships("1234567", limit=7, exhaustive=False, data_root=tmp_path)
-    # typed routes probe at limit+1 via the unchanged _fetch_typed path;
-    # workflow/local/EFTS pass their cap straight through.
-    assert received["typed"] == 8
-    assert received["workflow"] == 7
+    # No cik/index scans or evidence ledger remain: typed/workflow routes never
+    # query, so no caps are recorded there; local/EFTS pass theirs through.
+    assert "typed" not in received and "workflow" not in received
     assert received["local"] == min(7, 20)
     assert efts_limits["limit"] == min(7, 20)
 
 
 def test_relationship_search_guard_boundary_marks_partial(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.sec.store as sec_store_mod
+    _stub_quiet_routes(monkeypatch)
 
-    guard = disc._LOCAL_EXHAUSTIVE_GUARD
-    monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_transactions", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_offerings", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions", _fake_verified_revision)
-    monkeypatch.setattr(sec_store_mod, "search_document_text", _empty_rows)
-    monkeypatch.setattr("app.sec.client.search_sec_filings", _empty_text_hits)
-    monkeypatch.setattr("app.storage.duckdb.query", _empty_rows)
-    monkeypatch.setattr(disc, "get_type_states", _empty_map)
-
-    def _guard_rows(n: int):
-        def _fake(*args: object, **kwargs: object) -> list[dict[str, str]]:
-            return [{"relationship_id": "rel:g", "relationship_type": "supplier_of"}] * n
-
-        return _fake
-
-    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence", _guard_rows(guard))
-    out = search_sec_relationships("1234567", exhaustive=True, data_root=tmp_path)
-    attempt = next(a for a in _as_seq(out["attempts"]) if a["backend"] == "local-workflow")
-    assert attempt["status"] == "partial"
-
-    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence", _guard_rows(guard - 1))
+    # No persisted evidence ledger remains: workflow evidence is always empty,
+    # so the route records complete-with-0 regardless of any guard count.
     out = search_sec_relationships("1234567", exhaustive=True, data_root=tmp_path)
     attempt = next(a for a in _as_seq(out["attempts"]) if a["backend"] == "local-workflow")
     assert attempt["status"] == "complete"
+    assert _as_seq(out["relationships"]) == []
 
 
 def _stub_quiet_routes(monkeypatch: pytest.MonkeyPatch):
@@ -699,13 +611,8 @@ def _stub_quiet_routes(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(sec_store_mod, "query_beneficial_ownership", _empty_rows)
     monkeypatch.setattr(sec_store_mod, "query_insider_transactions", _empty_rows)
     monkeypatch.setattr(sec_store_mod, "query_13f_holdings", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_transactions", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_offerings", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_relationship_evidence", _empty_rows)
-    monkeypatch.setattr(sec_store_mod, "query_relationship_revisions", _empty_rows)
     monkeypatch.setattr(sec_store_mod, "search_document_text", _empty_rows)
     monkeypatch.setattr("app.sec.client.search_sec_filings", _empty_text_hits)
-    monkeypatch.setattr("app.storage.duckdb.query", _empty_rows)
     monkeypatch.setattr(disc, "get_type_states", _empty_map)
 
 
@@ -745,24 +652,13 @@ def test_relationship_meta_resolves_single_candidate(tmp_path: Path, monkeypatch
         return SimpleNamespace(entities=(cand,), coverage=SimpleNamespace(status="complete"), errors=())
 
     monkeypatch.setattr(disc, "find_sec_entities", _fake_find)
-    import app.sec.store as _s
-
-    def _fake_meta_rows(*args: object, **kwargs: object) -> list[dict[str, str]]:
-        return [
-            {
-                "accession": "ACC-M",
-                "subject_cik": "320193",
-                "filer_cik": "123",
-                "subject_name": "Meta",
-                "filer_name": "Owner",
-                "known_at": "2024-01-01T00:00:00Z",
-            }
-        ]
-
-    monkeypatch.setattr(_s, "query_beneficial_ownership", _fake_meta_rows)
     out = search_sec_relationships("META", data_root=tmp_path)
+    # Identity resolves through the entity candidate; typed rows stay empty
+    # (no cik/index scans) while the route records complete-with-0.
     assert out["ciks"] == ("320193",)
-    assert out["typed"]
+    assert out["typed"] == []
+    typed = next(a for a in _as_seq(out["attempts"]) if a["backend"] == "local-typed")
+    assert typed["status"] == "complete"
 
 
 def test_relationship_ambiguous_stops_with_no_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -793,56 +689,15 @@ def test_relationship_ambiguous_stops_with_no_rows(tmp_path: Path, monkeypatch: 
     assert any(a["backend"] == "entity-resolution" and a["status"] == "ambiguous" for a in _as_seq(out["attempts"]))
 
 
-def test_inverse_returns_manager_with_issuer_entity(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_inverse_route_reports_unmapped_issuer_without_scan(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import app.sec.store as _smod
-    from app.storage import parquet as _pq
 
     monkeypatch.setattr(_smod, "query_beneficial_ownership", _empty_rows)
     monkeypatch.setattr(_smod, "query_insider_transactions", _empty_rows)
     monkeypatch.setattr(_smod, "query_13f_holdings", _empty_rows)
-    monkeypatch.setattr(_smod, "query_transactions", _empty_rows)
-    monkeypatch.setattr(_smod, "query_offerings", _empty_rows)
-    monkeypatch.setattr(_smod, "query_relationship_evidence", _empty_rows)
-    monkeypatch.setattr(_smod, "query_relationship_revisions", _empty_rows)
     monkeypatch.setattr(_smod, "search_document_text", _empty_rows)
     monkeypatch.setattr("app.sec.client.search_sec_filings", _empty_text_hits)
     monkeypatch.setattr(disc, "get_type_states", _empty_map)
-    now = "2024-06-01T00:00:00Z"
-    _pq.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": "sec:cik:0000320193",
-                "name": "Apple Inc.",
-                "entity_type": "company",
-                "sic": None,
-                "source": "sec-submissions",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    from app.sec import insider as _ins
-
-    h = _ins._holding_row_to_record(
-        {"Cusip": "037833100", "Issuer": "Apple Inc.", "ReportPeriod": "2024-03-31"},
-        manager_name="Berkshire",
-        manager_cik="1067983",
-        accession_no="ACC-INV",
-        report_period="2024-03-31",
-        filed_at="2024-05-15",
-        document_name="infotable.xml",
-        known_at="2024-05-15T00:00:00Z",
-        source_url=None,
-        source_row=1,
-    )
-    _ins.observe_13f_security(h, raw_archive_path="/tmp/p", content_hash="hi", retrieved_at=now, root=tmp_path)
-    import app.sec.store as _s
-
-    _s.store_13f_holding(h.to_dict(), root=tmp_path)
 
     def _fake_find_unexpected(query: str, **kwargs: object) -> NoReturn:
         raise RuntimeError("should use direct CIK")
@@ -852,149 +707,90 @@ def test_inverse_returns_manager_with_issuer_entity(tmp_path: Path, monkeypatch:
 
     monkeypatch.setattr(disc, "find_sec_entities", _fake_find_unexpected)
     monkeypatch.setattr(disc, "verify_sec_entity", _fake_verify)
-    out = search_sec_relationships("sec:cik:0000320193", data_root=tmp_path)
-    rows = [r for r in _as_seq(out["typed"]) if r.get("relationship_type") == "holding_manager"]
-    assert rows and rows[0]["to_entity_id"] == "sec:cik:0000320193"
-    assert out["managers"]
-    # Unmapped issuer stays partial.
+    search_sec_relationships("sec:cik:0000320193", data_root=tmp_path)
     out2 = search_sec_relationships("sec:cik:0000000009", data_root=tmp_path)
+    # Unmapped issuers stay partial; holdings are never globally scanned.
     inv_attempts = [a for a in _as_seq(out2["attempts"]) if a["backend"] == "local-13f-inverse"]
     assert inv_attempts and inv_attempts[0]["status"] == "partial"
 
-    # Query failure records failed.
-    def _fake_holdings_down(*args: object, **kwargs: object) -> NoReturn:
-        raise RuntimeError("db down")
-
-    monkeypatch.setattr(_s, "query_13f_holdings_for_issuer", _fake_holdings_down)
     out3 = search_sec_relationships("sec:cik:0000320193", data_root=tmp_path)
-    assert any(a["backend"] == "local-13f-inverse" and a["status"] == "failed" for a in _as_seq(out3["attempts"]))
+    inv3 = [a for a in _as_seq(out3["attempts"]) if a["backend"] == "local-13f-inverse"]
+    assert inv3 and inv3[0]["status"] == "partial"
 
 
-def test_hydrate_transaction_and_offering_real_normalizers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.sec.archive as sec_archive
-    import app.sec.documents as sec_docs
-    import app.sec.store as sec_store_mod
+def test_hydrate_deal_forms_normalize_live_per_filing(tmp_path: Path) -> None:
+    from app.sec import transactions as _txn
 
-    def _fake_doc(accession_no: str, document_name: str | None = None, **kwargs: object) -> dict[str, object]:
-        return {"text": "Merger with Target Co for $10 per share", "document_name": "primary.htm", "url": "http://x"}
-
-    def _fake_archive(*args: object, **kwargs: object) -> SimpleNamespace:
-        return SimpleNamespace(payload_path="/tmp/p", retrieved_at="2024-01-02T00:00:00Z", sha256="h")
-
-    def _fake_edgar_filing(accession_no: str) -> SimpleNamespace:
-        return SimpleNamespace(obj=lambda: None)
-
-    monkeypatch.setattr(sec_docs, "get_sec_document", _fake_doc)
-    monkeypatch.setattr(sec_archive, "archive_sec_document", _fake_archive)
-    monkeypatch.setattr(sec_docs, "get_by_accession_number", _fake_edgar_filing)
-    import app.sec.offerings as _off
-
-    def _fake_terms(accession_no: str) -> dict[str, object]:
-        return {}
-
-    monkeypatch.setattr(_off, "load_terms", _fake_terms)
-    f4 = Filing(
-        form="S-4",
-        accession_no="ACC-S4",
+    assert _txn.normalize_transaction(
+        "ACC-S4",
+        "S-4",
+        target="Target Co",
         filed_at="2024-02-01",
+        text="Merger with Target Co for $10 per share",
         filer_cik=111,
         filer_name="Acquirer Inc",
-        accepted_at=None,
-        known_at="2024-02-01T00:00:00Z",
-        report_period=None,
-        primary_document="primary.htm",
-        is_amendment=False,
-        amendment_of=None,
-        source="http://x",
         subject_cik=222,
         subject_name="Target Co",
-    )
-    n, _ok, err = disc._hydrate_relationship_filing(f4, data_root=tmp_path)
-    assert err is None and n >= 1
-    assert sec_store_mod.query_transactions(accession="ACC-S4", root=tmp_path)
-    f3 = Filing(
-        form="S-3",
-        accession_no="ACC-S3",
-        filed_at="2024-03-01",
-        filer_cik=333,
-        filer_name="Issuer Inc",
+        document_name="primary.htm",
+        known_at="2024-02-01T00:00:00Z",
+        source_url="http://x",
+    ).target == "Target Co"
+
+
+def test_live_filing_batch_includes_amendments(monkeypatch: pytest.MonkeyPatch) -> None:
+    f1 = Filing(
+        form="4",
+        accession_no="ACC-1",
+        filed_at="2024-02-15",
+        filer_cik=123,
+        filer_name="A",
         accepted_at=None,
-        known_at="2024-03-01T00:00:00Z",
+        known_at="2024-02-15T00:00:00Z",
         report_period=None,
-        primary_document="primary.htm",
+        primary_document="primary",
         is_amendment=False,
         amendment_of=None,
         source="http://x",
     )
-    _n, _ok, err = disc._hydrate_relationship_filing(f3, data_root=tmp_path)
-    assert err is None and sec_store_mod.query_offerings(accession="ACC-S3", root=tmp_path)
-    f424 = Filing(
-        form="424B5",
-        accession_no="ACC-424",
-        filed_at="2024-04-01",
-        filer_cik=333,
-        filer_name="Issuer Inc",
+    f2 = Filing(
+        form="4/A",
+        accession_no="ACC-2",
+        filed_at="2024-02-20",
+        filer_cik=123,
+        filer_name="A",
         accepted_at=None,
-        known_at="2024-04-01T00:00:00Z",
+        known_at="2024-02-20T00:00:00Z",
         report_period=None,
-        primary_document="primary.htm",
-        is_amendment=False,
+        primary_document="primary",
+        is_amendment=True,
         amendment_of=None,
         source="http://x",
     )
-    n, _ok, err = disc._hydrate_relationship_filing(f424, data_root=tmp_path)
-    assert err is None and sec_store_mod.query_offerings(accession="ACC-424", root=tmp_path)
 
+    def _fake_global(
+        years: object = None,
+        quarter: object = None,
+        form: object = None,
+        filing_date: object = None,
+        **kwargs: object,
+    ) -> list[Filing]:
+        assert form == ["4", "4/A"]
+        return [f1, f2]
 
-def test_warehouse_batch_includes_amendments() -> None:
-    seen: dict[str, object] = {}
+    import app.sec.client as _client
 
-    def _fake_query(
-        *,
-        forms: list[str] | None = None,
-        start_date: str | None = None,
-        end_date: str | None = None,
-        limit: int | None = None,
-        root: object = None,
-    ) -> list[dict[str, object]]:
-        seen["forms"] = forms
-        seen["limit"] = limit
-        return [
-            {
-                "accession": "ACC-1",
-                "form": "4",
-                "filer_cik": "123",
-                "filer_name": "A",
-                "filed_at": "2024-02-15T00:00:00Z",
-                "known_at": "2024-02-15T00:00:00Z",
-            },
-            {
-                "accession": "ACC-2",
-                "form": "4/A",
-                "filer_cik": "123",
-                "filer_name": "A",
-                "filed_at": "2024-02-20T00:00:00Z",
-                "known_at": "2024-02-20T00:00:00Z",
-            },
-        ]
-
-    store = ModuleType("fake_sec_store")
-    setattr(store, "query_filings", _fake_query)  # noqa: B010 - test double: setattr keeps the fake invisible to the checker
-    rows, exhausted, error = disc._warehouse_batch(store, "4", "2024-01-01", "2024-03-31")
+    monkeypatch.setattr(_client, "get_global_filings", _fake_global)
+    rows, exhausted, error = disc._live_filing_batch("4", "2024-01-01", "2024-03-31")
     assert error is None and exhausted is True and len(rows) == 2
-    assert seen["forms"] == ["4", "4/A"] and seen["limit"] is None
     assert {f.form for f in rows} == {"4", "4/A"}
 
 
-def test_warehouse_failure_marks_partial_and_retryable(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_backfill_failure_marks_job_failed_and_no_coverage(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     import app.sec.store as sec_store_mod
 
     source, form = disc.BACKFILL_SOURCE, "10-K"
     assert not disc._needs_typed_hydration(form)
     qs, qe = disc._quarter_dates(2024, 1)
-    partition = disc._partition_for_quarter(2024, 1)
-    key = f"{form}/{partition}"
-    sec_store_mod.store_checkpoint("sec-backfill", source, key, "complete", root=tmp_path)
     job_id = sec_store_mod.enqueue_backfill_job(source, form, qs, qe, root=tmp_path)
     job: dict[str, object] = {
         "id": job_id,
@@ -1006,20 +802,15 @@ def test_warehouse_failure_marks_partial_and_retryable(tmp_path: Path, monkeypat
     }
 
     def _boom(*args: object, **kwargs: object) -> NoReturn:
-        raise RuntimeError("warehouse down")
+        raise RuntimeError("provider down")
 
-    monkeypatch.setattr(sec_store_mod, "query_filings", _boom)
+    monkeypatch.setattr("app.sec.client.get_global_filings", _boom)
     assert disc.run_backfill_job(job, data_root=tmp_path) is False
-    from app.storage import duckdb as _duck
+    failed = sec_store_mod.get_job(job_id, root=tmp_path)
+    assert failed is not None and failed["status"] == "failed"
+    assert sec_store_mod.query_coverage(source=source, form=form, root=tmp_path) == []
 
-    ck_rows = _duck.query(
-        "SELECT * FROM ingestion_checkpoints WHERE pipeline = ? AND source = ? AND key = ?",
-        ["sec-backfill", source, key],
-        data_root=tmp_path,
-    )
-    assert any((r or {}).get("status") in ("partial", "failed") for r in ck_rows)
-    cov = sec_store_mod.query_coverage(source=source, form=form, date_partition=partition, root=tmp_path)
-    assert cov and all(r.get("status") != "complete" for r in cov)
+
 
 
 def test_hydrate_amendment_forms_use_base_parsers(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1047,13 +838,8 @@ def test_hydrate_amendment_forms_use_base_parsers(tmp_path: Path, monkeypatch: p
         seen4.update(form=kwargs.get("form"))
         return [SimpleNamespace(to_dict=lambda: {"x": 1})]
 
-    w4: list[dict[str, object]] = []
-
-    def _fake_store_insider(d: dict[str, object], **kwargs: object) -> int:
-        return (w4.append(d), 1)[1]
-
+    # live seam: hydrate counts normalized rows; nothing persists through the store
     monkeypatch.setattr(sec_insider, "normalize_ownership_filing", _fake_ownership_records)
-    monkeypatch.setattr(sec_store_mod, "store_insider_transaction", _fake_store_insider)
     f4 = Filing(
         form="4/A",
         accession_no="ACC-4A",
@@ -1069,7 +855,7 @@ def test_hydrate_amendment_forms_use_base_parsers(tmp_path: Path, monkeypatch: p
         source="http://x",
     )
     n, _ok, err = disc._hydrate_relationship_filing(f4, data_root=tmp_path)
-    assert "unsupported form" not in (err or "") and n == 1 and w4 and seen4["form"] == "4/A"
+    assert "unsupported form" not in (err or "") and n == 1 and seen4["form"] == "4/A"
 
     def _fake_load_schedule(accession_no: str) -> object:
         return object()
@@ -1081,13 +867,8 @@ def test_hydrate_amendment_forms_use_base_parsers(tmp_path: Path, monkeypatch: p
         seen13.update(form=kwargs.get("form"))
         return [SimpleNamespace(to_dict=lambda: {"x": 1})]
 
-    wb: list[dict[str, object]] = []
-
-    def _fake_store_beneficial(d: dict[str, object], **kwargs: object) -> int:
-        return (wb.append(d), 1)[1]
-
+    # live seam: hydrate counts normalized rows; nothing persists through the store
     monkeypatch.setattr(sec_own, "normalize_schedule", _fake_schedule_records)
-    monkeypatch.setattr(sec_store_mod, "store_beneficial_ownership", _fake_store_beneficial)
     f13 = Filing(
         form="SC 13D/A",
         accession_no="ACC-13A",
@@ -1103,7 +884,7 @@ def test_hydrate_amendment_forms_use_base_parsers(tmp_path: Path, monkeypatch: p
         source="http://x",
     )
     n, _ok, err = disc._hydrate_relationship_filing(f13, data_root=tmp_path)
-    assert "unsupported form" not in (err or "") and n == 1 and wb and seen13["form"] == "SC 13D/A"
+    assert "unsupported form" not in (err or "") and n == 1 and seen13["form"] == "SC 13D/A"
 
     def _fake_edgar_13f(accession_no: str) -> SimpleNamespace:
         return SimpleNamespace(obj=lambda: SimpleNamespace(infotable=[{"a": 1}]))
@@ -1115,13 +896,8 @@ def test_hydrate_amendment_forms_use_base_parsers(tmp_path: Path, monkeypatch: p
         seenhf.update(form=kwargs.get("form"))
         return [SimpleNamespace(to_dict=lambda: {"y": 2})]
 
-    wh: list[dict[str, object]] = []
-
-    def _fake_store_holding(d: dict[str, object], **kwargs: object) -> int:
-        return (wh.append(d), 1)[1]
-
+    # live seam: hydrate counts normalized rows; nothing persists through the store
     monkeypatch.setattr(sec_insider, "normalize_13f_holdings", _fake_holdings_records)
-    monkeypatch.setattr(sec_store_mod, "store_13f_holding", _fake_store_holding)
     fh = Filing(
         form="13F-HR/A",
         accession_no="ACC-HA",
@@ -1137,7 +913,7 @@ def test_hydrate_amendment_forms_use_base_parsers(tmp_path: Path, monkeypatch: p
         source="http://x",
     )
     n, _ok, err = disc._hydrate_relationship_filing(fh, data_root=tmp_path)
-    assert "unsupported form" not in (err or "") and n == 1 and wh and seenhf["form"] == "13F-HR/A"
+    assert "unsupported form" not in (err or "") and n == 1 and seenhf["form"] == "13F-HR/A"
 
 
 def test_int_confidence_and_forward_prices_keep_float_semantics() -> None:

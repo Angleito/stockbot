@@ -2,78 +2,279 @@
 
 from __future__ import annotations
 
-import shutil
+import json
 import sys
 from pathlib import Path
 
 import pytest
 
 import scripts.verify_pi_tools as v
+from app import finra_client
+from app.analytics import screens
+from app.domain.market.securities import TickerAlias
 from app.normalization import (
     normalize_finra_short_interest,
     normalize_sec_company_facts,
     normalize_sec_tickers,
 )
-from app.storage import parquet
+from app.services import research_data
+from app.storage import raw_archive
 
 SETTLEMENT = "2026-08-14"
 
 
-def _seed_all(durable: Path) -> None:
-    tickers = normalize_sec_tickers(
-        {"0": {"cik_str": 1, "ticker": "AAA", "title": "AAA Corp"}},
-        retrieved_at="2026-08-10T12:00:00Z",
-        content_hash="tickers-hash",
-    )
-    for name, rows in tickers.items():
-        if name in v.FINRA_SEED_DATASETS:
-            parquet.write_rows(name, rows, root=durable / "parquet")
-    facts = normalize_sec_company_facts(
+class _ScreenGateway:
+    """Screens gateway double built from normalizer output (PIT-filtered)."""
+
+    def __init__(
+        self, tickers_payload: dict[str, object], facts_by_cik: dict[int, dict[str, object]]
+    ) -> None:
+        alias_rows = normalize_sec_tickers(
+            tickers_payload,
+            retrieved_at="2026-08-10T12:00:00Z",
+            content_hash="tickers",
+        ).get("entity_aliases", [])
+        self._aliases = [
+            TickerAlias(
+                alias_type=str(row.get("alias_type")),
+                alias_value=str(row.get("alias_value")),
+                entity_id=str(row.get("entity_id")),
+                security_id=str(row.get("security_id")) if row.get("security_id") else None,
+                source=str(row.get("source")),
+                valid_from=str(row.get("valid_from")) if row.get("valid_from") else None,
+                valid_to=str(row.get("valid_to")) if row.get("valid_to") else None,
+                known_at=str(row.get("known_at")) if row.get("known_at") else None,
+                retrieved_at=str(row.get("retrieved_at")) if row.get("retrieved_at") else None,
+            )
+            for row in alias_rows
+            if isinstance(row, dict)
+        ]
+        self._facts: dict[int, dict[str, list[dict[str, object]]]] = {
+            int(cik): normalize_sec_company_facts(
+                payload,
+                retrieved_at="2026-08-10T12:00:00Z",
+                content_hash=f"facts-{cik}",
+                source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{int(cik):010d}.json",
+                source_record_id=f"cik{int(cik):010d}",
+            )
+            for cik, payload in facts_by_cik.items()
+        }
+
+    def ticker_candidates(self, ticker: str, as_of: object) -> list[TickerAlias]:
+        del as_of  # PIT stays in resolve_ticker_aliases; return all aliases unfiltered.
+        return [a for a in self._aliases if a.alias_value == ticker.strip().upper()]
+
+    def company_facts(self, cik: int, as_of: str | None = None) -> dict[str, object]:
+        datasets = self._facts.get(int(cik), {})
+        out: dict[str, object] = {name: list(rows) for name, rows in datasets.items()}
+        if as_of is not None:
+            for name in ("financial_facts", "dividend_events"):
+                rows = out.get(name)
+                if isinstance(rows, list):
+                    out[name] = [r for r in rows if str(r.get("known_at") or "")[:10] <= as_of]
+        return out
+
+
+def _stub_transports(
+    monkeypatch: pytest.MonkeyPatch,
+    tickers_payload: dict[str, object],
+    facts_by_cik: dict[int, dict[str, object]],
+    finra_pairs: list[tuple[str, int]],
+) -> None:
+    """Stub provider transports: SEC payloads, FINRA pages, enrichment confirm."""
+
+    def _fake_get(url: str) -> bytes:
+        if url == "https://www.sec.gov/files/company_tickers.json":
+            return json.dumps(tickers_payload).encode()
+        marker = "/companyfacts/CIK"
+        if marker in url:
+            cik = int(url.rsplit("CIK", 1)[1].split(".")[0])
+            return json.dumps(facts_by_cik[cik]).encode()
+        raise AssertionError(f"unexpected SEC url: {url}")
+
+    raw_rows: list[dict[str, object]] = [
         {
-            "cik": 1,
-            "entityName": "CIK1",
-            "facts": {
-                "dei": {
-                    "EntityCommonStockSharesOutstanding": {
-                        "units": {
-                            "shares": [
-                                {"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"},
-                            ]
-                        }
-                    },
-                }
-            },
-        },
-        retrieved_at="2026-08-10T12:00:00Z",
-        content_hash="facts-1",
-        source_url="https://data.sec.gov/api/xbrl/companyfacts/CIK0000000001.json",
-        source_record_id="cik0000000001",
-    )
-    for name, rows in facts.items():
-        if name in v.FINRA_SEED_DATASETS:
-            parquet.write_rows(name, rows, root=durable / "parquet")
-    snap = normalize_finra_short_interest(
-        [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20}],
+            "symbolCode": symbol,
+            "issueName": symbol,
+            "settlementDate": SETTLEMENT,
+            "currentShortPositionQuantity": pos,
+        }
+        for symbol, pos in finra_pairs
+    ]
+    content = json.dumps(raw_rows).encode()
+
+    def _fake_query(
+        group: str, name: str, req: dict[str, object]
+    ) -> tuple[bytes, list[dict[str, object]], dict[str, str]]:
+        return (content, raw_rows, {"record-total": str(len(raw_rows))})
+
+    class _Gateway:
+        def company_facts(self, cik: int, as_of: str | None = None) -> dict[str, object]:
+            del cik, as_of
+            return {}
+
+    typed = normalize_finra_short_interest(
+        raw_rows,
         settlement_date=SETTLEMENT,
-        known_at="2026-08-20T12:00:00Z",
+        retrieved_at="2026-08-30T12:00:00Z",
+        content_hash="screen-snapshot",
+        source_url="u",
+        source_record_id=f"otcMarket/consolidatedShortInterest:{SETTLEMENT}",
+    ).get("short_interest", [])
+    screen_rows = [row for row in typed if isinstance(row, dict)]
+
+    monkeypatch.setattr(research_data, "_edgar_get", _fake_get)
+    monkeypatch.setattr(finra_client, "ingestion_post_query", _fake_query)
+    monkeypatch.setattr(research_data, "_gateway", lambda: _Gateway())
+    monkeypatch.setattr(research_data.time, "sleep", lambda seconds: None)
+    monkeypatch.setattr(screens, "_fetch_settlement_rows", lambda settlement: screen_rows)
+    monkeypatch.setattr(screens, "_gateway", lambda: _ScreenGateway(tickers_payload, facts_by_cik))
+    monkeypatch.setattr(screens.time, "sleep", lambda seconds: None)
+
+
+def _tickers_payload() -> dict[str, object]:
+    return {"0": {"cik_str": 1, "ticker": "AAA", "title": "AAA Corp"}}
+
+
+def _facts_payload() -> dict[str, object]:
+    return {
+        "cik": 1,
+        "entityName": "CIK1",
+        "facts": {
+            "dei": {
+                "EntityCommonStockSharesOutstanding": {
+                    "units": {
+                        "shares": [
+                            {"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"},
+                        ]
+                    }
+                },
+            }
+        },
+    }
+
+
+def test_refresh_sec_tickers_returns_inline_rows_and_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_transports(monkeypatch, _tickers_payload(), {1: _facts_payload()}, [("AAA", 20)])
+
+    result = research_data.refresh_sec_tickers(data_root=tmp_path)
+
+    assert result["ticker_ciks"] == {"AAA": 1}
+    assert result["written"] == 0
+    assert result["normalized_rows"] == 2  # one entity + one alias
+    assert (
+        raw_archive.find("sec", "company_tickers", "company_tickers", root=tmp_path / "raw")
+        is not None
+    )
+    # pure normalizer agrees: parsed tickers match the inline summary
+    datasets = normalize_sec_tickers(
+        _tickers_payload(), retrieved_at="2026-08-10T12:00:00Z", content_hash="tickers-hash"
+    )
+    assert len(datasets["entity_aliases"]) == 1
+
+
+def test_refresh_sec_company_facts_returns_inline_rows_and_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_transports(monkeypatch, _tickers_payload(), {1: _facts_payload()}, [("AAA", 20)])
+
+    result = research_data.refresh_sec_company_facts(1, data_root=tmp_path)
+
+    assert result["cik"] == 1
+    assert result["written"] == 0
+    assert result["normalized_rows"] == 3  # documents + financial_facts + securities
+    assert (
+        raw_archive.find("sec", "cik0000000001", "companyfacts", root=tmp_path / "raw")
+        is not None
+    )
+    # archive replays to the same rows
+    rows = research_data.iter_archive_company_facts(1, data_root=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["concept"] == "EntityCommonStockSharesOutstanding"
+
+
+def test_refresh_finra_short_interest_returns_inline_rows_and_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_transports(monkeypatch, _tickers_payload(), {1: _facts_payload()}, [("AAA", 20)])
+
+    result = research_data.refresh_finra_short_interest(SETTLEMENT, data_root=tmp_path)
+
+    assert result["settlement_date"] == SETTLEMENT
+    assert result["rows"] == 1
+    assert result["normalized_rows"] == 1
+    assert result["written"] == 0
+    assert (
+        raw_archive.find(
+            "finra",
+            "data_page",
+            f"otcMarket/consolidatedShortInterest:{SETTLEMENT}:offset0",
+            root=tmp_path / "raw",
+        )
+        is not None
+    )
+    datasets = normalize_finra_short_interest(
+        [
+            {
+                "symbolCode": "AAA",
+                "issueName": "Alpha",
+                "settlementDate": SETTLEMENT,
+                "currentShortPositionQuantity": 20,
+            }
+        ],
+        settlement_date=SETTLEMENT,
         retrieved_at="2026-08-30T12:00:00Z",
         content_hash="snapshot-hash",
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
         source_record_id=f"otcMarket/consolidatedShortInterest:{SETTLEMENT}",
     )
-    for name, rows in snap.items():
-        parquet.write_rows(name, rows, root=durable / "parquet")
+    assert len(datasets["short_interest"]) == 1
+
+
+def test_prepare_short_interest_data_returns_inline_rows_and_archives(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _stub_transports(monkeypatch, _tickers_payload(), {1: _facts_payload()}, [("AAA", 20)])
+
+    summary = research_data.prepare_short_interest_data(
+        SETTLEMENT, tickers=["AAA"], data_root=tmp_path
+    )
+
+    assert summary["unresolved_tickers"] == []
+    assert summary["failed_enrichments"] == []
+    sec_facts = summary["sec_facts"]
+    assert isinstance(sec_facts, list) and len(sec_facts) == 1
+    finra = summary["finra"]
+    assert isinstance(finra, dict)
+    assert finra["rows"] == 1
+    assert (
+        raw_archive.find("sec", "company_tickers", "company_tickers", root=tmp_path / "raw")
+        is not None
+    )
+    assert (
+        raw_archive.find("sec", "cik0000000001", "companyfacts", root=tmp_path / "raw")
+        is not None
+    )
+    assert (
+        raw_archive.find(
+            "finra",
+            "data_page",
+            f"otcMarket/consolidatedShortInterest:{SETTLEMENT}:offset0",
+            root=tmp_path / "raw",
+        )
+        is not None
+    )
 
 
 def _main_mocks(
     monkeypatch: pytest.MonkeyPatch,
-    durable: Path,
     tmp_path: Path,
 ) -> list[list[tuple[str, int]]]:
     monkeypatch.chdir(tmp_path)
     monkeypatch.setattr(sys, "argv", ["verify", "--tool", "get_short_interest_leaderboard"])
     monkeypatch.setenv("PI_VERIFY_REPETITIONS", "1")
-    monkeypatch.setattr(v, "get_data_root", lambda: durable)
     monkeypatch.setattr(
         v,
         "discover",
@@ -97,87 +298,27 @@ def _main_mocks(
 
 
 def test_all_present_no_fetch_and_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.storage import duckdb
-
-    durable = tmp_path / "durable"
-    _seed_all(durable)
-
-    def _never(_d: Path, _s: str) -> None:
-        raise AssertionError("must not fetch")
-
-    monkeypatch.setattr(v, "fetch_finra_fixture", _never)
-    assert v.ensure_finra_fixture(durable, ["get_short_interest_leaderboard"]) == 0
-    store = tmp_path / "store"
-    v.seed_finra_fixture(store, durable)
-    rows = duckdb.query("SELECT COUNT(*) AS n FROM short_interest", data_root=store)
-    assert rows and rows[0]["n"] == 1
-    assert not (store / "warehouse.duckdb").is_symlink()
-
-
-def test_missing_fetch_called_once_then_copy(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.storage import duckdb
-
-    durable = tmp_path / "durable"
-    _seed_all(durable)
+    """Provider smoke passes with stubbed transports; seed hook stays a no-op."""
+    _stub_transports(monkeypatch, _tickers_payload(), {1: _facts_payload()}, [("AAA", 20)])
     monkeypatch.setenv("PI_VERIFY_SETTLEMENT_DATE", SETTLEMENT)
-    calls: list[tuple[Path, str]] = []
 
-    def _fake(d: Path, s: str) -> None:
-        calls.append((d, s))
-        duckdb.insert_ignore(
-            "financial_facts",
-            [
-                {
-                    "fact_id": "fetched",
-                    "entity_id": "sec:cik:0000000001",
-                    "security_id": "sec:equity:0000000001",
-                    "concept": "EntityCommonStockSharesOutstanding",
-                    "original_concept": "dei:EntityCommonStockSharesOutstanding",
-                    "value": 1.0,
-                    "unit": "shares",
-                    "duration_type": "instant",
-                    "period_end": "2026-08-01",
-                    "period_start": None,
-                    "fiscal_year": None,
-                    "fiscal_period": None,
-                    "filed_at": "2026-08-02",
-                    "accession": "fetched",
-                    "frame": None,
-                    "known_at": "2026-08-02",
-                    "retrieved_at": "2026-08-10T12:00:00Z",
-                    "source_url": "u",
-                    "source_record_id": "cik0000000001",
-                    "content_hash": "fetched",
-                    "parser_version": "sec-companyfacts-v6",
-                }
-            ],
-            data_root=d,
-        )
-
-    duckdb.execute("DELETE FROM financial_facts", data_root=durable)
-    monkeypatch.setattr(v, "fetch_finra_fixture", _fake)
-    assert v.ensure_finra_fixture(durable, ["get_short_interest_leaderboard"]) == 0
-    assert calls == [(durable, SETTLEMENT)]
-    store = tmp_path / "store"
-    v.seed_finra_fixture(store, durable)
-    rows = duckdb.query("SELECT fact_id FROM financial_facts", data_root=store)
-    assert [r["fact_id"] for r in rows] == ["fetched"]
+    assert v.ensure_finra_fixture(tmp_path, ["get_short_interest_leaderboard"]) == 0
+    assert v.seed_finra_fixture(tmp_path / "store", tmp_path) is None
 
 
-def test_missing_env_unset_main_fails_without_matrix(
+def test_missing_settlement_env_main_fails_without_matrix(
     tmp_path: Path,
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from app.storage import duckdb
-
-    durable = tmp_path / "durable"
-    _seed_all(durable)
-    duckdb.execute("DELETE FROM securities", data_root=durable)
+    _stub_transports(monkeypatch, _tickers_payload(), {1: _facts_payload()}, [("AAA", 20)])
+    # An unparseable settlement falls back to the newest cycle, which needs a
+    # live FINRA probe; with no network the smoke gate fails and main never
+    # reaches the matrix.
+    monkeypatch.setattr(finra_client, "ingestion_post_query", lambda *a, **k: (_ for _ in ()).throw(ValueError("no network")))
     monkeypatch.delenv("PI_VERIFY_SETTLEMENT_DATE", raising=False)
-    matrix_calls = _main_mocks(monkeypatch, durable, tmp_path)
+    matrix_calls = _main_mocks(monkeypatch, tmp_path)
     assert v.main() != 0
-    assert "PI_VERIFY_SETTLEMENT_DATE" in capsys.readouterr().err
     assert matrix_calls == []
 
 
@@ -186,85 +327,31 @@ def test_fetch_failure_main_fails_without_matrix(
     monkeypatch: pytest.MonkeyPatch,
     capsys: pytest.CaptureFixture[str],
 ) -> None:
-    from app.storage import duckdb
-
-    durable = tmp_path / "durable"
-    _seed_all(durable)
-    duckdb.execute("DELETE FROM short_interest", data_root=durable)
+    _stub_transports(monkeypatch, _tickers_payload(), {1: _facts_payload()}, [("AAA", 20)])
     monkeypatch.setenv("PI_VERIFY_SETTLEMENT_DATE", SETTLEMENT)
 
-    def _boom(_d: Path, _s: str) -> None:
+    def _boom(*args: object, **kwargs: object) -> object:
         raise ValueError("FINRA_CLIENT_ID is required")
 
-    monkeypatch.setattr(v, "fetch_finra_fixture", _boom)
-    matrix_calls = _main_mocks(monkeypatch, durable, tmp_path)
+    monkeypatch.setattr(finra_client, "ingestion_post_query", _boom)
+    monkeypatch.setattr(screens, "_fetch_settlement_rows", _boom)
+    matrix_calls = _main_mocks(monkeypatch, tmp_path)
     assert v.main() != 0
     assert "FINRA_CLIENT_ID" in capsys.readouterr().err
     assert matrix_calls == []
 
 
-def test_fetch_orchestrates_refresh_confirm_and_tolerates_one_cik(
-    tmp_path: Path,
-    monkeypatch: pytest.MonkeyPatch,
+def test_leaderboard_reads_live_providers_for_seeded_cycle(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    import app.services.research_data as rd
-    import app.storage.duckdb as dd
-    from app.analytics import screens
+    """Inline refresh + live leaderboard: the confirm path works end to end."""
+    _stub_transports(monkeypatch, _tickers_payload(), {1: _facts_payload()}, [("AAA", 20)])
 
-    durable = tmp_path / "durable"
-    seen: list[int] = []
+    research_data.prepare_short_interest_data(SETTLEMENT, tickers=["AAA"], data_root=tmp_path)
+    result = screens.get_short_interest_leaderboard(
+        limit=5, settlement_date=SETTLEMENT, as_of="2026-08-30"
+    )
 
-    def _tickers(*, data_root: Path | None = None) -> dict[str, object]:
-        return {"ticker_ciks": {"AAA": 1, "BBB": 2}}
-
-    def _finra(settlement_date: str, *, data_root: Path | None = None) -> dict[str, object]:
-        return {"rows": 3}
-
-    def _facts(cik: int, *, data_root: Path | None = None) -> dict[str, object]:
-        seen.append(cik)
-        if cik == 1:
-            raise ValueError("boom")
-        return {"cik": cik}
-
-    def _rows(
-        sql: str,
-        params: object = (),
-        data_root: Path | None = None,
-    ) -> list[dict[str, object]]:
-        return [
-            {"symbol_code": "AAA", "pos": 100},
-            {"symbol_code": "BBB", "pos": 50},
-            {"symbol_code": "ZZZ", "pos": 10},  # unmapped: skipped
-        ]
-
-    def _ok(**_kw: object) -> dict[str, object]:
-        return {"entries": [{"ticker": "AAA"}]}
-
-    def _empty(**_kw: object) -> dict[str, object]:
-        return {"error": "empty"}
-
-    monkeypatch.setattr(rd, "refresh_sec_tickers", _tickers)
-    monkeypatch.setattr(rd, "refresh_finra_short_interest", _finra)
-    monkeypatch.setattr(rd, "refresh_sec_company_facts", _facts)
-    monkeypatch.setattr(dd, "query", _rows)
-    monkeypatch.setattr(screens, "get_short_interest_leaderboard", _ok)
-    v.fetch_finra_fixture(durable, SETTLEMENT)
-    assert sorted(seen) == [1, 2]
-    monkeypatch.setattr(screens, "get_short_interest_leaderboard", _empty)
-    with pytest.raises(RuntimeError, match="confirmation failed"):
-        v.fetch_finra_fixture(durable, SETTLEMENT)
-
-
-def test_fetch_sql_and_confirm_work_against_real_store(tmp_path: Path) -> None:
-    """Pin the fetch SQL + confirm call to the real duckdb/screens layer (no fakes)."""
-    from app.analytics import screens
-    from app.storage import duckdb
-
-    durable = tmp_path / "durable"
-    _seed_all(durable)
-    rows = duckdb.query(v.FETCH_TOP_SYMBOLS_SQL, params=[SETTLEMENT], data_root=durable)
-    assert [(r["symbol_code"], r["pos"]) for r in rows] == [("AAA", 20.0)]
-    result = screens.get_short_interest_leaderboard(limit=5, data_root=durable)
     assert "error" not in result
     entries = result["entries"]
     assert isinstance(entries, list) and [e["ticker"] for e in entries] == ["AAA"]
