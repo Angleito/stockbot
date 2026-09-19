@@ -7,7 +7,7 @@ const ROOT = process.cwd().endsWith("needle-harness")
   ? process.cwd().replace(/\/needle-harness$/, "")
   : process.cwd();
 const BRIDGE_CMD = `${ROOT}/venv/bin/python`;
-const BRIDGE_ARGS = [`${ROOT}/scripts/pi_bridge.py`];
+const BRIDGE_ARGS = [`${ROOT}/scripts/tool_bridge.py`];
 
 export type BridgeReply = {
   id?: unknown;
@@ -21,7 +21,7 @@ type Pending = {
   timer: ReturnType<typeof setTimeout>;
 };
 
-// Persistent pi_bridge child; worker-dispatched tool.invoke replies arrive async with the same id.
+// Persistent runtime-neutral tool bridge; replies correlate by id.
 class StockbotBridge {
   private child: ChildProcessWithoutNullStreams | null = null;
   private buf = "";
@@ -138,7 +138,7 @@ export async function invoke(name: string, args: Record<string, unknown>, sessio
 
 export async function endSession(sessionId: string): Promise<void> {
   try {
-    await bridge.call({ op: "tool.invoke.end", session_id: sessionId }, 10_000);
+    await bridge.call({ op: "tool.session.end", session_id: sessionId }, 10_000);
   } catch {
     // Best-effort; loop finally awaits directly and must never throw.
   }

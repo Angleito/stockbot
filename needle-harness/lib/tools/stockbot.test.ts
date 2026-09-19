@@ -5,7 +5,7 @@ import { closeBridge, endSession, invoke, newSessionId } from "./stockbot";
 const ROOT = process.cwd().endsWith("needle-harness")
   ? process.cwd().replace(/\/needle-harness$/, "")
   : process.cwd();
-const HAS_BRIDGE = existsSync(`${ROOT}/venv/bin/python`) && existsSync(`${ROOT}/scripts/pi_bridge.py`);
+const HAS_BRIDGE = existsSync(`${ROOT}/venv/bin/python`) && existsSync(`${ROOT}/scripts/tool_bridge.py`);
 
 describe.skipIf(!HAS_BRIDGE)("stockbot bridge", () => {
   const sid = newSessionId();

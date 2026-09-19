@@ -56,8 +56,8 @@ const ALLOWLIST = ["search_web", "find_sec_entities", "search_sec_filings", "get
 type DescribeEntry = { function?: { name?: unknown; description?: unknown; parameters?: unknown } };
 
 async function fetchCatalog(): Promise<void> {
-  process.stdout.write("needle [ai]: fetching tool catalog via pi_bridge describe…\n");
-  const bridge = spawn(`${ROOT_DIR}/venv/bin/python`, [`${ROOT_DIR}/scripts/pi_bridge.py`], {
+  process.stdout.write("needle [ai]: fetching tool catalog via tool_bridge describe…\n");
+  const bridge = spawn(`${ROOT_DIR}/venv/bin/python`, [`${ROOT_DIR}/scripts/tool_bridge.py`], {
     cwd: ROOT_DIR,
     stdio: ["pipe", "pipe", "pipe"],
   });
