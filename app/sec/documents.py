@@ -1,4 +1,7 @@
-"""Document-level retrieval off a filing accession."""
+"""Document-level retrieval off a filing accession.
+
+Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind these live readers, never inside normalization.
+"""
 
 import hashlib
 import re
@@ -350,11 +353,11 @@ def _text_of(attachment: object) -> str:
 
 
 def _raw_root_for(data_root: Path | str | None) -> Path | None:
-    """Raw archive root under a data root (tolerates a parquet-root input)."""
+    """Raw archive root straight under a data root."""
+    # Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in here.
     if data_root is None:
         return None
-    base = Path(data_root)
-    return base / "raw" if base.name != "parquet" else base.parent / "raw"
+    return Path(data_root) / "raw"
 
 
 def _utcnow() -> str:
@@ -388,6 +391,36 @@ def _iso_stamp(value: object) -> object:
     if isinstance(value, date):
         return value.isoformat()
     return value
+
+
+def _iso_instant(value: object) -> object:
+    """Warehouse datetime to full UTC instant text; strings pass through."""
+    from datetime import UTC, date, datetime
+
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(value, date):
+        return value.isoformat()
+    return value
+
+
+def _local_stamp(value: object) -> str | None:
+    """Host-local rendering of the same instant; None when no time info."""
+    from datetime import UTC, datetime
+
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return moment.astimezone().isoformat()
+    if isinstance(value, str):
+        try:
+            parsed = datetime.fromisoformat(value.replace("Z", "+00:00"))
+        except ValueError:
+            return None
+        if parsed.tzinfo is None:
+            parsed = parsed.replace(tzinfo=UTC)
+        return parsed.astimezone().isoformat()
+    return None
 
 
 def _bounded_response(
@@ -438,8 +471,10 @@ def _bounded_response(
         "more_available": end < total,
         "source_url": source_url,
         "filed_at": _iso_stamp(filed_at),
-        "known_at": _iso_stamp(known_at),
-        "retrieved_at": _iso_stamp(retrieved_at),
+        "known_at": _iso_instant(known_at),
+        "retrieved_at": _iso_instant(retrieved_at),
+        "known_at_local": _local_stamp(known_at),
+        "retrieved_at_local": _local_stamp(retrieved_at),
         "cache_hit": cache_hit,
         "cache_type": cache_type,
     }
@@ -469,7 +504,10 @@ def _bounded_response(
         available_sections=available_sections,
         source_url=source_url,
         filed_at=_iso_stamp(filed_at),
-        known_at=_iso_stamp(known_at),
+        known_at=_iso_instant(known_at),
+        retrieved_at=_iso_instant(retrieved_at),
+        known_at_local=_local_stamp(known_at),
+        retrieved_at_local=_local_stamp(retrieved_at),
         content_hash=content_hash,
         source_content_hash=source_content_hash,
         offset=offset,
@@ -492,6 +530,9 @@ def _attach_view(
     source_url: object,
     filed_at: object,
     known_at: object,
+    retrieved_at: object,
+    known_at_local: object,
+    retrieved_at_local: object,
     content_hash: object,
     source_content_hash: object,
     offset: int,
@@ -517,6 +558,9 @@ def _attach_view(
         "source_url": source_url,
         "filed_at": filed_at,
         "known_at": known_at,
+        "retrieved_at": retrieved_at,
+        "known_at_local": known_at_local,
+        "retrieved_at_local": retrieved_at_local,
         "content_hash": content_hash,
         "source_content_hash": source_content_hash,
     }
@@ -686,7 +730,7 @@ def _source_bytes_of(attachment: object) -> tuple[bytes | None, str | None]:
     return None, None
 
 
-def _filing_row_of(accession_no: str, as_of: str | None, data_root: Path | str | None) -> dict[str, object] | None:
+def _filing_row_of(accession_no: str, as_of: str | None, data_root: Path | str | None) -> Filing | None:
     from . import store as _store
 
     try:
@@ -696,41 +740,76 @@ def _filing_row_of(accession_no: str, as_of: str | None, data_root: Path | str |
     return filings[0] if filings else None
 
 
-def _effective_document_name(document_name: str | None, filing: dict[str, object] | None) -> str | None:
-    filing_name = filing.get("primary_document") if filing else None
+def _effective_document_name(document_name: str | None, filing: Filing | None) -> str | None:
+    filing_name = filing.primary_document if filing else None
     if filing_name is not None and not isinstance(filing_name, str):
         filing_name = str(filing_name)
     return document_name or filing_name
 
 
-def _document_rows_of(
+def _archived_row_of(record: object, *, accession_no: str, document_name: str) -> dict[str, object]:
+    """One raw-archive record as an archived-response row (text + provenance)."""
+    from ..storage import raw_archive as _raw
+
+    payload_path = getattr(record, "payload_path", None)
+    text = ""
+    if isinstance(payload_path, Path):
+        try:
+            text = payload_path.read_bytes().decode("utf-8", "replace")
+        except OSError:
+            text = ""
+    metadata = getattr(record, "metadata", None)
+    meta = metadata if isinstance(metadata, dict) else {}
+    content_hash = getattr(record, "sha256", None)
+    return {
+        "document_name": document_name,
+        "text": text,
+        "source_url": getattr(record, "url", "") or "",
+        "content_hash": content_hash if isinstance(content_hash, str) else _raw.content_hash(text.encode("utf-8")),
+        "source_content_hash": content_hash if isinstance(content_hash, str) else None,
+        "source_representation": meta.get("representation", "source_bytes"),
+        "raw_archive_path": str(payload_path) if payload_path is not None else None,
+        "filed_at": meta.get("filed_at"),
+        "known_at": meta.get("known_at") or meta.get("filed_at"),
+        "retrieved_at": getattr(record, "retrieved_at", None),
+    }
+
+
+def _archived_rows_of(
     accession_no: str,
     document_name: str | None,
     as_of: str | None,
     data_root: Path | str | None,
-    filing: dict[str, object] | None,
+    filing: Filing | None,
 ) -> list[dict[str, object]]:
-    from . import store as _store
+    """Raw-archive read-back: previously archived source bytes, PIT-filtered."""
+    # Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in here.
+    from . import archive as _archive
 
     effective = _effective_document_name(document_name, filing)
-    try:
-        if effective is not None:
-            return _store.query_document_text(
-                accession=accession_no, document_name=effective, as_of=as_of, limit=50, root=data_root
-            )
-        if document_name is None:
-            rows = _store.query_document_text(accession=accession_no, as_of=as_of, limit=50, root=data_root)
-            if len({r.get("document_name") for r in rows}) > 1:
-                return []
-            return rows
+    if effective is None:
         return []
+    try:
+        records = list(_archive.iter_archived_documents(accession_no, effective, root=_raw_root_for(data_root)))
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return []
+    rows = [_archived_row_of(record, accession_no=accession_no, document_name=effective) for record in records]
+    if as_of is not None:
+        rows = [row for row in rows if str(row.get("known_at") or "")[:10] <= as_of]
+    rows.sort(
+        key=lambda row: (
+            str(row.get("known_at") or ""),
+            str(row.get("retrieved_at") or ""),
+            str(row.get("content_hash") or ""),
+        ),
+        reverse=True,
+    )
+    return rows
 
 
 def _stored_candidates(
     accession_no: str, document_name: str | None, as_of: str | None, data_root: Path | str | None
-) -> tuple[dict[str, object] | None, list[dict[str, object]]]:
+) -> tuple[Filing | None, list[dict[str, object]]]:
     """Local archive rows for one accession/document; returns (filing, rows).
 
     Filing lookup resolves the primary name when document_name is None;
@@ -738,7 +817,7 @@ def _stored_candidates(
     accession still resolves. Storage failures read as a local miss.
     """
     filing = _filing_row_of(accession_no, as_of, data_root)
-    return filing, _document_rows_of(accession_no, document_name, as_of, data_root, filing)
+    return filing, _archived_rows_of(accession_no, document_name, as_of, data_root, filing)
 
 
 def _revision_conflict(accession_no: str, document_name: object, top_known: object, as_of: str) -> dict[str, object]:
@@ -921,44 +1000,10 @@ def _persist_live_document(
     source_url: str | None,
     data_root: Path | str | None,
 ) -> tuple[str | None, str | None, list[str]]:
-    from ..domain.market.ids import sec_doc_id
-    from . import archive as _archive
-    from . import store as _store
-
-    doc_id = sec_doc_id("filing-document", f"{accession_no}/{doc_name}", content_hash)
-    known_at = meta.known_at or meta.filed_at
-    warnings: list[str] = []
-    raw_path: str | None = None
-    retrieved_at: str | None = None
-    try:
-        record = _archive.archive_sec_document(
-            accession_no,
-            doc_name,
-            source_bytes,
-            url=source_url or "",
-            metadata={"form": meta.form, "representation": representation},
-            root=_raw_root_for(data_root),
-        )
-        raw_path = str(record.payload_path)
-        retrieved_at = record.retrieved_at
-        _store.store_document_text(
-            doc_id,
-            normalized,
-            accession=accession_no,
-            document_name=doc_name,
-            source_url=source_url,
-            raw_archive_path=raw_path,
-            source_content_hash=source_content_hash,
-            source_representation=representation,
-            filed_at=meta.filed_at,
-            known_at=known_at,
-            retrieved_at=retrieved_at,
-            root=data_root,
-        )
-    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        warnings.append(f"persistence failed, returning live evidence: {exc}")
-        retrieved_at = retrieved_at or _utcnow()
-    return raw_path, retrieved_at, warnings
+    """Fetch-time lookup only: no archiving here (selective retention)."""
+    _ = (accession_no, doc_name, source_bytes, representation, meta, source_url, data_root)
+    _ = (normalized, content_hash, source_content_hash)
+    return None, None, []
 
 
 def _live_hashes(source_bytes: bytes, normalized: str) -> tuple[str, str]:

@@ -129,7 +129,6 @@ from .store import (
     query_filings,
     recover_stale_jobs,
     requeue_job,
-    store_filing,
 )
 from .transactions import (
     diff_transaction,
@@ -257,7 +256,6 @@ __all__ = [
     "run_backfill_job",
     "search_sec_filings",
     "search_sec_relationships",
-    "store_filing",
     "stripped_name_key",
     "update_transaction",
     "verify_sec_entity",
