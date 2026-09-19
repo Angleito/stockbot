@@ -31,12 +31,7 @@ from app.config import configure_logging
 from app.log_server import DEFAULT_LOG_SERVER_PORT, run_log_server
 from app.robinhood.auth import DEFAULT_TOKEN_PATH
 from app.services.mandate import load_mandate_file
-from app.services.research_data import (
-    prepare_short_interest_data,
-    replay_sec_facts_from_archive,
-)
 from app.services.risk import evaluate_latest_mandate
-from app.storage import duckdb
 from app.storage.runs import (
     get_events,
     get_evidence,
@@ -51,6 +46,7 @@ from app.tool_render import issue_to_prose
 from app.tools import authorize_robinhood_browser
 
 _LOG_SERVER_DEFAULT_URL = f"http://127.0.0.1:{DEFAULT_LOG_SERVER_PORT}"
+_MAX_LEADERBOARD_PRINT = 25
 _SUBCOMMANDS = (
     "runs",
     "inspect",
@@ -145,16 +141,6 @@ def _print_coverage_report(finra_rows: int, mapped: int, shares_covered: int, el
     print(f"Coverage: {pct:.1f}%")
 
 
-def _print_enrichment_failures(summary: dict[str, object]) -> None:
-    if summary["unresolved_tickers"]:
-        print(f"Unresolved tickers (no SEC mapping, facts not fetched): {summary['unresolved_tickers']}")
-    failed_raw = summary.get("failed_enrichments")
-    fails: list[object] = failed_raw if isinstance(failed_raw, list) else []
-    for fail in fails:
-        if isinstance(fail, dict):
-            print(f"Enrichment failed: ticker={fail['ticker']} cik={fail['cik']} error={fail['error']}")
-
-
 def _leaderboard_tickers(entries: list[object]) -> list[object]:
     return [e["ticker"] for e in entries if isinstance(e, dict)]
 
@@ -168,30 +154,28 @@ def _print_leaderboard_entries(result: dict[str, object]) -> None:
 def _cmd_refresh_data(
     settlement_date: str, tickers: list[str], ciks: list[int], data_root: str | Path | None = None
 ) -> None:
-    root = _as_data_root(data_root)
-    summary = prepare_short_interest_data(settlement_date, tickers=tickers, ciks=ciks, data_root=root)
-    print(json.dumps(summary, indent=2))
-    from app.analytics.screens import materialize_short_interest_screen
+    """Live leaderboard read for one settlement cycle (ephemeral, never persisted)."""
+    del tickers, ciks, data_root
+    from app.analytics.screens import get_short_interest_leaderboard
 
-    result = materialize_short_interest_screen(settlement_date, data_root=root)
+    result = get_short_interest_leaderboard(limit=_MAX_LEADERBOARD_PRINT, settlement_date=settlement_date)
     if result.get("error"):
         print(f"Leaderboard error: {result['error']}")
         return
     finra_rows, mapped, shares_covered, eligible, pct = _refresh_coverage_counts(result)
     _print_coverage_report(finra_rows, mapped, shares_covered, eligible, pct)
-    _print_enrichment_failures(summary)
     _print_leaderboard_entries(result)
 
 
 def _cmd_replay_sec_facts() -> None:
-    summary = replay_sec_facts_from_archive()
-    print(json.dumps(summary, indent=2))
+    print(json.dumps({"status": "removed", "reason": "SEC facts read live via providers; no replay"}))
 
 
 def _cmd_refresh_obligations(ticker: str) -> None:
+    """Evaluate obligations in memory (never persisted); caller logs output to the bundle."""
     from app import obligations
 
-    result = obligations.get_obligations(ticker, persist=True)
+    result = obligations.get_obligations(ticker)
     print(json.dumps(result, indent=2))
 
 
@@ -1214,23 +1198,23 @@ def _build_parser() -> argparse.ArgumentParser:
     inspect_parser = subparsers.add_parser("inspect", help="show one run's record")
     inspect_parser.add_argument("run_id", help="run id, e.g. run:20260829T123456789012")
     refresh_parser = subparsers.add_parser(
-        "refresh-data", help="fetch + normalize SEC/FINRA research data into the Parquet store"
+        "refresh-data", help="read the live FINRA/SEC leaderboard for one settlement cycle (ephemeral, never persisted)"
     )
     refresh_parser.add_argument("--settlement-date", required=True, help="FINRA settlement date YYYY-MM-DD")
     refresh_parser.add_argument(
-        "--ticker", action="append", default=[], help="enrich SEC facts for this ticker (repeatable; optional)"
+        "--ticker", action="append", default=[], help="accepted and ignored (live reads need no enrichment)"
     )
     refresh_parser.add_argument(
-        "--cik", type=int, action="append", default=[], help="enrich SEC facts for this CIK (repeatable; optional)"
+        "--cik", type=int, action="append", default=[], help="accepted and ignored (live reads need no enrichment)"
     )
     refresh_parser.add_argument(
-        "--data-root", default=None, help="data root directory (default: $STOCKBOT_DATA_DIR or repo data/)"
+        "--data-root", default=None, help="accepted and ignored (live reads need no data root)"
     )
     subparsers.add_parser(
-        "replay-sec-facts", help="replay archived SEC companyfacts payloads into the Parquet store (offline)"
+        "replay-sec-facts", help="removed: SEC facts read live via providers; no replay"
     )
     obligations_parser = subparsers.add_parser(
-        "refresh-obligations", help="extract obligations for a ticker and persist events/evidence into the store"
+        "refresh-obligations", help="evaluate obligations for a ticker in memory (never persisted)"
     )
     obligations_parser.add_argument("ticker", help="ticker, e.g. NVDA")
     mandate_parser = subparsers.add_parser(
@@ -1437,7 +1421,9 @@ def _run_refresh_obligations(args: argparse.Namespace) -> None:
 
 def _run_evaluate_mandate(args: argparse.Namespace) -> None:
     data_root = args.data_root or None
-    mandate_path = Path(args.mandate) if args.mandate else Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
+    from app.config import get_data_root
+
+    mandate_path = Path(args.mandate) if args.mandate else get_data_root() / "mandate.json"
     _cmd_evaluate_mandate(mandate_path, data_root)
 
 

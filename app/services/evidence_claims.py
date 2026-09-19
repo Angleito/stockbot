@@ -97,7 +97,7 @@ def _claim_resolver(
     name_to_ticker: Callable[[str], str | None],
     instant: datetime,
 ) -> Callable[[str | None, str | None], SecurityResolution]:
-    """Bound subject/object resolver: explicit override or warehouse path."""
+    """Bound subject/object resolver: explicit override or supplied lookups."""
 
     def _resolve(ticker: str | None, name: str | None):
         if resolve is not None:
@@ -113,20 +113,27 @@ def _claim_resolver(
     return _resolve
 
 
+def _empty_aliases(ticker: str) -> Sequence[TickerAlias]:
+    """No provider candidates supplied: tickers stay unresolved."""
+    del ticker
+    return ()
+
+
+def _unmapped_ticker(name: str) -> str | None:
+    """No name index supplied: names stay unresolved."""
+    del name
+    return None
+
+
 def _claim_lookups(
     aliases_by_ticker: Callable[[str], Sequence[TickerAlias]] | None,
     name_to_ticker: Callable[[str], str | None] | None,
     instant: datetime,
     data_root: Path | None,
 ) -> tuple[Callable[[str], Sequence[TickerAlias]], Callable[[str], str | None]]:
-    """Warehouse lookups when the caller passes none."""
-    if aliases_by_ticker is None or name_to_ticker is None:
-        from .evidence_resolution import warehouse_aliases_fn, warehouse_name_to_ticker
-
-        aliases_by_ticker = aliases_by_ticker or warehouse_aliases_fn(instant, data_root)
-        name_to_ticker = name_to_ticker or (lambda n: warehouse_name_to_ticker(n, data_root))
-    assert aliases_by_ticker is not None and name_to_ticker is not None
-    return aliases_by_ticker, name_to_ticker
+    """Caller-supplied lookups; absent lookups resolve as unresolved."""
+    del instant, data_root
+    return aliases_by_ticker or _empty_aliases, name_to_ticker or _unmapped_ticker
 
 
 def _build_one_claim(

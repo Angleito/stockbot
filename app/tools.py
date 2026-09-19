@@ -1,4 +1,7 @@
-"""Tool implementations + OpenAI-format JSON schemas for Pi."""
+"""Tool implementations + OpenAI-format JSON schemas for Pi.
+
+Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind these live readers, never inside normalization.
+"""
 
 from __future__ import annotations
 
@@ -42,7 +45,6 @@ from .services.portfolio_research import (
     enrich_portfolio_research,
 )
 from .services.portfolio_sync import read_latest_snapshot, sync_robinhood_portfolio
-from .storage import duckdb
 
 if TYPE_CHECKING:
     from .domain.risk.breaches import RiskBreach
@@ -2229,7 +2231,7 @@ def _mandate_evaluation(evaluation: RiskEvaluation) -> dict[str, object]:
 
 def evaluate_mandate(data_root: Path | None = None, mandate_path: Path | None = None) -> dict[str, object]:
     """Deterministic mandate evaluation over the latest persisted snapshot."""
-    path = mandate_path or Path(duckdb.DEFAULT_DATA_ROOT) / "mandate.json"
+    path = mandate_path or get_data_root() / "mandate.json"
     try:
         evaluation = risk_service.evaluate_latest_mandate(path, data_root=data_root)
     except (FileNotFoundError, ValueError) as exc:
@@ -2874,7 +2876,7 @@ def _signals_capped(rows: object, limit: int) -> bool:
         return False
 
 
-def _query_signals_result(args: dict[str, object], rows: object, limit: int) -> dict[str, object]:
+def _local_signals_packet(args: dict[str, object], rows: object, limit: int) -> dict[str, object]:
     """Local-signal ok packet with continuation capped at the requested limit."""
     capped = _signals_capped(rows, limit)
     assert isinstance(rows, list)
@@ -2890,24 +2892,15 @@ def _query_signals_result(args: dict[str, object], rows: object, limit: int) -> 
 
 
 def _find_alternative_signals(args: dict[str, object], model: str) -> dict[str, object]:
-    """Local collected candidates only; disabled without credentials, never raises."""
+    """No persisted signal store: ephemeral per-collection compute only, never raises."""
+    # Seam: ephemeral per-collection compute via collect_trends + normalization; caller logs to the run bundle + raw_archive; NOTE: warehouse slots behind live readers.
     try:
-        from .google_data import signals as _signals
+        from .google_data import signals as _signals  # noqa: F401 - seam anchor: signals normalize live per collection
     except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return _google_import_error("google", exc)
     try:
         limit = _arg_int(args, "limit", 20)
-        return _query_signals_result(
-            args,
-            _signals.query_signals(
-                query=_arg_str(args, "query"),
-                geo=_arg_str(args, "geo"),
-                as_of=_arg_str(args, "as_of"),
-                limit=limit,
-                data_root=get_data_root(),
-            ),
-            limit,
-        )
+        return _local_signals_packet(args, [], limit)
     except Exception as exc:
         logger.exception("find_alternative_signals failed")
         return {"error": f"Tool 'find_alternative_signals' failed: {exc}", "soft": True, "source": "google"}
@@ -2964,13 +2957,10 @@ def _investigate_term(args: dict[str, object]) -> str:
 def _collect_investigate_signals(
     term: str, geo: str, per_source: int, evidence: dict[str, object], gaps: list[str]
 ) -> None:
-    """Local signals evidence; failures become gaps, never raises."""
-    try:
-        from .google_data import signals as _signals
-
-        evidence["signals"] = _signals.query_signals(query=term, geo=geo, limit=per_source, data_root=get_data_root())
-    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        gaps.append(f"signals unavailable: {exc}")
+    """No persisted signal store: ephemeral per-collection compute only; record a gap."""
+    # Seam: ephemeral per-collection compute via collect_trends + normalization; caller logs to the run bundle + raw_archive; NOTE: warehouse slots behind live readers.
+    del term, geo, per_source, evidence
+    gaps.append("signals unavailable: no persisted signal store (ephemeral per-collection compute only)")
 
 
 def _classify_investigate_entity(ent: object, term: str, confirmed: list[object], unresolved: list[object]) -> None:
@@ -2988,14 +2978,13 @@ def _classify_investigate_entity(ent: object, term: str, confirmed: list[object]
 
 
 def _resolve_investigate_ticker(term: str, confirmed: list[object], unresolved: list[object]) -> None:
-    """Ticker-alias corroboration; unresolved ticker only when nothing else confirmed anything."""
-    from datetime import datetime
-
+    """Ticker-alias corroboration via provider candidates; unresolved ticker only when nothing else confirmed anything."""
+    from .data_sources import SourceGateway
     from .domain.market.identity import resolve_ticker_aliases as _resolve_alias
-    from .storage.duckdb import ticker_alias_candidates as _alias_cands
 
     as_of = datetime.now(UTC)
-    resolution = _resolve_alias(term.upper(), _alias_cands(term.upper(), as_of, get_data_root()), as_of=as_of)
+    candidates = SourceGateway().ticker_candidates(term.upper(), as_of)
+    resolution = _resolve_alias(term.upper(), candidates, as_of=as_of)
     if resolution.resolved:
         confirmed.append(
             {
@@ -5601,19 +5590,6 @@ def _diff_sec_filings(args: dict[str, object], model: str) -> dict[str, object]:
     return _diff_resolved_pair(ticker, filings, section)
 
 
-def _warehouse_ticker(name: str) -> str | None:
-    """Exact warehouse name->ticker match, else None (never raises)."""
-    try:
-        from app.services.evidence_resolution import warehouse_name_to_ticker
-
-        mapped = warehouse_name_to_ticker(name)
-        if mapped and mapped.strip():
-            return mapped.strip().upper()
-    except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts; intentional silent skip
-        pass
-    return None
-
-
 def _edgar_ticker(name: str) -> str | None:
     """EDGAR company-index top hit tickers[0], else None (never raises)."""
     try:
@@ -5629,8 +5605,8 @@ def _edgar_ticker(name: str) -> str | None:
 
 
 def _resolve_company_to_ticker(name: str) -> str | None:
-    """Company name to ticker: exact warehouse match, then EDGAR company index top hit."""
-    return _warehouse_ticker(name) or _edgar_ticker(name)
+    """Company name to ticker via the EDGAR company index top hit."""
+    return _edgar_ticker(name)
 
 
 def _upper_arg(args: dict[str, object], key: str) -> str | None:
@@ -5640,7 +5616,7 @@ def _upper_arg(args: dict[str, object], key: str) -> str | None:
 
 
 def _remap_mixed_case(args: dict[str, object], key: str, value: str) -> str:
-    """Mixed-case values may be company names: remap when the warehouse disagrees."""
+    """Mixed-case values may be company names: remap when the EDGAR index resolves them."""
     raw = args.get(key)
     if isinstance(raw, str) and raw != raw.upper():
         resolved = _resolve_company_to_ticker(raw)
@@ -6840,95 +6816,17 @@ def _read_search_page(arguments: dict[str, object]) -> tuple[int, int, tuple[str
     return offset, limit, _read_search_forms(arguments)
 
 
-def _ledger_json_list(raw: object) -> list[str]:
-    """JSON string column -> string list ([] on absent/mistyped)."""
-    if not isinstance(raw, str):
-        return []
-    try:
-        parsed: object = json.loads(raw)
-    except json.JSONDecodeError:
-        return []
-    return [str(v) for v in parsed] if isinstance(parsed, list) else []
-
-
-def _ledger_search_request(row: dict[str, object]) -> dict[str, object]:
-    """Decoded request_json of one persisted search row ({} when absent/bad)."""
-    raw = row.get("request_json")
-    if not isinstance(raw, str):
-        return {}
-    try:
-        parsed: object = json.loads(raw)
-    except json.JSONDecodeError:
-        return {}
-    return {str(k): v for k, v in parsed.items()} if isinstance(parsed, dict) else {}
-
-
-def _ledger_search_coverage(row: dict[str, object]) -> dict[str, object]:
-    """Persisted coverage + retrieval truth of one search row (never the display bound).
-
-    Retrieval flags stay null for rows persisted before they were recorded:
-    unknown is reported as unknown, never as "not complete".
-    """
-    return {
-        "status": row.get("coverage_status"),
-        "date_coverage": row.get("date_coverage"),
-        "forms_covered": _ledger_json_list(row.get("forms_covered_json")),
-        "results_reported": row.get("results_reported"),
-        "results_retrieved": row.get("results_retrieved"),
-        "pages": row.get("pages"),
-        "pending_backfill_jobs": _ledger_json_list(row.get("pending_jobs_json")),
-        "pagination_complete": row.get("pagination_complete"),
-        "source_exhausted": row.get("source_exhausted"),
-    }
-
-
-def _ledger_hit(hit: dict[str, object]) -> dict[str, object]:
-    """One persisted hit as a paged packet row (navigation artifact, not evidence)."""
-    return {
-        "accession": hit.get("accession"),
-        "form": hit.get("form"),
-        "filed_at": hit.get("filed_at"),
-        "document": hit.get("matched_document"),
-        "section": hit.get("file_description") or hit.get("file_type"),
-        "query": hit.get("query"),
-        "score": hit.get("score"),
-        "page": hit.get("page"),
-        "known_at": hit.get("known_at"),
-        "source_url": hit.get("source_url"),
-        "snippet": hit.get("snippet") or hit.get("file_description"),
-    }
-
-
 def _research_read_search(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:
-    """Paged view of one persisted SEC search's full ranked hit universe."""
-    from app.sec import store as sec_store
-
+    """No persisted SEC search universe remains; every read is unknown_search."""
+    # Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind live readers, never here.
     session_id = str(arguments["session_id"])
     search_id = str(arguments["search_id"])
-    offset, limit, forms = _read_search_page(arguments)
+    _read_search_page(arguments)
     try:
         _research_repo_for(context).get_session(session_id)
     except KeyError as e:
         return _research_not_found_error(e)
-    root = get_data_root()
-    row = sec_store.query_search(search_id, root=root)
-    if row is None:
-        return {"error": f"unknown search_id: {search_id!r}", "error_type": "unknown_search"}
-    total = sec_store.query_hits_count(search_id, forms=forms, root=root)
-    hits = sec_store.query_hits(search_id, offset=offset, limit=limit, forms=forms, root=root)
-    request = _ledger_search_request(row)
-    return {
-        "session_id": session_id,
-        "search_id": search_id,
-        "query": request.get("query") or request.get("company_name"),
-        "coverage": _ledger_search_coverage(row),
-        "total": total,
-        "offset": offset,
-        "limit": limit,
-        "hits": [_ledger_hit(hit) for hit in hits],
-        "pagination_complete": row.get("pagination_complete"),
-        "more": offset + len(hits) < total,
-    }
+    return {"error": f"unknown search_id: {search_id!r}", "error_type": "unknown_search"}
 
 
 def _research_add_evidence(arguments: dict[str, object], context: RequestContext) -> dict[str, object]:

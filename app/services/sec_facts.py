@@ -1,16 +1,15 @@
-"""Store-first SEC fact read path behind get_fundamentals/get_xbrl_facts.
+"""Live SEC fact read path behind get_fundamentals/get_xbrl_facts.
+Live normalized companyfacts via the SourceGateway, PIT-gated
 
-EPS and shares_outstanding read the normalized Parquet store first (gated
-``known_at <= as_of``, restatements resolved by the true latest ``filed_at``),
-with the live ``edgar_client`` path as fallback; balance_sheet, overview, and
-xbrl facts stay always-live.  Every served result is wrapped in a truthfully
-labeled envelope: ``data_source`` is ``'store'`` only when the value actually
-came from the point-in-time store, ``'live'`` otherwise.
+``known_at <= as_of`` with restatements resolved by the true latest
+``filed_at``. Live fallback is the only path: explicit as_of with no
+knowable rows returns pit_data_unavailable; otherwise the provider payload
+is enveloped with a truthful live data_source.
 
 The live EPS payload carries a human label under the key ``source``; the
 envelope needs ``source`` for the provider code, so the payload label key is
-renamed ``source`` -> ``source_label`` in every envelope (store and live
-alike).  All other payload keys stay byte-identical.
+renamed ``source`` -> ``source_label`` in every envelope alike.
+All other payload keys stay byte-identical.
 """
 
 from __future__ import annotations
@@ -21,6 +20,7 @@ from pathlib import Path
 from typing import TypedDict
 
 from .. import edgar_client
+from ..data_sources import SourceGateway
 from ..domain.market.identity import resolve_ticker_aliases
 from ..edgar_client import (
     _DERIVED_Q4_OFFSET_DAYS,
@@ -35,10 +35,10 @@ from ..edgar_client import (
     _has_contiguous_quarters,
     _is_recent_dividend_period,
 )
-from ..storage import duckdb
+from ..sec.client import resolve_cik
 from .dividend_analysis import analyze_dividends
 
-DEFAULT_DATA_ROOT = duckdb.DEFAULT_DATA_ROOT
+DEFAULT_DATA_ROOT = None
 
 DILUTED_EPS_CONCEPT = "EarningsPerShareDiluted"
 BASIC_EPS_CONCEPT = "EarningsPerShareBasic"
@@ -51,7 +51,7 @@ _METRICS = ("eps", "shares_outstanding", "balance_sheet", "overview", "dividends
 
 
 class FinancialFactRow(TypedDict):
-    """One normalized ``financial_facts`` row (parquet DOUBLE reads as float)."""
+    """One normalized financial-fact row (float value)."""
 
     concept: str
     value: float
@@ -117,26 +117,8 @@ def _validated_as_of(as_of: str | None) -> _dt.date | None:
         return None
 
 
-def _resolve_entity(ticker: str, as_of: _dt.date, data_root: Path | None) -> str | None:
-    """Resolve a ticker to its entity id through the alias store.
-
-    The alias horizon is end-of-day UTC on the as-of date so an alias
-    ingested on the as-of day itself is visible (day-granularity semantics,
-    matching the store's ``known_at <= as_of`` facts gate).  Ambiguous or
-    unresolved tickers resolve to None: no store path, never a guess.
-    """
-    horizon = _dt.datetime.combine(as_of, _dt.time.max, tzinfo=_dt.UTC)
-    aliases = duckdb.ticker_alias_candidates(ticker, horizon, data_root=data_root)
-    if not aliases:
-        return None
-    resolution = resolve_ticker_aliases(ticker, aliases, as_of=horizon)
-    if not resolution.resolved:
-        return None
-    return resolution.entity_id
-
-
 def _stored_text(value: object) -> str:
-    """Coerce a store text column: str as-is, date/datetime to ISO, None -> "", else str."""
+    """Coerce a live text field: str as-is, date/datetime to ISO, None -> "", else str."""
     from datetime import date, datetime
 
     if isinstance(value, str):
@@ -151,7 +133,7 @@ def _stored_text(value: object) -> str:
 
 
 def _stored_opt_text(value: object) -> str | None:
-    """Coerce an optional store text column: str as-is, date/datetime to ISO, else None."""
+    """Coerce an optional live text field: str as-is, date/datetime to ISO, else None."""
     from datetime import date, datetime
 
     if isinstance(value, str):
@@ -164,20 +146,14 @@ def _stored_opt_text(value: object) -> str | None:
 
 
 def _stored_opt_int(value: object) -> int | None:
-    """Coerce an optional store int column: int as-is (bool excluded), else None."""
+    """Coerce an optional live int field: int as-is (bool excluded), else None."""
     if isinstance(value, bool):
         return None
     return value if isinstance(value, int) else None
 
 
 def _validated_fact_row(row: Mapping[str, object]) -> FinancialFactRow | None:
-    """Narrow one raw store row to a FinancialFactRow; None when unusable.
-
-    The store is machine-written so every row validates; a row without a
-    concept, period end, or numeric value cannot assemble and is skipped.
-    Warehouse timestamp columns arrive as datetimes (TIMESTAMPTZ), so the
-    period-end gate coerces through the ISO helper instead of requiring str.
-    """
+    """Narrow one live normalized fact row to a FinancialFactRow; None when unusable."""
     concept = row.get("concept")
     period_end = _stored_opt_text(row.get("period_end"))
     value = row.get("value")
@@ -200,27 +176,76 @@ def _validated_fact_row(row: Mapping[str, object]) -> FinancialFactRow | None:
         "source_url": _stored_opt_text(row.get("source_url")),
     }
 
+def _gateway() -> SourceGateway:
+    """Per-call gateway: fetch-once-per-run cache never outlives the call."""
+    return SourceGateway()
+
+
+def _resolve_entity(ticker: str, as_of: _dt.date, data_root: Path | None) -> str | None:
+    """Resolve a ticker to its entity id through live company-tickers aliases.
+
+    The alias horizon is end-of-day UTC on the as-of date so an alias
+    knowable on the as-of day itself is visible (day-granularity semantics,
+    matching the ``known_at <= as_of`` facts gate). Ambiguous or
+    unresolved tickers resolve to None: no store path, never a guess.
+    """
+    del data_root
+    horizon = _dt.datetime.combine(as_of, _dt.time.max, tzinfo=_dt.UTC)
+    aliases = _gateway().ticker_candidates(ticker, horizon)
+    if not aliases:
+        cik = resolve_cik(ticker)
+        if cik is None:
+            return None
+        from ..domain.market.ids import sec_entity_id
+
+        return sec_entity_id(cik)
+    resolution = resolve_ticker_aliases(ticker, aliases, as_of=horizon)
+    if not resolution.resolved:
+        return None
+    return resolution.entity_id
+
+
+def _resolve_cik(entity_id: str) -> int | None:
+    """Trailing-digit CIK from a sec:cik entity id or a bare CIK string."""
+    try:
+        digits = "".join(ch for ch in str(entity_id or "") if ch.isdigit())
+        return int(digits) if digits else None
+    except (TypeError, ValueError):
+        return None
+
+
+def _live_fact_rows(entity_id: str, concepts: tuple[str, ...], as_of: _dt.date) -> list[FinancialFactRow]:
+    """Live normalized companyfacts for one entity, narrowed to validated rows."""
+    cik = _resolve_cik(entity_id)
+    if cik is None:
+        return []
+    try:
+        facts = _gateway().company_facts(cik, as_of=as_of.isoformat())
+    except Exception:
+        return []
+    rows = facts.get("financial_facts")
+    if not isinstance(rows, list):
+        return []
+    wanted = set(concepts)
+    validated: list[FinancialFactRow] = []
+    for row in rows:
+        if not isinstance(row, Mapping):
+            continue
+        if row.get("concept") not in wanted:
+            continue
+        fact = _validated_fact_row(row)
+        if fact is not None:
+            validated.append(fact)
+    validated.sort(key=lambda fact: (fact["period_end"], fact.get("filed_at") or "", fact.get("accession") or ""))
+    return validated
+
 
 def _store_rows(
     entity_id: str, concepts: tuple[str, ...], as_of: _dt.date, data_root: Path | None
 ) -> list[FinancialFactRow]:
-    clause, param = duckdb.as_of_clause(as_of.isoformat())
-    placeholders = ",".join("?" for _ in concepts)
-    rows = duckdb.query(
-        "SELECT concept, value, period_start, period_end, fiscal_year, "
-        "fiscal_period, filed_at, accession, known_at, source_url "
-        "FROM financial_facts "
-        f"WHERE entity_id = ? AND concept IN ({placeholders}) AND {clause} "
-        "ORDER BY period_end, filed_at, accession",
-        params=[entity_id, *concepts, param],
-        data_root=data_root,
-    )
-    validated: list[FinancialFactRow] = []
-    for row in rows:
-        fact = _validated_fact_row(row)
-        if fact is not None:
-            validated.append(fact)
-    return validated
+    """Live fallback is the only path: normalized companyfacts via the gateway."""
+    del data_root
+    return _live_fact_rows(entity_id, concepts, as_of)
 
 
 def _envelope(
@@ -253,7 +278,7 @@ def _envelope(
 
 
 # ---------------------------------------------------------------------------
-# EPS: store assembly mirroring edgar_client semantics
+# EPS: live assembly mirroring edgar_client semantics
 # ---------------------------------------------------------------------------
 
 
@@ -436,7 +461,7 @@ def _eps_ttm(quarters: Sequence[FinancialFactRow] | None) -> float | None:
 
 
 def _assemble_eps_payload(ticker: str, rows: Sequence[FinancialFactRow]) -> dict[str, object] | None:
-    """Deterministic store assembly over feed rows (pure; no storage)."""
+    """Deterministic live assembly over feed rows (pure; no storage)."""
     recent_diluted = _recent_concept_quarters(rows, DILUTED_EPS_CONCEPT)
     if not recent_diluted:
         return None
@@ -460,7 +485,7 @@ def _assemble_eps_payload(ticker: str, rows: Sequence[FinancialFactRow]) -> dict
 def _assemble_dividend_payload(
     ticker: str, rows: Sequence[FinancialFactRow], as_of: _dt.date
 ) -> dict[str, object] | None:
-    """Deterministic store assembly over feed rows (pure; no storage)."""
+    """Deterministic live assembly over feed rows (pure; no storage)."""
     if not any(r.get("concept") == DIVIDEND_PER_SHARE_CONCEPT for r in rows):
         return None
     quarters = _duration_rows(rows, DIVIDEND_PER_SHARE_CONCEPT, _QUARTER_DAYS)
@@ -537,27 +562,27 @@ def _validated_dividend_event(row: Mapping[str, object]) -> DividendEventRow | N
 
 
 def _store_dividend_events(entity_id: str, as_of: _dt.date, data_root: Path | None) -> list[DividendEventRow]:
-    """PIT-gated dividend events, deduped by id keeping max known_at.
+    """Live PIT-gated dividend events, deduped by id keeping max known_at.
 
     Amended filings produce different ids (amount is part of the id) so both
     revisions stay visible; duplicate 8-K/10-Q disclosures share an id and
     collapse here.
     """
-    clause, param = duckdb.as_of_clause(as_of.isoformat())
-    rows = duckdb.query(
-        "SELECT dividend_event_id, entity_id, security_id, ticker, amount_per_share, "
-        "currency, dividend_type, declaration_date, record_date, payment_date, "
-        "ex_dividend_date, ex_dividend_date_source, status, source_form, accession, "
-        "filed_at, known_at, source_url, source_concept, source_type, evidence_excerpt, "
-        "content_hash, parser_version "
-        "FROM dividend_events "
-        f"WHERE entity_id = ? AND {clause} "
-        "ORDER BY known_at, dividend_event_id",
-        params=[entity_id, param],
-        data_root=data_root,
-    )
+    del data_root
+    cik = _resolve_cik(entity_id)
+    if cik is None:
+        return []
+    try:
+        facts = _gateway().company_facts(cik, as_of=as_of.isoformat())
+    except Exception:
+        return []
+    rows = facts.get("dividend_events")
+    if not isinstance(rows, list):
+        return []
     by_id: dict[str, DividendEventRow] = {}
     for row in rows:
+        if not isinstance(row, Mapping):
+            continue
         event = _validated_dividend_event(row)
         if event is None:
             continue
@@ -1200,7 +1225,7 @@ def _assemble_dividend_safety(
 
 
 def get_fundamentals(ticker: str, metric: str, as_of: str | None = None) -> dict[str, object]:
-    """Store-first fundamentals with a truthful data_source envelope."""
+    """Live fundamentals with a truthful data_source envelope."""
     explicit_as_of = as_of is not None
     requested = _validated_as_of(as_of)
     if requested is None:
@@ -1229,13 +1254,12 @@ def _pit_unavailable(ticker: str, metric: str, requested: _dt.date) -> dict[str,
 
 
 def _store_dividend_inputs(ticker: str, requested: _dt.date) -> tuple[list[FinancialFactRow], list[DividendEventRow]]:
-    """Store rows + dividend events for one ticker at the requested date."""
-    data_root = DEFAULT_DATA_ROOT
-    entity_id = _resolve_entity(ticker, requested, data_root)
+    """Live rows + dividend events for one ticker at the requested date."""
+    entity_id = _resolve_entity(ticker, requested, None)
     store_rows: list[FinancialFactRow] = (
-        _store_rows(entity_id, _DIVIDEND_CONCEPTS + _SAFETY_CONCEPTS, requested, data_root) if entity_id else []
+        _store_rows(entity_id, _DIVIDEND_CONCEPTS + _SAFETY_CONCEPTS, requested, None) if entity_id else []
     )
-    events: list[DividendEventRow] = _store_dividend_events(entity_id, requested, data_root) if entity_id else []
+    events: list[DividendEventRow] = _store_dividend_events(entity_id, requested, None) if entity_id else []
     return store_rows, events
 
 
@@ -1283,7 +1307,7 @@ def _store_dividend_payload(
     *,
     current: bool,
 ) -> dict[str, object]:
-    """Store-path merged payload: events analysis + valuation + safety."""
+    """Live-path merged payload: events analysis + valuation + safety."""
     valuation = _dividend_valuation(ticker, payload.get("ttm_dividend_per_share"), include_price=current)
     growth, ttm_dps, annual_history = _events_analysis_inputs(payload)
     safety = _assemble_dividend_safety(
@@ -1329,7 +1353,7 @@ def _dividend_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool
             ticker,
             "dividends",
             merged,
-            data_source="store",
+            data_source="live",
             as_of_date=requested.isoformat(),
             row_count=len(history_count) if isinstance(history_count, list) else 0,
         )
@@ -1339,10 +1363,9 @@ def _dividend_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool
 
 
 def _eps_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = False) -> dict[str, object]:
-    data_root = DEFAULT_DATA_ROOT
-    entity_id = _resolve_entity(ticker, requested, data_root)
+    entity_id = _resolve_entity(ticker, requested, None)
     store_rows: list[FinancialFactRow] = (
-        _store_rows(entity_id, _EPS_CONCEPTS, requested, data_root) if entity_id else []
+        _store_rows(entity_id, _EPS_CONCEPTS, requested, None) if entity_id else []
     )
     payload: dict[str, object] | None = _assemble_eps_payload(ticker, store_rows) if store_rows else None
     if payload is not None:
@@ -1351,7 +1374,7 @@ def _eps_fundamental(ticker: str, requested: _dt.date, explicit_as_of: bool = Fa
             ticker,
             "eps",
             payload,
-            data_source="store",
+            data_source="live",
             as_of_date=requested.isoformat(),
             row_count=len(quarters_count) if isinstance(quarters_count, list) else 0,
         )
@@ -1401,24 +1424,20 @@ def _latest_shares_row(
     requested: _dt.date, data_root: Path | None, entity_id: str
 ) -> tuple[dict[str, object], float] | None:
     """Newest (row, shares value) for shares-outstanding, else None."""
-    clause, param = duckdb.as_of_clause(requested.isoformat())
-    rows = duckdb.query(
-        "SELECT value, period_end, filed_at, accession, known_at, source_url "
-        "FROM financial_facts "
-        f"WHERE entity_id = ? AND concept = ? AND {clause} "
-        "ORDER BY period_end DESC, filed_at DESC, accession DESC LIMIT 1",
-        params=[entity_id, SHARES_OUTSTANDING_CONCEPT, param],
-        data_root=data_root,
+    del data_root
+    rows = _live_fact_rows(entity_id, (SHARES_OUTSTANDING_CONCEPT,), requested)
+    if not rows:
+        return None
+    latest = max(
+        rows, key=lambda row: (row["period_end"], row.get("filed_at") or "", row.get("accession") or "")
     )
-    if rows:
-        candidate_value = rows[0].get("value")
-        if isinstance(candidate_value, (int, float)):
-            return rows[0], float(candidate_value)
-    return None
+    if not isinstance(latest["value"], (int, float)):
+        return None
+    return dict(latest), float(latest["value"])
 
 
 def _shares_store_payload(ticker: str, row: Mapping[str, object], shares_value: float | None) -> dict[str, object]:
-    """Store-path shares-outstanding payload anchored on the latest row."""
+    """Live-path shares-outstanding payload anchored on the latest row."""
     return {
         "ticker": ticker,
         "shares_outstanding": shares_value,
@@ -1435,12 +1454,11 @@ def _shares_store_payload(ticker: str, row: Mapping[str, object], shares_value: 
 def _shares_outstanding_fundamental(
     ticker: str, requested: _dt.date, explicit_as_of: bool = False
 ) -> dict[str, object]:
-    data_root = DEFAULT_DATA_ROOT
-    entity_id = _resolve_entity(ticker, requested, data_root)
+    entity_id = _resolve_entity(ticker, requested, None)
     row: dict[str, object] | None = None
     shares_value: float | None = None
     if entity_id:
-        latest = _latest_shares_row(requested, data_root, entity_id)
+        latest = _latest_shares_row(requested, None, entity_id)
         if latest is not None:
             row, shares_value = latest
     if row is not None:
@@ -1448,7 +1466,7 @@ def _shares_outstanding_fundamental(
             ticker,
             "shares_outstanding",
             _shares_store_payload(ticker, row, shares_value),
-            data_source="store",
+            data_source="live",
             as_of_date=requested.isoformat(),
             row_count=1,
         )

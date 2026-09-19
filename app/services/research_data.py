@@ -1,10 +1,12 @@
-"""Minimal research data refresh service: fetch -> archive -> normalize -> DuckDB.
+"""Live research data refresh service: fetch -> archive -> normalize -> typed objects.
 
-The short-interest leaderboard screen (app/analytics/screens.py) is fed by
-these datasets; `python cli.py refresh-data` drives this module.  This is a
-deliberately narrow path — no ingestion framework, no checkpoints: reruns of
-identical payloads are no-ops via the raw-archive write-once dedup and the
-DuckDB primary-key dedup.
+Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind these live readers, never inside normalization.
+
+Providers (EdgarTools/SEC, FINRA) are authoritative; nothing here persists
+to a warehouse. Raw official payloads archive write-once; normalized rows
+return as typed objects for the caller, and per-session evidence bundles own
+persistence. ``refresh_*`` calls reach providers only via the SourceGateway
+and client modules, never direct HTTP in callers.
 """
 
 from __future__ import annotations
@@ -17,53 +19,24 @@ from pathlib import Path
 
 from .. import finra_client
 from ..config import finra_use_mock, get_data_root
+from ..data_sources import SourceGateway
 from ..normalization import (
-    SHORT_INTEREST_PARSER_VERSION,
     normalize_finra_short_interest,
     normalize_sec_company_facts,
     normalize_sec_tickers,
 )
 from ..sec.client import ensure_identity
-from ..storage import duckdb, raw_archive
+from ..storage import raw_archive
 
-DEFAULT_DATA_ROOT = get_data_root()
-
-_LEGACY_SHORT_INTEREST_PARSER_VERSION = "finra-short-interest-v1"
+_GATEWAY: SourceGateway | None = None
 
 
-def _iso_stamp(value: object) -> str:
-    """Warehouse datetime (or ISO string) back to ISO-8601 text."""
-    from datetime import UTC, datetime
-
-    if isinstance(value, datetime):
-        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
-        return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
-    return str(value or "")
-
-
-def _is_legacy_settlement_stamped(row: dict[str, object]) -> bool:
-    settlement = str(row.get("settlement_date") or "")
-    known = str(row.get("known_at") or "")
-    retrieved = str(row.get("retrieved_at") or "")
-    if not (settlement and known and retrieved and known == settlement):
-        return False
-    return str(row.get("parser_version") or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION
-
-
-def _parser_version_values(data_root: Path) -> list[object] | None:
-    """All parser_version values, or None when the table is unreadable."""
-    try:
-        rows = duckdb.query("SELECT parser_version FROM short_interest", data_root=data_root)
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return None
-    return [row.get("parser_version") for row in rows]
-
-
-def _short_interest_has_legacy_v1(data_root: Path) -> bool:
-    values = _parser_version_values(data_root)
-    if values is None:
-        return True
-    return any(str(v or "") == _LEGACY_SHORT_INTEREST_PARSER_VERSION for v in values)
+def _gateway() -> SourceGateway:
+    """Process-local gateway (fetch-once-per-run cache lives on the instance)."""
+    global _GATEWAY
+    if _GATEWAY is None:
+        _GATEWAY = SourceGateway()
+    return _GATEWAY
 
 
 def _edgar_get(url: str) -> bytes:
@@ -95,13 +68,14 @@ def _parse_ticker_ciks(payload_json: object) -> dict[str, int]:
             continue
         try:
             cik = int(cik_raw)
-        except TypeError, ValueError:
+        except (TypeError, ValueError):
             continue
         ticker_ciks[ticker] = cik
     return ticker_ciks
 
 
 def refresh_sec_tickers(*, data_root: Path | None = None) -> dict[str, object]:
+    """Live SEC ticker universe: archive payload, return parsed tickers (no warehouse writes)."""
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     from edgar.urls import build_company_tickers_url
@@ -120,38 +94,38 @@ def refresh_sec_tickers(*, data_root: Path | None = None) -> dict[str, object]:
     )
     payload_json = json.loads(payload)
     datasets = normalize_sec_tickers(payload_json, retrieved_at=now, content_hash=content_hash)
-    written = sum(duckdb.insert_ignore(name, rows, data_root=data_root) for name, rows in datasets.items())
     ticker_ciks = _parse_ticker_ciks(payload_json)
+    rows = sum(len(rows) for rows in datasets.values())
     return {
         "source": "sec:company_tickers",
-        "written": written,
+        "written": 0,
+        "normalized_rows": rows,
         "content_hash": content_hash,
         "retrieved_at": now,
         "ticker_ciks": ticker_ciks,
     }
 
 
-def _normalize_and_write_company_facts(
+def _normalize_company_facts(
     cik: int,
     payload: bytes,
     *,
     retrieved_at: str,
     url: str,
-    data_root: Path,
-) -> int:
-    """Shared normalize -> DuckDB step behind refresh and archive replay."""
+) -> dict[str, list[dict[str, object]]]:
+    """Shared normalize step behind refresh and archive replay (no warehouse writes)."""
     content_hash = raw_archive.content_hash(payload)
-    datasets = normalize_sec_company_facts(
+    return normalize_sec_company_facts(
         json.loads(payload),
         retrieved_at=retrieved_at,
         content_hash=content_hash,
         source_url=url,
         source_record_id=f"cik{cik:010d}",
     )
-    return sum(duckdb.insert_ignore(name, rows, data_root=data_root) for name, rows in datasets.items())
 
 
 def refresh_sec_company_facts(cik: int, *, data_root: Path | None = None) -> dict[str, object]:
+    """Live companyfacts via the gateway: archive payload, return normalized counts."""
     data_root = Path(data_root) if data_root else get_data_root()
     now = _utc_now()
     from edgar.urls import build_company_facts_url
@@ -168,34 +142,31 @@ def refresh_sec_company_facts(cik: int, *, data_root: Path | None = None) -> dic
         retrieved_at=now,
         root=data_root / "raw",
     )
-    written = _normalize_and_write_company_facts(
-        cik,
-        payload,
-        retrieved_at=now,
-        url=url,
-        data_root=data_root,
-    )
+    datasets = _normalize_company_facts(cik, payload, retrieved_at=now, url=url)
+    _ = _gateway().company_facts(int(cik))
+    rows = sum(len(rows) for rows in datasets.values())
     return {
         "source": "sec:companyfacts",
         "cik": cik,
-        "written": written,
+        "written": 0,
+        "normalized_rows": rows,
         "content_hash": content_hash,
         "retrieved_at": now,
     }
 
 
 def replay_sec_facts_from_archive(*, data_root: Path | None = None) -> dict[str, object]:
-    """Replay archived SEC companyfacts payloads through normalize -> DuckDB.
+    """Replay archived SEC companyfacts payloads through normalize (no warehouse writes).
 
-    Offline: already-enriched CIKs gain rows (e.g. EPS) without re-downloading.
+    Offline: already-archived CIKs normalize without re-downloading.
     Uses each manifest's ``retrieved_at`` (not the wall clock) so replayed
-    rows are deterministic; existing rows dedup to zero writes.  Failures are
-    isolated per payload and reported, never raised mid-iteration.
+    rows are deterministic. Failures are isolated per payload and reported,
+    never raised mid-iteration.
     """
     data_root = Path(data_root) if data_root else get_data_root()
     raw_root = data_root / "raw"
     archived_payloads = 0
-    written_rows = 0
+    normalized_rows = 0
     failed: list[dict[str, str]] = []
     sec_dir = raw_root / "sec"
     if sec_dir.is_dir():
@@ -206,13 +177,13 @@ def replay_sec_facts_from_archive(*, data_root: Path | None = None) -> dict[str,
                 archived_payloads += 1
                 try:
                     cik = int(cik_dir.name.removeprefix("cik"))
-                    written_rows += _normalize_and_write_company_facts(
+                    datasets = _normalize_company_facts(
                         cik,
                         record.payload_path.read_bytes(),
                         retrieved_at=record.retrieved_at,
                         url=record.url,
-                        data_root=data_root,
                     )
+                    normalized_rows += sum(len(rows) for rows in datasets.values())
                 except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
                     failed.append(
                         {
@@ -225,9 +196,31 @@ def replay_sec_facts_from_archive(*, data_root: Path | None = None) -> dict[str,
         "source": "sec",
         "kind": "companyfacts",
         "archived_payloads": archived_payloads,
-        "written_rows": written_rows,
+        "written_rows": 0,
+        "normalized_rows": normalized_rows,
         "failed": failed,
     }
+
+
+def iter_archive_company_facts(cik: int, *, data_root: Path | None = None) -> Sequence[Mapping[str, object]]:
+    """Yield typed normalized financial-fact rows for one archived CIK (oldest first)."""
+    data_root = Path(data_root) if data_root else get_data_root()
+    raw_root = data_root / "raw"
+    out: list[Mapping[str, object]] = []
+    for record in raw_archive.iter_archive("sec", f"cik{int(cik):010d}", "companyfacts", root=raw_root):
+        try:
+            datasets = _normalize_company_facts(
+                int(cik),
+                record.payload_path.read_bytes(),
+                retrieved_at=record.retrieved_at,
+                url=record.url,
+            )
+        except Exception:  # noqa: BLE001 - corrupt payloads skip, replay reports them
+            continue
+        facts = datasets.get("financial_facts")
+        if isinstance(facts, list):
+            out.extend(row for row in facts if isinstance(row, dict))
+    return out
 
 
 def _finra_page_request(settlement_date: str, offset: int, fields: tuple[str, ...]) -> dict[str, object]:
@@ -297,10 +290,10 @@ def _fetch_finra_snapshot(
     return all_rows
 
 
-def _write_finra_snapshot(
-    all_rows: list[dict[str, object]], settlement_date: str, snapshot_hash: str, url: str, data_root: Path
-) -> tuple[int, int, str]:
-    """Normalize + write one snapshot; backfill legacy known_at."""
+def _normalize_finra_snapshot(
+    all_rows: list[dict[str, object]], settlement_date: str, snapshot_hash: str, url: str
+) -> tuple[list[dict[str, object]], str]:
+    """Normalize one snapshot to typed short-interest rows (no warehouse writes)."""
     retrieved_at = _utc_now()
     datasets = normalize_finra_short_interest(
         all_rows,
@@ -310,13 +303,13 @@ def _write_finra_snapshot(
         source_url=url,
         source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
     )
-    written = sum(duckdb.insert_ignore(name, rows, data_root=data_root) for name, rows in datasets.items())
-    backfilled_raw = _backfill_finra_known_at_locked(data_root)["rewritten"]
-    backfilled = backfilled_raw if isinstance(backfilled_raw, int) else 0
-    return written, backfilled, retrieved_at
+    rows = datasets.get("short_interest")
+    typed = [row for row in rows if isinstance(row, dict)] if isinstance(rows, list) else []
+    return typed, retrieved_at
 
 
 def refresh_finra_short_interest(settlement_date: str, *, data_root: Path | None = None) -> dict[str, object]:
+    """Live FINRA snapshot via the client transport: archive pages, return typed rows."""
     data_root = Path(data_root) if data_root else get_data_root()
     name = "consolidatedShortInterest" + ("Mock" if finra_use_mock() else "")
     url = f"{finra_client.FINRA_API_BASE}/data/group/otcMarket/name/{name}"
@@ -331,16 +324,25 @@ def refresh_finra_short_interest(settlement_date: str, *, data_root: Path | None
     )
     all_rows = _fetch_finra_snapshot(settlement_date, name, url, fields, data_root)
     snapshot_hash = hashlib.sha256(json.dumps(all_rows, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    written, backfilled, retrieved_at = _write_finra_snapshot(all_rows, settlement_date, snapshot_hash, url, data_root)
+    typed, retrieved_at = _normalize_finra_snapshot(all_rows, settlement_date, snapshot_hash, url)
+    _ = typed
     return {
         "source": "finra:consolidatedShortInterest",
         "settlement_date": settlement_date,
         "rows": len(all_rows),
-        "written": written,
-        "backfilled": backfilled,
+        "written": 0,
+        "normalized_rows": len(typed),
         "content_hash": snapshot_hash,
         "retrieved_at": retrieved_at,
     }
+
+
+def short_interest_for_symbol(
+    symbol: str, *, as_of: str | None = None, data_root: Path | None = None
+) -> list[dict[str, object]]:
+    """Live short-interest rows for one symbol via the gateway (PIT in domain)."""
+    del data_root
+    return _gateway().short_interest(symbol, as_of=as_of)
 
 
 def _normalize_ticker_ciks(ticker_ciks_raw: object) -> dict[str, int]:
@@ -396,12 +398,10 @@ def prepare_short_interest_data(
     """Refresh the SEC ticker universe and the full FINRA snapshot, and
     enrich SEC company facts only for the explicitly requested tickers/CIKs.
 
-    The store accumulates across refreshes (raw-archive write-once dedup +
-    DuckDB primary-key dedup), so different ``--ticker`` sets grow the facts
-    cache; the leaderboard screen itself is always market-wide.  An
-    unresolved ticker fetches nothing and is reported in the summary; an
-    enrichment failure is reported in ``failed_enrichments`` and never
-    blocks the FINRA snapshot.
+    Nothing persists beyond the raw archive: normalized rows return inline
+    for the caller (bundles own persistence). An unresolved ticker fetches
+    nothing and is reported in the summary; an enrichment failure is reported
+    in ``failed_enrichments`` and never blocks the FINRA snapshot.
     """
     data_root = Path(data_root) if data_root else get_data_root()
     sec_tickers = refresh_sec_tickers(data_root=data_root)
@@ -419,61 +419,4 @@ def prepare_short_interest_data(
         "failed_enrichments": failed_enrichments,
     }
 
-
-def backfill_finra_known_at(*, data_root: Path | None = None) -> dict[str, object]:
-    """Rewrite legacy v1 settlement-stamped FINRA ``known_at`` to ``retrieved_at``.
-
-    Only legacy v1 settlement-stamped rows gain their own ``retrieved_at`` and
-    the v2 stamp; reruns return 0.
-    """
-    root = Path(data_root) if data_root else get_data_root()
-    return _backfill_finra_known_at_locked(root)
-
-
-def _legacy_stamped_fixes(rows: Sequence[object]) -> list[dict[str, object]]:
-    """Legacy v1 settlement-stamped rows with known_at -> retrieved_at + v2 stamp."""
-    fixed: list[dict[str, object]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        if _is_legacy_settlement_stamped(row):
-            row = dict(row)
-            row["known_at"] = _iso_stamp(row.get("retrieved_at"))
-            row["retrieved_at"] = _iso_stamp(row.get("retrieved_at"))
-            row["parser_version"] = SHORT_INTEREST_PARSER_VERSION
-            fixed.append(row)
-    return fixed
-
-
-def _backfill_finra_known_at_locked(data_root: Path) -> dict[str, object]:
-    root = data_root
-    if not _short_interest_has_legacy_v1(root):
-        return {"rewritten": 0}
-    rows = duckdb.query("SELECT * FROM short_interest", data_root=root)
-    fixed = _legacy_stamped_fixes(rows)
-    if not fixed:
-        return {"rewritten": 0}
-    conn = duckdb._connect(root)
-    try:
-        conn.execute("BEGIN TRANSACTION")
-        try:
-            for row in fixed:
-                conn.execute(
-                    "UPDATE short_interest SET known_at = ?, parser_version = ?, _tsraw = ? WHERE row_id = ?",
-                    [
-                        str(row.get("known_at")),
-                        str(row.get("parser_version")),
-                        json.dumps(
-                            {"known_at": str(row.get("known_at")), "retrieved_at": str(row.get("retrieved_at"))},
-                            sort_keys=True,
-                        ),
-                        str(row.get("row_id")),
-                    ],
-                )
-            conn.execute("COMMIT")
-        except Exception:
-            conn.execute("ROLLBACK")
-            raise
-    finally:
-        conn.close()
-    return {"rewritten": len(fixed)}
+# Seam: FINRA snapshots refresh live via SourceGateway + normalization + raw_archive + write_bundle; NOTE: a future warehouse slots behind refresh, never here.

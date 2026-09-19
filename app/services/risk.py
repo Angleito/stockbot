@@ -1,38 +1,70 @@
-"""Storage-touching glue for mandate evaluation.
+"""Mandate evaluation glue: snapshot + provider sectors.
 
-Loads the mandate file, the latest persisted portfolio snapshot, and the
-newest-per-entity sector mappings, then delegates the pure math to the
-domain evaluator.  Nothing is persisted; evaluations are computed on
-demand.
+Loads the mandate file and the latest persisted portfolio snapshot, builds
+the entity -> sector map from the provider-supplied sector field (SEC
+submissions), then delegates the pure math to the domain evaluator.
+Nothing is persisted; evaluations are computed on demand.
 """
 
 from __future__ import annotations
 
-from datetime import datetime
+from collections.abc import Iterable
 from pathlib import Path
 
+from ..domain.portfolio import Position
 from ..domain.risk.evaluation import RiskEvaluation, evaluate_mandate
-from ..storage import duckdb
 from .mandate import load_mandate_file
 from .portfolio_sync import read_latest_snapshot
 
 
-def load_sector_map(data_root: Path | None = None, as_of: datetime | None = None) -> dict[str, str]:
-    """Newest-per-entity sector from sector_mappings, knowable on/before as_of;
-    same-instant conflicting sectors drop the entity (unknown exposure)."""
-    clause, param = duckdb.as_of_clause(as_of.isoformat()) if as_of else ("1 = 1", None)
-    params = [param] if param is not None else []
-    rows = duckdb.query(
-        "SELECT entity_id, sector FROM ("
-        "SELECT entity_id, sector, "
-        "row_number() OVER (PARTITION BY entity_id ORDER BY CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
-        "count(DISTINCT sector) OVER (PARTITION BY entity_id, CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
-        f"FROM sector_mappings WHERE {clause}"
-        ") WHERE _rn = 1 AND _variants = 1",
-        params=params,
-        data_root=data_root,
-    )
-    return {str(row["entity_id"]): str(row["sector"]) for row in rows}
+def _cik_of(entity_id: str | None) -> int | None:
+    """CIK int for SEC entity ids (None when absent or not an SEC identity)."""
+    if not isinstance(entity_id, str) or not entity_id.startswith("sec:cik:"):
+        return None
+    try:
+        return int(entity_id.split(":")[-1])
+    except ValueError:
+        return None
+
+
+def _provider_sector(cik: int) -> str | None:
+    """Provider-supplied sector for one CIK (None when unavailable)."""
+    from ..sec.client import get_submissions_metadata
+
+    meta = get_submissions_metadata(cik)
+    if not isinstance(meta, dict):
+        return None
+    for key in ("sic_description", "sic"):
+        sector = meta.get(key)
+        if isinstance(sector, str) and sector.strip():
+            return sector.strip()
+    return None
+
+
+def load_sector_map(positions: Iterable[Position]) -> dict[str, str]:
+    """Entity -> sector from live SEC submissions.
+
+    Entities without an SEC identity or without a provider sector stay
+    unmapped (unknown exposure, as before). A provider failure skips the
+    entity; evaluation still runs.
+    """
+    sectors: dict[str, str] = {}
+    seen: set[str] = set()
+    for position in positions:
+        entity_id = position.entity_id
+        if entity_id is None or entity_id in seen:
+            continue
+        seen.add(entity_id)
+        cik = _cik_of(entity_id)
+        if cik is None:
+            continue
+        try:
+            sector = _provider_sector(cik)
+        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+            continue
+        if sector is not None:
+            sectors[entity_id] = sector
+    return sectors
 
 
 def evaluate_latest_mandate(mandate_path: Path, data_root: Path | None = None) -> RiskEvaluation:
@@ -47,5 +79,5 @@ def evaluate_latest_mandate(mandate_path: Path, data_root: Path | None = None) -
         raise FileNotFoundError(
             "no persisted portfolio snapshot; run a portfolio sync (get_portfolio_snapshot with refresh) first"
         )
-    sector_map = load_sector_map(data_root=data_root, as_of=snapshot.created_at)
+    sector_map = load_sector_map(snapshot.positions)
     return evaluate_mandate(snapshot, mandate, sector_map)

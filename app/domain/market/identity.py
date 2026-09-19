@@ -2,9 +2,8 @@
 
 Reproduces the entity_aliases resolution semantics — visibility, entity
 ambiguity, newest-instant selection, security-id ambiguity — with no
-storage dependency.  Storage hands over candidate rows via
-``ticker_alias_candidates`` and the row mapper materializes fields; the
-resolver derives sec:cik security ids itself.
+storage dependency.  ``SourceGateway.ticker_candidates`` hands over a
+``TickerAlias`` list; the resolver derives sec:cik security ids itself.
 """
 
 from __future__ import annotations

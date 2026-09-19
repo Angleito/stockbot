@@ -27,17 +27,12 @@ import re
 from collections.abc import Mapping, MutableMapping, Sequence
 from datetime import UTC, datetime
 from functools import partial
-from pathlib import Path
-from typing import TYPE_CHECKING, Protocol, TypedDict, runtime_checkable
+from typing import Protocol, TypedDict, runtime_checkable
 
 from edgar import Filing
 
 from . import cache, edgar_client
-from .domain.events import sec_event_id
 from .services.sec_facts import FinancialFactRow, StoredFactKey
-
-if TYPE_CHECKING:
-    import pandas as pd
 
 logger = logging.getLogger(__name__)
 
@@ -163,8 +158,8 @@ def _positive_amount(row: Mapping[str, object]) -> float | None:
 def _publish_lifecycle(
     rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]
 ) -> None:
-    """Strip persist-internal keys; publish underscore lifecycle as public."""
-    for row in rows + bucket + capital:  # archive annotations are persist-internal, not public
+    """Strip evidence-internal keys; publish underscore lifecycle as public."""
+    for row in rows + bucket + capital:  # archive annotations are evidence-internal, not public
         row.pop("_archive_key", None)
         row.pop("_archive_sha", None)
         row.pop("_accession", None)
@@ -678,36 +673,35 @@ def _store_fact_text_row(row: dict[str, object]) -> dict[str, object]:
     return out
 
 
-def _xbrl_store_facts(ticker: str) -> list[FinancialFactRow]:
-    """Normalized-store XBRL facts for obligation concepts (PIT provenance).
+def _xbrl_gateway_facts(ticker: str) -> list[FinancialFactRow]:
+    """Normalized gateway facts for obligation concepts (PIT provenance).
 
-    Returns raw ``financial_facts`` rows (concept/value/period/filed_at/
-    accession/known_at); empty when the store has nothing (ingestion gap).
-    Separated for testability; raises only on unexpected store errors.
+    Live provider rows via the SourceGateway seam, narrowed to
+    ``FinancialFactRow`` shape through the existing validator; empty when
+    the provider has nothing (ingestion gap). Raises only on unexpected
+    provider errors.
     """
     from datetime import date
 
-    from .services import sec_facts
-    from .storage import duckdb
+    from .data_sources import SourceGateway
+    from .sec.client import resolve_cik
+    from .services import sec_facts as _sec_facts
 
-    today = date.today()  # noqa: DTZ011 - trading-calendar local date has no tz meaning
-    entity_id = sec_facts._resolve_entity(ticker, today, sec_facts.DEFAULT_DATA_ROOT)
-    if not entity_id:
+    cik = resolve_cik(ticker.strip().upper())
+    if cik is None:
         return []
+    today = date.today().isoformat()  # noqa: DTZ011 - trading-calendar local date has no tz meaning
+    facts = SourceGateway().company_facts(cik, as_of=today)
+    rows = facts.get("financial_facts") if isinstance(facts, dict) else None
     needles = tuple(_XBRL_OBLIGATION_CONCEPTS)
-    like = " OR ".join(["concept LIKE ?"] * len(needles))
-    clause, param = duckdb.as_of_clause(today.isoformat())
-    rows = duckdb.query(
-        "SELECT concept, value, period_start, period_end, fiscal_year, "
-        "fiscal_period, filed_at, accession, known_at, source_url "
-        "FROM financial_facts "
-        f"WHERE entity_id = ? AND ({like}) AND {clause} "
-        "ORDER BY period_end, filed_at, accession",
-        params=[entity_id, *[f"%{n}%" for n in needles], param],
-        data_root=sec_facts.DEFAULT_DATA_ROOT,
-    )
-    rows = [_store_fact_text_row(row) for row in rows]
-    return [fact for row in rows if (fact := sec_facts._validated_fact_row(row)) is not None]
+    validated: list[FinancialFactRow] = []
+    for row in rows if isinstance(rows, list) else []:
+        if not isinstance(row, dict) or not any(n in str(row.get("concept") or "") for n in needles):
+            continue
+        fact = _sec_facts._validated_fact_row(_store_fact_text_row(row))
+        if fact is not None:
+            validated.append(fact)
+    return validated
 
 
 def _store_fact_key(f: FinancialFactRow) -> StoredFactKey:
@@ -767,29 +761,15 @@ def _xbrl_best_by_kind(store_facts: list[FinancialFactRow]) -> dict[str, Financi
     return store_by_kind
 
 
-def _xbrl_load_store_facts(ticker: str) -> list[FinancialFactRow]:
-    """Store facts with store-read failures logged as warnings, never raised."""
+def _xbrl_load_gateway_facts(ticker: str) -> list[FinancialFactRow]:
+    """Gateway facts with provider failures logged as warnings, never raised."""
     try:
-        return _xbrl_store_facts(ticker)
+        return _xbrl_gateway_facts(ticker)
     except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        logger.warning("xbrl store read failed for %s: %s", ticker, e)
+        logger.warning("xbrl gateway read failed for %s: %s", ticker, e)
         return []
-
-
-def _xbrl_live_facts(ticker: str) -> tuple[pd.DataFrame | None, str | None]:
-    """Live Company Facts frame plus error text (None, None only on success path split)."""
-    try:
-        facts_obj = edgar_client.get_company(ticker).get_facts()
-        if facts_obj is None:
-            raise ValueError("company facts unavailable")
-        return facts_obj.to_dataframe(), None
-    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        logger.warning("xbrl obligations failed for %s: %s", ticker, e)
-        return None, str(e)
-
-
 def _xbrl_store_row(kind: str, fact: FinancialFactRow) -> dict[str, object] | None:
-    """One store-backed obligation row (None when value missing)."""
+    """One gateway-backed obligation row (None when value missing)."""
     concept = fact.get("concept")
     val_raw = fact.get("value")
     if val_raw is None:
@@ -828,142 +808,41 @@ def _xbrl_store_rows(store_by_kind: dict[str, FinancialFactRow], seen: set[tuple
     return rows
 
 
-def _xbrl_proxy_filing(ticker: str) -> tuple[str | None, str, Filing | None]:
-    """Latest 10-K/10-Q filing date triple for proxied live-fact provenance."""
-    for form in ("10-K", "10-Q"):
-        found = _latest_report(ticker, form)
-        if found is not None:
-            proxy_filing = found[0]
-            return str(proxy_filing.filing_date), form, proxy_filing
-    return None, "XBRL", None
-
-
-def _xbrl_live_row(
-    kind: str, concept: str, value: float, period_end: str, filing_date: str | None, proxy_form: str
-) -> dict[str, object]:
-    """One live-fallback row with proxied-provenance coverage warning."""
-    return {
-        "type": kind,
-        "amount_billions": round(value / 1e9, 3),
-        "certainty": "contractual",
-        "status": _xbrl_status(kind),
-        "revenue_matched": False,
-        "default_triggered": False,
-        "source": f"SEC EDGAR XBRL {concept}",
-        "filed": filing_date,
-        "as_of": period_end,
-        "excerpt": f"XBRL fact {concept} = {value:,.0f} as of {period_end}",
-        "concept": concept,
-        "provenance": "proxied",
-        "_coverage_warning": (
-            f"XBRL provenance is proxied for {concept}: store has no rows, filed date is the latest {proxy_form} proxy"
-        ),
-    }
-
-
-def _xbrl_live_frame_concepts(facts: pd.DataFrame) -> list[str]:
-    """Distinct concept tags from the live facts frame."""
-    unique = facts["concept"].unique()
-    return [str(c) for c in list(unique)]
-
-
-def _xbrl_live_concept_rows(
-    facts: pd.DataFrame,
-    store_by_kind: dict[str, FinancialFactRow],
-    seen: set[tuple[str, str]],
-    filing_date: str | None,
-    proxy_form: str,
-) -> list[dict[str, object]]:
-    """Live-fallback rows for concepts the store lacks (deduped, non-zero)."""
-    rows: list[dict[str, object]] = []
-    for concept in _xbrl_live_frame_concepts(facts):
-        row = _xbrl_live_concept_row(facts, concept, store_by_kind, seen, filing_date, proxy_form)
-        if row is not None:
-            rows.append(row)
-    return rows
-
-
-def _xbrl_live_concept_kind(concept: str, store_by_kind: dict[str, FinancialFactRow]) -> str | None:
-    """Obligation kind for one live concept (None when unmatched/stored)."""
-    for needle, kind in _XBRL_OBLIGATION_CONCEPTS.items():
-        if needle not in concept:
-            continue
-        if kind in store_by_kind:
-            return None
-        return kind
-    return None
-
-
-def _xbrl_live_latest(facts: pd.DataFrame, concept: str) -> tuple[float, str]:
-    """Latest (value, period_end) for one live concept tag."""
-    sub = facts[facts["concept"] == concept]
-    latest = sub.sort_values("period_end").iloc[-1]
-    return float(latest["value"]), str(latest["period_end"])
-
-
-def _xbrl_live_concept_row(
-    facts: pd.DataFrame,
-    concept: str,
-    store_by_kind: dict[str, FinancialFactRow],
-    seen: set[tuple[str, str]],
-    filing_date: str | None,
-    proxy_form: str,
-) -> dict[str, object] | None:
-    """One live-fallback concept row (None when stored/duplicate/zero)."""
-    kind = _xbrl_live_concept_kind(concept, store_by_kind)
-    if kind is None:
-        return None
-    value, period_end = _xbrl_live_latest(facts, concept)
-    key = (kind, period_end)
-    if key in seen or value == 0:
-        return None
-    seen.add(key)
-    return _xbrl_live_row(kind, concept, value, period_end, filing_date, proxy_form)
-
-
 def _xbrl_record_manifest(
     manifest: list[dict[str, object]] | None,
-    proxy_form: str,
-    proxy_filing: Filing | None,
     count: int,
-    live: bool,
-    store_by_kind: dict[str, FinancialFactRow],
+    gateway_by_kind: dict[str, FinancialFactRow],
     error: str | None,
 ) -> None:
-    """Manifest entry for the XBRL scan (failed/scanned per source state)."""
+    """Manifest entry for the XBRL scan (failed/scanned per provider state)."""
     if manifest is None:
         return
-    if not live and not store_by_kind:
+    if not gateway_by_kind:
         manifest.append(_manifest_entry("XBRL", None, ["xbrl_facts"], 0, 0, "failed", error))
-    elif live:
-        manifest.append(_manifest_entry(proxy_form, proxy_filing, ["xbrl_facts"], count, 0, "scanned"))
-    elif store_by_kind:
+    else:
         manifest.append(_manifest_entry("XBRL", None, ["xbrl_facts"], count, 0, "scanned"))
 
 
 def _xbrl_obligations(ticker: str, *, manifest: list[dict[str, object]] | None = None) -> list[dict[str, object]]:
     """Layer 1: standardized us-gaap obligation concepts.
 
-    Store-first: each concept resolves through the normalized
-    ``financial_facts`` store so rows carry their own fact provenance
+    Live gateway facts only: each concept resolves through the provider
+    payload so rows carry their own fact provenance
     (``filed=filed_at``, ``known_at``, ``accession``, ``as_of=period_end``).
-    Restatements resolve by latest ``(filed_at, accession)``. The live
-    Company Facts read is fallback only for concepts the store lacks, and
-    those rows stash a proxied-provenance warning for coverage.
+    Restatements resolve by latest ``(filed_at, accession)``. Evaluated in
+    memory; nothing is persisted.
     """
-    store_by_kind = _xbrl_best_by_kind(_xbrl_load_store_facts(ticker))
-    facts, live_error = _xbrl_live_facts(ticker)
+    error: str | None = None
+    try:
+        gateway_by_kind = _xbrl_best_by_kind(_xbrl_gateway_facts(ticker))
+    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        logger.warning("xbrl gateway read failed for %s: %s", ticker, e)
+        gateway_by_kind = {}
+        error = str(e)
     rows: list[dict[str, object]] = []
     seen: set[tuple[str, str]] = set()
-    rows.extend(_xbrl_store_rows(store_by_kind, seen))
-    proxy_form, proxy_filing = "XBRL", None
-    if facts is not None:
-        # Company facts aggregate every filing; the facts frame exposes no
-        # per-fact filing date, so the latest 10-K/10-Q filing date stands in
-        # as the row's filed date (never period_end — see persist known_at).
-        filing_date, proxy_form, proxy_filing = _xbrl_proxy_filing(ticker)
-        rows.extend(_xbrl_live_concept_rows(facts, store_by_kind, seen, filing_date, proxy_form))
-    _xbrl_record_manifest(manifest, proxy_form, proxy_filing, len(rows), facts is not None, store_by_kind, live_error)
+    rows.extend(_xbrl_store_rows(gateway_by_kind, seen))
+    _xbrl_record_manifest(manifest, len(rows), gateway_by_kind, error)
     return rows
 
 
@@ -2218,26 +2097,25 @@ def _current_snapshot(rows: list[dict[str, object]]) -> tuple[list[dict[str, obj
     return snapshot, warnings
 
 
-def _obligations_cached(ticker: str, persist: bool) -> dict[str, object] | None:
-    """Cached picture when present (never served on a persist refresh)."""
-    key = f"obligations:{ticker}"
-    hit = cache.get(key, ttl=CACHE_TTL_SECONDS)
-    if isinstance(hit, dict) and not persist:
-        return hit
-    return None
+def _obligations_cached(ticker: str) -> dict[str, object] | None:
+    """Cached picture when present (existing boundary)."""
+    hit = cache.get(f"obligations:{ticker}", ttl=CACHE_TTL_SECONDS)
+    return hit if isinstance(hit, dict) else None
 
 
 def _obligations_fetch(
-    ticker: str, persist: bool, manifest: list[dict[str, object]]
+    ticker: str, manifest: list[dict[str, object]]
 ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]] | None:
-    """Fetch all four layers into quantified rows plus exposure splits."""
+    """Fetch all four layers into quantified rows plus exposure splits (in memory only)."""
     try:
         rows: list[dict[str, object]] = []
         rows.extend(_xbrl_obligations(ticker, manifest=manifest))
-        note_rows, unquantified, capital_raw = _note_obligations(ticker, archive=persist, manifest=manifest)
+        # Filing-text archiving stays: raw official text is kept only when it
+        # became evidence (rows produced from it) via raw_archive.
+        note_rows, unquantified, capital_raw = _note_obligations(ticker, archive=True, manifest=manifest)
         rows.extend(note_rows)
-        rows.extend(_balance_sheet_liabilities(ticker, archive=persist, manifest=manifest))
-        rows.extend(_scan_8k_obligations(ticker, archive=persist, manifest=manifest))
+        rows.extend(_balance_sheet_liabilities(ticker, archive=True, manifest=manifest))
+        rows.extend(_scan_8k_obligations(ticker, archive=True, manifest=manifest))
         return rows, unquantified, capital_raw
     except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         logger.warning("obligations failed for %s: %s", ticker, e)
@@ -2364,7 +2242,7 @@ def _obligations_coverage(
 def _obligations_stash_warnings(
     rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]
 ) -> list[str]:
-    """Pop persist-internal warning stashes into coverage warnings."""
+    """Pop coverage-warning stashes into the coverage warnings list."""
     stashed: list[str] = []
     for row in rows + bucket + capital:
         for stash_key in ("_reconciliation_warning", "_coverage_warning"):
@@ -2372,7 +2250,6 @@ def _obligations_stash_warnings(
             if warning:
                 stashed.append(str(warning))
     return stashed
-
 
 def _obligations_filings_examined(manifest: list[dict[str, object]], rows: list[dict[str, object]]) -> list[str]:
     """Filing dates examined (manifest first, row fallback when empty)."""
@@ -2392,24 +2269,6 @@ def _obligations_sections_examined(manifest: list[dict[str, object]], rows: list
         }
     )
     return sections or sorted({str(r.get("source")) for r in rows if r.get("source")})
-
-
-def _obligations_persist_summary(
-    ticker: str, rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]
-) -> None:
-    """Persist events with per-skip logging (failures logged, never raised)."""
-    try:
-        summary = persist_obligation_events(rows, unquantified=bucket, capital=capital)
-        if summary["events_written"]:
-            logger.info("persisted %d obligation events for %s", summary["events_written"], ticker)
-        if summary["skipped_no_filing_date"]:
-            logger.warning(
-                "skipped %d obligation rows without a filing date for %s", summary["skipped_no_filing_date"], ticker
-            )
-        if summary["skipped_proxied"]:
-            logger.warning("skipped %d proxied XBRL rows (live-only) for %s", summary["skipped_proxied"], ticker)
-    except Exception as e:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        logger.warning("obligation persistence failed for %s: %s", ticker, e)
 
 
 def _obligations_stamp_all(
@@ -2439,9 +2298,8 @@ def _obligations_finalize(
     rows: list[dict[str, object]],
     bucket: list[dict[str, object]],
     capital: list[dict[str, object]],
-    persist: bool,
 ) -> dict[str, object]:
-    """Coverage-checked picture assembly plus cache/persist/publish."""
+    """Coverage-checked picture assembly plus cache/publish (in memory only)."""
     snapshot, snap_warnings = _current_snapshot(rows)
     stashed = _obligations_stash_warnings(rows, bucket, capital)
     if not rows and not bucket and not capital:
@@ -2460,537 +2318,30 @@ def _obligations_finalize(
         "note": _PICTURE_NOTE,
     }
     cache.set(f"obligations:{ticker}", value)
-    if persist:
-        _obligations_persist_summary(ticker, rows, bucket, capital)
     _publish_lifecycle(rows, bucket, capital)
     return value
 
 
-def get_obligations(ticker: str, *, persist: bool = False) -> dict[str, object]:
-    """Return the full obligations picture for ANY ticker (cached 24h)."""
+def get_obligations(ticker: str) -> dict[str, object]:
+    """Return the full obligations picture for ANY ticker (cached 24h, in memory only)."""
     ticker = ticker.strip().upper()
     if not ticker:
         return _no_data("", "empty ticker")
-    cached = _obligations_cached(ticker, persist)
+    cached = _obligations_cached(ticker)
     if cached is not None:
         return cached
     manifest: list[dict[str, object]] = []
-    fetched = _obligations_fetch(ticker, persist, manifest)
+    fetched = _obligations_fetch(ticker, manifest)
     if fetched is None:
         return {"error": f"Obligations unavailable for {ticker}: unknown fetch failure"}
     fetched_rows, unquantified, capital_raw = fetched
     known_at = _known_at()
     rows, bucket, capital = _obligations_stamp_all(fetched_rows, unquantified, capital_raw, ticker, known_at)
-    return _obligations_finalize(ticker, known_at, manifest, rows, bucket, capital, persist)
-
-
-class _PersistBuild:
-    """Mutable persist sink: event/capital/evidence rows plus skip counts."""
-
-    def __init__(self, data_root: Path) -> None:
-        self.data_root = data_root
-        self.event_rows: list[dict[str, object]] = []
-        self.capital_rows: list[dict[str, object]] = []
-        self.evidence_rows: list[dict[str, object]] = []
-        self.skipped = 0
-        self.skipped_proxied = 0
-
-
-def _persist_filed(value: object) -> str | None:
-    """Filed date string for TEXT or TIMESTAMPTZ source values (existing boundary)."""
-    if value is None:
-        return None
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    text = str(value).strip()
-    return text or None
-
-
-def _persist_normalize_exposure(exp: Mapping[str, object]) -> dict[str, object]:
-    """Exposure as an amount-None contingent event row (default flag kept)."""
-    filed = _persist_filed(exp.get("filed"))
-    norm: dict[str, object] = {
-        "ticker": exp.get("ticker"),
-        "type": exp.get("type", "other"),
-        "amount_billions": None,
-        "certainty": "contingent",
-        "status": "contingent",
-        "revenue_matched": False,
-        "default_triggered": exp.get("trigger") == "counterparty_default",
-        "fiscal_year": None,
-        "schedule": None,
-        "payment_horizon": None,
-        "filed": filed,
-        "known_at": exp.get("known_at"),
-        "parser_version": exp.get("parser_version"),
-        "trigger": exp.get("trigger"),
-        "_accession": exp.get("_accession") or exp.get("accession"),
-        "_archive_key": exp.get("_archive_key"),
-        "excerpt": exp.get("excerpt"),
-        "source": exp.get("source"),
-    }
-    norm["content_hash"] = exp.get("content_hash") or _content_hash(norm)
-    return norm
-
-
-def _persist_work_lists(
-    rows: Sequence[Mapping[str, object]],
-    unquantified: Sequence[Mapping[str, object]] | None,
-    capital: Sequence[Mapping[str, object]] | None,
-) -> tuple[list[Mapping[str, object]], list[Mapping[str, object]]]:
-    """Event work list plus hashed capital work list for one persist call."""
-    work: list[Mapping[str, object]] = list(rows or [])
-    for exp in unquantified or []:
-        work.append(_persist_normalize_exposure(exp))
-    capital_work: list[Mapping[str, object]] = []
-    for entry in capital or []:
-        if not entry.get("content_hash"):
-            entry = {**entry, "content_hash": _content_hash(entry)}
-        capital_work.append(entry)
-    return work, capital_work
-
-
-def _persist_timing_jsons(row: Mapping[str, object]) -> tuple[str | None, str | None]:
-    """Schedule/timing JSON pair for one row (horizon fallback when scheduled)."""
-    horizon_raw = row.get("payment_horizon")
-    horizon: Mapping[str, object] = horizon_raw if isinstance(horizon_raw, Mapping) else {}
-    sched_raw = row.get("schedule") or horizon.get("schedule")
-    sched: list[object] = sched_raw if isinstance(sched_raw, list) else []
-    schedule_json = json.dumps(sched) if sched else None
-    if sched:
-        return schedule_json, schedule_json
-    if any(
-        horizon.get(k) is not None
-        for k in ("paid_in_remainder_of_fy", "paid_in_remainder_billions", "paid_after_remainder_billions")
-    ):
-        return schedule_json, json.dumps(
-            {
-                "paid_in_remainder_of_fy": horizon.get("paid_in_remainder_of_fy"),
-                "paid_in_remainder_billions": horizon.get("paid_in_remainder_billions"),
-                "paid_after_remainder_billions": horizon.get("paid_after_remainder_billions"),
-            }
-        )
-    return schedule_json, None
-
-
-def _persist_event_parts(row: Mapping[str, object], filed: str) -> tuple[str, str, str]:
-    """Event id plus ticker plus content hash for one persist row."""
-    ticker = str(row.get("ticker") or "").strip().upper()
-    content_hash = str(row.get("content_hash") or "")
-    return sec_event_id(ticker, content_hash), ticker, content_hash
-
-
-def _persist_entity_id(row: Mapping[str, object], ticker: str, filed: str, data_root: Path) -> str | None:
-    """Entity id from the accession CIK, else resolved for the filed date."""
-    from datetime import date
-
-    from .domain.market.ids import sec_entity_id
-    from .services.sec_facts import _resolve_entity
-
-    accession = str(row.get("_accession") or "")
-    m = re.match(r"^(\d{10})-", accession)
-    if m:
-        return sec_entity_id(m.group(1))
-    if not ticker:
-        return None
-    return _resolve_entity(ticker, date.fromisoformat(filed[:10]), data_root)
-
-
-def _persist_build_event(
-    row: Mapping[str, object], filed: str, target: list[dict[str, object]], sink: _PersistBuild
-) -> None:
-    """Append one CorporateEvent dict for a filed, non-proxied row."""
-    from dataclasses import asdict
-
-    from .domain.events import CorporateEvent
-
-    event_id, ticker, content_hash = _persist_event_parts(row, filed)
-    schedule_json, payment_timing_json = _persist_timing_jsons(row)
-    row_amount = row.get("amount_billions")
-    event = CorporateEvent(
-        event_id=event_id,
-        entity_id=_persist_entity_id(row, ticker, filed, sink.data_root),
-        security_id=None,
-        ticker=ticker,
-        event_type=str(row.get("type") or "other"),
-        amount_billions=float(row_amount) if isinstance(row_amount, (int, float)) else None,
-        certainty=_opt_str(row.get("certainty")),
-        status=_opt_str(row.get("status")),
-        revenue_matched=bool(row.get("revenue_matched")),
-        default_triggered=bool(row.get("default_triggered")),
-        fiscal_year=str(row.get("fiscal_year")) if row.get("fiscal_year") is not None else None,
-        schedule_json=schedule_json,
-        payment_timing_json=payment_timing_json,
-        filed_at=filed,
-        known_at=filed,
-        retrieved_at=str(row.get("known_at") or ""),
-        accession=str(row.get("_accession") or "") or None,
-        source=_opt_str(row.get("source")),
-        source_url=None,
-        content_hash=content_hash,
-        parser_version=_opt_str(row.get("parser_version")),
-        agreement_key=_opt_str(row.get("agreement_key")),
-        lifecycle_event=_opt_str(row.get("_lifecycle_event", row.get("lifecycle_event"))),
-        schedule_component=_opt_bool(row.get("schedule_component")),
-        headline_type=_opt_str(row.get("headline_type")),
-    )
-    event_dict: dict[str, object] = {}
-    event_dict.update(asdict(event))
-    target.append(event_dict)
-
-
-def _persist_evidence_span(
-    row: Mapping[str, object], archive_key: str, sink: _PersistBuild
-) -> tuple[str | None, int | None, int | None]:
-    """Archived SHA plus excerpt span for one filing-text evidence row."""
-    from .storage import raw_archive
-
-    record = raw_archive.find("sec", _ARCHIVE_KIND, archive_key, root=sink.data_root / "raw")
-    if record is None:
-        return None, None, None
-    text = record.payload_path.read_text(encoding="utf-8", errors="replace")
-    excerpt = str(row.get("excerpt") or "")
-    if not excerpt:
-        return record.sha256, None, None
-    start = text.find(excerpt)
-    if start < 0:
-        return record.sha256, None, None
-    return record.sha256, start, start + len(excerpt)
-
-
-def _persist_build_evidence(row: Mapping[str, object], event_id: str, content_hash: str, sink: _PersistBuild) -> None:
-    """Append one Evidence dict (filing-text archive span or XBRL fact)."""
-    from dataclasses import asdict
-
-    from .domain.events import Evidence, sec_evidence_id
-
-    is_xbrl_fact = "concept" in row
-    archive_key = str(row.get("_archive_key") or "") or None
-    archived_sha: str | None = None
-    span_start: int | None = None
-    span_end: int | None = None
-    if archive_key is not None and not is_xbrl_fact:
-        archived_sha, span_start, span_end = _persist_evidence_span(row, archive_key, sink)
-    evidence = Evidence(
-        evidence_id=sec_evidence_id(event_id, content_hash),
-        event_id=event_id,
-        source_type="xbrl_fact" if is_xbrl_fact else "filing_text",
-        archive_key=archive_key if not is_xbrl_fact else None,
-        content_hash=archived_sha,
-        excerpt=_opt_str(row.get("excerpt")),
-        span_start=span_start,
-        span_end=span_end,
-        retrieved_at=str(row.get("known_at") or ""),
-        parser_version=_opt_str(row.get("parser_version")),
-    )
-    evidence_dict: dict[str, object] = {}
-    evidence_dict.update(asdict(evidence))
-    sink.evidence_rows.append(evidence_dict)
-
-
-def _persist_build_row(row: Mapping[str, object], sink: _PersistBuild, target: list[dict[str, object]]) -> str | None:
-    """Build event into target plus evidence into the sink (None if skipped)."""
-    if row.get("provenance") == "proxied":
-        sink.skipped_proxied += 1
-        return None
-    filed = _persist_filed(row.get("filed"))
-    if not filed:
-        sink.skipped += 1
-        return None
-    event_id, _ticker, content_hash = _persist_event_parts(row, filed)
-    _persist_build_event(row, filed, target, sink)
-    _persist_build_evidence(row, event_id, content_hash, sink)
-    return event_id
-
-
-def _persist_write_sink(sink: _PersistBuild) -> dict[str, object]:
-    """Flush the sink to DuckDB tables with skip counts."""
-    from .storage import duckdb
-
-    return {
-        "events_written": duckdb.insert_ignore("events", sink.event_rows, data_root=sink.data_root),
-        "capital_events_written": duckdb.insert_ignore(
-            "capital_events", sink.capital_rows, data_root=sink.data_root
-        ),
-        "evidence_written": duckdb.insert_ignore("evidence", sink.evidence_rows, data_root=sink.data_root),
-        "skipped_no_filing_date": sink.skipped,
-        "skipped_proxied": sink.skipped_proxied,
-    }
-
-
-def persist_obligation_events(
-    rows: Sequence[Mapping[str, object]],
-    data_root: str | Path | None = None,
-    *,
-    unquantified: Sequence[Mapping[str, object]] | None = None,
-    capital: Sequence[Mapping[str, object]] | None = None,
-) -> dict[str, object]:
-    """Write obligations rows as CorporateEvent + Evidence rows.
-
-    One source row -> one CorporateEvent plus one Evidence row.  Event
-    ``known_at`` is the source filing's ``filed`` date — NEVER the wall clock
-    or a period end — so rows without a filing date are skipped and counted
-    in ``skipped_no_filing_date``.  Filing-text evidence is anchored to the
-    report text archived at fetch time (``raw_archive`` under
-    ``filing-text:{ticker}:{filed}:{accession-or-hash}``); XBRL-fact rows
-    carry no archive.  ``data_root`` is a research data root (parquet/ +
-    raw/ subdirectories; default: the repo data root).
-
-    ``unquantified`` exposures persist as amount-None contingent events with
-    evidence (excerpt/archive span) via the same path. No schema change: the
-    trigger rides on the existing ``default_triggered`` flag (True only for
-    ``counterparty_default``).
-
-    Returns ``{events_written, evidence_written, skipped_no_filing_date, skipped_proxied}``;
-    a deterministic rerun writes 0 rows (dedup by event/evidence id). Proxied
-    XBRL rows (``provenance == "proxied"``) are live-only evidence, never persisted.
-    Status is derived by ``_resolve_8k_lifecycle`` at read time and is never stored.
-    Reconciled fiscal-year components persist with their flags and are excluded from snapshots at read time.
-    """
-    from .storage import duckdb
-
-    root = Path(data_root) if data_root is not None else Path(duckdb.DEFAULT_DATA_ROOT)
-    sink = _PersistBuild(root)
-    work, capital_work = _persist_work_lists(rows, unquantified, capital)
-    for row in work:
-        _persist_build_row(row, sink, sink.event_rows)
-    for row in capital_work:
-        _persist_build_row(row, sink, sink.capital_rows)
-    return _persist_write_sink(sink)
-
-
-def _drop_internal(row: dict[str, object]) -> dict[str, object]:
-    """Strip warehouse-internal columns (existing boundary)."""
-    row.pop("_dedup", None)
-    row.pop("_tsraw", None)
-    return row
-
-
-def _asof_read_tables(
-    data_root: Path,
-) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]]:
-    """Stored events/capital/evidence tables (capital empty when absent)."""
-    from .storage import duckdb
-
-    stored: list[dict[str, object]] = [_drop_internal(row) for row in duckdb.query("SELECT * FROM events", data_root=data_root)]
-    try:
-        stored_capital: list[dict[str, object]] = [
-            _drop_internal(row) for row in duckdb.query("SELECT * FROM capital_events", data_root=data_root)
-        ]
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        stored_capital = []
-    stored_evidence: list[dict[str, object]] = [
-        _drop_internal(row) for row in duckdb.query("SELECT * FROM evidence", data_root=data_root)
-    ]
-    return stored, stored_capital, stored_evidence
-
-
-def _asof_evidence_index(stored_evidence: list[dict[str, object]]) -> dict[str, dict[str, object]]:
-    """First evidence row per event id (replay joins on either id form)."""
-    evidence_by_event: dict[str, dict[str, object]] = {}
-    for ev in stored_evidence:
-        eid = str(ev.get("event_id") or "")
-        if eid and eid not in evidence_by_event:
-            evidence_by_event[eid] = ev
-    return evidence_by_event
-
-
-def _asof_filed_at(value: object) -> str:
-    """Filed-date string for TEXT or TIMESTAMPTZ event values (existing boundary)."""
-    if isinstance(value, datetime):
-        return value.date().isoformat()
-    return str(value or "")
-
-def _asof_keep_ticker(events: list[dict[str, object]], ticker: str, as_of: str) -> list[dict[str, object]]:
-    """Events for one ticker filed on or before the as-of date."""
-    kept: list[dict[str, object]] = []
-    for e in events:
-        if str(e.get("ticker") or "").strip().upper() != ticker:
-            continue
-        if _asof_filed_at(e.get("filed_at"))[:10] > as_of[:10]:
-            continue
-        kept.append(e)
-    return kept
-
-
-def _rebuild_schedule(event: Mapping[str, object]) -> object:
-    """Schedule payload from stored JSON (None when absent/unparseable)."""
-    schedule_raw = event.get("schedule_json")
-    try:
-        return json.loads(schedule_raw) if isinstance(schedule_raw, str) else None
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return None
-
-
-def _rebuild_horizon(event: Mapping[str, object]) -> object:
-    """Payment-horizon payload from stored JSON (None when absent/unparseable)."""
-    timing_raw = event.get("payment_timing_json")
-    if not timing_raw:
-        return None
-    try:
-        parsed = json.loads(timing_raw) if isinstance(timing_raw, str) else None
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return None
-    if isinstance(parsed, list):
-        return {"schedule": parsed}
-    if isinstance(parsed, dict):
-        return parsed
-    return None
-
-
-def _rebuild_evidence(
-    event: Mapping[str, object], ticker: str, evidence_by_event: dict[str, dict[str, object]]
-) -> dict[str, object] | None:
-    """Evidence row for one event (either event-id form, None when absent)."""
-    content_hash = str(event.get("content_hash") or "")
-    eid = str(event.get("event_id") or "") or sec_event_id(ticker, content_hash)
-    return evidence_by_event.get(eid) or evidence_by_event.get(sec_event_id(ticker, content_hash))
-
-
-def _rebuild_event_row(
-    event: Mapping[str, object], ticker: str, evidence_by_event: dict[str, dict[str, object]]
-) -> dict[str, object]:
-    """One ledger row rebuilt from a stored event plus its evidence excerpt."""
-    content_hash = str(event.get("content_hash") or "")
-    ev = _rebuild_evidence(event, ticker, evidence_by_event)
-    row: dict[str, object] = {
-        "type": event.get("event_type"),
-        "amount_billions": event.get("amount_billions"),
-        "filed": _asof_filed_at(event.get("filed_at")),
-        "known_at": _asof_filed_at(event.get("known_at")) or event.get("known_at"),
-        "certainty": event.get("certainty"),
-        "status": event.get("status"),
-        "revenue_matched": event.get("revenue_matched"),
-        "default_triggered": event.get("default_triggered"),
-        "fiscal_year": event.get("fiscal_year"),
-        "schedule": _rebuild_schedule(event),
-        "payment_horizon": _rebuild_horizon(event),
-        "agreement_key": event.get("agreement_key"),
-        "_lifecycle_event": event.get("lifecycle_event"),
-        "schedule_component": event.get("schedule_component"),
-        "headline_type": event.get("headline_type"),
-        "source": event.get("source"),
-        "accession": event.get("accession"),
-        "_accession": event.get("accession"),
-        "excerpt": (ev or {}).get("excerpt"),
-        "ticker": ticker,
-        "content_hash": content_hash,
-        "parser_version": event.get("parser_version"),
-    }
-    if (ev or {}).get("source_type") == "xbrl_fact":
-        row["concept"] = True
-    return row
-
-
-def _asof_is_unquantified(row: dict[str, object]) -> bool:
-    """True when a rebuilt row belongs in the bucket (amount-less, unmarked)."""
-    return row.get("amount_billions") is None and row.get("_lifecycle_event") not in ("amendment", "termination")
-
-
-def _asof_split_rows(
-    kept: list[dict[str, object]], ticker: str, evidence_by_event: dict[str, dict[str, object]]
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
-    """Rebuilt rows split into quantified rows plus unquantified bucket."""
-    rows: list[dict[str, object]] = []
-    bucket: list[dict[str, object]] = []
-    for e in kept:
-        row = _rebuild_event_row(e, ticker, evidence_by_event)
-        row["trigger"] = _row_trigger(row)
-        if _asof_is_unquantified(row):
-            bucket.append(row)
-        else:
-            rows.append(row)
-    return rows, bucket
-
-
-def _asof_rebuild_capital(
-    kept_capital: list[dict[str, object]], ticker: str, evidence_by_event: dict[str, dict[str, object]]
-) -> list[dict[str, object]]:
-    """Rebuilt capital rows (board-discretion trigger, never obligations)."""
-    capital: list[dict[str, object]] = []
-    for e in kept_capital:
-        row = _rebuild_event_row(e, ticker, evidence_by_event)
-        row["trigger"] = "board_discretion"
-        capital.append(row)
-    return capital
-
-
-def _asof_event_ids(kept: list[dict[str, object]], kept_capital: list[dict[str, object]], ticker: str) -> set[str]:
-    """Known event ids in both stored and recomputed id forms."""
-    event_ids = {str(e.get("event_id") or "") for e in kept + kept_capital}
-    event_ids |= {sec_event_id(ticker, str(e.get("content_hash") or "")) for e in kept + kept_capital}
-    return event_ids
-
-
-def _asof_provenance(
-    rows: list[dict[str, object]], bucket: list[dict[str, object]], capital: list[dict[str, object]]
-) -> tuple[list[str], list[str]]:
-    """Filings/sections examined from rebuilt rows (sorted, present only)."""
-    filings = sorted({str(r.get("filed")) for r in rows + bucket + capital if r.get("filed")})
-    sections = sorted({str(r.get("source")) for r in rows + bucket + capital if r.get("source")})
-    return filings, sections
-
-
-def _asof_assemble(
-    ticker: str,
-    as_of: str,
-    rows: list[dict[str, object]],
-    bucket: list[dict[str, object]],
-    capital: list[dict[str, object]],
-    snapshot: list[dict[str, object]],
-    snap_warnings: list[str],
-) -> dict[str, object]:
-    """Assembled replay picture from rebuilt rows plus snapshot/coverage."""
-    filings, sections = _asof_provenance(rows, bucket, capital)
-    return {
-        "ticker": ticker,
-        "as_of": as_of,
-        "source": f"{_PICTURE_SOURCE} (replayed from stored events as of {as_of})",
-        "obligations": rows,
-        "current_snapshot": snapshot,
-        "unquantified_exposures": bucket,
-        "capital_allocation": capital,
-        "coverage": {
-            "scan_manifest": [],
-            "quantified_count": len(rows),
-            "unquantified_count": len(bucket),
-            "warnings": list(snap_warnings),
-        },
-        "filings_examined": filings,
-        "sections_examined": sections,
-        "note": _PICTURE_NOTE,
-    }
-
-
-def get_obligations_as_of(ticker: str, as_of: str, data_root: str | Path | None = None) -> dict[str, object]:
-    """Replay the full obligations picture from stored events as of a date."""
-    from .storage import duckdb
-
-    ticker = ticker.strip().upper()
-    if not ticker:
-        return _no_data("", "empty ticker")
-    data_root = Path(data_root) if data_root is not None else Path(duckdb.DEFAULT_DATA_ROOT)
-    stored, stored_capital, stored_evidence = _asof_read_tables(data_root)
-    evidence_by_event = _asof_evidence_index(stored_evidence)
-    kept = _asof_keep_ticker(stored, ticker, as_of)
-    kept_capital = _asof_keep_ticker(stored_capital, ticker, as_of)
-    event_ids = _asof_event_ids(kept, kept_capital, ticker)
-    rows, bucket = _asof_split_rows(kept, ticker, evidence_by_event)
-    capital = _asof_rebuild_capital(kept_capital, ticker, evidence_by_event)
-    # Ignore evidence without a matching event (never joined above).
-    _ = {ev.get("event_id") for ev in stored_evidence if str(ev.get("event_id") or "") not in event_ids}
-    if not rows and not bucket and not capital:
-        return _no_data(ticker, f"no stored obligation events as of {as_of}")
-    _apply_legacy_component_flags(rows)
-    snapshot, snap_warnings = _current_snapshot(rows)
-    _publish_lifecycle(rows, bucket, capital)
-    return _asof_assemble(ticker, as_of, rows, bucket, capital, snapshot, snap_warnings)
+    return _obligations_finalize(ticker, known_at, manifest, rows, bucket, capital)
 
 
 __all__ = [
     "DEFAULT_TRIGGERED_TYPES",
     "REVENUE_MATCHED_KINDS",
     "get_obligations",
-    "get_obligations_as_of",
-    "persist_obligation_events",
 ]

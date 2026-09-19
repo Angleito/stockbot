@@ -27,7 +27,7 @@ from typing import TYPE_CHECKING, Protocol
 if TYPE_CHECKING:
     from ..storage.raw_archive import ArchiveRecord
 
-from ._guards import as_dict, as_list, as_str_list, json_from_text, result_rows
+from ._guards import as_dict, as_list, as_str_list, result_rows
 from ._lazy_config import google_data_enabled
 
 SOURCE = "trends"
@@ -59,7 +59,6 @@ _FALLBACK_TABLES = {
 }
 _COLLECTOR_VERSION = "1"
 _SQL_VERSION = "1"
-_CHECKPOINT_PIPELINE = "google_trends"
 _MAX_LIMIT = 1000
 _FETCH_LIMIT = _MAX_LIMIT + 1
 _MAX_GEOS = 50
@@ -272,52 +271,6 @@ def _plan_groups(geos: list[str]) -> list[dict[str, object]]:
     return groups
 
 
-def _parquet_root(data_root: Path | str | None) -> Path | None:
-    if data_root is None:
-        return None
-    try:
-        from importlib.util import find_spec as _find_spec
-    except ImportError:
-        return None
-    if _find_spec("app.storage.parquet") is None:
-        return None
-    return Path(data_root) / "parquet"
-
-
-def _db_root(data_root: Path | str | None) -> Path | None:
-    """Warehouse root for ``duckdb`` calls (``<root>/parquet`` maps to ``<root>``)."""
-    if data_root is None:
-        return None
-    path = Path(data_root)
-    return path.parent if path.name == "parquet" else path
-
-
-def _read_warehouse(table: str, data_root: Path | str | None) -> list[dict[str, object]]:
-    """Best-effort warehouse read; a missing store reads as no rows."""
-    try:
-        from ..storage import duckdb as _duckdb
-    except ImportError:
-        return []
-    try:
-        rows = _duckdb.query(f"SELECT * FROM {table}", data_root=_db_root(data_root))
-    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        return []
-    return [row for row in rows if isinstance(row, dict)]
-
-
-def _insert_warehouse(table: str, rows: list[dict[str, object]], data_root: Path | str | None) -> int:
-    """Warehouse insert; failures propagate to the caller's best-effort boundary."""
-    from ..storage import duckdb as _duckdb
-
-    return _duckdb.insert_ignore(table, rows, data_root=_db_root(data_root))
-
-
-def _checkpoint_key(template: str, refresh: str, params: dict[str, object]) -> str:
-    """Scoped completion key for the exact canonical query submitted."""
-    scope_hash = hashlib.sha256(json.dumps(params, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-    return f"{template}|{refresh}|{scope_hash}"
-
-
 def _observation_identity(
     table: object,
     period: object,
@@ -372,509 +325,6 @@ def _series_basis(staged_row: dict[str, object]) -> str:
     return ""
 
 
-def _inputs_scope_parts(scope: dict[str, object]) -> tuple[list[str], str, str, str, str]:
-    geos = as_str_list(scope.get("geos"), what="geos")
-    week_start = str(scope.get("week_start") or "")
-    week_end = str(scope.get("week_end") or "")
-    scope_table = str(scope.get("table") or "")
-    scope_kind = str(scope.get("list_kind") or "")
-    return geos, week_start, week_end, scope_table, scope_kind
-
-
-def _cand_matches_scope_identity(cand: dict[str, object], scope_table: str, scope_kind: str, term: str) -> bool:
-    return (
-        str(cand.get("table") or "") == scope_table
-        and str(cand.get("list_kind") or "") == scope_kind
-        and str(cand.get("term") or "") == (term or "")
-    )
-
-
-def _cand_period_in_scope(cand: dict[str, object], week_start: str, week_end: str) -> str | None:
-    period = str(cand.get("period") or cand.get("week") or "")
-    if not period or period < week_start or period > week_end:
-        return None
-    return period
-
-
-def _cand_matches_scope_geo(cand: dict[str, object], geos: list[str], basis: str) -> bool:
-    cgeo = str(cand.get("geo") or "")
-    return cgeo.split(":")[0] in geos and _series_basis(cand) == (basis or "")
-
-
-def _scope_pair_for(
-    cand: object,
-    scope_table: str,
-    scope_kind: str,
-    term: str,
-    week_start: str,
-    week_end: str,
-    geos: list[str],
-    basis: str,
-) -> list[str] | None:
-    if not isinstance(cand, dict):
-        return None
-    if not _cand_matches_scope_identity(cand, scope_table, scope_kind, term):
-        return None
-    if _cand_period_in_scope(cand, week_start, week_end) is None:
-        return None
-    if not _cand_matches_scope_geo(cand, geos, basis):
-        return None
-    return [str(cand.get("observation_id") or ""), str(cand.get("content_hash") or "")]
-
-
-def _collect_scope_pairs(
-    candidates: list[dict[str, object]],
-    scope_table: str,
-    scope_kind: str,
-    term: str,
-    week_start: str,
-    week_end: str,
-    geos: list[str],
-    basis: str,
-) -> list[list[str]]:
-    pairs: list[list[str]] = []
-    for cand in candidates:
-        pair = _scope_pair_for(cand, scope_table, scope_kind, term, week_start, week_end, geos, basis)
-        if pair is None:
-            continue
-        pairs.append(pair)
-    return pairs
-
-
-def _cand_matches_target(cand: object, target_table: str, target_kind: str, target_geo: str, target_basis: str) -> bool:
-    if not isinstance(cand, dict):
-        return False
-    return (
-        str(cand.get("table") or "") == target_table
-        and str(cand.get("list_kind") or "") == target_kind
-        and str(cand.get("geo") or "") == target_geo
-        and _series_basis(cand) == target_basis
-    )
-
-
-def _target_gate_open(target_geo: str, geos: list[str]) -> bool:
-    return target_geo.split(":")[0] in geos or (not geos and not target_geo)
-
-
-def _collect_target_periods(
-    candidates: list[dict[str, object]],
-    target_table: str,
-    target_kind: str,
-    target_geo: str,
-    target_basis: str,
-    week_start: str,
-    week_end: str,
-    geos: list[str],
-) -> set[str]:
-    periods: set[str] = set()
-    if not _target_gate_open(target_geo, geos):
-        return periods
-    for cand in candidates:
-        if not _cand_matches_target(cand, target_table, target_kind, target_geo, target_basis):
-            continue
-        period = _cand_period_in_scope(cand, week_start, week_end)
-        if period is None:
-            continue
-        periods.add(period)
-    return periods
-
-
-def _inputs_geos_covered(geos: list[str], target_geo: str) -> list[str]:
-    if target_geo in geos:
-        return sorted(geos)
-    if target_geo:
-        return [target_geo]
-    return []
-
-
-def expected_inputs_hash(
-    scope: dict[str, object],
-    term: str,
-    table: str,
-    list_kind: str,
-    basis: str,
-    geo: str,
-    candidates: list[dict[str, object]],
-) -> str:
-    """Scope-complete input identity shared by writes and PIT reads."""
-    geos, week_start, week_end, scope_table, scope_kind = _inputs_scope_parts(scope)
-    pairs = _collect_scope_pairs(candidates, scope_table, scope_kind, term, week_start, week_end, geos, basis or "")
-    target_table = table or ""
-    target_kind = list_kind or ""
-    target_geo = geo or ""
-    target_basis = basis or ""
-    periods_covered = sorted(
-        _collect_target_periods(
-            candidates, target_table, target_kind, target_geo, target_basis, week_start, week_end, geos
-        )
-    )
-    geos_covered = _inputs_geos_covered(geos, target_geo)
-    payload = {"source_pairs": sorted(pairs), "periods_covered": periods_covered, "geos_covered": geos_covered}
-    return hashlib.sha256(json.dumps(payload, sort_keys=True, separators=(",", ":")).encode()).hexdigest()
-
-
-def _load_checkpoint_rows(proot: Path) -> list[dict[str, object]]:
-    return _read_warehouse("ingestion_checkpoints", proot)
-
-
-def _completion_row_eligible(row: dict[str, object]) -> bool:
-    return (
-        row.get("pipeline") == _CHECKPOINT_PIPELINE
-        and row.get("source") == "bigquery"
-        and row.get("status") == "complete"
-    )
-
-
-def _completion_template_key(key: str, wanted: set[str]) -> str | None:
-    template, _, _rest = key.partition("|")
-    if template in wanted and key:
-        return key
-    return None
-
-
-def _completion_key_if_wanted(row: object, wanted: set[str]) -> str | None:
-    if not isinstance(row, dict) or not _completion_row_eligible(row):
-        return None
-    return _completion_template_key(str(row.get("key") or ""), wanted)
-
-
-def _completed_refreshes(data_root: Path | str | None, templates: list[str]) -> set[str]:
-    """Completed scoped checkpoint keys; missing warehouse reads as none."""
-    done: set[str] = set()
-    proot = _parquet_root(data_root)
-    if proot is None:
-        return done
-    wanted = set(templates)
-    for row in _load_checkpoint_rows(proot):
-        key = _completion_key_if_wanted(row, wanted)
-        if key is not None:
-            done.add(key)
-    return done
-
-
-def _read_observation_rows(proot: Path) -> list[dict[str, object]]:
-    return _read_warehouse("google_observations", proot)
-
-
-def _decode_warehouse_content(row: dict[str, object]) -> tuple[dict[str, object], list[object], str, str] | None:
-    metrics_raw, evidence_raw = row.get("metrics_json"), row.get("evidence_json")
-    metrics = as_dict(
-        json_from_text(metrics_raw if isinstance(metrics_raw, str) else str(metrics_raw), what="metrics_json"),
-        what="metrics",
-    )
-    evidence = as_list(
-        json_from_text(evidence_raw if isinstance(evidence_raw, str) else str(evidence_raw), what="evidence_json"),
-        what="evidence",
-    )
-    try:
-        metrics_canon = json.dumps(metrics, sort_keys=True, separators=(",", ":"), default=str)
-        evidence_canon = json.dumps(evidence, sort_keys=True, separators=(",", ":"), default=str)
-    except TypeError, ValueError:
-        return None
-    return metrics, evidence, metrics_canon, evidence_canon
-
-
-def _warehouse_key(
-    row: dict[str, object], table: str, metrics_canon: str, evidence_canon: str
-) -> tuple[str, str, str, str, str, str, str, str]:
-    return (
-        str(row.get("table") or table),
-        str(row.get("period") or ""),
-        str(row.get("geo") or ""),
-        str(row.get("term") or ""),
-        str(row.get("list_kind") or ""),
-        str(row.get("source_record_id") or ""),
-        metrics_canon,
-        evidence_canon,
-    )
-
-
-def _warehouse_staged(
-    row: dict[str, object], table: str, metrics: dict[str, object], evidence: list[object]
-) -> dict[str, object]:
-    return {
-        "table": row.get("table") or table,
-        "period": row.get("period"),
-        "week": row.get("period"),
-        "geo": row.get("geo"),
-        "term": row.get("term"),
-        "list_kind": row.get("list_kind"),
-        "rank": metrics.get("rank"),
-        "source_record_id": row.get("source_record_id"),
-        "observed_at": row.get("observed_at"),
-        "known_at": row.get("known_at"),
-        "retrieved_at": row.get("retrieved_at"),
-        "metrics": metrics,
-        "evidence": evidence,
-        "features": None,
-        "calc_version": row.get("calc_version") or "1",
-    }
-
-
-def _warehouse_entry(
-    row: object, table: str, prefix: str
-) -> tuple[tuple[str, str, str, str, str, str, str, str], dict[str, object]] | None:
-    if not isinstance(row, dict):
-        return None
-    if not str(row.get("source_record_id") or "").startswith(prefix):
-        return None
-    decoded = _decode_warehouse_content(row)
-    if decoded is None:
-        return None
-    metrics, evidence, metrics_canon, evidence_canon = decoded
-    return (_warehouse_key(row, table, metrics_canon, evidence_canon), _warehouse_staged(row, table, metrics, evidence))
-
-
-def _warehouse_rows(data_root: Path | str | None, table: str, refresh: str) -> list[dict[str, object]]:
-    """Normalized observations already stored for one table/refresh partition."""
-    proot = _parquet_root(data_root)
-    if proot is None:
-        return []
-    prefix = f"{table}|{refresh}|"
-    collapsed: dict[tuple[str, str, str, str, str, str, str, str], dict[str, object]] = {}
-    for row in _read_observation_rows(proot):
-        entry = _warehouse_entry(row, table, prefix)
-        if entry is None:
-            continue
-        key, staged = entry
-        prev = collapsed.get(key)
-        if prev is not None and str(prev.get("known_at") or "") <= str(staged.get("known_at") or ""):
-            continue
-        collapsed[key] = staged
-    return list(collapsed.values())
-
-
-def _backfill_context(data_root: Path | str | None) -> tuple[Path, Path] | None:
-    if data_root is None:
-        return None
-    try:
-        from ..storage import parquet as _parquet_b  # noqa: F401
-    except ImportError:
-        return None
-    proot = _parquet_root(data_root)
-    if proot is None:
-        return None
-    marker = Path(data_root) / "google_data" / ".signal_features_backfilled"
-    try:
-        if marker.exists():
-            return None
-    except OSError:
-        pass
-    return proot, marker
-
-
-def _read_backfill_source(proot: Path) -> list[dict[str, object]]:
-    return _read_warehouse("google_observations", proot)
-
-
-def _backfill_features_blob(row: dict[str, object]) -> dict[str, object] | None:
-    raw = row.get("features_json")
-    if raw is None or raw == "":
-        return None
-    if not isinstance(raw, str):
-        raw = str(raw)
-    decoded = json_from_text(raw, what="features_json")
-    return decoded if isinstance(decoded, dict) else None
-
-
-def _backfill_feature_payload(row: dict[str, object], decoded: dict[str, object]) -> dict[str, object]:
-    return {
-        "observation_id": str(row.get("observation_id") or ""),
-        "feature_scope_hash": "legacy-unknown",
-        "feature_scope_json": json.dumps({"legacy": True, "reason": "pre-scope-backfill"}),
-        "features_json": json.dumps(decoded, sort_keys=True, default=str),
-        "calc_version": str(row.get("calc_version") or "1"),
-        "calculated_at": str(row.get("known_at") or ""),
-        "inputs_hash": "",
-    }
-
-
-def _backfill_feature_row(row: object) -> dict[str, object] | None:
-    if not isinstance(row, dict):
-        return None
-    decoded = _backfill_features_blob(row)
-    if decoded is None:
-        return None
-    return _backfill_feature_payload(row, decoded)
-
-
-def _collect_backfill_rows(rows: list[object] | list[dict[str, object]]) -> list[dict[str, object]]:
-    feature_rows: list[dict[str, object]] = []
-    for row in rows:
-        converted = _backfill_feature_row(row)
-        if converted is None:
-            continue
-        feature_rows.append(converted)
-    return feature_rows
-
-
-def _finish_backfill(proot: Path, marker: Path, feature_rows: list[dict[str, object]]) -> int:
-    written = 0
-    if feature_rows:
-        try:
-            written = _insert_warehouse("google_signal_features", feature_rows, proot)
-        except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-            return 0
-    try:
-        marker.parent.mkdir(parents=True, exist_ok=True)
-        marker.write_text("backfilled\n")
-    except OSError:
-        pass
-    return written
-
-
-def backfill_legacy_feature_rows(data_root: Path | str | None) -> int:
-    ctx = _backfill_context(data_root)
-    if ctx is None:
-        return 0
-    proot, marker = ctx
-    rows = _read_backfill_source(proot)
-    return _finish_backfill(proot, marker, _collect_backfill_rows(rows))
-
-
-def _cached_week_in_scope(cached: dict[str, object], params: dict[str, object]) -> bool:
-    week = str(cached.get("week") or cached.get("period") or "")
-    return not (week < str(params.get("week_start") or "") or week > str(params.get("week_end") or ""))
-
-
-def _national_scope_decision(geo: str, params: dict[str, object]) -> bool | None:
-    if not params.get("national"):
-        return None
-    if "country_code" not in params:
-        return geo == str(params["national"])
-    return geo == str(params.get("country_code"))
-
-
-def _dma_scope_decision(geo: str, params: dict[str, object]) -> bool | None:
-    if "all_dmas" not in params:
-        return None
-    if params.get("all_dmas"):
-        return geo == "US"
-    return geo in set(as_str_list(params.get("dmas"), what="dmas"))
-
-
-def _country_scope_decision(geo: str, params: dict[str, object]) -> bool | None:
-    if "country_code" not in params:
-        return None
-    country = str(params.get("country_code") or "")
-    return geo == country or geo.startswith(country + ":")
-
-
-def _cache_in_scope(cached: dict[str, object], params: dict[str, object]) -> bool:
-    """Keep only cached rows matching the current canonical query scope."""
-    if not _cached_week_in_scope(cached, params):
-        return False
-    geo = str(cached.get("geo") or "")
-    for decider in (_national_scope_decision, _dma_scope_decision, _country_scope_decision):
-        decision = decider(geo, params)
-        if decision is not None:
-            return decision
-    return True
-
-
-def _cached_record_id(row: dict[str, object]) -> str:
-    return str(row.get("source_record_id") or "")
-
-
-def _cached_rank_key(row: dict[str, object]) -> int | float:
-    rank = row.get("rank")
-    return rank if isinstance(rank, (int, float)) else float("inf")
-
-
-def _cached_week_str(row: dict[str, object]) -> str:
-    return str(row.get("week") or row.get("period") or "")
-
-
-def _first_known_map(stored: list[dict[str, object]]) -> dict[tuple[str, str], str]:
-    first_known: dict[tuple[str, str], str] = {}
-    for row in stored:
-        if not isinstance(row, dict):
-            continue
-        key = (str(row.get("observation_id")), str(row.get("content_hash")))
-        known = str(row.get("known_at") or "")
-        if key not in first_known or known < first_known[key]:
-            first_known[key] = known
-    return first_known
-
-
-def _store_refresh_date(obs: dict[str, object], metrics: dict[str, object]) -> str:
-    refresh_date = str(metrics.get("refresh_date") or "")
-    if not refresh_date:
-        parts = str(obs.get("source_record_id") or "").split("|")
-        if len(parts) >= 2 and parts[0] == obs.get("table"):
-            refresh_date = parts[1]
-    return refresh_date
-
-
-def _build_stored_row(
-    obs: dict[str, object],
-    metrics: dict[str, object],
-    evidence: list[object],
-    observation_id: str,
-    content_hash: str,
-    known_at: str,
-    retrieved_at: str,
-) -> dict[str, object]:
-    return {
-        "observation_id": observation_id,
-        "source": SOURCE,
-        "table": obs["table"],
-        "term": obs["term"],
-        "geo": obs["geo"],
-        "list_kind": obs["list_kind"],
-        "period": obs["period"],
-        "observed_at": obs.get("observed_at") or obs["period"],
-        "known_at": known_at,
-        "retrieved_at": retrieved_at,
-        "source_record_id": obs.get("source_record_id") or observation_id,
-        "content_hash": content_hash,
-        "collector_version": _COLLECTOR_VERSION,
-        "calc_version": _COLLECTOR_VERSION,
-        "metrics_json": json.dumps(metrics, sort_keys=True, default=str),
-        "features_json": None,
-        "evidence_json": json.dumps(evidence, sort_keys=True, default=str),
-        "source_url": f"bq://{obs['table']}",
-    }
-
-
-def _store_one_observation(
-    obs: dict[str, object],
-    first_known: dict[tuple[str, str], str],
-    retrieved_at: str,
-    expected: dict[tuple[object, str], set[tuple[str, str]]],
-) -> dict[str, object]:
-    metrics = dict(as_dict(obs.get("metrics"), what="metrics"))
-    evidence = list(as_list(obs.get("evidence"), what="evidence"))
-    observation_id, content_hash = _observation_identity(
-        obs["table"], obs["period"], obs["geo"], obs["term"], obs["list_kind"], metrics, evidence
-    )
-    refresh_date = _store_refresh_date(obs, metrics)
-    expected.setdefault((obs["table"], refresh_date), set()).add((observation_id, content_hash))
-    known_at = first_known.get((observation_id, content_hash), retrieved_at)
-    return _build_stored_row(obs, metrics, evidence, observation_id, content_hash, known_at, retrieved_at)
-
-
-def _store_observations(
-    data_root: Path | str | None, observations: list[dict[str, object]], retrieved_at: str
-) -> dict[tuple[object, str], set[tuple[str, str]]]:
-    """Write normalized observations; return expected identities per (table, refresh)."""
-    proot = _parquet_root(data_root)
-    if proot is None:
-        return {}
-    try:
-        backfill_legacy_feature_rows(data_root)
-    except Exception:  # noqa: BLE001, S110 - intentional best-effort boundary, never aborts
-        pass
-    stored = _read_warehouse("google_observations", proot)
-    first_known = _first_known_map(stored)
-    warehouse_rows: list[dict[str, object]] = []
-    expected: dict[tuple[object, str], set[tuple[str, str]]] = {}
-    for obs in observations:
-        warehouse_rows.append(_store_one_observation(obs, first_known, retrieved_at, expected))
-    _insert_warehouse("google_observations", warehouse_rows, proot)
-    return expected
-
-
 def _archive_raw(
     data_root: Path | str | None, template: str, job_id: str, table: str, params: dict[str, object], rows: list[object]
 ) -> None:
@@ -901,10 +351,6 @@ def _archive_raw(
 
 def _archive_root(data_root: Path | str | None) -> Path | None:
     if data_root is None:
-        return None
-    try:
-        from ..storage import raw_archive as _raw_archive_a  # noqa: F401
-    except ImportError:
         return None
     return Path(data_root) / "raw"
 
@@ -953,35 +399,6 @@ def _archived_rows(
         return _best_archive_payload(_raw_archive_r.iter_archive("google", template, job_id, root=root), params)
     except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return None
-
-
-def _mark_complete(
-    data_root: Path | str | None, checkpoint_key: str, refresh: str, payload_hash: str, count: int
-) -> None:
-    proot = _parquet_root(data_root)
-    if proot is None:
-        return
-    now = datetime.now(UTC).isoformat()
-    _insert_warehouse(
-        "ingestion_checkpoints",
-        [
-            {
-                "pipeline": _CHECKPOINT_PIPELINE,
-                "source": "bigquery",
-                "key": checkpoint_key,
-                "payload_hash": payload_hash,
-                "status": "complete",
-                "record_count": count,
-                "started_at": now,
-                "finished_at": now,
-                "parser_version": _COLLECTOR_VERSION,
-                "last_key": refresh,
-                "error": None,
-                "totals_json": "{}",
-            }
-        ],
-        proot,
-    )
 
 
 def _enumerate_refreshes(
@@ -1162,13 +579,6 @@ def _refresh_query_params(group: dict[str, object], refresh: str, week_start: st
     return {**base, "country_code": group["country"], "national": group["country"]}
 
 
-def _completed_for(data_root: Path | str | None, groups: list[dict[str, object]]) -> set[str]:
-    if data_root is None:
-        return set()
-    templates = [t for g in groups for t in _templates_for(g)]
-    return _completed_refreshes(data_root, templates)
-
-
 def _submit_or_error(
     template: str, params: dict[str, object], executor: _Executor | None, data_root: Path | str | None
 ) -> tuple[dict[str, object] | None, dict[str, object]]:
@@ -1191,7 +601,7 @@ def _resolve_rows(
         if recovered is None:
             return _wrap_error(
                 {
-                    "error": f"cached Trends result unavailable for {template}; refusing to checkpoint",
+                    "error": f"cached Trends result unavailable for {template}; no archived payload matches",
                     "error_type": "source_unavailable",
                     "source": "bigquery",
                 }
@@ -1213,12 +623,6 @@ def _maybe_archive(
         _archive_raw(data_root, template, job_id, table, params, rows)
 
 
-def _payload_hash(rows: list[object], data_root: Path | str | None) -> str:
-    if data_root is None:
-        return ""
-    return hashlib.sha256(json.dumps(rows, sort_keys=True, default=str).encode()).hexdigest()
-
-
 def _scope_limit_error(template: str, refresh: str, count: int) -> dict[str, object] | None:
     if count <= _MAX_LIMIT:
         return None
@@ -1229,42 +633,6 @@ def _scope_limit_error(template: str, refresh: str, count: int) -> dict[str, obj
         "error": f"{template} query scope exceeds 1000 rows for {refresh}",
         "error_type": "missing_coverage",
     }
-
-
-def _cached_record_refresh(cached: dict[str, object]) -> str:
-    parts = str(cached.get("source_record_id") or "").split("|")
-    if len(parts) >= 2 and parts[0] == cached.get("table"):
-        return parts[1]
-    return ""
-
-
-def _cached_metrics_refresh(cached: dict[str, object]) -> str:
-    return str(as_dict(cached.get("metrics"), what="metrics").get("refresh_date") or "")
-
-
-def _cached_row_refresh(cached: dict[str, object], refresh: str) -> str:
-    return (
-        _cached_metrics_refresh(cached)
-        or _cached_record_refresh(cached)
-        or str(cached.get("week") or cached.get("period") or refresh)
-    )
-
-
-def _merge_cached_rows(
-    cached_rows: list[dict[str, object]],
-    refresh: str,
-    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
-) -> None:
-    for cached in cached_rows:
-        key = (
-            cached["table"],
-            _cached_row_refresh(cached, refresh),
-            str(cached.get("week") or cached.get("period")),
-            str(cached["geo"]),
-            str(cached["term"]),
-            str(cached["list_kind"]),
-        )
-        merged.setdefault(key, cached)
 
 
 def _intl_row_geo(row: dict[str, object], group: dict[str, object]) -> object:
@@ -1316,25 +684,6 @@ def _tag_row(
     return staged
 
 
-def _as_staged(row: dict[str, object]) -> dict[str, object]:
-    """Cached warehouse rows carry plain dicts (no _-markers); normalize keys."""
-    staged_row = dict(row)
-    if "_table" not in staged_row:
-        staged_row["_table"] = staged_row.get("table")
-        staged_row["_week"] = str(staged_row.get("week") or staged_row.get("period"))
-        parts = str(staged_row.get("source_record_id") or "").split("|")
-        id_refresh = parts[1] if len(parts) >= 2 and parts[0] == staged_row.get("table") else ""
-        staged_row["_refresh"] = str(
-            as_dict(staged_row.get("metrics"), what="metrics").get("refresh_date")
-            or id_refresh
-            or staged_row.get("period")
-        )
-        staged_row["_kind"] = staged_row.get("list_kind")
-        staged_row["_geo"] = staged_row.get("geo")
-        staged_row["_cached"] = True
-    return staged_row
-
-
 def _table_sets() -> tuple[set[str], set[str]]:
     return (
         {_template_table("trends_us_top"), _template_table("trends_us_rising"), "trends_top", "trends_rising"},
@@ -1349,6 +698,18 @@ def _dma_scope_set(groups: list[dict[str, object]]) -> set[str]:
         if g.get("kind") == "us" and not g.get("national")
         for d in as_str_list(g.get("dmas"), what="dmas")
     }
+
+
+def _as_staged(row: dict[str, object]) -> dict[str, object]:
+    """Staged row with normalized markers (existing boundary)."""
+    staged = dict(row)
+    staged.setdefault("_table", staged.get("table") or "trends")
+    staged.setdefault("_week", staged.get("week") or staged.get("period") or "")
+    staged.setdefault("_geo", staged.get("geo"))
+    staged.setdefault("_kind", staged.get("list_kind") or staged.get("list") or "top")
+    staged.setdefault("_refresh", staged.get("refresh_date") or staged.get("_week"))
+    staged.setdefault("_template", staged.get("template"))
+    return staged
 
 
 def _route_staged(
@@ -1564,11 +925,8 @@ def _normalize_staged(
     rows: list[dict[str, object]],
     series_features: dict[tuple[object, object, object, object, str], dict[str, object]],
     retrieved_at: str,
-    data_root: Path | str | None,
-) -> tuple[list[dict[str, object]], list[dict[str, object]]]:
+) -> list[dict[str, object]]:
     observations: list[dict[str, object]] = []
-    effective: list[dict[str, object]] = []
-    winner_ids = {id(w) for w in _pick_winners(rows).values()}
     for row in rows:
         basis = _series_basis(row)
         features = series_features.get((row.get("term"), row.get("_table"), row.get("_kind"), row.get("_geo"), basis))
@@ -1581,211 +939,107 @@ def _normalize_staged(
             or metrics.get("region_count") is not None
         )
         norm = _normalize_row(
-            row, retrieved_at, data_root, features=_strip_diffusion(features) if aggregate else features
+            row, retrieved_at, features=_strip_diffusion(features) if aggregate else features
         )
         observations.append(norm)
-        if id(row) in winner_ids:
-            effective.append(norm)
-    return observations, effective
+    return observations
 
 
-def _feature_infos(
-    observations: list[dict[str, object]], dma_set: set[str], week_start: str, week_end: str
-) -> list[tuple[dict[str, object], str, str, dict[str, object], str, str, dict[str, object]]]:
-    infos: list[tuple[dict[str, object], str, str, dict[str, object], str, str, dict[str, object]]] = []
-    for obs in observations:
-        feats = obs.get("features")
-        if not isinstance(feats, dict):
+def _collect_one_live(
+    template: str,
+    table: str,
+    refresh: str,
+    params: dict[str, object],
+    group: dict[str, object],
+    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
+    used_templates: list[str],
+    refresh_seen: set[str],
+    executor: _Executor | None,
+    data_root: Path | str | None,
+) -> dict[str, object] | None:
+    """Fetch one refresh live; archive the raw payload, merge staged rows."""
+    refresh_seen.add(refresh)
+    err, result = _submit_or_error(template, params, executor, data_root)
+    if err is not None:
+        return err
+    cached = bool(result.get("cached"))
+    resolve_err, rows = _resolve_rows(template, params, data_root, result)
+    if resolve_err is not None:
+        return resolve_err
+    job_id = result.get("job_id")
+    _maybe_archive(data_root, template, str(job_id or template), table, params, rows, cached)
+    over = _scope_limit_error(template, refresh, len(rows))
+    if over is not None:
+        return over
+    if template not in used_templates:
+        used_templates.append(template)
+    for row in rows:
+        staged = _tag_row(row, template, table, refresh, group, job_id)
+        if staged is None:
             continue
-        metrics = dict(as_dict(obs.get("metrics"), what="metrics"))
-        evidence = list(as_list(obs.get("evidence"), what="evidence"))
-        oid, ch = _observation_identity(
-            obs["table"], obs["period"], obs["geo"], obs["term"], obs["list_kind"], metrics, evidence
+        key = (
+            staged["_table"],
+            staged["_refresh"],
+            staged["_week"],
+            str(staged["_geo"]),
+            str(staged.get("term")),
+            staged["_kind"],
         )
-        geo = str(obs.get("geo") or "")
-        if geo == "US":
-            geos = ["US"]
-        elif geo in dma_set:
-            geos = sorted(dma_set)
-        else:
-            geos = [geo.split(":")[0]]
-        scope = _feature_scope_json(
-            week_start=week_start,
-            week_end=week_end,
-            geos=geos,
-            table=str(obs.get("table") or ""),
-            list_kind=str(obs.get("list_kind") or ""),
-        )
-        infos.append((obs, oid, ch, scope, _feature_scope_hash(scope), _series_basis(obs), feats))
-    return infos
+        merged.setdefault(key, staged)
+    return None
 
 
-_FeatureInfo = tuple[dict[str, object], str, str, dict[str, object], str, str, dict[str, object]]
-
-
-def _feature_candidates(infos: list[_FeatureInfo], effective: list[dict[str, object]]) -> list[dict[str, object]]:
-    effective_ids = {id(o) for o in effective}
-    return [
-        {
-            "observation_id": oid,
-            "content_hash": ch,
-            "table": str(obs.get("table") or ""),
-            "period": str(obs.get("period") or ""),
-            "geo": str(obs.get("geo") or ""),
-            "term": str(obs.get("term") or ""),
-            "list_kind": str(obs.get("list_kind") or ""),
-            "metrics": as_dict(obs.get("metrics"), what="metrics"),
-        }
-        for obs, oid, ch, _, _, _, _ in infos
-        if id(obs) in effective_ids
-    ]
-
-
-def _feature_calc_key(row: dict[str, object]) -> tuple[str, str, str, str]:
-    return (
-        str(row.get("observation_id") or ""),
-        str(row.get("feature_scope_hash") or ""),
-        str(row.get("calc_version") or ""),
-        str(row.get("inputs_hash") or ""),
-    )
-
-
-def _track_calc(first_calc: dict[tuple[str, str, str, str], str], row: dict[str, object]) -> None:
-    k = _feature_calc_key(row)
-    c = str(row.get("calculated_at") or "")
-    if k not in first_calc or c < first_calc[k]:
-        first_calc[k] = c
-
-
-def _feature_calc_map(existing: list[dict[str, object]]) -> dict[tuple[str, str, str, str], str]:
-    first_calc: dict[tuple[str, str, str, str], str] = {}
-    for row in existing:
-        if isinstance(row, dict):
-            _track_calc(first_calc, row)
-    return first_calc
-
-
-def _feature_rows(
-    infos: list[_FeatureInfo],
-    candidates: list[dict[str, object]],
-    calc_version: str,
-    retrieved_at: str,
-    first_calc: dict[tuple[str, str, str, str], str],
-) -> list[dict[str, object]]:
-    empty_hash = expected_inputs_hash({}, "", "", "", "", "", [])
-    rows: list[dict[str, object]] = []
-    for obs, oid, ch, scope, shash, basis, feats in infos:
-        expected = expected_inputs_hash(
-            scope,
-            str(obs.get("term") or ""),
-            str(obs.get("table") or ""),
-            str(obs.get("list_kind") or ""),
-            basis,
-            str(obs.get("geo") or ""),
-            candidates,
-        )
-        if expected == empty_hash:
-            continue
-        calc_at = first_calc.get((oid, shash, calc_version, expected), retrieved_at)
-        rows.append(
-            {
-                "observation_id": oid,
-                "feature_scope_hash": shash,
-                "feature_scope_json": json.dumps(scope, sort_keys=True),
-                "features_json": json.dumps(feats, sort_keys=True, default=str),
-                "calc_version": calc_version,
-                "calculated_at": calc_at,
-                "inputs_hash": expected,
-            }
-        )
-    return rows
-
-
-def _write_feature_rows(
-    proot: Path,
-    observations: list[dict[str, object]],
-    effective: list[dict[str, object]],
-    dma_set: set[str],
+def _fetch_all_live(
+    groups: list[dict[str, object]],
     week_start: str,
     week_end: str,
-    calc_version: str,
-    retrieved_at: str,
-) -> None:
-    infos = _feature_infos(observations, dma_set, week_start, week_end)
-    if not infos:
-        return
-    existing = _read_warehouse("google_signal_features", proot)
-    _insert_warehouse(
-        "google_signal_features",
-        _feature_rows(
-            infos, _feature_candidates(infos, effective), calc_version, retrieved_at, _feature_calc_map(existing)
-        ),
-        proot,
-    )
-
-
-def _warehouse_identities(data_root: Path | str | None, table: str, refresh: str) -> set[tuple[str, str]]:
-    actual: set[tuple[str, str]] = set()
-    for cached in _warehouse_rows(data_root, table, refresh):
-        metrics = as_dict(cached.get("metrics"), what="metrics")
-        evidence = as_list(cached.get("evidence"), what="evidence")
-        actual.add(
-            _observation_identity(
-                cached.get("table") or table,
-                str(cached.get("period") or cached.get("week") or ""),
-                str(cached.get("geo") or ""),
-                str(cached.get("term") or ""),
-                str(cached.get("list_kind") or ""),
-                metrics,
-                evidence,
-            )
-        )
-    return actual
-
-
-def _verify_partition(
-    data_root: Path | str | None, table: str, refresh: str, expected: dict[tuple[object, str], set[tuple[str, str]]]
-) -> None:
-    if not expected.get((table, refresh), set()) <= _warehouse_identities(data_root, table, refresh):
-        raise RuntimeError(f"warehouse verify failed for {table}|{refresh}")
-
-
-def _verify_warehouse(
+    start_date: str,
+    end_date: str,
+    executor: _Executor | None,
     data_root: Path | str | None,
-    fetched: list[tuple[str, str, str, str, int, list[str]]],
-    expected: dict[tuple[object, str], set[tuple[str, str]]],
-) -> None:
-    for _key, _template, _refresh, _hash, _count, _tables in fetched:
-        for _table in _tables:
-            _verify_partition(data_root, _table, _refresh, expected)
+    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
+    used_templates: list[str],
+    refresh_seen: set[str],
+) -> dict[str, object] | None:
+    """Live fetch every refresh; no checkpoints, no replay."""
+    for group in groups:
+        for template in _templates_for(group):
+            table = _template_table(template)
+            refreshes = _enumerate_refreshes(table, start_date, end_date, executor, data_root)
+            if refreshes is None:
+                return _wrap_error(
+                    {"error": "refresh enumeration failed", "error_type": "source_unavailable", "source": "bigquery"}
+                )
+            for refresh in refreshes or [end_date]:
+                params = _refresh_query_params(group, refresh, week_start, week_end)
+                refresh_error = _collect_one_live(
+                    template, table, refresh, params, group, merged, used_templates, refresh_seen, executor, data_root
+                )
+                if refresh_error is not None:
+                    return refresh_error
+    return None
 
 
-def _mark_fetched(data_root: Path | str | None, fetched: list[tuple[str, str, str, str, int, list[str]]]) -> None:
-    for _key, _template, _refresh, _hash, _count, _tables in fetched:
-        _mark_complete(data_root, _key, _refresh, _hash, _count)
-
-
-def _persist_collect(
-    data_root: Path | str | None,
-    observations: list[dict[str, object]],
-    effective: list[dict[str, object]],
-    fetched: list[tuple[str, str, str, str, int, list[str]]],
-    dma_set: set[str],
-    week_start: str,
-    week_end: str,
-    retrieved_at: str,
+def _collect_end_live(
+    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
+    groups: list[dict[str, object]],
     signals_mod: ModuleType,
-) -> None:
-    expected = _store_observations(data_root, observations, retrieved_at)
-    proot = _parquet_root(data_root)
-    if proot is not None:
-        version = getattr(signals_mod, "CALC_VERSION", "")
-        calc_version = version if isinstance(version, str) else ""
-        _write_feature_rows(
-            proot, observations, effective, dma_set, week_start, week_end, calc_version, retrieved_at
-        )
-    _verify_warehouse(data_root, fetched, expected)
-    _mark_fetched(data_root, fetched)
+    used_templates: list[str],
+    refresh_seen: set[str],
+    limit: int,
+    term: str | None,
+) -> dict[str, object]:
+    """Normalize staged rows to observations; compute features in memory only."""
+    try:
+        national_rows, dma_rows, intl_rows, dma_set = _split_staged(merged, groups)
+    except ValueError as exc:
+        return {"status": "error", "source": SOURCE, "error": str(exc), "error_type": "malformed_row"}
+    staged_all = national_rows + dma_rows + intl_rows
+    winners = _pick_winners(staged_all)
+    series_features = _features_for(signals_mod, winners, dma_set)
+    retrieved_at = datetime.now(UTC).isoformat()
+    observations = _normalize_staged(national_rows + dma_rows + intl_rows, series_features, retrieved_at)
+    return _collect_response(observations, limit, used_templates, refresh_seen, term)
 
 
 def _collect_response(
@@ -1821,211 +1075,6 @@ def _collect_response(
     }
 
 
-def _fetch_all(
-    groups: list[dict[str, object]],
-    week_start: str,
-    week_end: str,
-    start_date: str,
-    end_date: str,
-    executor: _Executor | None,
-    data_root: Path | str | None,
-    completed: set[str],
-    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
-    used_templates: list[str],
-    fetched: list[tuple[str, str, str, str, int, list[str]]],
-    refresh_seen: set[str],
-) -> dict[str, object] | None:
-    for group in groups:
-        for template in _templates_for(group):
-            table = _template_table(template)
-            refreshes = _enumerate_refreshes(table, start_date, end_date, executor, data_root)
-            if refreshes is None:
-                return _wrap_error(
-                    {"error": "refresh enumeration failed", "error_type": "source_unavailable", "source": "bigquery"}
-                )
-            for refresh in refreshes or [end_date]:
-                params = _refresh_query_params(group, refresh, week_start, week_end)
-                checkpoint_key = _checkpoint_key(template, refresh, params)
-                refresh_error = _collect_one_refresh(
-                    template,
-                    table,
-                    refresh,
-                    params,
-                    group,
-                    checkpoint_key,
-                    completed,
-                    merged,
-                    used_templates,
-                    fetched,
-                    refresh_seen,
-                    executor,
-                    data_root,
-                )
-                if refresh_error is not None:
-                    return refresh_error
-    return None
-
-
-def _collect_end(
-    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
-    groups: list[dict[str, object]],
-    signals_mod: ModuleType,
-    used_templates: list[str],
-    fetched: list[tuple[str, str, str, str, int, list[str]]],
-    refresh_seen: set[str],
-    data_root: Path | str | None,
-    week_start: str,
-    week_end: str,
-    limit: int,
-    term: str | None,
-) -> dict[str, object]:
-    try:
-        national_rows, dma_rows, intl_rows, dma_set = _split_staged(merged, groups)
-    except ValueError as exc:
-        return {"status": "error", "source": SOURCE, "error": str(exc), "error_type": "malformed_row"}
-    staged_all = national_rows + dma_rows + intl_rows
-    winners = _pick_winners(staged_all)
-    series_features = _features_for(signals_mod, winners, dma_set)
-    retrieved_at = datetime.now(UTC).isoformat()
-    observations, effective = _normalize_staged(
-        national_rows + dma_rows + intl_rows, series_features, retrieved_at, data_root
-    )
-    if data_root is not None and (observations or fetched):
-        try:
-            _persist_collect(
-                data_root, observations, effective, fetched, dma_set, week_start, week_end, retrieved_at, signals_mod
-            )
-        except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-            return _wrap_error({"error": f"{SOURCE} store failed: {exc}", "error_type": "source_unavailable"})
-    return _collect_response(observations, limit, used_templates, refresh_seen, term)
-
-
-def _merge_tagged(
-    rows: list[object],
-    template: str,
-    table: str,
-    refresh: str,
-    group: dict[str, object],
-    job_id: object,
-    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
-) -> set[str]:
-    tables_seen: set[str] = set()
-    for row in rows:
-        staged = _tag_row(row, template, table, refresh, group, job_id)
-        if staged is None:
-            continue
-        key = (
-            staged["_table"],
-            staged["_refresh"],
-            staged["_week"],
-            str(staged["_geo"]),
-            str(staged.get("term")),
-            staged["_kind"],
-        )
-        merged.setdefault(key, staged)
-        tables_seen.add(str(staged["_table"]))
-    return tables_seen
-
-
-def _cached_rows_for(
-    data_root: Path | str | None, table: str, refresh: str, params: dict[str, object]
-) -> list[dict[str, object]]:
-    rows = [c for c in _warehouse_rows(data_root, table, refresh) if _cache_in_scope(c, params)]
-    rows.sort(key=_cached_record_id)
-    rows.sort(key=_cached_rank_key)
-    rows.sort(key=_cached_week_str, reverse=True)
-    return rows
-
-
-def _replay_completed(
-    template: str,
-    refresh: str,
-    params: dict[str, object],
-    table: str,
-    checkpoint_key: str,
-    completed: set[str],
-    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
-    used_templates: list[str],
-    data_root: Path | str | None,
-) -> tuple[bool, dict[str, object] | None]:
-    """Replay a checkpointed refresh; (False, None) means fall through to fetch."""
-    if checkpoint_key not in completed:
-        return False, None
-    cached_rows = _cached_rows_for(data_root, table, refresh, params)
-    if not cached_rows:
-        return False, None
-    over = _scope_limit_error(template, refresh, len(cached_rows))
-    if over is not None:
-        return True, over
-    _merge_cached_rows(cached_rows[:_MAX_LIMIT], refresh, merged)
-    if template not in used_templates:
-        used_templates.append(template)
-    return True, None
-
-
-def _merge_fresh(
-    template: str,
-    table: str,
-    refresh: str,
-    params: dict[str, object],
-    group: dict[str, object],
-    checkpoint_key: str,
-    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
-    used_templates: list[str],
-    fetched: list[tuple[str, str, str, str, int, list[str]]],
-    data_root: Path | str | None,
-    result: dict[str, object],
-) -> dict[str, object] | None:
-    cached = bool(result.get("cached"))
-    resolve_err, rows = _resolve_rows(template, params, data_root, result)
-    if resolve_err is not None:
-        return resolve_err
-    job_id = result.get("job_id")
-    _maybe_archive(data_root, template, str(job_id or template), table, params, rows, cached)
-    over = _scope_limit_error(template, refresh, len(rows))
-    if over is not None:
-        return over
-    if template not in used_templates:
-        used_templates.append(template)
-    tables_seen = _merge_tagged(rows, template, table, refresh, group, job_id, merged)
-    if data_root is not None:
-        fetched.append(
-            (checkpoint_key, template, refresh, _payload_hash(rows, data_root), len(rows), sorted(tables_seen))
-        )
-    return None
-
-
-def _collect_one_refresh(
-    template: str,
-    table: str,
-    refresh: str,
-    params: dict[str, object],
-    group: dict[str, object],
-    checkpoint_key: str,
-    completed: set[str],
-    merged: dict[tuple[object, object, object, object, object, object], dict[str, object]],
-    used_templates: list[str],
-    fetched: list[tuple[str, str, str, str, int, list[str]]],
-    refresh_seen: set[str],
-    executor: _Executor | None,
-    data_root: Path | str | None,
-) -> dict[str, object] | None:
-    refresh_seen.add(refresh)
-    replayed, replay_error = _replay_completed(
-        template, refresh, params, table, checkpoint_key, completed, merged, used_templates, data_root
-    )
-    if replay_error is not None:
-        return replay_error
-    if replayed:
-        return None
-    err, result = _submit_or_error(template, params, executor, data_root)
-    if err is not None:
-        return err
-    return _merge_fresh(
-        template, table, refresh, params, group, checkpoint_key, merged, used_templates, fetched, data_root, result
-    )
-
-
 def collect_trends(
     *,
     start_date: str | None,
@@ -2039,7 +1088,12 @@ def collect_trends(
     interval: str | None = "daily",
     term: str | None = None,
 ) -> dict[str, object]:
-    """Collect top/rising lists; each row becomes an idempotent candidate."""
+    """Collect top/rising lists live; each row becomes an idempotent candidate.
+
+    Live collect plus raw-payload archiving only; derived observations and
+    features are ephemeral per invocation, never persisted. The
+    model-visible output is logged to the run bundle by the caller.
+    """
     geos = _normalize_geos(geos)
     ready = _readiness_error()
     if ready:
@@ -2053,30 +1107,15 @@ def collect_trends(
     groups = _plan_groups(geos)
     from . import signals as _signals
 
-    completed = _completed_for(data_root, groups)
     merged: dict[tuple[object, object, object, object, object, object], dict[str, object]] = {}
     used_templates: list[str] = []
     refresh_seen: set[str] = set()
-    fetched: list[tuple[str, str, str, str, int, list[str]]] = []
-    fetch_error = _fetch_all(
-        groups,
-        week_start,
-        week_end,
-        start_date,
-        end_date,
-        executor,
-        data_root,
-        completed,
-        merged,
-        used_templates,
-        fetched,
-        refresh_seen,
+    fetch_error = _fetch_all_live(
+        groups, week_start, week_end, start_date, end_date, executor, data_root, merged, used_templates, refresh_seen
     )
     if fetch_error is not None:
         return fetch_error
-    return _collect_end(
-        merged, groups, _signals, used_templates, fetched, refresh_seen, data_root, week_start, week_end, limit, term
-    )
+    return _collect_end_live(merged, groups, _signals, used_templates, refresh_seen, limit, term)
 
 
 def _norm_table(row: dict[str, object]) -> object:
@@ -2102,14 +1141,6 @@ def _norm_refresh(row: dict[str, object], week: str) -> str:
 def _norm_keys(row: dict[str, object]) -> tuple[object, str, str, object, object, str]:
     week = _norm_week(row)
     return _norm_table(row), week, _norm_geo(row), row.get("term"), _norm_kind(row), _norm_refresh(row, week)
-
-
-def _cached_roundtrip(row: dict[str, object]) -> tuple[dict[str, object], list[object]] | None:
-    if row.get("_cached") and isinstance(row.get("metrics"), dict):
-        # Warehouse roundtrip: reuse stored metrics/evidence verbatim so a
-        # recollect re-hashes identically (durable dedup, first known_at kept).
-        return (dict(as_dict(row.get("metrics"), what="metrics")), list(as_list(row.get("evidence"), what="evidence")))
-    return None
 
 
 def _apply_subregion_counts(metrics: dict[str, object], row: dict[str, object]) -> None:
@@ -2150,19 +1181,13 @@ def _fresh_evidence(row: dict[str, object], table: object) -> list[object]:
     ]
 
 
-def _normalize_row(
-    row: dict[str, object], retrieved_at: str, data_root: Path | str | None, features: object = None
-) -> dict[str, object]:
-    """Map one merged row to a persisted candidate observation."""
+def _normalize_row(row: dict[str, object], retrieved_at: str, features: object = None) -> dict[str, object]:
+    """Map one merged row to an ephemeral candidate observation."""
     from . import signals as _signals_n
 
     table, week, geo, term, kind, refresh = _norm_keys(row)
-    roundtrip = _cached_roundtrip(row)
-    if roundtrip is not None:
-        metrics, evidence = roundtrip
-    else:
-        metrics = _fresh_metrics(row, refresh, week)
-        evidence = _fresh_evidence(row, table)
+    metrics = _fresh_metrics(row, refresh, week)
+    evidence = _fresh_evidence(row, table)
     return _signals_n.normalize_candidate(
         table=table,
         period=week,
@@ -2179,7 +1204,4 @@ def _normalize_row(
         features=features,
         retrieved_at=row.get("retrieved_at") or retrieved_at,
         known_at=row.get("known_at"),
-        # Warehouse is the durable store; JSONL stays a read-only legacy trail.
-        data_root=None,
-        persist=False,
     )

@@ -23,6 +23,8 @@ __all__ = [
     "EvidenceRecord",
     "EvidenceRejectedError",
     "discovery_only",
+    "edgartools_version",
+    "evidence_bundle_entry",
     "evidence_content_hash",
     "evidence_from_dict",
     "evidence_to_dict",
@@ -658,3 +660,71 @@ def evidence_from_dict(data: Mapping[str, object]) -> Evidence:
         claim_kind=_evidence_claim_kind(d),
         provenance=validate_provenance(d.get("provenance", {}), "<evidence>: 'provenance'"),
     )
+
+
+def edgartools_version() -> str | None:
+    """Installed edgartools version, or None when unresolvable (provenance metadata, never a gate)."""
+    try:
+        from importlib.metadata import version
+    except Exception:
+        return None
+    try:
+        return version("edgartools")
+    except Exception:
+        return None
+
+
+def _bundle_source_url(evidence: Evidence) -> str:
+    """Canonical source URL: the explicit URI, else the SEC archive URL for the accession."""
+    if isinstance(evidence.source_uri, str) and evidence.source_uri.strip():
+        return evidence.source_uri.strip()
+    prov = evidence.provenance if isinstance(evidence.provenance, Mapping) else {}
+    uri = prov.get("source_uri")
+    if isinstance(uri, str) and uri.strip():
+        return uri.strip()
+    accession = evidence.source_record_id or ""
+    raw_accession = prov.get("accession_no")
+    if isinstance(raw_accession, str) and raw_accession:
+        accession = raw_accession
+    bare = accession.replace("-", "")
+    if bare:
+        return f"https://www.sec.gov/Archives/edgar/data/{bare}"
+    return ""
+
+def _bundle_locator(evidence: Evidence) -> dict[str, JSONValue]:
+    """Source locator: document + kernel-materialized window coordinates (the reload recipe)."""
+    prov = evidence.provenance if isinstance(evidence.provenance, Mapping) else {}
+    document = prov.get("document_name")
+    if not isinstance(document, str) or not document:
+        document = str(evidence.metadata.get("document_name", "") or "")
+    offset = prov.get("offset")
+    end = prov.get("end")
+    locator: dict[str, JSONValue] = {"document": document}
+    locator["section"] = prov.get("section") if isinstance(prov.get("section"), str) else None
+    locator["start"] = offset if isinstance(offset, int) and not isinstance(offset, bool) else None
+    locator["end"] = end if isinstance(end, int) and not isinstance(end, bool) else None
+    return locator
+
+def evidence_bundle_entry(evidence: Evidence, *, accepted_at: str | None = None) -> dict[str, JSONValue]:
+    """Per-session bundle evidence entry: the 12-file Contract fields with exact model-visible text."""
+    prov = evidence.provenance if isinstance(evidence.provenance, Mapping) else {}
+    accession = evidence.source_record_id or ""
+    prov_accession = prov.get("accession_no")
+    if isinstance(prov_accession, str) and prov_accession:
+        accession = prov_accession
+    form = evidence.metadata.get("form") or evidence.metadata.get("filing_form")
+    retrieved = evidence.retrieved_at.isoformat()
+    return {
+        "evidence_id": evidence.evidence_id,
+        "session_id": evidence.session_id,
+        "source": evidence.source_type or "sec",
+        "accession": accession,
+        "form": form if isinstance(form, str) else None,
+        "source_url": _bundle_source_url(evidence),
+        "accepted_at": accepted_at or retrieved,
+        "retrieved_at": retrieved,
+        "edgartools_version": edgartools_version(),
+        "rendered_to_model": evidence.content,
+        "source_locator": _bundle_locator(evidence),
+        "source_hash": f"sha256:{evidence.content_hash}",
+    }
