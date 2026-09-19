@@ -47,7 +47,8 @@
     "stockbot": "omp --config .stockbot/omp/stockbot.yml --no-extensions --no-skills --no-rules --no-lsp --tools=task -e .stockbot/omp ${STOCKBOT_PROVIDER:+--provider \"$STOCKBOT_PROVIDER\"} ${STOCKBOT_MODEL:+--model \"$STOCKBOT_MODEL\"}",
     "stockbot:granite": "STOCKBOT_MODEL=lmstudio-community/granite-4.1-8b-GGUF:Q4_K_M bun run stockbot",
     "llama": "llama-server --models-dir ${HOME}/.cache/huggingface/hub --models-preset ${HOME}/.config/llama-server/presets.ini --models-max 1 --host 127.0.0.1 --port 8080",
-    "lint": "venv/bin/ruff check . && venv/bin/ruff format --check ."
+    "lint": "venv/bin/ruff check . && venv/bin/ruff format --check .",
+    "needle": "bun needle-harness/scripts/needle.ts"
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "18.2.3",

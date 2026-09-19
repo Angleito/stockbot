@@ -66,4 +66,13 @@ coverage-rust.lcov
 
 # mutmut working tree (full source copy; never commit)
 mutants/
+.needle/
+needle-harness/.next/
+needle-harness/out/
+needle-harness/benchmarks/
+benchmarks/
 .mutmut-cache
+*.tsbuildinfo
+
+# Needle weights blob (never ignore)
+!/needle3.cact

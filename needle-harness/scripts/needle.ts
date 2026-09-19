@@ -1,0 +1,116 @@
+import { spawn } from "node:child_process";
+import { existsSync } from "node:fs";
+import { homedir, networkInterfaces } from "node:os";
+import { dirname, isAbsolute, join } from "node:path";
+import { fileURLToPath } from "node:url";
+
+const HARNESS_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
+const ROOT_DIR = dirname(HARNESS_DIR);
+
+if (!existsSync(join(HARNESS_DIR, "lib/needle/server.py"))) {
+  process.stderr.write(`needle: harness not found at ${HARNESS_DIR}\n`);
+  process.exit(1);
+}
+
+const DOTENV = join(ROOT_DIR, ".env");
+const dotenvLoaded = typeof process.loadEnvFile === "function" && existsSync(DOTENV);
+if (dotenvLoaded) process.loadEnvFile(DOTENV);
+
+const VENV_PYTHON = `${homedir()}/.cache/needle-harness/.needle/bin/python`;
+const SERVER = join(HARNESS_DIR, "lib/needle/server.py");
+const WARMUP_TIMEOUT_MS = 120_000;
+const PORT = process.env.PORT ?? "3000";
+
+process.stdout.write(`needle [web]: harness ${HARNESS_DIR} → http://localhost:${PORT} (cwd ${process.cwd()})\n`);
+for (const n of Object.values(networkInterfaces()).flat()) {
+  if (n?.family === "IPv4" && !n.internal) process.stdout.write(`needle [web]: LAN   http://${n.address}:${PORT}\n`);
+}
+process.stdout.write(dotenvLoaded ? `needle [web]: env loaded ${DOTENV}\n` : `needle [web]: no .env at ${DOTENV}, using shell env\n`);
+
+function fail(msg: string): never {
+  process.stderr.write(msg + "\n");
+  process.exit(1);
+}
+
+if (!existsSync(VENV_PYTHON)) {
+  fail("needle venv missing — run: bash scripts/setup-needle.sh");
+}
+process.stdout.write(`needle [ai]: venv ok ${VENV_PYTHON}\n`);
+
+const pinned = process.env.NEEDLE_WEIGHTS;
+const repoBlob = join(ROOT_DIR, "needle3.cact");
+if (pinned) {
+  const resolved = isAbsolute(pinned) ? pinned : join(HARNESS_DIR, pinned);
+  process.env.NEEDLE_WEIGHTS = resolved;
+  process.stdout.write(`needle [ai]: weights ${resolved} (${existsSync(resolved) ? "exists" : "missing"})\n`);
+} else if (existsSync(repoBlob)) {
+  process.stdout.write(`needle [ai]: weights ${repoBlob} (exists)\n`);
+} else {
+  process.stderr.write("weights not pinned — falling back to HF cache\n");
+}
+
+async function warmup(): Promise<void> {
+  process.stdout.write("needle [ai]: warmup start (loading Needle 3 weights, first load can take ~60s)…\n");
+  const child = spawn(VENV_PYTHON, [SERVER], { cwd: HARNESS_DIR, stdio: ["pipe", "pipe", "pipe"] });
+  const { promise, resolve, reject } = Promise.withResolvers<string>();
+  let buf = "";
+  let errTail = "";
+  const timer = setTimeout(() => reject(new Error("timeout")), WARMUP_TIMEOUT_MS);
+  child.stdout?.on("data", (d: Buffer) => {
+    buf += d.toString();
+    const i = buf.indexOf("\n");
+    if (i >= 0) {
+      clearTimeout(timer);
+      resolve(buf.slice(0, i));
+    }
+  });
+  child.on("error", reject);
+  child.on("close", (code) => {
+    clearTimeout(timer);
+    reject(new Error(`bridge exited ${code ?? "unknown"} before warmup reply`));
+  });
+  child.stderr?.on("data", (d: Buffer) => {
+    const s = d.toString();
+    process.stderr.write(s);
+    errTail = (errTail + s).slice(-2000);
+  });
+  child.stdin?.write('{"id":"warmup","action":"route","prompt":"What time is it?","context":""}\n');
+  const line = await promise.catch((e: Error) => {
+    child.kill();
+    fail(`needle warmup failed: ${e.message}\nneedle warmup stderr tail: ${errTail || "(empty)"}`);
+  });
+  child.kill();
+  let id: unknown;
+  let tool: unknown;
+  try {
+    ({ id, tool } = JSON.parse(line) as { id?: unknown; tool?: unknown });
+  } catch {
+    fail(`needle warmup failed: bad JSON ${line}\nneedle warmup stderr tail: ${errTail || "(empty)"}`);
+  }
+  if (id !== "warmup" || tool !== "get_current_time") {
+    fail(`needle warmup failed: unexpected ${line}\nneedle warmup stderr tail: ${errTail || "(empty)"}`);
+  }
+  process.stdout.write("needle [ai]: warmup ok (get_current_time)\n");
+}
+
+await warmup();
+
+process.stdout.write(`needle [web]: starting next dev (cwd ${HARNESS_DIR}, PORT=${PORT})…\n`);
+process.stdout.write("needle [web]: next dev output follows — wait for Ready…\n");
+const dev = spawn("bun", ["run", "dev"], {
+  cwd: HARNESS_DIR,
+  stdio: "inherit",
+  env: { ...process.env, PORT },
+});
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => dev.kill(sig));
+}
+const { promise: exited, resolve: onExit } = Promise.withResolvers<number>();
+dev.on("close", onExit);
+const code = await exited;
+if (code === 0) {
+  process.stdout.write(`needle [web]: next dev exited with code ${code}\n`);
+} else {
+  process.stderr.write(`needle [web]: next dev exited with code ${code}\n`);
+}
+process.exit(code);
