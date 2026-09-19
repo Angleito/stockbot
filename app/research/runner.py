@@ -2439,12 +2439,15 @@ class _LiveRun:
         return agents
 
     def write_bundle(self, session_id: str) -> Path:
-        """Per-session JSON evidence bundle: request/config/tool_calls/evidence/artifacts/agents/answer/eval.
+        """Per-session JSON evidence bundle: disposable export view, never a source of truth.
 
-        Selective artifacts: substantive evidence rows only (content-addressed
-        sha256 names, no per-run copies); search lists, unused opens, and PDFs
-        stay trace-metadata-only. research.sqlite stays the metadata index; no
-        warehouse.duckdb is written anywhere.
+        ResearchRepository/SQLite owns sessions, jobs, evidence, freezes,
+        dossiers, final results, and traces; raw_archive owns accepted source
+        artifacts. Bundles under ``<data_root>/bundles`` are assembled from
+        those two and nothing reads them back (no resume/verify path touches
+        ``bundles/``). Selective artifacts: substantive evidence rows only
+        (content-addressed sha256 names, no per-run copies); search lists,
+        unused opens, and PDFs stay trace-metadata-only.
         """
         import json as _json
 

@@ -54,42 +54,40 @@ class SourceGateway:
         key = ("company_facts", cik_int)
         cached: object = self._cache.get(key)
         if cached is None:
-            company = _sec.get_company(cik_int)
-            facts_obj = company.get_facts()
-            if facts_obj is None:
+            _sec.ensure_identity()
+            from edgar.entity.entity_facts import download_company_facts_from_sec
+
+            try:
+                raw = download_company_facts_from_sec(cik_int)
+            except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+                raw = None
+            if not isinstance(raw, dict):
                 cached = dict(_EMPTY_FACTS)
             else:
-                from edgar.entity.entity_facts import download_company_facts_from_sec
+                retrieved_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
+                from edgar.urls import build_company_facts_url
 
-                raw = download_company_facts_from_sec(cik_int)
-                if not isinstance(raw, dict):
-                    cached = dict(_EMPTY_FACTS)
-                else:
-                    retrieved_at = datetime.now(UTC).strftime("%Y-%m-%dT%H:%M:%SZ")
-                    from edgar.urls import build_company_facts_url
-
-                    source_url = build_company_facts_url(cik_int)
-                    record_id = f"cik{cik_int:010d}"
-                    content_hash = hashlib.sha256(
-                        json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str).encode()
-                    ).hexdigest()
-                    normalized: dict[str, list[dict[str, object]]] = _norm.normalize_sec_company_facts(
-                        raw,
-                        retrieved_at=retrieved_at,
-                        content_hash=content_hash,
-                        source_url=source_url,
-                        source_record_id=record_id,
-                    )
-                    cached = {name: list(rows) for name, rows in normalized.items()}
+                source_url = build_company_facts_url(cik_int)
+                record_id = f"cik{cik_int:010d}"
+                content_hash = hashlib.sha256(
+                    json.dumps(raw, sort_keys=True, separators=(",", ":"), default=str).encode()
+                ).hexdigest()
+                normalized: dict[str, list[dict[str, object]]] = _norm.normalize_sec_company_facts(
+                    raw,
+                    retrieved_at=retrieved_at,
+                    content_hash=content_hash,
+                    source_url=source_url,
+                    source_record_id=record_id,
+                )
+                cached = {name: list(rows) for name, rows in normalized.items()}
             self._cache[key] = cached
         assert isinstance(cached, dict)
         if as_of is None:
             return dict(cached)
         out = dict(cached)
-        for name in ("financial_facts", "dividend_events"):
-            rows = cached.get(name)
+        for _name, rows in cached.items():
             if isinstance(rows, list):
-                out[name] = [row for row in rows if _known_as_of(row, as_of)]
+                out[_name] = [row for row in rows if _known_as_of(row, as_of)]
         return out
 
     def search_filings(
@@ -126,7 +124,7 @@ class SourceGateway:
         return cached
 
     def short_interest(self, symbol: str, *, as_of: str | None = None) -> list[dict[str, object]]:
-        """Normalized short-interest rows for one symbol, newest cycles first."""
+        """Normalized short-interest rows, newest first; ``as_of`` gates knowledge time (``known_at``)."""
         sym = str(symbol).strip().upper()
         key = ("short_interest", sym)
         cached: object = self._cache.get(key)
@@ -148,11 +146,7 @@ class SourceGateway:
         assert isinstance(cached, list)
         if as_of is None:
             return list(cached)
-        return [
-            row
-            for row in cached
-            if isinstance(row, dict) and str(row.get("settlement_date") or "")[:10] <= as_of
-        ]
+        return [row for row in cached if isinstance(row, dict) and _known_as_of(row, as_of)]
 
     def _normalized_short_rows(self, records: list[dict]) -> list[dict[str, object]]:
         """Exact FINRA records grouped by settlement date through the normalizer."""
@@ -186,12 +180,12 @@ class SourceGateway:
         return out
 
     def ticker_candidates(self, ticker: str, as_of: datetime) -> list[TickerAlias]:
-        """Live company-tickers aliases for one ticker.
+        """Live company-tickers aliases for one ticker (current knowledge only).
 
-        PIT stays with ``resolve_ticker_aliases`` (the caller), mirroring the
-        ``duckdb.ticker_alias_candidates`` seam this replaces.
+        Rows are now-stamped (``known_at == retrieved_at``), so a historical
+        ``as_of`` view resolves ``unresolved`` in ``resolve_ticker_aliases``;
+        intended, never papered over. PIT stays with the resolver (the caller).
         """
-        del as_of
         want = str(ticker).strip().upper()
         key = ("company_tickers",)
         cached: object = self._cache.get(key)

@@ -73,8 +73,7 @@ class _Gateway:
         out: dict[str, object] = {name: list(rows) for name, rows in facts.items()}
         if as_of is None:
             return out
-        for name in ("financial_facts", "dividend_events"):
-            rows = out.get(name)
+        for name, rows in out.items():
             if isinstance(rows, list):
                 out[name] = [
                     row

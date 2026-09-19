@@ -714,6 +714,10 @@ def evidence_bundle_entry(evidence: Evidence, *, accepted_at: str | None = None)
         accession = prov_accession
     form = evidence.metadata.get("form") or evidence.metadata.get("filing_form")
     retrieved = evidence.retrieved_at.isoformat()
+    document = prov.get("document_name")
+    document_name = (
+        document if isinstance(document, str) and document else str(evidence.metadata.get("document_name", "") or "")
+    )
     return {
         "evidence_id": evidence.evidence_id,
         "session_id": evidence.session_id,
@@ -726,5 +730,7 @@ def evidence_bundle_entry(evidence: Evidence, *, accepted_at: str | None = None)
         "edgartools_version": edgartools_version(),
         "rendered_to_model": evidence.content,
         "source_locator": _bundle_locator(evidence),
+        # source_hash pins model-visible text, not filing bytes; exact bytes live in raw_archive on acceptance.
         "source_hash": f"sha256:{evidence.content_hash}",
+        "source_artifact": (f"source://sec/{accession}/{document_name}" if accession and document_name else None),
     }

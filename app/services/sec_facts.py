@@ -35,7 +35,6 @@ from ..edgar_client import (
     _has_contiguous_quarters,
     _is_recent_dividend_period,
 )
-from ..sec.client import resolve_cik
 from .dividend_analysis import analyze_dividends
 
 DEFAULT_DATA_ROOT = None
@@ -188,17 +187,13 @@ def _resolve_entity(ticker: str, as_of: _dt.date, data_root: Path | None) -> str
     knowable on the as-of day itself is visible (day-granularity semantics,
     matching the ``known_at <= as_of`` facts gate). Ambiguous or
     unresolved tickers resolve to None: no store path, never a guess.
+    No archive-all from fetch: historically-unknown identity stays unknown.
     """
     del data_root
     horizon = _dt.datetime.combine(as_of, _dt.time.max, tzinfo=_dt.UTC)
     aliases = _gateway().ticker_candidates(ticker, horizon)
     if not aliases:
-        cik = resolve_cik(ticker)
-        if cik is None:
-            return None
-        from ..domain.market.ids import sec_entity_id
-
-        return sec_entity_id(cik)
+        return None
     resolution = resolve_ticker_aliases(ticker, aliases, as_of=horizon)
     if not resolution.resolved:
         return None

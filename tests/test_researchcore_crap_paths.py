@@ -868,6 +868,93 @@ def test_evidence_duplicate_identity_returns_prior(tmp_path: Path, monkeypatch: 
     assert dup == {"evidence_id": f"{sid}:ev:1", "accepted": False, "duplicate_of": f"{sid}:ev:1"}
 
 
+def test_evidence_identity_conflict_names_identity_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lost-race catch in _persist_evidence_record keys off 'identity_key' in the message."""
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    first = svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    stored = repo.get_evidence(str(first["evidence_id"]))
+    with pytest.raises(ValueError, match="identity_key"):
+        repo.save_evidence({**stored, "evidence_id": f"{sid}:ev:race"})
+    metadata = stored["metadata"]
+    assert isinstance(metadata, dict)
+    hit = repo.find_evidence_by_identity(sid, str(metadata["identity_key"]))
+    assert hit is not None and hit["evidence_id"] == first["evidence_id"]
+    assert repo.list_evidence_ids(sid) == [str(first["evidence_id"])]
+
+
+def test_acceptance_archives_exact_source_bytes_not_rendered_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accepted SEC evidence archives exact filing bytes; the derived text write stays."""
+    import app.sec.documents as _docs
+    from app.sec.archive import find_archived_document
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    exact = b"<html>EXACT SOURCE</html>"
+
+    def _fake_exact_bytes(accession_no: str, document_name: str | None = None) -> bytes | None:
+        del accession_no, document_name
+        return exact
+
+    monkeypatch.setattr(_docs, "get_sec_source_bytes", _fake_exact_bytes)
+    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    stored = repo.get_evidence(str(out["evidence_id"]))
+    provenance = stored["provenance"]
+    assert isinstance(provenance, dict)
+    found = find_archived_document(
+        str(provenance["accession_no"]), str(provenance["document_name"]), root=tmp_path / "raw"
+    )
+    assert found is not None
+    assert found.payload_path.read_bytes() == exact
+    assert exact != str(stored["content"]).encode("utf-8")
+
+
+def test_acceptance_without_source_bytes_keeps_derived_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """String-only attachments accept without an exact-bytes revision."""
+    import app.sec.documents as _docs
+    from app.sec.archive import find_archived_document
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+
+    def _fake_no_bytes(accession_no: str, document_name: str | None = None) -> bytes | None:
+        del accession_no, document_name
+        return None
+    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    stored = repo.get_evidence(str(out["evidence_id"]))
+    provenance = stored["provenance"]
+    assert isinstance(provenance, dict)
+    assert (
+        find_archived_document(
+            str(provenance["accession_no"]), str(provenance["document_name"]), root=tmp_path / "raw"
+        )
+        is None
+    )
+
+
+def test_bundle_entry_pins_rendered_text_and_names_source_bytes(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """source_hash stays the rendered-text hash; source_artifact names the exact-bytes key."""
+    from app.research.evidence import evidence_bundle_entry, evidence_from_dict
+
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    stored = repo.get_evidence(str(out["evidence_id"]))
+    entry = evidence_bundle_entry(evidence_from_dict(stored))
+    assert entry["source_hash"] == f"sha256:{stored['content_hash']}"
+    provenance = stored["provenance"]
+    assert isinstance(provenance, dict)
+    assert entry["source_artifact"] == (f"source://sec/{provenance['accession_no']}/{provenance['document_name']}")
+
+
 def test_evidence_no_per_job_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)

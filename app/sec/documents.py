@@ -323,6 +323,16 @@ def _resolve_in(filing: EdgarFiling, accession_no: str, document_name: str | Non
     return _named_attachment_of(filing, accession_no, document_name)
 
 
+def get_sec_source_bytes(
+    accession_no: str, document_name: str | None = None, *, data_root: Path | str | None = None
+) -> bytes | None:
+    """Exact source bytes for one accession/document; None when only derived text exists."""
+    _ = data_root
+    attachment = _resolve_in(_filing(accession_no), accession_no, document_name)
+    source_bytes, _representation = _source_bytes_of(attachment)
+    return source_bytes
+
+
 def _resolve(accession_no: str, document_name: str | None = None) -> object:
     return _resolve_in(_filing(accession_no), accession_no, document_name)
 
@@ -1114,13 +1124,15 @@ def get_sec_document(
     Primary-document fallback applies only when document_name is None.
 
     Archive-first: stored revisions under the selected root win with
-    ``known_at <= as_of``; a local miss fetches through EdgarTools once and
-    writes the archive through. Raw filing bytes stay durably addressable via
-    ``raw_archive_path``/``source://sec/<accession>/<document>``; the bounded
-    ``text`` is a derived rendered view (section/query narrow it, cursor/limit
-    paginate it) with per-span ``source_refs``. Pass ``raw=True`` for the
-    bounded raw-source window instead. Omitted ``max_chars``/``limit`` returns
-    the full stored text for internal callers; model callers pass a bound.
+    ``known_at <= as_of``; a local miss fetches live once and archives
+    nothing (selective retention: only evidence acceptance archives exact
+    bytes). Raw filing bytes stay addressable via
+    ``raw_archive_path``/``source://sec/<accession>/<document>`` once
+    accepted; the bounded ``text`` is a derived rendered view
+    (section/query narrow it, cursor/limit paginate it) with per-span
+    ``source_refs``. Pass ``raw=True`` for the bounded raw-source window
+    instead. Omitted ``max_chars``/``limit`` returns the full stored text
+    for internal callers; model callers pass a bound.
     """
     from .filings import _check_as_of
 

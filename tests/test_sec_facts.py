@@ -62,8 +62,7 @@ class _Gateway:
         out: dict[str, object] = {name: list(rows) for name, rows in facts.items()}
         if as_of is None:
             return out
-        for name in ("financial_facts", "dividend_events"):
-            rows = out.get(name)
+        for name, rows in out.items():
             if isinstance(rows, list):
                 out[name] = [
                     row
@@ -527,3 +526,16 @@ def test_render_sec_facts_envelope(gateway: _Gateway) -> None:
     assert "2026 Q2 (period end 2025-07-27): diluted 1.08" in text
     assert "2027 Q1 (period end 2026-04-26): diluted 2.39 | basic 2.4" in text
     assert "source_label: SEC EDGAR company facts (Basic & Diluted EPS)" in text
+
+
+def test_now_stamped_alias_unresolved_at_past_as_of(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Now-known ticker identity stays unknown at a past as_of; no archive-all fetch."""
+    _seed_ticker(gateway, NVDA_CIK, "NVDA", retrieved_at="2026-08-20T12:00:00Z")
+    _seed_facts(gateway, NVDA_CIK, shares=[_shares_fact(1000, "2026-08-01", "2026-08-02", "s1")])
+
+    def _boom(ticker: str, metric: str):
+        raise AssertionError(f"live fallback must not run for unknown identity: {ticker} {metric}")
+
+    monkeypatch.setattr(sec_facts.edgar_client, "get_fundamentals", _boom)
+    result = sec_facts.get_fundamentals("NVDA", "shares_outstanding", as_of="2026-08-10")
+    assert result["error_type"] == "pit_data_unavailable"

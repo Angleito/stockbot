@@ -1041,6 +1041,14 @@ def _build_evidence_record(
     )
 
 
+def _duplicate_response(store: ResearchRepository, session_id: str, record: Evidence) -> dict[str, JSONValue]:
+    """Winner row for a lost identity race; raises when the winner is gone."""
+    hit = store.find_evidence_by_identity(session_id, str(record.metadata.get("identity_key") or ""))
+    if hit is None:
+        raise ValueError(f"<research.sqlite>: evidence: duplicate identity_key {record.evidence_id!r}")
+    return {"evidence_id": hit.get("evidence_id"), "accepted": False, "duplicate_of": hit.get("evidence_id")}
+
+
 def _persist_evidence_record(
     store: ResearchRepository,
     session_id: str,
@@ -1062,15 +1070,51 @@ def _persist_evidence_record(
             continue
     ingest_evidence(ledger, record, as_of=found.as_of)
     stored = evidence_to_dict(record)
-    store.save_evidence(stored)
-    _emit(store, session_id, "evidence.accepted", {"job_id": job_id, "evidence_id": record.evidence_id})
     try:
+        store.save_evidence(stored)
+    except ValueError as exc:
+        if "identity_key" not in str(exc):
+            raise
+        return _duplicate_response(store, session_id, record)
+    _emit(store, session_id, "evidence.accepted", {"job_id": job_id, "evidence_id": record.evidence_id})
+    provenance = record.provenance if isinstance(record.provenance, dict) else {}
+    accession = provenance.get("accession_no")
+    document = provenance.get("document_name")
+    source_bytes: bytes | None = None
+    try:
+        from app.sec.documents import get_sec_source_bytes
+
+        if isinstance(accession, str) and accession:
+            source_bytes = get_sec_source_bytes(
+                accession, document if isinstance(document, str) and document else None
+            )
+    except Exception:
+        source_bytes = None
+    try:
+        from app.sec.archive import archive_sec_document
         from app.storage import raw_archive as _artifacts
 
+        if source_bytes is not None and isinstance(accession, str) and accession:
+            archive_sec_document(
+                accession,
+                document if isinstance(document, str) and document else "primary",
+                source_bytes,
+                url=record.source_uri or "",
+                retrieved_at=record.retrieved_at.isoformat(),
+                metadata={
+                    "evidence_id": record.evidence_id,
+                    "session_id": session_id,
+                    "source_content_hash": sha256(source_bytes).hexdigest(),
+                },
+            )
         _artifacts.store_evidence_artifact(
             record.content.encode("utf-8"),
             url=record.source_uri or "",
-            metadata={"evidence_id": record.evidence_id, "session_id": session_id},
+            metadata={
+                "evidence_id": record.evidence_id,
+                "session_id": session_id,
+                "source_bytes": "archived" if source_bytes is not None else "unavailable",
+            },
         )
     except Exception:
         pass
@@ -1175,14 +1219,6 @@ def _record_absence_artifact(
     }
 
 
-def _evidence_duplicate(prior: list[dict[str, JSONValue]], identity_key: str):
-    """The prior row when this identity key repeats, else None (no per-job evidence cap)."""
-    for row in prior:
-        if isinstance(row.get("metadata"), dict) and row["metadata"].get("identity_key") == identity_key:
-            return {"evidence_id": row.get("evidence_id"), "accepted": False, "duplicate_of": row.get("evidence_id")}
-    return None
-
-
 def record_evidence(
     session_id: str,
     job_id: str,
@@ -1211,10 +1247,9 @@ def record_evidence(
     metadata, subject = _evidence_typed(data, found)
     provenance = _observed_provenance(data)
     identity_key = _evidence_identity(data, claim, subject, provenance)
-    prior = store.list_evidence(session_id)
-    dup = _evidence_duplicate(prior, identity_key)
-    if dup is not None:
-        return dup
+    hit = store.find_evidence_by_identity(session_id, identity_key)
+    if hit is not None:
+        return {"evidence_id": hit.get("evidence_id"), "accepted": False, "duplicate_of": hit.get("evidence_id")}
     record = _build_evidence_record(
         data,
         session_id=session_id,

@@ -397,6 +397,17 @@ def _leaderboard_key(item: dict[str, object]) -> tuple[float, str]:
     return (-float(str(item["short_interest_percent"])), str(item["ticker"]))
 
 
+def _unresolved_symbols(inputs: _ScreenInputs) -> list[str]:
+    """Symbols with no resolved entity: explicit unknown, never silent."""
+    from ..domain.market.securities import SecurityResolution
+
+    out: list[str] = []
+    for symbol, res in inputs.resolutions.items():
+        if not isinstance(res, SecurityResolution) or not res.resolved:
+            out.append(str(symbol))
+    return out
+
+
 def _compute_leaderboard(settlement_date: str, as_of: str, limit: int | None) -> dict[str, object]:
     """Build one complete settlement-date leaderboard from live providers."""
     limit = _clamp_limit(limit)
@@ -404,7 +415,8 @@ def _compute_leaderboard(settlement_date: str, as_of: str, limit: int | None) ->
     if not rows:
         return _empty_screen_error(settlement_date, as_of)
     gateway = _gateway()
-    inputs = _screen_inputs([str(row["symbol_code"]) for row in rows], as_of, gateway)
+    symbols = [str(row["symbol_code"]) for row in rows]
+    inputs = _screen_inputs(symbols, as_of, gateway)
     accum = _ScreenAccum()
     for row in rows:
         _accumulate_screen_row(row, settlement_date, inputs, accum)
@@ -436,6 +448,7 @@ def _compute_leaderboard(settlement_date: str, as_of: str, limit: int | None) ->
             "shares_outstanding_rows": accum.counters["shares_outstanding_rows"],
             "exclusions": accum.exclusions,
         },
+        "unresolved": sorted(_unresolved_symbols(inputs)),
         "source_records": [
             f"FINRA otcMarket/consolidatedShortInterest (settlement {settlement_date})",
             "SEC company_tickers.json",
@@ -768,5 +781,6 @@ def short_interest_change_screen(
         "settlement_prior": prior_date,
         "calculation_version": SLICE_CALC_VERSION,
         "coverage": {"current_finra_rows": len(current), "eligible_rows": len(entries)},
+        "unresolved": sorted(_unresolved_symbols(inputs)),
         "entries": entries[:limit],
     }

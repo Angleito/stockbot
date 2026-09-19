@@ -1028,3 +1028,23 @@ def test_attachment_exhibit_of_garbage_returns_none() -> None:
     assert documents._attachment_exhibit_of(SimpleNamespace(document_type=object(), document=object())) is None
     assert documents._attachment_exhibit_of(SimpleNamespace()) is None
     assert documents._attachment_exhibit_of(object()) is None
+
+
+def test_get_sec_source_bytes_prefers_download_over_derived_text(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Acceptance archives download() bytes; string-only attachments yield None."""
+    exact = b"<html>EXACT</html>"
+
+    def _download() -> bytes:
+        return exact
+
+    attachment: object = SimpleNamespace(document="a.htm", download=_download, content="derived", text="derived")
+
+    def _fake_filing(accession_no: str) -> object:
+        del accession_no
+        return SimpleNamespace(document=attachment)
+
+    monkeypatch.setattr(documents, "_filing", _fake_filing)
+    assert documents.get_sec_source_bytes("0000000000-25-000001") == exact
+    attachment = SimpleNamespace(document="a.htm", content="derived", text="derived")
+    monkeypatch.setattr(documents, "_filing", _fake_filing)
+    assert documents.get_sec_source_bytes("0000000000-25-000001") is None

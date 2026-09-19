@@ -537,10 +537,11 @@ def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(
         "conflicting_versions": 0,
     }
     assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
+    assert result["truncated"] is False
+    assert result["unresolved"] == ["DDD", "EEE", "FFF"]
 
 
 def test_stale_settlement_is_surfaced(data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch) -> None:
-    _seed_tickers(seeds)
     _seed_facts(seeds, _default_facts())
     stale_date = "2025-01-15"
     _seed_short_interest(
@@ -557,9 +558,21 @@ def test_stale_settlement_is_surfaced(data_root: Path, seeds: _Seeds, monkeypatc
     assert stale["as_of_date"] == "2025-01-20"
 
 
-# ---------------------------------------------------------------------------
-# Point-in-time enforcement (P0): FINRA rows, aliases, and classifications
-# ---------------------------------------------------------------------------
+def test_short_interest_rows_gate_on_known_at_not_settlement(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A past-settlement cycle retrieved today is invisible at a past as_of."""
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_short_interest(seeds, _default_rows(), retrieved_at="2026-08-20T12:00:00Z")
+    _install(monkeypatch, seeds)
+
+    early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert "error" in early
+    early_error = early["error"]
+    assert isinstance(early_error, str) and "knowable on or before 2026-08-14" in early_error
+    later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-20", data_root=data_root)
+    assert isinstance(later.get("coverage"), dict) and later["coverage"]["finra_rows"] == 3
 
 
 def test_snapshot_later_settlement_invisible_at_as_of(
@@ -721,6 +734,7 @@ def test_security_classification_is_consulted(
     early_entries = early["entries"]
     assert isinstance(early_entries, list)
     assert "ETF" in [e["ticker"] for e in early_entries]
+    assert early["unresolved"] == []
 
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
     later_coverage = later["coverage"]
@@ -729,6 +743,7 @@ def test_security_classification_is_consulted(
     assert isinstance(later_entries, list)
     assert later_coverage["exclusions"]["not_classified_common_equity"] == 1
     assert "ETF" not in [e["ticker"] for e in later_entries]
+    assert later["unresolved"] == []
 
 
 def test_corrected_snapshot_mixed_offsets_newest_wins(
@@ -805,6 +820,30 @@ def test_change_slice_computes_changes_with_evidence(
     assert by_ticker["AAA"]["finra_source_url"].startswith("https://api.finra.org")
     # Sorted by signed short-interest pp change: AAA moved most.
     assert [e["ticker"] for e in entries] == ["AAA", "BBB", "CCC"]
+    assert result["unresolved"] == []
+
+
+def _unmapped_row() -> dict[str, object]:
+    return {
+        "symbolCode": "DDD",
+        "issueName": "Delta",
+        "settlementDate": SETTLEMENT,
+        "currentShortPositionQuantity": 10,
+    }
+
+
+def test_change_slice_surfaces_unresolved_symbols(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unresolved symbols surface explicitly, never vanish (matches the leaderboard key)."""
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_cycle(seeds, PRIOR_SETTLEMENT, _prior_rows())
+    _seed_cycle(seeds, SETTLEMENT, _default_rows() + [_unmapped_row()])
+    _install(monkeypatch, seeds)
+
+    result = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
+    assert result["unresolved"] == ["DDD"]
 
 
 def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(
