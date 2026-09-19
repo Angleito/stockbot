@@ -2,6 +2,36 @@
 
 These rules apply to all AI agents and engineers changing Stockbot: Python, TypeScript, Rust, shell, Docker, tests, dependencies, agent/eval code.
 Goal: make bad agent-generated changes hard to merge while keeping the feedback loop fast.
+## 0. Human Decision Authority
+
+The human owns all decisions. The agent investigates, executes approved decisions, and verifies results.
+
+Before making any decision that changes WHAT is being built or HOW it will behave, use the `ask` tool.
+Do not infer approval from the task objective. Do not choose a reasonable default, the "best" option,
+or continue past a decision point without an explicit human answer.
+
+A decision exists whenever there are multiple materially different valid ways to proceed: architecture,
+library/dependency, data structure, algorithm, API/interface, schema/representation, storage/persistence,
+error-handling, caching, concurrency, security boundary, auth, compatibility,
+performance/correctness/complexity tradeoffs, observable behavior change/removal, scope expansion,
+new abstraction, custom code where an established library may exist, ambiguous requirement interpretation,
+or fixing an unrelated discovered problem.
+
+`ask` format: investigate first, then present Decision, why it exists, viable options with
+repo/dependency evidence, and consequences of each. No recommendation unless asked. After `ask`, STOP.
+
+No `ask` for purely mechanical details fully implied by an approved decision: import/reference updates,
+formatting, implementing an explicitly specified interface, tests pinning approved behavior, mechanical
+type fixes. A mechanical task revealing a new design choice stops being mechanical — `ask`.
+
+Before each slice: name the approved decision; execute only writes it fully implies, else `ask`.
+Approval covers the current slice only. After a slice: verify, report diff, STOP.
+Example: approved "use edgartools, preserve our representation" covers parser/import/caller/test edits;
+discovering edgartools represents amendments differently is a new decision — `ask` how to represent them.
+
+Investigation is always authorized when non-destructive: read, search, references, AST/LSP, git
+history/diffs, dependency source/docs, non-destructive diagnostics/tests. It never authorizes implementation.
+
 ## 1. YAGNI — You Aren't Gonna Need It
 
 YAGNI means: do not build for imagined future needs. Build only what the current task requires.
