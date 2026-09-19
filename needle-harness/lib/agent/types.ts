@@ -21,7 +21,7 @@ export type ToolResult = { ok: true; evidence: Evidence } | { ok: false; error: 
 export type Tool = {
   description: string;
   parameters: JSONSchema;
-  execute(args: Record<string, unknown>): Promise<ToolResult>;
+  execute(args: Record<string, unknown>, opts: { sessionId: string }): Promise<ToolResult>;
 };
 
 export type AgentEvent =

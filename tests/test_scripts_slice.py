@@ -1739,6 +1739,54 @@ def test_tool_invoke_failure_writes_bridge_failed(monkeypatch: pytest.MonkeyPatc
     assert responses == [{"id": "i9", "error": "bridge_failed"}]
 
 
+def test_tool_invoke_reuses_session_context(monkeypatch: pytest.MonkeyPatch):
+    responses = _capture(monkeypatch)
+    seen: list[PiSessionContext] = []
+
+    def fake_execute(
+        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+    ) -> dict[str, object]:
+        seen.append(session)
+        return {"ok": 1}
+
+    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    try:
+        pi_bridge._run_tool_invoke({"id": "c1", "name": "search_web", "arguments": {}, "session_id": "reuse-1"})
+        pi_bridge._run_tool_invoke({"id": "c2", "name": "search_web", "arguments": {}, "session_id": "reuse-1"})
+        assert responses == [{"id": "c1", "result": {"ok": 1}}, {"id": "c2", "result": {"ok": 1}}]
+        assert len(seen) == 2 and seen[0] is seen[1]
+    finally:
+        pi_bridge._invoke_sessions.pop("reuse-1", None)
+
+
+def test_tool_invoke_end_drops_session(monkeypatch: pytest.MonkeyPatch):
+    _capture(monkeypatch)
+    seen: list[PiSessionContext] = []
+
+    def fake_execute(
+        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+    ) -> dict[str, object]:
+        seen.append(session)
+        return {"ok": 1}
+
+    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    try:
+        pi_bridge._run_tool_invoke({"id": "e1", "name": "search_web", "arguments": {}, "session_id": "end-1"})
+        assert pi_bridge._op_tool_invoke_end({"session_id": "end-1"}, "end-op") == {
+            "id": "end-op",
+            "result": {"ended": True},
+        }
+        pi_bridge._run_tool_invoke({"id": "e2", "name": "search_web", "arguments": {}, "session_id": "end-1"})
+        assert len(seen) == 2 and seen[0] is not seen[1]
+        assert pi_bridge._op_tool_invoke_end({"session_id": "end-unknown"}, "end-miss") == {
+            "id": "end-miss",
+            "result": {"ended": False},
+        }
+        assert pi_bridge._op_tool_invoke_end({}, "end-bad") == {"id": "end-bad", "error": "missing_arg"}
+    finally:
+        pi_bridge._invoke_sessions.pop("end-1", None)
+
+
 def test_tool_invoke_overlaps_barrier(monkeypatch: pytest.MonkeyPatch):
     responses = _capture(monkeypatch)
     barrier = threading.Barrier(2)

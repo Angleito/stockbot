@@ -3,7 +3,7 @@
   "private": true,
   "scripts": {
     "setup": "python3.14 -m venv venv && venv/bin/pip install --upgrade pip && venv/bin/pip install -r requirements.txt",
-    "test": "venv/bin/pytest && bun test tests/pi_extension.test.ts",
+    "test": "venv/bin/pytest && bun test tests/pi_extension.test.ts && (cd needle-harness && bun test)",
     "typecheck": "venv/bin/pyrefly check",
     "typecheck-ts": "tsc --noEmit -p tsconfig.json",
     "test-collect": "venv/bin/pytest --collect-only -q",

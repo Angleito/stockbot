@@ -1,13 +1,12 @@
-import { randomUUID } from "node:crypto";
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { needleRouter, type NeedleDecision } from "../needle/client";
+import { acquireNeedle, needleRouter, type NeedleDecision } from "../needle/client";
 import { reason, type MuseUsage } from "../muse/client";
 import { tools } from "../tools/index";
-import { setAllowedFetchUrls } from "../tools/fetch-url";
 import { resetEvidenceIds } from "./evidence";
 import { groundingError } from "./grounding";
 import type { AgentEvent, Evidence, Metrics } from "./types";
+import { endSession, newSessionId } from "../tools/stockbot";
 
 export type NeedleDecisionRecord = {
   step: number;
@@ -39,7 +38,6 @@ export async function runAgent(
 ): Promise<void> {
   const t0 = performance.now();
   const startedAt = new Date().toISOString();
-  resetEvidenceIds();
   const evidence: Evidence[] = [];
   const needleDecisions: NeedleDecisionRecord[] = [];
   const toolCalls: ToolCallRecord[] = [];
@@ -48,23 +46,12 @@ export async function runAgent(
   let escalations = 0;
   let escalated = false;
   let directFallback = false;
-  const sessionId = randomUUID();
 
-  const collectUrls = (): string[] => {
-    const urls: string[] = [];
-    for (const e of evidence) {
-      if (e.url) urls.push(e.url);
-      const matches = e.content.match(/https?:\/\/[^\s"'\)\]]+/g);
-      if (matches) urls.push(...matches);
-      if (urls.length >= 200) break;
-    }
-    return urls.slice(0, 200);
-  };
   const evidenceText = (): string => evidence.map((e) => e.content).join("\n").slice(0, 24000);
 
   emit({ type: "agent_start", prompt });
   if (isConversational(prompt)) {
-    const answer = "Hi! I'm Needle. Ask me something to look up \u2014 the time, SEC filings, a URL to fetch, or a web search.";
+    const answer = "Hi! I'm Needle. Ask me something to look up — the time, SEC filings, or a web search.";
     emit({ type: "answer_delta", text: answer });
     const metrics: Metrics = {
       totalMs: performance.now() - t0,
@@ -83,122 +70,126 @@ export async function runAgent(
     }
     return;
   }
-  const seen = new Set<string>();
-  let consecutiveFailures = 0;
-  let decision: NeedleDecision | null = null;
+  const releaseNeedle = await acquireNeedle();
+  const sessionId = newSessionId();
   try {
-    const tn = performance.now();
-    decision = await needleRouter.start(prompt);
-    needleMs += performance.now() - tn;
-  } catch {
-    escalations += 1;
-    if (evidence.length === 0) escalated = true;
-    directFallback = evidence.length === 0;
-    decision = null;
-  }
-  for (let step = 0; step < 8 && decision; step++) {
-    if (opts?.signal?.aborted) break;
-    const current = decision;
-    decision = null;
-    needleDecisions.push({
-      step,
-      tool: current.tool,
-      arguments: current.arguments,
-      confidence: current.confidence,
-      reasoning: current.reasoning,
-    });
-    emit({ type: "needle_decision", step, tool: current.tool, arguments: current.arguments, confidence: current.confidence });
-    if (current.escalate || !current.tool) {
-      escalations += 1;
-      if (evidence.length === 0) escalated = true;
-      break;
-    }
-    const stripped = prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
-    const timeWord = /\b(time|clock|date|today|now|utc|hour|minute|second|day|week|month|year|morning|afternoon|evening)\b/i.test(prompt);
-    if (stripped.length < 2 || (current.tool === "get_current_time" && !timeWord)) {
-      escalations += 1;
-      if (evidence.length === 0) escalated = true;
-      directFallback = evidence.length === 0;
-      break;
-    }
-    const tool = tools[current.tool];
-    if (!tool) {
-      escalations += 1;
-      if (evidence.length === 0) escalated = true;
-      directFallback = evidence.length === 0;
-      break;
-    }
-    const key = current.tool + JSON.stringify(current.arguments);
-    if (seen.has(key)) break;
-    seen.add(key);
-    const urls = collectUrls();
-    setAllowedFetchUrls(urls);
-    const rejection = groundingError(current.tool, current.arguments, {
-      prompt,
-      evidenceText: evidenceText(),
-      seenUrls: new Set(urls),
-    });
-    if (rejection) {
-      emit({ type: "tool_result", tool: current.tool, preview: rejection.slice(0, 160) });
-      toolCalls.push({ tool: current.tool, ok: false });
-      consecutiveFailures += 1;
-      if (consecutiveFailures >= 2) {
-        escalations += 1;
-        if (evidence.length === 0) escalated = true;
-        break;
-      }
-      try {
-        const tn = performance.now();
-        decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: rejection });
-        needleMs += performance.now() - tn;
-      } catch {
-        escalations += 1;
-        if (evidence.length === 0) escalated = true;
-        directFallback = evidence.length === 0;
-        break;
-      }
-      continue;
-    }
-    emit({ type: "tool_start", tool: current.tool });
-    const tt = performance.now();
-    const result = await tool.execute({ ...current.arguments, sessionId });
-    toolMs += performance.now() - tt;
-    toolCalls.push({ tool: current.tool, ok: result.ok, evidenceId: result.ok ? result.evidence.id : undefined });
-    if (!result.ok) {
-      emit({ type: "tool_result", tool: current.tool, preview: result.error.slice(0, 160) });
-      consecutiveFailures += 1;
-      if (consecutiveFailures >= 2) {
-        escalations += 1;
-        if (evidence.length === 0) escalated = true;
-        break;
-      }
-      try {
-        const tn = performance.now();
-        decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: result.error });
-        needleMs += performance.now() - tn;
-      } catch {
-        escalations += 1;
-        if (evidence.length === 0) escalated = true;
-        directFallback = evidence.length === 0;
-        break;
-      }
-      continue;
-    }
-    consecutiveFailures = 0;
-    evidence.push(result.evidence);
-    setAllowedFetchUrls(collectUrls());
-    emit({ type: "tool_result", tool: current.tool, evidenceId: result.evidence.id, preview: result.evidence.content.slice(0, 160) });
-    if (evidence.length >= 5 || evidence.reduce((n, e) => n + e.content.length, 0) >= 24000) break;
+    resetEvidenceIds();
+    const seen = new Set<string>();
+    let consecutiveFailures = 0;
+    let decision: NeedleDecision | null = null;
     try {
       const tn = performance.now();
-      decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: true, evidence: result.evidence });
+      decision = await needleRouter.start(prompt);
       needleMs += performance.now() - tn;
     } catch {
       escalations += 1;
       if (evidence.length === 0) escalated = true;
       directFallback = evidence.length === 0;
-      break;
+      decision = null;
     }
+    for (let step = 0; step < 8 && decision; step++) {
+      if (opts?.signal?.aborted) break;
+      const current = decision;
+      decision = null;
+      needleDecisions.push({
+        step,
+        tool: current.tool,
+        arguments: current.arguments,
+        confidence: current.confidence,
+        reasoning: current.reasoning,
+      });
+      emit({ type: "needle_decision", step, tool: current.tool, arguments: current.arguments, confidence: current.confidence });
+      if (current.escalate || !current.tool) {
+        escalations += 1;
+        if (evidence.length === 0) escalated = true;
+        break;
+      }
+      const stripped = prompt.trim().toLowerCase().replace(/[^a-z0-9]+/g, "");
+      const timeWord = /\b(time|clock|date|today|now|utc|hour|minute|second|day|week|month|year|morning|afternoon|evening)\b/i.test(prompt);
+      if (stripped.length < 2 || (current.tool === "get_current_time" && !timeWord)) {
+        escalations += 1;
+        if (evidence.length === 0) escalated = true;
+        directFallback = evidence.length === 0;
+        break;
+      }
+      const tool = tools[current.tool];
+      if (!tool) {
+        escalations += 1;
+        if (evidence.length === 0) escalated = true;
+        directFallback = evidence.length === 0;
+        break;
+      }
+      const key = current.tool + JSON.stringify(current.arguments);
+      if (seen.has(key)) break;
+      seen.add(key);
+      const rejection = groundingError(current.tool, current.arguments, {
+        prompt,
+        evidenceText: evidenceText(),
+      });
+      if (rejection) {
+        emit({ type: "tool_result", tool: current.tool, preview: rejection.slice(0, 160) });
+        toolCalls.push({ tool: current.tool, ok: false });
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= 2) {
+          escalations += 1;
+          if (evidence.length === 0) escalated = true;
+          break;
+        }
+        try {
+          const tn = performance.now();
+          decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: rejection });
+          needleMs += performance.now() - tn;
+        } catch {
+          escalations += 1;
+          if (evidence.length === 0) escalated = true;
+          directFallback = evidence.length === 0;
+          break;
+        }
+        continue;
+      }
+      emit({ type: "tool_start", tool: current.tool });
+      const tt = performance.now();
+      const result = await tool.execute(current.arguments, { sessionId });
+      toolMs += performance.now() - tt;
+      toolCalls.push({ tool: current.tool, ok: result.ok, evidenceId: result.ok ? result.evidence.id : undefined });
+      if (!result.ok) {
+        emit({ type: "tool_result", tool: current.tool, preview: result.error.slice(0, 160) });
+        consecutiveFailures += 1;
+        if (consecutiveFailures >= 2) {
+          escalations += 1;
+          if (evidence.length === 0) escalated = true;
+          break;
+        }
+        try {
+          const tn = performance.now();
+          decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: result.error });
+          needleMs += performance.now() - tn;
+        } catch {
+          escalations += 1;
+          if (evidence.length === 0) escalated = true;
+          directFallback = evidence.length === 0;
+          break;
+        }
+        continue;
+      }
+      consecutiveFailures = 0;
+      evidence.push(result.evidence);
+      emit({ type: "tool_result", tool: current.tool, evidenceId: result.evidence.id, preview: result.evidence.content.slice(0, 160) });
+      if (evidence.length >= 5 || evidence.reduce((n, e) => n + e.content.length, 0) >= 24000) break;
+      try {
+        const tn = performance.now();
+        decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: true, evidence: result.evidence });
+        needleMs += performance.now() - tn;
+      } catch {
+        escalations += 1;
+        if (evidence.length === 0) escalated = true;
+        directFallback = evidence.length === 0;
+        break;
+      }
+    }
+  } finally {
+    releaseNeedle();
+    await endSession(sessionId);
   }
 
   emit({ type: "reasoning_start", model: MUSE_MODEL });

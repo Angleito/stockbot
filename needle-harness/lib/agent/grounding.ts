@@ -11,7 +11,6 @@ const ALLOWLIST: Record<string, true> = {
   find_sec_entities: true,
   search_sec_filings: true,
   get_sec_document: true,
-  fetch_url: true,
   get_current_time: true,
 };
 
@@ -20,7 +19,6 @@ const ACCESSION_RE = /^\d{10}-\d{2}-\d{6}$/;
 export type GroundingOpts = {
   prompt: string;
   evidenceText: string;
-  seenUrls: Set<string>;
 };
 
 function contentTokens(text: string): Set<string> {
@@ -54,14 +52,6 @@ export function groundingError(
   if (!ALLOWLIST[name]) return `ungrounded: unknown tool "${name}"`;
 
   if (name === "get_current_time") return null;
-
-  if (name === "fetch_url") {
-    const url = args.url;
-    if (typeof url !== "string" || !opts.seenUrls.has(url)) {
-      return `ungrounded: fetch_url target not in evidence: ${String(url ?? "(missing)").slice(0, 120)}`;
-    }
-    return null;
-  }
 
   if (name === "get_sec_document") {
     const acc = args.accession_no;

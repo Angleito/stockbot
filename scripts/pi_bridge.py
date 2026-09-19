@@ -11,7 +11,9 @@ string ``id`` get ``{"error": "missing_arg"}``.
     -> {"id": str, "result": {...}}
   {"op": "tool.invoke", "id": str, "name": str, "arguments": dict,
    "session_id": str | null, "tool_call_id": str, "bridge_queue_ms": float}
-    -> {"id": str, "result": {...}} (dumb tool passthrough, no session state)
+    -> {"id": str, "result": {...}} (session-cached for explicit ids, ephemeral for fallbacks)
+  {"op": "tool.invoke.end", "id": str, "session_id": str}
+    -> {"id": str, "result": {"ended": bool}}
   {"op": "research.session.create", "id": str, "question": str,
    "objective": str | null, "as_of": str | null} -> {"id": str, "result": {"session_id": str}}
   {"op": "research.job.start", "id": str, "session_id": str, "type": str,
@@ -91,6 +93,7 @@ def _bridge_ctx(request: Mapping[str, object]) -> RequestContext:
 
 
 _sessions: dict[str, PiSessionContext] = {}
+_invoke_sessions: dict[str, PiSessionContext] = {}
 _recorders: dict[str, RunRecorder] = {}
 _inflight: dict[str, set[concurrent.futures.Future[None]]] = {}
 
@@ -1184,11 +1187,21 @@ def _parse_invoke_shape(request: Mapping[str, object]) -> tuple[str, dict[str, o
 
 
 def _invoke_sid(request: Mapping[str, object], protocol_id: object) -> str:
-    """Ephemeral session id: explicit session/run id or a bridge-scoped fallback."""
+    """Session id: explicit session/run id or a bridge-scoped fallback."""
     raw_sid = request.get("session_id", request.get("run_id"))
     if isinstance(raw_sid, str) and raw_sid:
         return raw_sid
     return f"bridge:{protocol_id}"
+
+
+def _get_invoke_session(sid: str) -> PiSessionContext:
+    """Session-cached context for explicit harness ids; get-or-create under lock."""
+    with _state_lock:
+        session = _invoke_sessions.get(sid)
+        if session is None:
+            session = PiSessionContext(session_id=sid)
+            _invoke_sessions[sid] = session
+        return session
 
 
 def _call_tool_invoke(
@@ -1200,13 +1213,15 @@ def _call_tool_invoke(
     queue_ms: float,
     data_root: str | None,
     as_of: str | None,
+    cache: bool,
 ) -> object:
-    """execute_pi_tool with an ephemeral session; routing fields coerced."""
+    """execute_pi_tool with a session-cached (explicit) or ephemeral (fallback) session; routing fields coerced."""
     tool_call_id = _coerce_opt_str(request.get("tool_call_id"))
+    session = _get_invoke_session(sid) if cache else PiSessionContext(session_id=sid)
     return execute_pi_tool(
         name,
         arguments,
-        PiSessionContext(session_id=sid),
+        session,
         tool_call_id=tool_call_id,
         protocol_id=protocol_id if isinstance(protocol_id, str) else None,
         bridge_queue_ms=queue_ms,
@@ -1216,7 +1231,7 @@ def _call_tool_invoke(
 
 
 def _run_tool_invoke(request: Mapping[str, object]) -> None:
-    """Executor worker: dumb tool passthrough with an ephemeral session context."""
+    """Executor worker: session-cached tool passthrough for explicit ids, ephemeral for fallbacks."""
     protocol_id = request.get("id")
     parsed = _parse_invoke_shape(request)
     if isinstance(parsed, dict):
@@ -1225,12 +1240,24 @@ def _run_tool_invoke(request: Mapping[str, object]) -> None:
     name, arguments = parsed
     _, data_root, as_of, queue_ms = _tool_call_wire(request)
     sid = _invoke_sid(request, protocol_id)
+    raw_sid = request.get("session_id", request.get("run_id"))
+    explicit = isinstance(raw_sid, str) and bool(raw_sid)
     try:
-        result = _call_tool_invoke(name, arguments, sid, request, protocol_id, queue_ms, data_root, as_of)
+        result = _call_tool_invoke(name, arguments, sid, request, protocol_id, queue_ms, data_root, as_of, explicit)
         _write({"id": protocol_id, "result": result})
     except Exception:  # per-request failure never breaks the loop
         logger.exception("tool.invoke failed")
         _write({"id": protocol_id, "error": "bridge_failed"})
+
+
+def _op_tool_invoke_end(request: Mapping[str, object], protocol_id: str) -> dict[str, object]:
+    """Drop a cached tool.invoke session; unknown sids report ended False, never an error."""
+    sid = _required_arg(request, "session_id")
+    if sid is None:
+        return {"id": protocol_id, "error": "missing_arg"}
+    with _state_lock:
+        ended = _invoke_sessions.pop(sid, None) is not None
+    return {"id": protocol_id, "result": {"ended": ended}}
 
 
 def _decode_handle_line(line: str) -> tuple[dict[str, object], str] | dict[str, object]:
@@ -1261,7 +1288,7 @@ def _handle_tool_call(request: dict[str, object]) -> dict[str, object] | None:
 
 
 def _handle_local_op(op: object, request: dict[str, object], protocol_id: str) -> dict[str, object] | None:
-    """describe/doctor/tool_call/abort/pi_event/tool.invoke; None when unhandled."""
+    """describe/doctor/tool_call/abort/pi_event/tool.invoke(.end); None when unhandled."""
     if op == "describe":
         return {"id": protocol_id, **_describe()}
     if op == "doctor":
@@ -1275,6 +1302,8 @@ def _handle_local_op(op: object, request: dict[str, object], protocol_id: str) -
     if op == "tool.invoke":
         _executor.submit(_run_tool_invoke, dict(request))
         return None
+    if op == "tool.invoke.end":
+        return _op_tool_invoke_end(request, protocol_id)
     return None
 
 

@@ -25,6 +25,17 @@ type Pending = {
   reject: (e: Error) => void;
   cancel: () => void;
 };
+// ponytail: exclusive lock serializes Needle routing; per-session Needle state if Herdr panes need concurrency
+let needleTail: Promise<void> = Promise.resolve();
+
+export async function acquireNeedle(): Promise<() => void> {
+  const { promise: grant, resolve: release } = Promise.withResolvers<void>();
+  const prev = needleTail;
+  needleTail = prev.then(() => grant);
+  await prev;
+  return () => release();
+}
+
 
 export class NeedleRouter {
   private child: ChildProcess | null = null;

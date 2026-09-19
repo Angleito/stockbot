@@ -2,10 +2,9 @@ import { describe, expect, test } from "bun:test";
 import { groundingError } from "./grounding";
 
 const PROMPT = "What will happen to NVDA should Anthropic IPO fail?";
-const opts = (evidenceText = "", urls: string[] = []) => ({
+const opts = (evidenceText = "") => ({
   prompt: PROMPT,
   evidenceText,
-  seenUrls: new Set(urls),
 });
 
 describe("groundingError", () => {
@@ -25,15 +24,6 @@ describe("groundingError", () => {
     expect(
       groundingError("search_web", { query: "NVDA NVDA NVDA earnings" }, opts()),
     ).not.toBeNull();
-  });
-
-  test("rejects unseen fetch_url, passes evidence URL", () => {
-    expect(
-      groundingError("fetch_url", { url: "https://evil.example/x" }, opts("", ["https://good.example/y"])),
-    ).not.toBeNull();
-    expect(
-      groundingError("fetch_url", { url: "https://good.example/y" }, opts("", ["https://good.example/y"])),
-    ).toBeNull();
   });
 
   test("rejects accession absent from evidence, passes when present", () => {

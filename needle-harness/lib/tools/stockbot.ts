@@ -27,18 +27,21 @@ class StockbotBridge {
   private buf = "";
   private nextId = 0;
   private pending = new Map<string, Pending>();
+  private bridgeStderrTail = "";
 
   private spawnChild(): ChildProcessWithoutNullStreams {
     const child = spawn(BRIDGE_CMD, BRIDGE_ARGS, { cwd: ROOT, stdio: ["pipe", "pipe", "pipe"] });
     this.child = child;
     this.buf = "";
     child.stdout.on("data", (chunk: Buffer) => this.onData(chunk.toString("utf8")));
-    child.stderr.on("data", () => { });
+    child.stderr.on("data", (chunk: Buffer) => {
+      this.bridgeStderrTail = (this.bridgeStderrTail + chunk.toString("utf8")).slice(-2000);
+    });
     child.on("exit", () => {
       if (this.child === child) this.child = null;
       for (const [, p] of this.pending) {
         clearTimeout(p.timer);
-        p.reject(new Error("stockbot bridge exited"));
+        p.reject(new Error(`stockbot bridge exited; stderr tail: ${this.bridgeStderrTail || "(empty)"}`));
       }
       this.pending.clear();
     });
@@ -80,7 +83,7 @@ class StockbotBridge {
     return new Promise<BridgeReply>((resolve, reject) => {
       const timer = setTimeout(() => {
         this.pending.delete(id);
-        reject(new Error("stockbot bridge timeout"));
+        reject(new Error(`stockbot bridge timeout; stderr tail: ${this.bridgeStderrTail || "(empty)"}`));
       }, timeoutMs);
       this.pending.set(id, { resolve, reject, timer });
       child.stdin.write(JSON.stringify({ id, ...req }) + "\n", (err) => {
@@ -94,6 +97,21 @@ class StockbotBridge {
         }
       });
     });
+  }
+
+  close(): void {
+    const child = this.child;
+    this.child = null;
+    for (const [, p] of this.pending) {
+      clearTimeout(p.timer);
+      p.reject(new Error("stockbot bridge closed"));
+    }
+    this.pending.clear();
+    try {
+      child?.kill();
+    } catch {
+      // Already gone; nothing to kill.
+    }
   }
 }
 
@@ -116,6 +134,18 @@ export async function invoke(name: string, args: Record<string, unknown>, sessio
     ok: true,
     evidence: makeEvidence(name, content.slice(0, 8000), { title: name }),
   };
+}
+
+export async function endSession(sessionId: string): Promise<void> {
+  try {
+    await bridge.call({ op: "tool.invoke.end", session_id: sessionId }, 10_000);
+  } catch {
+    // Best-effort; loop finally awaits directly and must never throw.
+  }
+}
+
+export function closeBridge(): void {
+  bridge.close();
 }
 
 export function newSessionId(): string {

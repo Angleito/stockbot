@@ -115,7 +115,6 @@ async function fetchCatalog(): Promise<void> {
     }
   }
   catalog.push(
-    { name: "fetch_url", description: "Fetch a URL and extract readable text", parameters: { type: "object", properties: { url: { type: "string" } }, required: ["url"] } },
     { name: "get_current_time", description: "Get the current UTC date and time", parameters: { type: "object", properties: {} } },
   );
   await writeFile(CATALOG, JSON.stringify(catalog, null, 2));
