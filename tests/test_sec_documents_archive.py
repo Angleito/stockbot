@@ -396,8 +396,8 @@ def test_accepted_2026_filing_rejected_at_2025_read(tmp_path: Path, monkeypatch:
         sid = svc.create_research("NVDA demand?", "o", as_of="2026-06-30T00:00:00+00:00", repo=repo)
         src = repo.list_jobs(sid)[0].job_id
         passage = "Data center revenue grew 142 percent in fiscal 2026."
-        handle = seam.handle_for(passage, accession=ACC, document=DOC)
-        svc.record_evidence(
+        handle = seam.handle_for(passage, accession=ACC, document=DOC, known_at="2026-01-20T00:00:00+00:00")
+        stored = svc.record_evidence(
             sid,
             src,
             {
@@ -411,11 +411,35 @@ def test_accepted_2026_filing_rejected_at_2025_read(tmp_path: Path, monkeypatch:
                 "source_record_id": ACC,
                 "document_name": DOC,
                 "matching_passage": passage,
-                "known_at": "2026-01-20T00:00:00+00:00",
+                "known_at": "2024-01-01T00:00:00+00:00",
                 "source_handle": handle,
             },
             repo=repo,
         )
+        row = repo.get_evidence(str(stored["evidence_id"]))
+        assert str(row["known_at"]).startswith("2026")
+        sid25 = svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+        src25 = repo.list_jobs(sid25)[0].job_id
+        with pytest.raises(ValueError, match="ERR_SEC_HANDLE_UNREADABLE"):
+            svc.record_evidence(
+                sid25,
+                src25,
+                {
+                    "evidence_id": f"{sid25}:ev:1",
+                    "wave_id": 1,
+                    "content": "c",
+                    "claim_text": "c",
+                    "subject": "NVDA",
+                    "source_name": "SEC",
+                    "source_uri": "https://sec.gov/x",
+                    "source_record_id": ACC,
+                    "document_name": DOC,
+                    "matching_passage": passage,
+                    "known_at": "2026-01-20T00:00:00+00:00",
+                    "source_handle": handle,
+                },
+                repo=repo,
+            )
     finally:
         monkeypatch.setattr(documents, "get_sec_document", real_get_sec_document)
     latest = documents.get_sec_document(ACC, DOC, data_root=tmp_path)

@@ -496,27 +496,17 @@ def cancel_job(
     return store.get_job(job.job_id).to_dict()
 
 
-_VERIFIED_SOURCE_BYTES: dict[tuple[str, str, str], tuple[bytes, str]] = {}
-"""Verify-time windows keyed (accession, document, text_hash); process memory only, never persisted."""
+def _exact_source_bytes(accession: str, document: str) -> tuple[bytes, str]:
+    """Exact source bytes that produced the verified window, re-resolved live."""
+    from app.sec.documents import _filing, _resolve_in, _source_bytes_of
 
-_VERIFIED_SOURCE_BYTES_MAX = 64
-
-
-def _stash_verified_source_bytes(
-    accession: str, document: str, text_hash: str, window: str, representation: str | None
-) -> None:
-    """Hold the verified window bytes + representation for the accept-time archive (bounded, oldest evicted)."""
-    if len(_VERIFIED_SOURCE_BYTES) >= _VERIFIED_SOURCE_BYTES_MAX:
-        _VERIFIED_SOURCE_BYTES.pop(next(iter(_VERIFIED_SOURCE_BYTES)))
-    _VERIFIED_SOURCE_BYTES[(accession, document, text_hash)] = (
-        window.encode("utf-8"),
-        representation or "source_bytes",
-    )
-
-
-def _take_verified_source_bytes(accession: str, document: str, text_hash: str) -> tuple[bytes, str] | None:
-    """Pop the stashed verify-time bytes + representation; None when the window was never verified here."""
-    return _VERIFIED_SOURCE_BYTES.pop((accession, document, text_hash), None)
+    attachment = _resolve_in(_filing(accession), accession, document or None)
+    payload, rep = _source_bytes_of(attachment)
+    if payload is None:
+        raise ValueError(
+            f"record_evidence: ERR_NO_SOURCE_BYTES (EdgarTools exposed no exact bytes for {accession}/{document})"
+        )
+    return payload, rep or "source_bytes"
 
 
 def _coerce_dt(value: object) -> datetime | None:
@@ -662,12 +652,26 @@ def _declared_accession(data: Mapping[str, object]) -> str | None:
         ) from None
 
 
-def _observed_provenance(data: Mapping[str, object]) -> dict[str, JSONValue]:
+@dataclass(frozen=True)
+class MaterializedEvidenceSource:
+    """Verified SEC passage plus the exact source bytes and canonical timing."""
+
+    provenance: dict[str, JSONValue]
+    source_bytes: bytes
+    representation: str
+    source_content_hash: str
+    known_at: datetime | None
+    filed_at: datetime | None
+    retrieved_at: datetime | None
+
+
+def _observed_provenance(data: Mapping[str, object], *, as_of: datetime | str | None) -> MaterializedEvidenceSource:
     """SECSourceRef for an observed fact: the KERNEL-materialized passage of a canonical handle.
 
     The model supplies a locator (which passage it means) and the handle
     ``get_sec_document`` returned for the window it read; the kernel reloads that
-    window from the SEC archive, verifies it, and stores its own bytes. A search
+    window from the SEC archive against the session as_of, verifies it, and
+    returns the full exact bytes plus canonical timing. A search
     hit, a missing handle, or a hallucinated passage never qualifies.
     """
     locator = _required_text(
@@ -684,9 +688,9 @@ def _observed_provenance(data: Mapping[str, object]) -> dict[str, JSONValue]:
         )
     declared_accession = _declared_accession(data)
     declared_document = _first_text(data, _DOCUMENT_KEYS)
-    provenance = materialize_sec_passage(handle, locator)
-    _check_declared_ref(provenance, accession=declared_accession, document=declared_document)
-    return provenance
+    materialized = materialize_sec_passage(handle, locator, as_of=as_of)
+    _check_declared_ref(materialized.provenance, accession=declared_accession, document=declared_document)
+    return materialized
 
 
 def _check_declared_ref(provenance: Mapping[str, object], *, accession: str | None, document: str | None) -> None:
@@ -810,7 +814,7 @@ def _handle_opt_str(handle: Mapping[str, object], key: str, code: str) -> str | 
     return _handle_str(handle, key, code)
 
 
-def _reload_handle_window(fields: _SecHandle) -> dict[str, object]:
+def _reload_handle_window(fields: _SecHandle, as_of: datetime | str | None) -> dict[str, object]:
     """Reload the handle's window from the archive; any failure is ERR_SEC_HANDLE_UNREADABLE."""
     from app.config import get_data_root
     from app.sec.documents import get_sec_document
@@ -819,7 +823,7 @@ def _reload_handle_window(fields: _SecHandle) -> dict[str, object]:
         return get_sec_document(
             fields.accession,
             fields.document,
-            as_of=None,
+            as_of=as_of,  # type: ignore[arg-type] - filings._check_as_of accepts datetime
             offset=fields.offset,
             max_chars=fields.max_chars,
             section=fields.section,
@@ -833,22 +837,35 @@ def _reload_handle_window(fields: _SecHandle) -> dict[str, object]:
         ) from exc
 
 
-def materialize_sec_passage(handle: Mapping[str, object], locator: object) -> dict[str, JSONValue]:
+def _is_hex64(value: object) -> bool:
+    """64-hex sha256 digest check for the source-bytes cross-check."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(ch in "0123456789abcdef" for ch in value)
+    )
+
+
+def materialize_sec_passage(
+    handle: Mapping[str, object], locator: object, *, as_of: datetime | str | None = None
+) -> MaterializedEvidenceSource:
     """Reload one canonical handle from the SEC archive and slice the cited passage out of it.
 
-    Returns the SECSourceRef (kernel passage + coordinates + window hash) for an
+    Returns the materialized source (kernel passage + coordinates + window hash,
+    full exact bytes, representation, source hash, canonical timing) for an
     observed fact. The caller's locator only says WHICH passage is meant; the
     stored text is always the archive's. Fail-closed codes: ERR_SEC_HANDLE_INVALID
     (malformed handle), ERR_SEC_HANDLE_UNREADABLE (archive cannot reload it),
     ERR_SEC_HANDLE_STALE (the reloaded window no longer hashes to the handle),
-    ERR_PASSAGE_NOT_IN_SOURCE (the locator is not in that window).
+    ERR_PASSAGE_NOT_IN_SOURCE (the locator is not in that window),
+    ERR_NO_SOURCE_BYTES (no exact document bytes to archive).
     """
     if not isinstance(handle, Mapping):
         raise ValueError(  # noqa: TRY004 - the public error contract pins ValueError, tests are oracle
             "record_evidence: ERR_SEC_HANDLE_INVALID (source_handle must be an object)"
         )
     fields = _handle_fields(handle)
-    reloaded = _reload_handle_window(fields)
+    reloaded = _reload_handle_window(fields, as_of)
     window = reloaded.get("text")
     if not isinstance(window, str):
         raise ValueError(  # noqa: TRY004 - the public error contract pins ValueError, tests are oracle
@@ -861,11 +878,7 @@ def materialize_sec_passage(handle: Mapping[str, object], locator: object) -> di
             "with get_sec_document and cite the new handle)"
         )
     start, end = _locate_passage(window, locator if isinstance(locator, str) else "")
-    document = fields.document or str(reloaded.get("document_name") or "")
-    representation = str(reloaded.get("source_representation") or "source_bytes")
-    _stash_verified_source_bytes(fields.accession, document, fields.text_hash, window, representation)
-    uri = reloaded.get("source_uri")
-    return sec_source_ref(
+    provenance = sec_source_ref(
         accession_no=fields.accession,
         document_name=fields.document
         or _required_text(
@@ -874,11 +887,28 @@ def materialize_sec_passage(handle: Mapping[str, object], locator: object) -> di
             "record_evidence: ERR_SEC_HANDLE_UNREADABLE (no document identity)",
         ),
         passage=window[start:end],
-        source_uri=uri if isinstance(uri, str) else handle.get("source_uri"),
+        source_uri=reloaded.get("source_uri") if isinstance(reloaded.get("source_uri"), str) else handle.get("source_uri"),
         offset=fields.offset + start,
         end=fields.offset + end,
         basis=fields.basis,
         text_hash=fields.text_hash,
+    )
+    document = fields.document or str(reloaded.get("document_name") or "")
+    source_bytes, byte_rep = _exact_source_bytes(fields.accession, document)
+    claimed = reloaded.get("source_content_hash")
+    if _is_hex64(claimed) and claimed != sha256(source_bytes).hexdigest():
+        raise ValueError(
+            "record_evidence: ERR_SEC_HANDLE_STALE "
+            "(exact source bytes no longer match the reloaded document; re-read the document)"
+        )
+    return MaterializedEvidenceSource(
+        provenance=provenance,
+        source_bytes=source_bytes,
+        representation=byte_rep,
+        source_content_hash=str(claimed or sha256(source_bytes).hexdigest()),
+        known_at=_coerce_dt(reloaded.get("known_at")),
+        filed_at=_coerce_dt(reloaded.get("filed_at")),
+        retrieved_at=_coerce_dt(reloaded.get("retrieved_at")),
     )
 
 
@@ -1075,6 +1105,32 @@ def _duplicate_response(store: ResearchRepository, session_id: str, record: Evid
     return {"evidence_id": hit.get("evidence_id"), "accepted": False, "duplicate_of": hit.get("evidence_id")}
 
 
+def _archive_materialized_source(
+    session_id: str, evidence_id: str, source_uri: str | None, retrieved_at: datetime, m: MaterializedEvidenceSource
+) -> None:
+    """Archive the full exact source bytes; raises on failure, never best-effort."""
+    from app.sec.archive import archive_sec_document
+
+    accession = m.provenance.get("accession_no")
+    document = m.provenance.get("document_name")
+    assert isinstance(accession, str) and accession
+    archive_sec_document(
+        accession,
+        document if isinstance(document, str) and document else "primary",
+        m.source_bytes,
+        url=source_uri or "",
+        retrieved_at=retrieved_at.isoformat(),
+        metadata={
+            "evidence_id": evidence_id,
+            "session_id": session_id,
+            "source_content_hash": m.source_content_hash,
+            "known_at": m.known_at.isoformat() if m.known_at is not None else None,
+            "filed_at": m.filed_at.isoformat() if m.filed_at is not None else None,
+            "representation": m.representation,
+        },
+    )
+
+
 def _persist_evidence_record(
     store: ResearchRepository,
     session_id: str,
@@ -1082,10 +1138,9 @@ def _persist_evidence_record(
     found: ResearchSession,
     record: Evidence,
     *,
-    source_bytes: bytes | None = None,
-    source_representation: str | None = None,
+    source: MaterializedEvidenceSource,
 ) -> dict[str, JSONValue]:
-    """PIT-gate + archive the verified window + append the record, link it, return the stored dict."""
+    """PIT-gate + archive the full exact bytes before commit; missing bytes cannot arrive."""
     from .evidence import EvidenceLedger
 
     ledger = EvidenceLedger()
@@ -1097,34 +1152,10 @@ def _persist_evidence_record(
         except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
     ingest_evidence(ledger, record, as_of=found.as_of)
-    provenance = record.provenance if isinstance(record.provenance, dict) else {}
-    accession = provenance.get("accession_no")
-    document = provenance.get("document_name")
-    bytes_status = "unavailable"
-    if source_bytes is not None and isinstance(accession, str) and accession:
-        from app.sec.archive import archive_sec_document
-
-        known_at = record.known_at.isoformat() if record.known_at is not None else None
-        filed_at = record.published_at.isoformat() if record.published_at is not None else None
-        archive_sec_document(
-            accession,
-            document if isinstance(document, str) and document else "primary",
-            source_bytes,
-            url=record.source_uri or "",
-            retrieved_at=record.retrieved_at.isoformat(),
-            metadata={
-                "evidence_id": record.evidence_id,
-                "session_id": session_id,
-                "source_content_hash": sha256(source_bytes).hexdigest(),
-                "known_at": known_at,
-                "filed_at": filed_at,
-                "representation": source_representation or "source_bytes",
-            },
-        )
-        bytes_status = "archived"
+    _archive_materialized_source(session_id, record.evidence_id, record.source_uri, record.retrieved_at, source)
     stored = evidence_to_dict(record)
     stored_meta = stored.get("metadata")
-    stored["metadata"] = {**(stored_meta if isinstance(stored_meta, dict) else {}), "source_bytes": bytes_status}
+    stored["metadata"] = {**(stored_meta if isinstance(stored_meta, dict) else {}), "source_bytes": "archived"}
     try:
         store.save_evidence(stored)
     except ValueError as exc:
@@ -1141,7 +1172,7 @@ def _persist_evidence_record(
             metadata={
                 "evidence_id": record.evidence_id,
                 "session_id": session_id,
-                "source_bytes": bytes_status,
+                "source_bytes": "archived",
             },
         )
     except Exception:
@@ -1271,11 +1302,15 @@ def record_evidence(
     _evidence_live_wave(found, job, session_id)
     evidence_id, source_name, supports, contradicts = _evidence_ids_names(data, session_id, job)
     metadata, subject = _evidence_typed(data, found)
-    provenance = _observed_provenance(data)
+    materialized = _observed_provenance(data, as_of=found.as_of)
+    provenance = materialized.provenance
     identity_key = _evidence_identity(data, claim, subject, provenance)
     hit = store.find_evidence_by_identity(session_id, identity_key)
     if hit is not None:
         return {"evidence_id": hit.get("evidence_id"), "accepted": False, "duplicate_of": hit.get("evidence_id")}
+    data["known_at"] = materialized.known_at.isoformat() if materialized.known_at else None
+    data["published_at"] = materialized.filed_at.isoformat() if materialized.filed_at else None
+    data["retrieved_at"] = materialized.retrieved_at.isoformat() if materialized.retrieved_at else None
     record = _build_evidence_record(
         data,
         session_id=session_id,
@@ -1293,16 +1328,7 @@ def record_evidence(
         claim_kind="observed_fact",
         provenance=provenance,
     )
-    stashed = _take_verified_source_bytes(
-        str(provenance.get("accession_no") or ""),
-        str(provenance.get("document_name") or ""),
-        str(provenance.get("text_hash") or ""),
-    )
-    verified_bytes, verified_representation = stashed if stashed is not None else (None, None)
-    return _persist_evidence_record(
-        store, session_id, job_id, found, record,
-        source_bytes=verified_bytes, source_representation=verified_representation,
-    )
+    return _persist_evidence_record(store, session_id, job_id, found, record, source=materialized)
 
 
 def _submit_str_list_field(cov: dict[str, object], key: str, *, required: bool = False) -> list[str]:

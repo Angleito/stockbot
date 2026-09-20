@@ -77,6 +77,8 @@ def _archived_ticker_aliases(want: str, as_of: datetime) -> list[TickerAlias] | 
     latest_retrieved = ""
     for record in raw_archive.iter_archive("sec", "company_tickers", "company_tickers", root=get_data_root() / "raw"):
         retrieved = record.retrieved_at if isinstance(record.retrieved_at, str) else ""
+        # Latest-wins mapping is valid indefinitely; a reassignment inside the gap is invisible.
+        # Strict PIT would bracket coverage and return unresolved (future work, not this change).
         if retrieved and retrieved <= horizon and (latest is None or retrieved >= latest_retrieved):
             latest, latest_retrieved = record, retrieved
     if latest is None:

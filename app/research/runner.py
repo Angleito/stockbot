@@ -13,6 +13,7 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
@@ -75,7 +76,9 @@ from app.research.models import (
 from app.research.repository import ResearchRepository
 from app.research.synthesis.committee import CommitteeDisagreement, compute_disagreement
 
-__all__ = ["LiveModelError", "resume_live", "run_live", "write_session_bundle"]
+if TYPE_CHECKING:
+    from app.research.service import MaterializedEvidenceSource
+
 
 
 # Tool-*reported* errors (a result dict carrying "error") are agent-visible by
@@ -1079,22 +1082,24 @@ class _LiveRun:
         query = _first_str(inner_args, ("query",))
         search_id = _first_str(raw, ("search_id",))
         known_at = _extract_known_at(raw)
+        materialized: MaterializedEvidenceSource | None = None
         provenance: dict[str, JSONValue] | None = None
         if is_evidence:
             # The archive, never the model or the tool payload, is authoritative for
             # the admitted text: reload the handle the document read returned and
             # slice the passage out of that. A result without a canonical handle, or
             # one the archive no longer reproduces, stays a navigation artifact.
-            provenance, kind, is_evidence, passage = self._materialize_document_handle(
-                sid, eid, raw.get("source_handle"), passage, known_at
+            materialized, kind, is_evidence, passage = self._materialize_document_handle(
+                sid, eid, raw.get("source_handle"), passage, known_at, uri
             )
+            provenance = dict(materialized.provenance) if materialized is not None else None
         content = _record_content(raw, passage, is_evidence)
         if "\x00" in content:
             # NULs mean the bytes are not readable text, and POSIX argv cannot carry
             # them at all, so this can never ground a claim. Keep a stripped navigation
             # record and say why the evidence candidacy was dropped.
             content = content.replace("\x00", "")
-            kind, is_evidence, provenance = "discovery", False, None
+            kind, is_evidence, provenance, materialized = "discovery", False, None, None
             self._emit(
                 sid,
                 "evidence.rejected",
@@ -1131,12 +1136,11 @@ class _LiveRun:
             claim_text=claim_text,
             content=content,
             content_hash=evidence_content_hash(content),
-            retrieved_at=utcnow(),
+            retrieved_at=materialized.retrieved_at if materialized is not None and materialized.retrieved_at else utcnow(),
             source_uri=uri,
             source_record_id=_record_ref(is_evidence, ref, search_id, accession),
-            published_at=None,
-            known_at=known_at,
-            effective_at=None,
+            published_at=materialized.filed_at if materialized is not None else None,
+            known_at=materialized.known_at if materialized is not None else known_at,
             job_id=src_job_id or None,
             agent_id="sec_scout",
             supports=(),
@@ -1168,15 +1172,16 @@ class _LiveRun:
         handle: object,
         locator: str,
         known_at: datetime | None,
-    ) -> tuple[dict[str, JSONValue] | None, str, bool, str]:
-        """(provenance, record kind, is_evidence, passage) for one document result.
+        uri: str | None = None,
+    ) -> tuple[MaterializedEvidenceSource | None, str, bool, str]:
+        """(materialized, record kind, is_evidence, passage) for one document result.
 
-        The kernel reloads the handle's window from the SEC archive and slices the
-        passage out of it; a missing, stale, or unreadable handle demotes the result
-        to a navigation record (journaled), so a claim can never ground on text the
-        archive does not reproduce.
+        The kernel reloads the handle's window from the SEC archive against the
+        session as_of and slices the passage out of it; a missing, stale, or
+        unreadable handle demotes the result to a navigation record (journaled),
+        so a claim can never ground on text the archive does not reproduce.
         """
-        from app.research.service import materialize_sec_passage
+        from app.research.service import _archive_materialized_source, materialize_sec_passage
 
         if not isinstance(handle, Mapping):
             self._emit(
@@ -1191,7 +1196,7 @@ class _LiveRun:
             )
             return None, "discovery", False, locator
         try:
-            provenance = materialize_sec_passage(handle, locator)
+            materialized = materialize_sec_passage(handle, locator, as_of=self.as_of)
         except ValueError as exc:
             self._emit(
                 sid,
@@ -1204,17 +1209,25 @@ class _LiveRun:
                 ),
             )
             return None, "discovery", False, locator
-        passage = provenance.get("passage")
-        from app.research.service import _take_verified_source_bytes
-
-        handle_map: Mapping[str, object] = handle if isinstance(handle, Mapping) else {}
-        _take_verified_source_bytes(
-            str(provenance.get("accession_no") or handle_map.get("accession_no") or ""),
-            str(provenance.get("document_name") or handle_map.get("document_name") or ""),
-            str(provenance.get("text_hash") or handle_map.get("text_hash") or ""),
-        )
+        try:
+            _archive_materialized_source(
+                sid, eid, uri, materialized.retrieved_at or utcnow(), materialized
+            )
+        except Exception as exc:
+            self._emit(
+                sid,
+                "evidence.rejected",
+                rejection_payload(
+                    eid,
+                    str(exc)[:300],
+                    known_at.isoformat() if known_at is not None else None,
+                    self.as_of,
+                ),
+            )
+            return None, "discovery", False, locator
+        passage = materialized.provenance.get("passage")
         return (
-            provenance,
+            materialized,
             "evidence",
             True,
             passage if isinstance(passage, str) else locator,

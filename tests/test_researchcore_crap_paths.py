@@ -794,9 +794,9 @@ def test_materialize_sec_passage_fails_closed_per_handle_defect() -> None:
     materialized = materialize_sec_passage(handle, "Data   center revenue grew 142% year over year")
     # The stored text is the archive's slice of the cited span, not the locator string.
     cited = "Data center revenue grew 142% year over year"
-    assert materialized["passage"] == cited and materialized["basis"] == "rendered"
-    assert (materialized["offset"], materialized["end"]) == (0, len(cited))
-    assert materialized["text_hash"] == handle["text_hash"]
+    assert materialized.provenance["passage"] == cited and materialized.provenance["basis"] == "rendered"
+    assert (materialized.provenance["offset"], materialized.provenance["end"]) == (0, len(cited))
+    assert materialized.provenance["text_hash"] == handle["text_hash"]
     # Malformed locators are deliberately outside the handle type; getattr keeps the
     # checker green without an escape hatch (those are forbidden in this tree).
     call_untyped = getattr(svc, "materialize_sec_passage")  # noqa: B009 - malformed-input contract; getattr keeps checker green
@@ -886,23 +886,36 @@ def test_evidence_identity_conflict_names_identity_key(tmp_path: Path, monkeypat
 def test_acceptance_archives_verified_window_bytes_not_rendered_text(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """Accepted SEC evidence archives the verified window bytes; the derived text write stays."""
+    """Accepted SEC evidence archives the full exact bytes; one revision, no PIT conflict."""
+    from app.sec import documents
     from app.sec.archive import find_archived_document
 
     monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
-    eid = f"{sid}:ev:1"
-    window = "passage-" + eid
-    out = svc.record_evidence(sid, src, _item(eid), repo=repo)
-    stored = repo.get_evidence(str(out["evidence_id"]))
-    provenance = stored["provenance"]
-    assert isinstance(provenance, dict)
-    found = find_archived_document(
-        str(provenance["accession_no"]), str(provenance["document_name"]), root=tmp_path / "raw"
+    acc, doc = "0000320193-25-000079", "two-windows-000079.htm"
+    first = "first cited sentence"
+    second = "second cited sentence"
+    h1 = seam.handle_for(first, accession=acc, document=doc)
+    h2 = seam.handle_for(second, accession=acc, document=doc)
+    full = f"{first}\n{second}"
+    out1 = svc.record_evidence(
+        sid, src, {**_item(f"{sid}:ev:1"), "matching_passage": first, "source_handle": h1,
+                   "source_record_id": acc, "document_name": doc}, repo=repo
     )
-    assert found is not None
-    assert found.payload_path.read_bytes() == window.encode("utf-8")
+    out2 = svc.record_evidence(
+        sid, src, {**_item(f"{sid}:ev:2"), "matching_passage": second, "source_handle": h2,
+                   "source_record_id": acc, "document_name": doc}, repo=repo
+    )
+    for out in (out1, out2):
+        stored = repo.get_evidence(str(out["evidence_id"]))
+        provenance = stored["provenance"]
+        assert isinstance(provenance, dict)
+        found = find_archived_document(str(provenance["accession_no"]), str(provenance["document_name"]), root=tmp_path / "raw")
+        assert found is not None
+        assert found.payload_path.read_bytes() == full.encode("utf-8")
+        assert len(full) > len(first) and len(full) > len(second)
+    assert documents.get_sec_document(acc, doc, as_of="2025-06-30", data_root=tmp_path)["text"] == full
 
 
 
@@ -932,28 +945,19 @@ def test_acceptance_archive_failure_raises_without_row_event_or_link(
 def test_source_bytes_unavailable_emits_no_source_artifact(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    """source_bytes unavailable rows persist and bundle with source_artifact None."""
-    from app.research import service as _svc
-    from app.research.evidence import evidence_bundle_entry, evidence_from_dict
-
+    """Missing exact bytes fail closed: no row, no event, no session link."""
     monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
     repo = _repo(tmp_path, monkeypatch)
     sid, src = _sid(repo)
-    item = _item(f"{sid}:ev:1")
-    provenance = _svc._observed_provenance(dict(item))
-    assert _svc._take_verified_source_bytes(
-        str(provenance.get("accession_no") or ""),
-        str(provenance.get("document_name") or ""),
-        str(provenance.get("text_hash") or ""),
-    ) is not None
-    def _no_stash(*args: object, **kwargs: object) -> None:
-        del args, kwargs
-        return None
-
-    monkeypatch.setattr(_svc, "_take_verified_source_bytes", _no_stash)
-    out = svc.record_evidence(sid, src, _item(f"{sid}:ev:2"), repo=repo)
-    stored = repo.get_evidence(str(out["evidence_id"]))
-    assert evidence_from_dict(stored).metadata.get("source_bytes") == "unavailable"
+    passage = "byte-less passage"
+    handle = seam.handle_for(passage, no_source_bytes=True)
+    with pytest.raises(ValueError, match="ERR_NO_SOURCE_BYTES"):
+        svc.record_evidence(
+            sid, src, {**_item(f"{sid}:ev:1"), "matching_passage": passage, "source_handle": handle}, repo=repo
+        )
+    assert repo.list_evidence(sid) == []
+    assert repo.list_evidence_ids(sid) == []
+    assert [e for e in repo.list_events(sid) if e.event_type == "evidence.accepted"] == []
 
 
 def test_evidence_no_per_job_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
