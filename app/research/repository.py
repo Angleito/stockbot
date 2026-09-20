@@ -20,9 +20,11 @@ from ..config import get_data_root
 from . import journal as journal_log
 from .models import (
     SOURCE_RUNTIME_BUDGET_S,
+    DecisionRecord,
     Job,
     JournalEvent,
     JSONValue,
+    ResearchNode,
     ResearchSession,
     utcnow,
     validate_json_mapping,
@@ -85,6 +87,15 @@ CREATE TABLE IF NOT EXISTS tool_results (
   tool_result_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, job_id TEXT NOT NULL,
   tool_name TEXT NOT NULL, created_at TEXT NOT NULL, record TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_tool_results_session ON tool_results(session_id);
+CREATE TABLE IF NOT EXISTS research_nodes (
+  node_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+  created_at TEXT NOT NULL, record TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_nodes_session ON research_nodes(session_id);
+CREATE TABLE IF NOT EXISTS decisions (
+  decision_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
+  node_id TEXT, job_id TEXT, created_at TEXT NOT NULL, record TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_decisions_session ON decisions(session_id);
+CREATE INDEX IF NOT EXISTS ix_decisions_node ON decisions(node_id);
 """
 
 
@@ -923,7 +934,12 @@ class ResearchRepository:
         session_id = record.get("session_id")
         job_id = record.get("job_id")
         tool_name = record.get("tool_name")
-        for key, value in (("tool_result_id", tool_result_id), ("session_id", session_id), ("job_id", job_id), ("tool_name", tool_name)):
+        for key, value in (
+            ("tool_result_id", tool_result_id),
+            ("session_id", session_id),
+            ("job_id", job_id),
+            ("tool_name", tool_name),
+        ):
             if not isinstance(value, str) or not value:
                 raise ValueError(f"{where}: {key!r} must be a non-empty string")
         created = _iso_or_none(record.get("created_at"), "created_at", where) or utcnow().isoformat()
@@ -1005,3 +1021,209 @@ class ResearchRepository:
             pending_next_action=pending_next_action(session, jobs),
             open_job_ids=open_ids,
         )
+
+    # -- research nodes / decisions (kernel slice: what needs knowing + JEV dispositions) --
+
+    def save_node(self, node: ResearchNode) -> str:
+        """Upsert one research node; fail-closed on unknown session. Returns node_id."""
+        node.validate("<research.sqlite>")
+        with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM sessions WHERE session_id = ?", (node.session_id,)).fetchone() is None:
+                raise KeyError(f"unknown session_id: {node.session_id!r}")
+            conn.execute(
+                "INSERT OR REPLACE INTO research_nodes (node_id, session_id, created_at, record) VALUES (?, ?, ?, ?)",
+                (
+                    node.node_id,
+                    node.session_id,
+                    utcnow().isoformat(),
+                    _record_json(node.to_dict(), "<research.sqlite>: node"),
+                ),
+            )
+        return node.node_id
+
+    def get_node(self, node_id: str) -> ResearchNode:
+        """Load one node; raises KeyError when absent."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT record FROM research_nodes WHERE node_id = ?", (node_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"unknown node_id: {node_id!r}")
+        return ResearchNode.from_dict(
+            validate_json_mapping(json.loads(str(row["record"])), "<research.sqlite>: node"), "<research.sqlite>"
+        )
+
+    def list_nodes(self, session_id: str) -> list[ResearchNode]:
+        """All nodes for one session, oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT record FROM research_nodes WHERE session_id = ? ORDER BY rowid", (session_id,)
+            ).fetchall()
+        return [
+            ResearchNode.from_dict(
+                validate_json_mapping(json.loads(str(r["record"])), "<research.sqlite>: node"), "<research.sqlite>"
+            )
+            for r in rows
+        ]
+
+    def update_node_status(self, node_id: str, status: str) -> ResearchNode:
+        """Transition one node's status; raises KeyError when absent, ValueError on bad status."""
+        from dataclasses import replace
+
+        node = self.get_node(node_id)
+        updated = replace(node, status=status)
+        updated.validate("<research.sqlite>")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO research_nodes (node_id, session_id, created_at, record) VALUES (?, ?, ?, ?)",
+                (
+                    updated.node_id,
+                    updated.session_id,
+                    utcnow().isoformat(),
+                    _record_json(updated.to_dict(), "<research.sqlite>: node"),
+                ),
+            )
+        return updated
+
+    def add_node_evidence(self, node_id: str, evidence_id: str) -> ResearchNode:
+        """Append one evidence id to a node (idempotent); raises KeyError when absent."""
+        from dataclasses import replace
+
+        if not evidence_id:
+            raise ValueError("<research.sqlite>: node evidence_id must be a non-empty string")
+        node = self.get_node(node_id)
+        if evidence_id in node.evidence_ids:
+            return node
+        updated = replace(node, evidence_ids=(*node.evidence_ids, evidence_id))
+        updated.validate("<research.sqlite>")
+        with self._connect() as conn:
+            conn.execute(
+                "INSERT OR REPLACE INTO research_nodes (node_id, session_id, created_at, record) VALUES (?, ?, ?, ?)",
+                (
+                    updated.node_id,
+                    updated.session_id,
+                    utcnow().isoformat(),
+                    _record_json(updated.to_dict(), "<research.sqlite>: node"),
+                ),
+            )
+        return updated
+
+    def save_decision(
+        self,
+        decision: DecisionRecord,
+        *,
+        request: object = None,
+        response: object = None,
+        provider: str | None = None,
+        latency_ms: float | None = None,
+    ) -> str:
+        """Persist one JEV disposition (domain row to research.sqlite).
+
+        Full request/response/provider latency mirror to runs.sqlite agent_events
+        best-effort via the recorder path; storage failure never breaks the write.
+        """
+        decision.validate("<research.sqlite>")
+        with self._connect() as conn:
+            if conn.execute("SELECT 1 FROM sessions WHERE session_id = ?", (decision.session_id,)).fetchone() is None:
+                raise KeyError(f"unknown session_id: {decision.session_id!r}")
+            if decision.node_id is not None and (
+                conn.execute("SELECT 1 FROM research_nodes WHERE node_id = ?", (decision.node_id,)).fetchone() is None
+            ):
+                raise KeyError(f"unknown node_id: {decision.node_id!r}")
+            try:
+                conn.execute(
+                    "INSERT INTO decisions (decision_id, session_id, node_id, job_id, created_at, record)"
+                    " VALUES (?, ?, ?, ?, ?, ?)",
+                    (
+                        decision.decision_id,
+                        decision.session_id,
+                        decision.node_id,
+                        decision.job_id,
+                        decision.created_at.isoformat(),
+                        _record_json(decision.to_dict(), "<research.sqlite>: decision"),
+                    ),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError(f"<research.sqlite>: duplicate decision_id {decision.decision_id!r}") from None
+        self._mirror_decision(decision, request=request, response=response, provider=provider, latency_ms=latency_ms)
+        return decision.decision_id
+
+    def list_decisions(self, session_id: str) -> list[DecisionRecord]:
+        """All decisions for one session, oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT record FROM decisions WHERE session_id = ? ORDER BY created_at, decision_id",
+                (session_id,),
+            ).fetchall()
+        return [
+            DecisionRecord.from_dict(
+                validate_json_mapping(json.loads(str(r["record"])), "<research.sqlite>: decision"),
+                "<research.sqlite>",
+            )
+            for r in rows
+        ]
+
+    def _mirror_decision(
+        self,
+        decision: DecisionRecord,
+        *,
+        request: object,
+        response: object,
+        provider: str | None,
+        latency_ms: float | None,
+    ) -> None:
+        """Best-effort decision mirror to runs.sqlite agent_events (never raises)."""
+        try:
+            from ..storage.runs import RunRecorder, get_runs_db_path
+
+            doc = decision.to_dict()
+            path = get_runs_db_path(self._path.parent)
+            path.parent.mkdir(parents=True, exist_ok=True)
+            conn = sqlite3.connect(str(path))
+            try:
+                RunRecorder._migrate_schema(conn)
+                seq = conn.execute(
+                    "SELECT COALESCE(MAX(sequence), 0) + 1 FROM agent_events WHERE run_id = ?",
+                    (decision.session_id,),
+                ).fetchone()[0]
+                conn.execute(
+                    "INSERT INTO agent_events (event_id, run_id, sequence, event_type,"
+                    " started_at, completed_at, duration_ms, round, model, tool_name,"
+                    " arguments, result_summary, success, error_type, evidence_ids, metadata)"
+                    " VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        decision.decision_id,
+                        decision.session_id,
+                        seq,
+                        "jev.decision",
+                        decision.created_at.isoformat(),
+                        decision.created_at.isoformat(),
+                        latency_ms,
+                        None,
+                        provider or "jev",
+                        str(decision.decision_type),
+                        json.dumps({"request": request, "candidates": doc["candidates"]}, sort_keys=True, default=str),
+                        json.dumps(
+                            {"selected": doc["selected"], "probabilities": doc["probabilities"]},
+                            sort_keys=True,
+                            default=str,
+                        ),
+                        1,
+                        None,
+                        None,
+                        json.dumps(
+                            {
+                                "decision_id": decision.decision_id,
+                                "node_id": decision.node_id,
+                                "job_id": decision.job_id,
+                                "response": response,
+                                "confidence": doc["confidence"],
+                            },
+                            sort_keys=True,
+                            default=str,
+                        ),
+                    ),
+                )
+                conn.commit()
+            finally:
+                conn.close()
+        except Exception:  # noqa: BLE001, S110 - observability mirror, never breaks persistence
+            pass

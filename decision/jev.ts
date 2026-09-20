@@ -219,3 +219,107 @@ export async function askDecisions(
   await writeFile(join(dir, `policy-${name}.json`), JSON.stringify(decisions, null, 2) + "\n");
   return { raw, decisions };
 }
+// Whole-registry tool selection: JEV owns tool selection; Needle never selects.
+// Every tool-selection decision receives the ENTIRE canonical registry — no
+// search_tools, no semantic prefilter, no model preselection layer. The caller
+// (kernel scheduler) assembles one ToolManifestEntry per canonical research
+// tool; this builder maps entries 1:1 to choice options plus the two sentinel
+// outcomes below. choice is exclusive (exactly one winner per round), so
+// parallel execution = successive JEV rounds, one winner per round; every
+// transition returns to JEV with the full registry again (Needle must NOT
+// chain tools: search_sec_filings result -> JEV -> get_sec_document).
+// Winner parsing reuses parseChoiceAnswer; no new parser lives here.
+export const TOOL_SELECTION_SENTINELS = {
+  reasoning_required: "Escalate to the reasoner (decompose/analyze proposals); no tool call fits this node.",
+  node_resolved: "Existing evidence resolves the node; no further tool call needed.",
+} as const;
+
+// Compact model-efficient manifest for one canonical tool, assembled
+// caller-side (Python scheduler) as one entry per canonical research tool.
+// name+description required (compat); all other fields optional budget aids
+// supplied by the scheduler's build_registry — never a filter, every
+// canonical tool stays visible. Builder renders one compact single line per
+// tool from all present fields.
+export type ToolManifestEntry = {
+  name: string;
+  description: string;
+  domain?: string;
+  purpose?: string;
+  keyInputs?: string;
+  outputKind?: string;
+  evidence?: string;
+  prerequisites?: string;
+  pitSupport?: string;
+};
+
+export type ToolSelectionNode = {
+  nodeId: string;
+  question: string;
+  whyItMatters?: string;
+};
+
+export type ToolSelectionAttempt = { tool: string; error: string };
+function manifestLine(entry: ToolManifestEntry): string {
+  const opt = (v: unknown): string | null =>
+    typeof v === "string" && v.trim() ? v.replace(/\s+/g, " ").trim() : null;
+  let line = entry.description.replace(/\s+/g, " ").trim();
+  const purpose = opt(entry.purpose);
+  if (purpose && purpose !== line) line += ` Purpose: ${purpose}.`;
+  const inputs = opt(entry.keyInputs);
+  if (inputs) line += ` Inputs: ${inputs}.`;
+  const output = opt(entry.outputKind);
+  if (output) line += ` Output: ${output}.`;
+  const evidence = opt(entry.evidence);
+  if (evidence) line += ` Evidence: ${evidence}.`;
+  const prereq = opt(entry.prerequisites);
+  if (prereq) line += ` Needs: ${prereq}.`;
+  const pit = opt(entry.pitSupport);
+  if (pit) line += ` PIT: ${pit}.`;
+  const domain = opt(entry.domain);
+  if (domain) line = `[${domain}] ${line}`;
+  return line;
+}
+
+function evidenceIds(evidence: unknown): string[] {
+  if (!Array.isArray(evidence)) return [];
+  const out: string[] = [];
+  for (const e of evidence) {
+    if (typeof e === "object" && e !== null && "id" in e && typeof (e as Record<string, unknown>).id !== "undefined")
+      out.push(String((e as Record<string, unknown>).id));
+    if (out.length >= 10) break;
+  }
+  return out;
+}
+
+export function buildToolSelectionQuestion(
+  registry: ToolManifestEntry[],
+  node: ToolSelectionNode,
+  evidence?: unknown[],
+  attempts?: ToolSelectionAttempt[],
+): { id: "tool_selection"; prompt: string; options: Record<string, string> } {
+  if (!Array.isArray(registry) || registry.length === 0) throw new Error("tool_selection: empty registry");
+  if (!node || typeof node.nodeId !== "string" || !node.nodeId || typeof node.question !== "string" || !node.question)
+    throw new Error("tool_selection: node needs nodeId and question");
+  const options: Record<string, string> = {};
+  for (const entry of registry) {
+    if (!entry || typeof entry.name !== "string" || !entry.name)
+      throw new Error("tool_selection: registry entry needs a name");
+    if (typeof entry.description !== "string" || !entry.description)
+      throw new Error(`tool_selection: tool ${entry.name} needs a description`);
+    if (entry.name in options) throw new Error(`tool_selection: duplicate tool ${entry.name}`);
+    options[entry.name] = manifestLine(entry);
+  }
+  for (const [k, v] of Object.entries(TOOL_SELECTION_SENTINELS)) {
+    if (k in options) throw new Error(`tool_selection: registry collides with sentinel ${k}`);
+    options[k] = v;
+  }
+  let prompt = `Which single tool runs next for research node ${node.nodeId}? Question: ${node.question}`;
+  if (typeof node.whyItMatters === "string" && node.whyItMatters) prompt += ` Why it matters: ${node.whyItMatters}`;
+  const ids = evidenceIds(evidence);
+  prompt += ` Evidence on hand: ${Array.isArray(evidence) ? evidence.length : 0} item(s)${ids.length ? ` [${ids.join(", ")}]` : ""}.`;
+  for (const a of attempts ?? []) {
+    if (!a || typeof a.tool !== "string" || typeof a.error !== "string") continue;
+    prompt += ` Prior attempt ${a.tool} failed: ${a.error.slice(0, 200)}.`;
+  }
+  return { id: "tool_selection", prompt, options };
+}

@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquireNeedle } from "./client";
+import { acquireNeedle, validateNeedleTool } from "./client";
 
 describe("acquireNeedle", () => {
   test("concurrent holders serialize", async () => {
@@ -38,5 +38,14 @@ describe("acquireNeedle", () => {
     } finally {
       second();
     }
+  });
+});
+
+describe("validateNeedleTool", () => {
+  test("exact match passes; mismatch and null throw", () => {
+    expect(validateNeedleTool("search_sec_filings", "search_sec_filings")).toBe("search_sec_filings");
+    expect(() => validateNeedleTool("search_sec_filings", "get_sec_document")).toThrow("mismatch");
+    expect(() => validateNeedleTool("search_sec_filings", null)).toThrow("mismatch");
+    expect(() => validateNeedleTool("", "search_sec_filings")).toThrow("nonempty");
   });
 });

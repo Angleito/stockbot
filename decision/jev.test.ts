@@ -10,16 +10,18 @@ import { mkdtemp, readdir } from "node:fs/promises";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
+  assertAcyclic,
+  askDecisions,
+  buildToolSelectionQuestion,
+  classifyProbability,
   DISPOSITION_OPTIONS,
   EVIDENCE_STATE_OPTIONS,
   MATERIALITY_LEVELS,
-  assertAcyclic,
-  askDecisions,
-  classifyProbability,
   parseChoiceAnswer,
   parseNoulAnswer,
   parseScoreAnswer,
   scopeNodeState,
+  TOOL_SELECTION_SENTINELS,
 } from "./jev.ts";
 
 test("noul preserves probability exactly; policy stays in classifyProbability", () => {
@@ -241,4 +243,42 @@ test("scopeNodeState projects only allowed keys; evidence must be an array", () 
   expect(() =>
     scopeNodeState({ objective: "o", proposal: "p", evidence: "e1" as unknown as unknown[] }),
   ).toThrow("evidence must be an array");
+});
+test("tool selection covers the whole registry plus sentinels; enriched manifests render one line", () => {
+  const registry = [
+    { name: "search_sec_filings", description: "Full-text filing search." },
+    {
+      name: "get_sec_document",
+      description: "Bounded text window of one filing document.",
+      domain: "sec",
+      purpose: "Read a known accession section.",
+      keyInputs: "req(accession_no) opt(section, cursor, limit)",
+      outputKind: "text window + source_refs",
+      evidence: "filing text with accession citations",
+      prerequisites: "accession_no from a prior search",
+      pitSupport: "as_of",
+    },
+  ];
+  const q = buildToolSelectionQuestion(
+    registry,
+    { nodeId: "n1", question: "What changed in risk factors?" },
+    [{ id: "e1" }],
+    [{ tool: "search_sec_filings", error: "timeout" }],
+  );
+  expect(q.id).toBe("tool_selection");
+  expect(Object.keys(q.options).sort()).toEqual(
+    ["get_sec_document", "node_resolved", "reasoning_required", "search_sec_filings"].sort(),
+  );
+  expect(q.options.search_sec_filings).toBe("Full-text filing search.");
+  const doc = q.options.get_sec_document;
+  for (const bit of ["[sec]", "Inputs:", "Output:", "Evidence:", "Needs:", "PIT:"]) expect(doc).toContain(bit);
+  expect(q.prompt).toContain("n1");
+  expect(q.prompt).toContain("search_sec_filings");
+  expect(TOOL_SELECTION_SENTINELS.reasoning_required.length).toBeGreaterThan(0);
+  expect(TOOL_SELECTION_SENTINELS.node_resolved.length).toBeGreaterThan(0);
+  expect(() => buildToolSelectionQuestion([], { nodeId: "n", question: "q" })).toThrow("empty registry");
+  expect(() => buildToolSelectionQuestion(
+    [{ name: "reasoning_required", description: "collision" }],
+    { nodeId: "n", question: "q" },
+  )).toThrow("sentinel");
 });

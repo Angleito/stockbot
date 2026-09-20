@@ -34,10 +34,14 @@ from .evidence import (
 )
 from .freeze import EvidenceFreeze
 from .models import (
+    DecisionRecord,
     FailureCategory,
     JSONValue,
+    ResearchNode,
     ResearchSession,
     default_policy,
+    new_decision_id,
+    new_node_id,
     utcnow,
     validate_json_mapping,
     validate_json_value,
@@ -58,10 +62,12 @@ __all__ = [
     "ResearchNotFound",
     "attach_job_runtime",
     "authorize_and_consume_dispatch",
+    "block_node",
     "cancel_job",
     "cancel_research",
     "complete_job",
     "create_committee_jobs",
+    "create_node",
     "create_research",
     "decide_next_wave",
     "decide_wave2",
@@ -74,9 +80,13 @@ __all__ = [
     "job_diagnostics",
     "list_research",
     "persist_tool_result",
+    "ready_nodes",
     "record_committee_analysis",
+    "record_decision",
     "record_evidence",
+    "reject_node",
     "research_events",
+    "resolve_node",
     "resume_research",
     "retry_job",
     "run_research",
@@ -3842,3 +3852,161 @@ def authorize_and_consume_dispatch(
         "tool_budget": spent.tool_budget,
         "tool_calls_used": used,
     }
+
+
+def _require_node(store: ResearchRepository, node_id: str) -> ResearchNode:
+    try:
+        return store.get_node(node_id)
+    except KeyError:
+        raise ResearchNotFound(f"unknown node_id: {node_id!r}") from None
+
+
+def create_node(
+    session_id: str,
+    question: str,
+    why_it_matters: str,
+    depends_on: Sequence[str] | None = None,
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> ResearchNode:
+    """Create one ResearchNode (what needs knowing); fail-closed on unknown session."""
+    if not isinstance(question, str) or not question.strip():
+        raise ValueError("create_node: 'question' must be a non-empty string")
+    if not isinstance(why_it_matters, str) or not why_it_matters.strip():
+        raise ValueError("create_node: 'why_it_matters' must be a non-empty string")
+    deps = tuple(depends_on or ())
+    if any(not isinstance(d, str) or not d for d in deps):
+        raise ValueError("create_node: 'depends_on' must be a list of non-empty strings")
+    store = _repo(repo)
+    _require_session(store, session_id)
+    for dep in deps:
+        dep_node = _require_node(store, dep)
+        if dep_node.session_id != session_id:
+            raise ValueError(f"create_node: depends_on {dep!r} belongs to another session")
+    node = ResearchNode(
+        node_id=new_node_id(),
+        session_id=session_id,
+        question=question.strip(),
+        why_it_matters=why_it_matters.strip(),
+        depends_on=deps,
+    )
+    node.validate("<service>")
+    try:
+        store.save_node(node)
+    except KeyError:
+        raise ResearchNotFound(f"unknown session_id: {session_id!r}") from None
+    _emit(store, session_id, "node.created", {"node_id": node.node_id})
+    return node
+
+
+def _node_resolved(nodes: list[ResearchNode], node_id: str) -> bool:
+    found = next((n for n in nodes if n.node_id == node_id), None)
+    return found is not None and found.status == "resolved"
+
+
+def ready_nodes(session_id: str, *, repo: ResearchRepository | Path | str | None = None) -> list[ResearchNode]:
+    """Nodes whose deps resolved and whose own status is proposed/gathering (read-only)."""
+    store = _repo(repo)
+    _require_session(store, session_id)
+    nodes = [n for n in store.list_nodes(session_id) if n.session_id == session_id]
+    return [
+        n
+        for n in nodes
+        if n.status in ("proposed", "gathering") and all(_node_resolved(nodes, d) for d in n.depends_on)
+    ]
+
+
+def _transition_node(store: ResearchRepository, session_id: str, node_id: str, status: str, event: str) -> ResearchNode:
+    node = _require_node(store, node_id)
+    if node.session_id != session_id:
+        raise ResearchNotFound(f"unknown node_id: {node_id!r}")
+    try:
+        updated = store.update_node_status(node_id, status)
+    except KeyError:
+        raise ResearchNotFound(f"unknown node_id: {node_id!r}") from None
+    _emit(store, session_id, event, {"node_id": node_id})
+    return updated
+
+
+def resolve_node(session_id: str, node_id: str, *, repo: ResearchRepository | Path | str | None = None) -> ResearchNode:
+    """Mark one node resolved."""
+    return _transition_node(_repo(repo), session_id, node_id, "resolved", "node.resolved")
+
+
+def block_node(
+    session_id: str, node_id: str, reason: str = "", *, repo: ResearchRepository | Path | str | None = None
+) -> ResearchNode:
+    """Mark one node blocked (reason carried on the journal event)."""
+    store = _repo(repo)
+    updated = _transition_node(store, session_id, node_id, "blocked", "node.blocked")
+    if reason:
+        _emit(store, session_id, "node.blocked", {"node_id": node_id, "reason": str(reason)[:500]})
+    return updated
+
+
+def reject_node(session_id: str, node_id: str, *, repo: ResearchRepository | Path | str | None = None) -> ResearchNode:
+    """Mark one node rejected."""
+    return _transition_node(_repo(repo), session_id, node_id, "rejected", "node.rejected")
+
+
+def record_decision(
+    session_id: str,
+    decision_type: str,
+    candidates: Mapping[str, object],
+    probabilities: Mapping[str, object],
+    selected: object,
+    *,
+    node_id: str | None = None,
+    job_id: str | None = None,
+    confidence: float | None = None,
+    request: object = None,
+    response: object = None,
+    provider: str | None = None,
+    latency_ms: float | None = None,
+    repo: ResearchRepository | Path | str | None = None,
+) -> DecisionRecord:
+    """Persist one JEV disposition: full candidate registry + probabilities + selected tool set."""
+    if not isinstance(decision_type, str) or not decision_type.strip():
+        raise ValueError("record_decision: 'decision_type' must be a non-empty string")
+    store = _repo(repo)
+    _require_session(store, session_id)
+    if node_id is not None:
+        node = _require_node(store, node_id)
+        if node.session_id != session_id:
+            raise ResearchNotFound(f"unknown node_id: {node_id!r}")
+    if job_id is not None:
+        job = _require_job(store, job_id)
+        if job.session_id != session_id:
+            raise ResearchNotFound(f"unknown job_id: {job_id!r}")
+    decision = DecisionRecord(
+        decision_id=new_decision_id(),
+        session_id=session_id,
+        node_id=node_id,
+        job_id=job_id,
+        decision_type=decision_type.strip(),
+        candidates=validate_json_mapping(dict(candidates), "<service>: 'candidates'"),
+        probabilities=validate_json_mapping(dict(probabilities), "<service>: 'probabilities'"),
+        selected=validate_json_value(selected, "<service>: 'selected'"),
+        confidence=confidence,
+        created_at=utcnow(),
+    )
+    decision.validate("<service>")
+    try:
+        store.save_decision(decision, request=request, response=response, provider=provider, latency_ms=latency_ms)
+    except KeyError as exc:
+        raise ResearchNotFound(exc.args[0] if exc.args else str(exc)) from None
+    _emit(store, session_id, "decision.recorded", {"decision_id": decision.decision_id, "type": decision.decision_type})
+    return decision
+
+
+def admit_evidence(
+    session_id: str,
+    job_id: str,
+    data: Mapping[str, object],
+    *,
+    repo: ResearchRepository | Path | str | None = None,
+) -> dict[str, JSONValue]:
+    """Kernel evidence admission: research_session_id/job_id/as_of carriage into record_evidence."""
+    if not isinstance(data, Mapping):
+        raise ValueError("admit_evidence: 'data' must be a mapping")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    return record_evidence(session_id, job_id, dict(data), repo=repo)

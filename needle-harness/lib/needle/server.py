@@ -75,6 +75,39 @@ def _decision(r):
     }
 
 
+def validate_needle_tool(jev_tool, needle_tool):
+    """Runtime gate: Needle output must invoke the exact JEV-selected tool.
+
+    JEV owns tool selection; Needle never selects, chains, or judges
+    sufficiency. A mismatch (including None/escalation) raises — the caller
+    treats it as retryable and returns to JEV with the full registry again.
+    Never silently substitute.
+    """
+    if not isinstance(jev_tool, str) or not jev_tool:
+        raise ValueError("jev_tool must be a nonempty tool name")
+    if needle_tool != jev_tool:
+        raise ValueError(f"needle tool mismatch: jev selected {jev_tool!r}, needle emitted {needle_tool!r}")
+    return needle_tool
+
+
+def _arguments_prompt(tool, schema, objective, node, context):
+    """Single-shot constrained prompt: exactly one tool, grounded args only."""
+    return json.dumps(
+        {
+            "instruction": (
+                f"Call exactly the tool {tool!r} once with valid grounded arguments, "
+                "or return no call. Never call another tool, never chain tools, "
+                "never judge sufficiency or completion."
+            ),
+            "tool": tool,
+            "schema": schema,
+            "objective": objective,
+            "node": node,
+            "context": context,
+        }
+    )
+
+
 def handle(line):
     try:
         req = json.loads(line)
@@ -93,6 +126,19 @@ def handle(line):
             r = agent.complete(prompt, max_new_tokens=256)
         elif action == "step":
             r = agent.complete(json.dumps(req.get("result")), max_new_tokens=256)
+        elif action == "arguments.generate":
+            # Narrow execution worker: exactly one JEV-selected tool. No
+            # registry inspection, no tool choice, no chaining, no
+            # sufficiency judgment. start/step (old Needle-owned loop) intact.
+            tool = req.get("tool")
+            if not isinstance(tool, str) or not tool:
+                raise ValueError("bad tool")
+            agent.reset()
+            r = agent.complete(
+                _arguments_prompt(tool, req.get("schema"), req.get("objective"), req.get("node"), req.get("context")),
+                max_new_tokens=256,
+            )
+            validate_needle_tool(tool, _decision(r)["tool"])
         else:
             return {"id": rid, "error": "bad_action"}
         out = {"id": rid}

@@ -1150,3 +1150,245 @@ class JournalEvent:
         )
         out.validate(where)
         return out
+
+
+def new_node_id() -> str:
+    """Mint a Stockbot-owned research node id (what needs knowing)."""
+    return f"rn:{uuid.uuid4()}"
+
+
+def new_decision_id() -> str:
+    """Mint a Stockbot-owned decision id."""
+    return f"dec:{uuid.uuid4()}"
+
+
+class ResearchNodeStatus(StrEnum):
+    """ResearchNode lifecycle: what needs knowing (node) vs execution attempt (job)."""
+
+    PROPOSED = "proposed"
+    GATHERING = "gathering"
+    READY_FOR_ANALYSIS = "ready_for_analysis"
+    RESOLVED = "resolved"
+    BLOCKED = "blocked"
+    REJECTED = "rejected"
+
+
+NODE_STATUS_VALUES = frozenset(e.value for e in ResearchNodeStatus)
+TOOL_DECISION_ACTIONS = frozenset({"invoke", "reason", "resolved"})
+
+
+def _opt_tuple_str(v: object, key: str, where: str) -> tuple[str, ...]:
+    if v is None:
+        return ()
+    if not isinstance(v, (list, tuple)) or any(not isinstance(x, str) for x in v):
+        raise ValueError(f"{where}: '{key}' must be a list of strings or null")
+    return tuple(v)
+
+
+def _tool_names_from(d: Mapping[str, object], where: str) -> tuple[str, ...]:
+    """tool_names list; single-tool compat: bare tool_name implies a one-tool set on invoke."""
+    names = _opt_tuple_str(d.get("tool_names", []), "tool_names", where)
+    if not names and d.get("action") == "invoke":
+        single = d.get("tool_name")
+        if isinstance(single, str) and single:
+            return (single,)
+    return names
+
+
+def _opt_confidence(v: object, key: str, where: str) -> float | None:
+    if v is None:
+        return None
+    if isinstance(v, bool) or not isinstance(v, (int, float)):
+        raise ValueError(f"{where}: '{key}' must be a number or null, got {v!r}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+    out = float(v)
+    if not math.isfinite(out) or not 0.0 <= out <= 1.0:
+        raise ValueError(f"{where}: '{key}' must be in [0, 1], got {v!r}")
+    return out
+
+
+@dataclass(frozen=True)
+class ResearchNode:
+    """One thing that needs knowing; a Job is an execution attempt against it."""
+
+    node_id: str
+    session_id: str
+    question: str
+    why_it_matters: str
+    depends_on: tuple[str, ...] = ()
+    status: str = ResearchNodeStatus.PROPOSED.value
+    evidence_ids: tuple[str, ...] = ()
+    missing_evidence: tuple[str, ...] = ()
+
+    def validate(self, where: str = "<node>") -> None:
+        """Raise ValueError on any contract violation."""
+        if not self.node_id:
+            raise ValueError(f"{where}: 'node_id' must be a non-empty string")
+        if not self.session_id:
+            raise ValueError(f"{where}: 'session_id' must be a non-empty string")
+        if not self.question:
+            raise ValueError(f"{where}: 'question' must be a non-empty string")
+        if not self.why_it_matters:
+            raise ValueError(f"{where}: 'why_it_matters' must be a non-empty string")
+        _coerce_enum(NODE_STATUS_VALUES, self.status, "status", where)
+
+    def to_dict(self) -> dict[str, JSONValue]:
+        """Serialize (tuples as lists)."""
+        return {
+            "node_id": self.node_id,
+            "session_id": self.session_id,
+            "question": self.question,
+            "why_it_matters": self.why_it_matters,
+            "depends_on": _json_str_list(list(self.depends_on)),
+            "status": self.status,
+            "evidence_ids": _json_str_list(list(self.evidence_ids)),
+            "missing_evidence": _json_str_list(list(self.missing_evidence)),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ResearchNode:
+        """Parse and validate; raises ValueError on malformed input."""
+        if not isinstance(d, dict):
+            raise ValueError(f"{_path}: node must be a mapping, got {type(d).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        where = f"{_path}: node {d.get('node_id', '?')}"
+        out = cls(
+            node_id=_req_str(d, "node_id", where),
+            session_id=_req_str(d, "session_id", where),
+            question=_req_str(d, "question", where),
+            why_it_matters=_req_str(d, "why_it_matters", where),
+            depends_on=_opt_tuple_str(d.get("depends_on", []), "depends_on", where),
+            status=_coerce_enum(
+                NODE_STATUS_VALUES, d.get("status", ResearchNodeStatus.PROPOSED.value), "status", where
+            ),
+            evidence_ids=_opt_tuple_str(d.get("evidence_ids", []), "evidence_ids", where),
+            missing_evidence=_opt_tuple_str(d.get("missing_evidence", []), "missing_evidence", where),
+        )
+        out.validate(where)
+        return out
+
+
+@dataclass(frozen=True)
+class DecisionRecord:
+    """Persisted JEV disposition: full candidate registry + probabilities + selected."""
+
+    decision_id: str
+    session_id: str
+    node_id: str | None
+    job_id: str | None
+    decision_type: str
+    candidates: dict[str, JSONValue]
+    probabilities: dict[str, JSONValue]
+    selected: JSONValue
+    confidence: float | None = None
+    created_at: datetime = field(default_factory=utcnow)
+
+    def validate(self, where: str = "<decision>") -> None:
+        """Raise ValueError on any contract violation."""
+        if not self.decision_id:
+            raise ValueError(f"{where}: 'decision_id' must be a non-empty string")
+        if not self.session_id:
+            raise ValueError(f"{where}: 'session_id' must be a non-empty string")
+        if not self.decision_type:
+            raise ValueError(f"{where}: 'decision_type' must be a non-empty string")
+        if self.confidence is not None:
+            out = self.confidence
+            if (
+                isinstance(out, bool)
+                or not isinstance(out, (int, float))
+                or not math.isfinite(float(out))
+                or not 0.0 <= float(out) <= 1.0
+            ):
+                raise ValueError(f"{where}: 'confidence' must be in [0, 1] or null, got {out!r}")
+
+    def to_dict(self) -> dict[str, JSONValue]:
+        """Serialize (datetimes as ISO-8601)."""
+        return {
+            "decision_id": self.decision_id,
+            "session_id": self.session_id,
+            "node_id": self.node_id,
+            "job_id": self.job_id,
+            "decision_type": self.decision_type,
+            "candidates": validate_json_mapping(self.candidates, "<decision>: 'candidates'"),
+            "probabilities": validate_json_mapping(self.probabilities, "<decision>: 'probabilities'"),
+            "selected": validate_json_value(self.selected, "<decision>: 'selected'"),
+            "confidence": self.confidence,
+            "created_at": self.created_at.isoformat(),
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> DecisionRecord:
+        """Parse and validate; raises ValueError on malformed input."""
+        if not isinstance(d, dict):
+            raise ValueError(f"{_path}: decision must be a mapping, got {type(d).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        where = f"{_path}: decision {d.get('decision_id', '?')}"
+        out = cls(
+            decision_id=_req_str(d, "decision_id", where),
+            session_id=_req_str(d, "session_id", where),
+            node_id=_opt_str(d.get("node_id"), "node_id", where),
+            job_id=_opt_str(d.get("job_id"), "job_id", where),
+            decision_type=_req_str(d, "decision_type", where),
+            candidates=validate_json_mapping(d.get("candidates", {}), f"{where}: 'candidates'"),
+            probabilities=validate_json_mapping(d.get("probabilities", {}), f"{where}: 'probabilities'"),
+            selected=validate_json_value(d.get("selected"), f"{where}: 'selected'"),
+            confidence=_opt_confidence(d.get("confidence"), "confidence", where),
+            created_at=_req_time(d, "created_at", where),
+        )
+        out.validate(where)
+        return out
+
+
+@dataclass(frozen=True)
+class ToolDecision:
+    """JEV tool disposition: one tool, a parallel set, reasoning escalation, or node-resolved."""
+
+    action: str
+    tool_name: str | None = None
+    tool_names: tuple[str, ...] = ()
+    probabilities: dict[str, JSONValue] = field(default_factory=dict)
+    confidence: float | None = None
+
+    def validate(self, where: str = "<tool_decision>") -> None:
+        """Raise ValueError on any contract violation."""
+        _coerce_enum(TOOL_DECISION_ACTIONS, self.action, "action", where)
+        if self.action == "invoke":
+            if not self.tool_names:
+                raise ValueError(f"{where}: 'tool_names' must be non-empty when action is 'invoke'")
+            if self.tool_name is not None and self.tool_name not in self.tool_names:
+                raise ValueError(f"{where}: 'tool_name' must be a member of 'tool_names'")
+        else:
+            if self.tool_names:
+                raise ValueError(f"{where}: 'tool_names' must be empty unless action is 'invoke'")
+            if self.tool_name is not None:
+                raise ValueError(f"{where}: 'tool_name' must be null unless action is 'invoke'")
+
+    @property
+    def selected_tools(self) -> tuple[str, ...]:
+        """Effective parallel set (tool_names; single-tool compat falls back to tool_name)."""
+        if self.tool_names:
+            return self.tool_names
+        return (self.tool_name,) if self.tool_name else ()
+
+    def to_dict(self) -> dict[str, JSONValue]:
+        """Serialize (tuples as lists)."""
+        return {
+            "action": self.action,
+            "tool_name": self.tool_name,
+            "tool_names": _json_str_list(list(self.tool_names)),
+            "probabilities": validate_json_mapping(self.probabilities, "<tool_decision>: 'probabilities'"),
+            "confidence": self.confidence,
+        }
+
+    @classmethod
+    def from_dict(cls, d: Mapping[str, object], _path: str = "<dict>") -> ToolDecision:
+        """Parse and validate; raises ValueError on malformed input."""
+        if not isinstance(d, dict):
+            raise ValueError(f"{_path}: tool decision must be a mapping, got {type(d).__name__}")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        where = f"{_path}: tool decision"
+        out = cls(
+            action=_coerce_enum(TOOL_DECISION_ACTIONS, d.get("action"), "action", where),
+            tool_name=_opt_str(d.get("tool_name"), "tool_name", where),
+            tool_names=_tool_names_from(d, where),
+            probabilities=validate_json_mapping(d.get("probabilities", {}), f"{where}: 'probabilities'"),
+            confidence=_opt_confidence(d.get("confidence"), "confidence", where),
+        )
+        out.validate(where)
+        return out

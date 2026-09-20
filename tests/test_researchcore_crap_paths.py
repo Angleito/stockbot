@@ -6493,3 +6493,59 @@ def test_zero_novelty_wave_stops_the_run(tmp_path: Path, monkeypatch: pytest.Mon
     reasons = [str(e.payload.get("reason")) for e in repo.list_events(sid) if e.event_type == "wave.stopped"]
     assert any(r.startswith("loop_detected:") for r in reasons)
     assert repo.get_session(sid).status == "completed"
+
+
+def test_kernel_node_lifecycle_ready_gating_and_decision_roundtrip(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Kernel slice: node lifecycle + depends_on gating + decision persist + ToolDecision shapes."""
+    import sqlite3
+
+    from app.research.models import DecisionRecord, ResearchNode, ToolDecision
+
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
+    repo = ResearchRepository()
+    sid, _ = _svc_sid(repo)
+    first = svc.create_node(sid, "What drives DC revenue?", "scopes tool choice", repo=repo)
+    second = svc.create_node(sid, "Follow-up?", "needs the first", depends_on=[first.node_id], repo=repo)
+    assert [n.node_id for n in svc.ready_nodes(sid, repo=repo)] == [first.node_id]
+    svc.resolve_node(sid, first.node_id, repo=repo)
+    assert [n.node_id for n in svc.ready_nodes(sid, repo=repo)] == [second.node_id]
+    assert repo.add_node_evidence(second.node_id, "ev-1").evidence_ids == ("ev-1",)
+    assert repo.update_node_status(second.node_id, "gathering").status == "gathering"
+    decision = svc.record_decision(
+        sid,
+        "tool_select",
+        {"t": {"tool": "x"}},
+        {"t": 1.0},
+        ["x"],
+        node_id=second.node_id,
+        confidence=0.9,
+        provider="jev",
+        latency_ms=12.5,
+        request={"id": "1"},
+        response={"ok": True},
+        repo=repo,
+    )
+    back = repo.list_decisions(sid)
+    assert len(back) == 1 and back[0].decision_id == decision.decision_id
+    assert DecisionRecord.from_dict(decision.to_dict()).selected == ["x"]
+    assert ResearchNode.from_dict(first.to_dict()).node_id == first.node_id
+    single = ToolDecision.from_dict({"action": "invoke", "tool_name": "a", "probabilities": {}})
+    assert single.tool_names == ("a",) and single.selected_tools == ("a",)
+    parallel = ToolDecision.from_dict(
+        {"action": "invoke", "tool_name": "a", "tool_names": ["a", "b"], "probabilities": {}}
+    )
+    assert parallel.selected_tools == ("a", "b")
+    assert ToolDecision.from_dict({"action": "resolved", "probabilities": {}}).selected_tools == ()
+    with pytest.raises(ValueError):
+        ToolDecision.from_dict({"action": "invoke", "probabilities": {}})
+    with pytest.raises(svc.ResearchNotFound):
+        svc.create_node("rs:missing", "q?", "why?", repo=repo)
+    mirror = (
+        sqlite3.connect(str(tmp_path / "runs.sqlite"))
+        .execute("SELECT count(*) FROM agent_events WHERE event_type='jev.decision'")
+        .fetchone()[0]
+    )
+    assert mirror == 1

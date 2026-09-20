@@ -15,6 +15,15 @@ export type NeedleDecision = NeedleRouteResult & {
 };
 
 export const TOOL_TIMEOUT_MS = 120_000;
+// Runtime gate mirroring server.py validate_needle_tool: Needle output must
+// invoke the exact JEV-selected tool. JEV owns selection; Needle never
+// selects, chains, or judges sufficiency. Throws on mismatch (incl. null).
+export function validateNeedleTool(jevTool: string, needleTool: string | null): string {
+  if (!jevTool) throw new Error("validateNeedleTool: jevTool must be a nonempty tool name");
+  if (needleTool !== jevTool)
+    throw new Error(`needle tool mismatch: jev selected ${JSON.stringify(jevTool)}, needle emitted ${JSON.stringify(needleTool)}`);
+  return needleTool;
+}
 
 const ROOT = process.cwd();
 const SERVER = `${ROOT}/lib/needle/server.py`;
@@ -175,6 +184,22 @@ export class NeedleRouter {
     return { ...r, escalate: r.tool === null };
   }
 
+  // Narrow execution worker op: generate arguments for the exact JEV-selected
+  // tool only. Single request->response (no Needle-owned conversation).
+  // Enforces emitted tool == requested tool; caller treats rejection as
+  // retryable and returns to JEV with the full registry again.
+  async generateArguments(req: {
+    tool: string;
+    schema?: unknown;
+    objective?: unknown;
+    node?: unknown;
+    context?: unknown;
+  }): Promise<NeedleRouteResult> {
+    if (!req.tool) throw new Error("generateArguments: tool must be a nonempty tool name");
+    const r = await this.call({ action: "arguments.generate", ...req });
+    validateNeedleTool(req.tool, r.tool);
+    return r;
+  }
   async close(): Promise<void> {
     const child = this.child;
     this.child = null;

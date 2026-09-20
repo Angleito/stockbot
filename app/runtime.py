@@ -1,8 +1,8 @@
-"""Pi tool-dispatch budget, tool-result telemetry, and Pi lifecycle events.
+"""Runtime tool-dispatch budget, tool-result telemetry, and runtime lifecycle events.
 
-Pure-stdlib module (no app imports): ExecutionBudget enforces Pi tool-call
+Pure-stdlib module (no app imports): ExecutionBudget enforces runtime tool-call
 limits, ToolResultMeta carries best-effort result telemetry, and EventType
-names the lifecycle values emitted by the Pi bridge and run store.
+names the lifecycle values emitted by the runtime bridge and run store.
 """
 
 import threading
@@ -23,7 +23,7 @@ class ToolResultMeta:
 
 @dataclass
 class ExecutionBudget:
-    """Pi tool-dispatch budget: consumption counters + hard limits.
+    """Runtime tool-dispatch budget: consumption counters + hard limits.
 
     RunRecorder (telemetry) only observes consumption; this object is the
     source of truth for limit enforcement, so observability failures never
