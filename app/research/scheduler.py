@@ -291,10 +291,16 @@ def _default_jev() -> Any:
 
 
 def _default_reasoner() -> Any:
-    """Frozen: app/reasoner_client.py ReasonerClient.decompose/analyze/expand."""
+    """Frozen: app/reasoner_client.py ReasonerClient.decompose/analyze/expand (env-wired)."""
+    import os
+
     from app.reasoner_client import ReasonerClient
 
-    return ReasonerClient()
+    return ReasonerClient(
+        api_key=os.environ.get("OPENCODE_API_KEY", ""),
+        url=os.environ.get("OPENCODE_URL", "https://opencode.ai/zen/v1/responses"),
+        model=os.environ.get("OPENCODE_MODEL", "muse-spark-1.3-contributor"),
+    )
 
 
 def _default_needle_generate() -> Any:

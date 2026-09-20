@@ -1,4 +1,4 @@
-import { runAgent } from "@/lib/agent/loop";
+import { runKernelAgent } from "@/lib/agent/kernel";
 import type { AgentEvent } from "@/lib/agent/types";
 
 export async function POST(req: Request): Promise<Response> {
@@ -19,9 +19,9 @@ export async function POST(req: Request): Promise<Response> {
       const enc = new TextEncoder();
       const send = (e: AgentEvent) => controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
       try {
-        await runAgent(prompt, send, { signal: req.signal });
+        await runKernelAgent(prompt, send, { signal: req.signal });
       } catch (err) {
-        console.error(`[web] [agent-api] runAgent error: ${err instanceof Error ? err.message : String(err)}`);
+        console.error(`[web] [agent-api] runKernelAgent error: ${err instanceof Error ? err.message : String(err)}`);
         send({ type: "error", message: err instanceof Error ? err.message : String(err) });
       }
       controller.close();

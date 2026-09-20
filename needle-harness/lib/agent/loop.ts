@@ -19,7 +19,7 @@ export type NeedleDecisionRecord = {
 export type ToolCallRecord = { tool: string; ok: boolean; evidenceId?: string };
 
 const MUSE_MODEL = "muse-spark-1.3-contributor";
-// INTERIM (Phase5 removal): TS worker loop until kernel-owned scheduler lands (plan §18/Phase5). Holds step IDs/refs + display buffer only, never kernel truth. Stops on escalate/terminal-failure/needle-down/abort/muse-result only — no research-depth caps. Needle now conforms to future kernel contracts but does not execute inside the kernel; next milestone is ResearchSession → Job → runtime-executed Needle worker carrying research_session_id/job_id/as_of, at which point TS Evidence[]/seen/counters disappear.
+// SUPERSEDED: kernel scheduler owns the agent loop (app/research/scheduler.py run_node via app/research/kernel_worker.py); route.ts no longer calls runAgent as of this cutover. File frozen for reference + its tests only; do not extend.
 // ponytail: operational guards are per-request timeouts (TOOL_TIMEOUT_MS/bridge 120s) + opts.signal abort + WORKER_DEADLINE_MS worker deadman (§4), not caps. Terminal runtime/kernel failures (deadline, non-retryable tool outcome, loop, provider down) skip Muse synthesis and end at done — normal retrieval exhaustion/escalation still synthesizes. evidence[] is interim display buffer (Muse formatEvidence truncates oldest-first to 24k); DISPLAY_CHAR_LIMIT is evidenceText() view slice only (§23 retrieval vs display), never loop exit.
 const DISPLAY_CHAR_LIMIT = 24000;
 const WORKER_DEADLINE_MS = 10 * 60 * 1000;
