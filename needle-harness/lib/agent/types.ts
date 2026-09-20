@@ -58,7 +58,8 @@ export type Evidence = {
   url?: string;
   retrievedAt: string;
   content: string;
-  handle?: string;
+  sourceHandle?: Record<string, unknown>;
+  sourceRefs?: Record<string, unknown>;
 };
 
 export type ToolResult = { ok: true; evidence: Evidence } | { ok: false; error: string; category: FailureCategory; retryable: boolean };
@@ -127,6 +128,7 @@ function redactValue(value: unknown): unknown {
   return value;
 }
 
+// TS key-based redaction is a UI safeguard only; the authoritative recorder boundary is app/redact.py (key norms PLUS free-text Bearer/sk/JWT patterns — a secret smuggled inside a query value is invisible to key matching).
 export function redactArgs(a: Record<string, unknown>): Record<string, unknown> {
   return redactValue(a) as Record<string, unknown>;
 }

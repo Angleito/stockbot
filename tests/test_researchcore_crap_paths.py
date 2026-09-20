@@ -263,6 +263,33 @@ def test_success_meta_discovery_and_refs() -> None:
     assert out["matches"] == ["z"] and out["status"] == "completed"
 
 
+def test_success_meta_source_handle_passthrough() -> None:
+    import app.pi_gateway as _g
+
+    meta = _g._tool_result_meta({"source": "s", "rows": [1]})
+    env = type(
+        "E",
+        (),
+        {
+            "source": "s",
+            "sensitivity": type("S", (), {"value": "public"})(),
+            "integrity": type("I", (), {"value": "ok"})(),
+        },
+    )()
+    handle = {
+        "accession_no": "0000320193-25-000079",
+        "document_name": "d.htm",
+        "basis": "raw",
+        "offset": 0,
+        "max_chars": 100,
+        "text_hash": "abc",
+    }
+    out = _g._success_meta("get_sec_document", {"source_handle": handle, "text": "body"}, meta, env, "completed")
+    assert out["source_handle"] == handle
+    bare = _g._success_meta("get_sec_document", {"text": "body"}, meta, env, "completed")
+    assert "source_handle" not in bare
+
+
 def test_company_name_fills_missing_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
     import app.pi_gateway as _g
 

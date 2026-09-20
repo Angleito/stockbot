@@ -1120,6 +1120,9 @@ def _success_meta(
     source_refs = _extract_source_refs(result)
     if source_refs:
         safe_meta["source_refs"] = source_refs
+    handle = result.get("source_handle") if isinstance(result, dict) else None
+    if isinstance(handle, dict) and handle:
+        safe_meta["source_handle"] = dict(handle)
     if name in ("search_tools", "browse_tools") and isinstance(result, dict):
         # Deferred loading: the TS extension activates these schemas additively.
         # Names are already model-visible in content; meta carries them structured.

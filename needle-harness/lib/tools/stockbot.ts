@@ -172,15 +172,18 @@ export async function invoke(name: string, args: Record<string, unknown>, sessio
   const result = msg.result ?? {};
   const content =
     "content" in result && typeof result.content === "string"
-      ? result.content.slice(0, 8000)
-      : JSON.stringify("content" in result ? result.content ?? result : result).slice(0, 8000);
-  const evidence = makeEvidence(name, content.slice(0, 8000), { title: name });
+      ? result.content
+      : JSON.stringify("content" in result ? result.content ?? result : result).slice(0, 32768);
   const meta = result.meta;
-  if (meta != null && typeof meta === "object" && ("source_refs" in meta || "source_handle" in meta)) {
-    const sourceRefs = "source_refs" in meta ? (meta as BridgeResultMeta).source_refs : undefined;
-    const sourceHandle = "source_handle" in meta ? (meta as BridgeResultMeta).source_handle : undefined;
-    evidence.handle = JSON.stringify({ source_handle: sourceHandle, source_refs: sourceRefs }).slice(0, 2000);
-  }
+  const rawHandle = meta != null && typeof meta === "object" && "source_handle" in meta ? (meta as BridgeResultMeta).source_handle : undefined;
+  const rawRefs = meta != null && typeof meta === "object" && "source_refs" in meta ? (meta as BridgeResultMeta).source_refs : undefined;
+  const sourceHandle = rawHandle !== null && typeof rawHandle === "object" && !Array.isArray(rawHandle) ? (rawHandle as Record<string, unknown>) : undefined;
+  const sourceRefs = rawRefs !== null && typeof rawRefs === "object" && !Array.isArray(rawRefs) ? (rawRefs as Record<string, unknown>) : undefined;
+  const evidence = makeEvidence(name, content, {
+    title: name,
+    ...(sourceHandle !== undefined ? { sourceHandle } : {}),
+    ...(sourceRefs !== undefined ? { sourceRefs } : {}),
+  });
   return { ok: true, evidence };
 }
 

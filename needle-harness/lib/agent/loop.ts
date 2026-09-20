@@ -19,9 +19,10 @@ export type NeedleDecisionRecord = {
 export type ToolCallRecord = { tool: string; ok: boolean; evidenceId?: string };
 
 const MUSE_MODEL = "muse-spark-1.3-contributor";
-// INTERIM (Phase5 removal): TS worker loop until kernel-owned scheduler lands (plan §18/Phase5). Holds step IDs/refs + display buffer only, never kernel truth. Stops on escalate/unknown-tool/duplicate/2-strike/provider-down/abort/muse-result only — no research-depth caps.
-// ponytail: operational guard is per-request timeouts (TOOL_TIMEOUT_MS/bridge 120s) + opts.signal abort (§4), not caps. evidence[] is interim display buffer (Muse formatEvidence truncates oldest-first to 24k); DISPLAY_CHAR_LIMIT is evidenceText() view slice only (§23 retrieval vs display), never loop exit.
+// INTERIM (Phase5 removal): TS worker loop until kernel-owned scheduler lands (plan §18/Phase5). Holds step IDs/refs + display buffer only, never kernel truth. Stops on escalate/unknown-tool/duplicate/2-strike/provider-down/abort/muse-result only — no research-depth caps. Needle now conforms to future kernel contracts but does not execute inside the kernel; next milestone is ResearchSession → Job → runtime-executed Needle worker carrying research_session_id/job_id/as_of, at which point TS Evidence[]/seen/counters disappear.
+// ponytail: operational guards are per-request timeouts (TOOL_TIMEOUT_MS/bridge 120s) + opts.signal abort + WORKER_DEADLINE_MS worker deadman (§4), not caps. evidence[] is interim display buffer (Muse formatEvidence truncates oldest-first to 24k); DISPLAY_CHAR_LIMIT is evidenceText() view slice only (§23 retrieval vs display), never loop exit.
 const DISPLAY_CHAR_LIMIT = 24000;
+const WORKER_DEADLINE_MS = 10 * 60 * 1000;
 
 function stamp(): string {
   const d = new Date();
@@ -37,9 +38,10 @@ function isConversational(prompt: string): boolean {
 export async function runAgent(
   prompt: string,
   emit: (e: AgentEvent) => void,
-  opts?: { signal?: AbortSignal },
+  opts?: { signal?: AbortSignal; workerDeadlineMs?: number },
 ): Promise<void> {
   const t0 = performance.now();
+  const deadlineMs = opts?.workerDeadlineMs ?? WORKER_DEADLINE_MS;
   const startedAt = new Date().toISOString();
   const evidence: Evidence[] = [];
   const needleDecisions: NeedleDecisionRecord[] = [];
@@ -121,6 +123,14 @@ export async function runAgent(
     }
     for (let step = 0; decision; step++) {
       if (opts?.signal?.aborted) break;
+      if (performance.now() - t0 > deadlineMs) {
+        countFailure("deadline_exceeded");
+        emit({ type: "tool_failed", tool: "worker", category: "deadline_exceeded", preview: "worker runtime deadline exceeded" });
+        emit({ type: "failed", category: "deadline_exceeded", message: "worker runtime deadline exceeded" });
+        escalations += 1;
+        if (evidence.length === 0) escalated = true;
+        break;
+      }
       const current = decision;
       decision = null;
       const redacted = redactArgs(current.arguments);
@@ -157,8 +167,19 @@ export async function runAgent(
         countFailure("duplicate_research_action");
         emit({ type: "tool_failed", tool: current.tool, category: "duplicate_research_action", preview: key.slice(0, 160) });
         consecutiveFailures += 1;
-        if (consecutiveFailures >= 2) loopDetected(current.tool, key);
-        break;
+        if (consecutiveFailures >= 2) {
+          loopDetected(current.tool, key);
+          break;
+        }
+        try {
+          const tn = performance.now();
+          decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: "duplicate_research_action: this exact action already ran with no new evidence; choose another action or escalate" });
+          needleMs += performance.now() - tn;
+        } catch (err) {
+          noteNeedleDown(err);
+          break;
+        }
+        continue;
       }
       seen.add(key);
       const rejection = groundingError(current.tool, current.arguments, {
@@ -190,7 +211,20 @@ export async function runAgent(
       const result = await tool.execute(current.arguments, { sessionId });
       toolMs += performance.now() - tt;
       toolCalls.push({ tool: current.tool, ok: result.ok, evidenceId: result.ok ? result.evidence.id : undefined });
+      // ponytail: exact-action duplicate feedback below is a reroute, not a same-call retry — the richer retry_same/reroute/terminal triple stays deferred.
       if (!result.ok) {
+        if (!result.retryable) {
+          countFailure(result.category);
+          emit({ type: "tool_result", tool: current.tool, preview: result.error.slice(0, 160) });
+          emit({ type: "tool_failed", tool: current.tool, category: result.category, preview: result.error.slice(0, 160) });
+          emit({ type: "failed", category: result.category, message: result.error.slice(0, 500) });
+          escalations += 1;
+          if (evidence.length === 0) {
+            escalated = true;
+            directFallback = true;
+          }
+          break;
+        }
         countFailure(result.category);
         emit({ type: "tool_result", tool: current.tool, preview: result.error.slice(0, 160) });
         emit({ type: "tool_failed", tool: current.tool, category: result.category, preview: result.error.slice(0, 160) });
