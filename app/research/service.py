@@ -1518,7 +1518,7 @@ def _persist_evidence_record(
                 "source_bytes": "archived",
             },
         )
-    except Exception:
+    except Exception:  # noqa: BLE001, S110 - best-effort artifact mirror, never blocks acceptance
         pass
     if record.evidence_id not in found.evidence_ids:
         store.save_session(
@@ -1603,7 +1603,7 @@ def persist_tool_result(
     from .agents.source_agent import is_finra_tool, is_web_tool
 
     store = _repo(repo)
-    found, job = _live_evidence_job(store, session_id, job_id)
+    _found, job = _live_evidence_job(store, session_id, job_id)
     domain = (job.source_domain or "").upper()
     if domain == "FINRA":
         if not is_finra_tool(tool_name) or tool_name not in _FINRA_EVIDENCE_TOOLS:
@@ -2611,9 +2611,12 @@ def _wave1_coverage(
                 tagged = [f"[{domain}] {v}" if domain and isinstance(v, str) else v for v in value]
                 merged[key] = [*prior, *tagged] if isinstance(prior, list) else list(tagged)
             verdict = coverage.get("useful_for_question")
-            if isinstance(verdict, str) and verdict in ("sufficient", "insufficient"):
-                if merged.get("useful_for_question") != "insufficient":
-                    merged["useful_for_question"] = verdict
+            if (
+                isinstance(verdict, str)
+                and verdict in ("sufficient", "insufficient")
+                and merged.get("useful_for_question") != "insufficient"
+            ):
+                merged["useful_for_question"] = verdict
     for row in rows:
         raw_rels = row.get("relationships")
         if isinstance(raw_rels, list):
@@ -3346,15 +3349,18 @@ def decide_next_wave(
         elapsed_s=elapsed,
         novelty=novelty,
     )
-    if decision.authorized and decision.targeted_domain.strip():
-        if not source_domain_allowed(found.source_policy, decision.targeted_domain, "<wave>"):
-            decision = WaveDecision(
-                False,
-                "not_actionable",
-                f"targeted domain {decision.targeted_domain!r} denied by session source_policy",
-                targeted_question=decision.targeted_question,
-                targeted_domain=decision.targeted_domain,
-            )
+    if (
+        decision.authorized
+        and decision.targeted_domain.strip()
+        and not source_domain_allowed(found.source_policy, decision.targeted_domain, "<wave>")
+    ):
+        decision = WaveDecision(
+            False,
+            "not_actionable",
+            f"targeted domain {decision.targeted_domain!r} denied by session source_policy",
+            targeted_question=decision.targeted_question,
+            targeted_domain=decision.targeted_domain,
+        )
     _decide_settle(store, session_id, decision)
     return {
         "authorized": decision.authorized,

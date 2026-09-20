@@ -5117,7 +5117,6 @@ def _hf_prov(out: Mapping[str, object], key: str) -> object:
 
 def test_hf_default_session_is_sec_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Kernel default: no policy input means SEC-only allowlist."""
-    from app.research import service as _svc
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
@@ -6047,7 +6046,7 @@ def test_hf_finra_known_at_gates_pit(tmp_path: Path, monkeypatch: pytest.MonkeyP
     early_rid = _hf_persist_finra(
         repo, sid, early_job, f"{sid}:tr:pit-early", as_of_date="2025-06-15", published_at="2025-06-15"
     )
-    early = _svc.record_evidence(
+    _svc.record_evidence(
         sid, early_job, _item(f"{sid}:ev:pit-early", early_rid, "NVDA short interest 12345 shares pit-early"), repo=repo
     )
     late_job = str(_svc.start_job(sid, "source_agent", source="FINRA", repo=repo, wave_id=1)["job_id"])
