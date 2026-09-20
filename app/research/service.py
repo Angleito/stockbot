@@ -2025,28 +2025,10 @@ def _submit_coverage_merge(coverage: dict[str, object], cov: dict[str, object] |
 
 
 def _sec_search_ledger(search_ids: Sequence[str]) -> tuple[dict[str, str], bool]:
-    """search_id -> persisted query from the SEC search ledger; (rows, readable).
-
-    Unknown ids are simply absent from the mapping; an unreadable ledger returns
-    ``({}, False)`` so callers can report a gap instead of guessing.
-    """
-    if not search_ids:
-        return {}, True
-    try:
-        from app.sec.store import query_search
-    except Exception:  # noqa: BLE001 - the SEC ledger is optional for research persistence
-        return {}, False
-    found: dict[str, str] = {}
-    for search_id in search_ids:
-        try:
-            row = query_search(search_id)
-        except Exception:  # noqa: BLE001 - an unreadable ledger degrades to "unknown", never a failed write
-            return {}, False
-        if not isinstance(row, Mapping):
-            continue
-        query = row.get("query")
-        found[search_id] = query.strip() if isinstance(query, str) else ""
-    return found, True
+    """No persisted SEC search ledger remains; always empty but readable."""
+    # Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind live readers, never here.
+    del search_ids
+    return {}, True
 
 
 def _submit_search_run_warnings(cov: dict[str, object]) -> list[str]:
