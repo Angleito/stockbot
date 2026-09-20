@@ -5032,18 +5032,42 @@ def test_hf_synthesize_keeps_trio_what_would_change() -> None:
     from app.research.synthesis.final import synthesize_final
 
     claim = GroundedClaim(text="exposure", evidence_ids=["EV-1"])
-    kw: dict[str, object] = {
-        "session_id": "rs:t",
-        "wave_id": 1,
-        "freeze_id": "F1",
-        "evidence_ids": ["EV-1"],
-        "as_of": "2025-06-30",
-        "question": "q",
-        "claims": [claim],
-    }
-    stock = StockbotAnalysis(answer="a", base_case="b", what_would_change=["c1"], **kw)  # type: ignore[arg-type]
-    bull = BullAnalysis(stance="bull", bull_case="up", what_would_change=["c1"], **kw)  # type: ignore[arg-type]
-    bear = BearAnalysis(stance="bear", bear_case="down", what_would_change=["c2"], **kw)  # type: ignore[arg-type]
+    stock = StockbotAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="2025-06-30",
+        question="q",
+        answer="a",
+        base_case="b",
+        claims=[claim],
+        what_would_change=["c1"],
+    )
+    bull = BullAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="2025-06-30",
+        question="q",
+        stance="bull",
+        bull_case="up",
+        claims=[claim],
+        what_would_change=["c1"],
+    )
+    bear = BearAnalysis(
+        session_id="rs:t",
+        wave_id=1,
+        freeze_id="F1",
+        evidence_ids=["EV-1"],
+        as_of="2025-06-30",
+        question="q",
+        stance="bear",
+        bear_case="down",
+        claims=[claim],
+        what_would_change=["c2"],
+    )
     synth = synthesize_final(
         "q",
         session_id="rs:t",
@@ -5060,11 +5084,9 @@ def test_hf_synthesize_keeps_trio_what_would_change() -> None:
 
 def test_hf_normalize_coverage_keeps_submit_keys_verbatim() -> None:
     """Dossier submit keys survive normalize + lines under their own names (no aliasing)."""
-    from typing import cast
-
     from app.research.synthesis.final import _coverage_lines, _normalize_coverage
 
-    coverage = {
+    coverage: dict[str, object] = {
         "sec": {"docs": ["0000320193-25-000079"], "forms_examined": ["10-K"], "search_runs": ["s1"]},
         "finra": {
             "datasets_queried": ["short-interest"],
@@ -5073,12 +5095,16 @@ def test_hf_normalize_coverage_keeps_submit_keys_verbatim() -> None:
         },
         "web": {"queries_executed": ["NVDA news"], "results_inspected": ["https://example.com/a"]},
     }
-    norm = cast(dict[str, dict[str, list[str]]], _normalize_coverage(coverage))
-    assert norm["sec"]["docs"] == ["0000320193-25-000079"]
-    assert norm["finra"]["datasets_queried"] == ["short-interest"]
-    assert norm["finra"]["settlement_windows_covered"] == ["2025-06-15"]
-    assert norm["web"]["queries_executed"] == ["NVDA news"]
-    assert "source_domain" not in norm["finra"] and "useful_for_question" not in norm["finra"]
+    norm = _normalize_coverage(coverage)
+    sec = norm["sec"]
+    finra = norm["finra"]
+    web = norm["web"]
+    assert isinstance(sec, dict) and isinstance(finra, dict) and isinstance(web, dict)
+    assert sec["docs"] == ["0000320193-25-000079"]
+    assert finra["datasets_queried"] == ["short-interest"]
+    assert finra["settlement_windows_covered"] == ["2025-06-15"]
+    assert web["queries_executed"] == ["NVDA news"]
+    assert "source_domain" not in finra and "useful_for_question" not in finra
     assert any("datasets_queried: short-interest" in line for line in _coverage_lines(norm))
 
 
@@ -5337,7 +5363,7 @@ def test_hf_admission_rejects_fabricated_sec_handle(tmp_path: Path, monkeypatch:
     with pytest.raises(ValueError, match="ERR_RAW_SOURCE_REQUIRED"):
         _svc.record_evidence(sid, src, no_handle, repo=repo)
     with pytest.raises(ValueError, match="ERR_SEC_HANDLE_INVALID"):
-        _svc.record_evidence(sid, src, _svc_item(f"{sid}:ev:2", source_handle={"bogus": 1}), repo=repo)  # type: ignore[dict-item]
+        _svc.record_evidence(sid, src, _svc_item(f"{sid}:ev:2", source_handle={"bogus": 1}), repo=repo)
     with pytest.raises(ValueError, match="ERR_SEC_HANDLE_UNREADABLE"):
         _svc.record_evidence(
             sid,
