@@ -362,7 +362,13 @@ def _auto_registry() -> list[dict[str, Any]]:
     except Exception:
         pass
     from app.policy import Capability
+    from app.security.action_policy import TOOL_DOMAINS
     from app.tools import TOOL_DISCOVERY_REGISTRY, tools_for_capabilities
+
+    try:  # scheduler import failed above; reuse its blind list when available
+        from app.research.scheduler import _PIT_BLIND_TOOLS as _BLIND
+    except Exception:
+        _BLIND = frozenset()
 
     out: list[dict[str, Any]] = []
     for tool in tools_for_capabilities(frozenset({Capability.RESEARCH})):
@@ -372,15 +378,24 @@ def _auto_registry() -> list[dict[str, Any]]:
         name = fn.get("name")
         if not isinstance(name, str) or not name:
             continue
-        desc = fn.get("description")
+        params = fn.get("parameters")
+        params = dict(params) if isinstance(params, dict) else {}
+        required = params.get("required")
+        required = [str(k) for k in required if isinstance(k, str)] if isinstance(required, list) else []
         meta = TOOL_DISCOVERY_REGISTRY.get(name)
         out.append(
             {
                 "name": name,
-                "description": desc if isinstance(desc, str) else "",
+                "domain": TOOL_DOMAINS.get(name, "unknown"),
+                "description": fn.get("description") if isinstance(fn.get("description"), str) else "",
                 "purpose": meta.summary if meta is not None else "",
+                "keyInputs": f"req({', '.join(required)})" if required else "req()",
                 "outputKind": meta.output_kind if meta is not None else "",
                 "evidence": meta.output_kind if meta is not None else "",
+                "prerequisites": "",
+                # ponytail: degraded path (scheduler unimportable); blind list best-effort.
+                "pitSupport": "PIT-blind: current state only" if name in _BLIND else "PIT-scoped",
+                "parameters": params,
             }
         )
     return out
@@ -477,8 +492,8 @@ class JevClient:
                 assert proc.stdin is not None and proc.stdout is not None
                 proc.stdin.write(line)
                 proc.stdin.flush()
-                annia = proc.stdout.readline()
-            except BrokenPipeError, OSError:
+                raw_line = proc.stdout.readline()
+            except (BrokenPipeError, OSError):
                 _LIVE_PROCS.discard(proc)
                 try:
                     proc.kill()
@@ -489,8 +504,8 @@ class JevClient:
                 assert proc.stdin is not None and proc.stdout is not None
                 proc.stdin.write(line)
                 proc.stdin.flush()
-                annia = proc.stdout.readline()
-            if not annia:
+                raw_line = proc.stdout.readline()
+            if not raw_line:
                 _LIVE_PROCS.discard(proc)
                 try:
                     proc.kill()
@@ -499,7 +514,7 @@ class JevClient:
                 self._proc = None
                 raise _SidecarUnavailable("sidecar closed (EOF)")
             try:
-                response = json.loads(annia)
+                response = json.loads(raw_line)
             except ValueError as exc:
                 raise RuntimeError(f"decide: malformed sidecar response: {exc}") from exc
             if not isinstance(response, dict):
