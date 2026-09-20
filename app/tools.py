@@ -1632,7 +1632,7 @@ TOOLS: list[dict[str, object]] = [
                             },
                             "source_handle": {
                                 "type": "object",
-                                "description": "The source_handle get_sec_document returned for the window you read (accession_no, document_name, basis, offset, max_chars, text_hash). The kernel reloads it and materializes the passage itself.",
+                                "description": "The source_handle get_sec_document returned for the window you read (accession_no, document_name, basis, offset, max_chars, text_hash, content_hash, source_content_hash). The kernel reloads it and materializes the passage itself.",
                             },
                             "source_uri": {
                                 "type": "string",

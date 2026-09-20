@@ -660,6 +660,7 @@ class MaterializedEvidenceSource:
     source_bytes: bytes
     representation: str
     source_content_hash: str
+    source_url: str | None
     known_at: datetime | None
     filed_at: datetime | None
     retrieved_at: datetime | None
@@ -772,6 +773,8 @@ class _SecHandle:
     accession: str
     document: str | None
     text_hash: str
+    source_content_hash: str
+    content_hash: str
     offset: int
     max_chars: int | None
     section: str | None
@@ -800,6 +803,8 @@ def _handle_fields(handle: Mapping[str, object]) -> _SecHandle:
         accession=accession,
         document=document_raw.strip() if isinstance(document_raw, str) and document_raw.strip() else None,
         text_hash=_handle_str(handle, "text_hash", "ERR_SEC_HANDLE_INVALID"),
+        source_content_hash=_handle_hex64(handle, "source_content_hash"),
+        content_hash=_handle_hex64(handle, "content_hash"),
         offset=offset,
         max_chars=max_chars,
         section=_handle_opt_str(handle, "section", "ERR_SEC_HANDLE_INVALID"),
@@ -846,6 +851,32 @@ def _is_hex64(value: object) -> bool:
     )
 
 
+def _handle_hex64(handle: Mapping[str, object], key: str) -> str:
+    """Required 64-hex digest of one handle field; missing/malformed is ERR_SEC_HANDLE_INVALID."""
+    value = handle.get(key)
+    if not _is_hex64(value):
+        raise ValueError(
+            f"record_evidence: ERR_SEC_HANDLE_INVALID (source_handle[{key!r}] must be a sha256 hex digest)"
+        )
+    assert isinstance(value, str)
+    return value
+
+
+def _resolve_source_bytes(accession: str, document: str, reloaded: Mapping[str, object]) -> tuple[bytes, str]:
+    """Exact source bytes: the immutable archive wins when present, else a live re-resolve."""
+    raw_path = reloaded.get("raw_archive_path")
+    if isinstance(raw_path, (str, Path)):
+        try:
+            payload = Path(raw_path).read_bytes()
+        except OSError:
+            raise ValueError(
+                f"record_evidence: ERR_NO_SOURCE_BYTES (archived source bytes unreadable at {raw_path})"
+            ) from None
+        rep = reloaded.get("source_representation")
+        return payload, rep if isinstance(rep, str) and rep else "source_bytes"
+    return _exact_source_bytes(accession, document)
+
+
 def materialize_sec_passage(
     handle: Mapping[str, object], locator: object, *, as_of: datetime | str | None = None
 ) -> MaterializedEvidenceSource:
@@ -877,6 +908,12 @@ def materialize_sec_passage(
             "(the document window changed since the handle was issued; re-read the document "
             "with get_sec_document and cite the new handle)"
         )
+    claimed_content = reloaded.get("content_hash")
+    if _is_hex64(claimed_content) and claimed_content != fields.content_hash:
+        raise ValueError(
+            "record_evidence: ERR_SEC_HANDLE_STALE "
+            "(the document revision changed since the handle was issued; re-read the document)"
+        )
     start, end = _locate_passage(window, locator if isinstance(locator, str) else "")
     provenance = sec_source_ref(
         accession_no=fields.accession,
@@ -894,18 +931,18 @@ def materialize_sec_passage(
         text_hash=fields.text_hash,
     )
     document = fields.document or str(reloaded.get("document_name") or "")
-    source_bytes, byte_rep = _exact_source_bytes(fields.accession, document)
-    claimed = reloaded.get("source_content_hash")
-    if _is_hex64(claimed) and claimed != sha256(source_bytes).hexdigest():
+    source_bytes, byte_rep = _resolve_source_bytes(fields.accession, document, reloaded)
+    if sha256(source_bytes).hexdigest() != fields.source_content_hash:
         raise ValueError(
             "record_evidence: ERR_SEC_HANDLE_STALE "
-            "(exact source bytes no longer match the reloaded document; re-read the document)"
+            "(the document revision changed since the handle was issued; re-read the document)"
         )
     return MaterializedEvidenceSource(
         provenance=provenance,
         source_bytes=source_bytes,
         representation=byte_rep,
-        source_content_hash=str(claimed or sha256(source_bytes).hexdigest()),
+        source_content_hash=fields.source_content_hash,
+        source_url=reloaded.get("source_url") if isinstance(reloaded.get("source_url"), str) else None,
         known_at=_coerce_dt(reloaded.get("known_at")),
         filed_at=_coerce_dt(reloaded.get("filed_at")),
         retrieved_at=_coerce_dt(reloaded.get("retrieved_at")),
@@ -1106,7 +1143,7 @@ def _duplicate_response(store: ResearchRepository, session_id: str, record: Evid
 
 
 def _archive_materialized_source(
-    session_id: str, evidence_id: str, source_uri: str | None, retrieved_at: datetime, m: MaterializedEvidenceSource
+    session_id: str, evidence_id: str, retrieved_at: datetime, m: MaterializedEvidenceSource
 ) -> None:
     """Archive the full exact source bytes; raises on failure, never best-effort."""
     from app.sec.archive import archive_sec_document
@@ -1114,11 +1151,12 @@ def _archive_materialized_source(
     accession = m.provenance.get("accession_no")
     document = m.provenance.get("document_name")
     assert isinstance(accession, str) and accession
+    url = m.source_url or (m.provenance.get("source_uri") if isinstance(m.provenance.get("source_uri"), str) else "") or ""
     archive_sec_document(
         accession,
         document if isinstance(document, str) and document else "primary",
         m.source_bytes,
-        url=source_uri or "",
+        url=url,
         retrieved_at=retrieved_at.isoformat(),
         metadata={
             "evidence_id": evidence_id,
@@ -1152,7 +1190,7 @@ def _persist_evidence_record(
         except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
     ingest_evidence(ledger, record, as_of=found.as_of)
-    _archive_materialized_source(session_id, record.evidence_id, record.source_uri, record.retrieved_at, source)
+    _archive_materialized_source(session_id, record.evidence_id, record.retrieved_at, source)
     stored = evidence_to_dict(record)
     stored_meta = stored.get("metadata")
     stored["metadata"] = {**(stored_meta if isinstance(stored_meta, dict) else {}), "source_bytes": "archived"}
@@ -1311,6 +1349,9 @@ def record_evidence(
     data["known_at"] = materialized.known_at.isoformat() if materialized.known_at else None
     data["published_at"] = materialized.filed_at.isoformat() if materialized.filed_at else None
     data["retrieved_at"] = materialized.retrieved_at.isoformat() if materialized.retrieved_at else None
+    data["source_uri"] = materialized.source_url or (
+        materialized.provenance.get("source_uri") if isinstance(materialized.provenance.get("source_uri"), str) else None
+    )
     record = _build_evidence_record(
         data,
         session_id=session_id,

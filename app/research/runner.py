@@ -1090,7 +1090,7 @@ class _LiveRun:
             # slice the passage out of that. A result without a canonical handle, or
             # one the archive no longer reproduces, stays a navigation artifact.
             materialized, kind, is_evidence, passage = self._materialize_document_handle(
-                sid, eid, raw.get("source_handle"), passage, known_at, uri
+                sid, eid, raw.get("source_handle"), passage, known_at
             )
             provenance = dict(materialized.provenance) if materialized is not None else None
         content = _record_content(raw, passage, is_evidence)
@@ -1137,7 +1137,7 @@ class _LiveRun:
             content=content,
             content_hash=evidence_content_hash(content),
             retrieved_at=materialized.retrieved_at if materialized is not None and materialized.retrieved_at else utcnow(),
-            source_uri=uri,
+            source_uri=(materialized.source_url if materialized is not None else None) or uri,
             source_record_id=_record_ref(is_evidence, ref, search_id, accession),
             published_at=materialized.filed_at if materialized is not None else None,
             known_at=materialized.known_at if materialized is not None else known_at,
@@ -1172,7 +1172,6 @@ class _LiveRun:
         handle: object,
         locator: str,
         known_at: datetime | None,
-        uri: str | None = None,
     ) -> tuple[MaterializedEvidenceSource | None, str, bool, str]:
         """(materialized, record kind, is_evidence, passage) for one document result.
 
@@ -1181,7 +1180,7 @@ class _LiveRun:
         unreadable handle demotes the result to a navigation record (journaled),
         so a claim can never ground on text the archive does not reproduce.
         """
-        from app.research.service import _archive_materialized_source, materialize_sec_passage
+        from app.research.service import materialize_sec_passage
 
         if not isinstance(handle, Mapping):
             self._emit(
@@ -1198,22 +1197,6 @@ class _LiveRun:
         try:
             materialized = materialize_sec_passage(handle, locator, as_of=self.as_of)
         except ValueError as exc:
-            self._emit(
-                sid,
-                "evidence.rejected",
-                rejection_payload(
-                    eid,
-                    str(exc)[:300],
-                    known_at.isoformat() if known_at is not None else None,
-                    self.as_of,
-                ),
-            )
-            return None, "discovery", False, locator
-        try:
-            _archive_materialized_source(
-                sid, eid, uri, materialized.retrieved_at or utcnow(), materialized
-            )
-        except Exception as exc:
             self._emit(
                 sid,
                 "evidence.rejected",

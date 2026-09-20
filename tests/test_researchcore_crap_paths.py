@@ -800,12 +800,18 @@ def test_materialize_sec_passage_fails_closed_per_handle_defect() -> None:
     # Malformed locators are deliberately outside the handle type; getattr keeps the
     # checker green without an escape hatch (those are forbidden in this tree).
     call_untyped = getattr(svc, "materialize_sec_passage")  # noqa: B009 - malformed-input contract; getattr keeps checker green
+    tampered_source = {**handle, "source_content_hash": "f" * 64}
+    tampered_content = {**handle, "content_hash": "f" * 64}
+    missing_source = {k: v for k, v in handle.items() if k != "source_content_hash"}
     for defect, code in (
         (None, "ERR_SEC_HANDLE_INVALID"),
         ({**handle, "basis": "guessed"}, "ERR_SEC_HANDLE_INVALID"),
         ({**handle, "accession_no": "not-an-accession"}, "ERR_SEC_HANDLE_INVALID"),
         ({**handle, "offset": -1}, "ERR_SEC_HANDLE_INVALID"),
+        (missing_source, "ERR_SEC_HANDLE_INVALID"),
         ({**handle, "text_hash": "0" * 64}, "ERR_SEC_HANDLE_STALE"),
+        (tampered_source, "ERR_SEC_HANDLE_STALE"),
+        (tampered_content, "ERR_SEC_HANDLE_STALE"),
         ({**handle, "document_name": "never-stored.htm"}, "ERR_SEC_HANDLE_UNREADABLE"),
     ):
         with pytest.raises(ValueError, match=code):
@@ -896,16 +902,17 @@ def test_acceptance_archives_verified_window_bytes_not_rendered_text(
     acc, doc = "0000320193-25-000079", "two-windows-000079.htm"
     first = "first cited sentence"
     second = "second cited sentence"
-    h1 = seam.handle_for(first, accession=acc, document=doc)
-    h2 = seam.handle_for(second, accession=acc, document=doc)
     full = f"{first}\n{second}"
+    seam.register_document(acc, doc, full)
+    h1 = seam.handle_for_registered(first, accession=acc, document=doc)
+    h2 = seam.handle_for_registered(second, accession=acc, document=doc)
     out1 = svc.record_evidence(
-        sid, src, {**_item(f"{sid}:ev:1"), "matching_passage": first, "source_handle": h1,
-                   "source_record_id": acc, "document_name": doc}, repo=repo
+        sid, src, _item(f"{sid}:ev:1", matching_passage=first, source_handle=h1,
+                        source_record_id=acc, document_name=doc), repo=repo
     )
     out2 = svc.record_evidence(
-        sid, src, {**_item(f"{sid}:ev:2"), "matching_passage": second, "source_handle": h2,
-                   "source_record_id": acc, "document_name": doc}, repo=repo
+        sid, src, _item(f"{sid}:ev:2", matching_passage=second, source_handle=h2,
+                        source_record_id=acc, document_name=doc), repo=repo
     )
     for out in (out1, out2):
         stored = repo.get_evidence(str(out["evidence_id"]))
@@ -959,6 +966,118 @@ def test_source_bytes_unavailable_emits_no_source_artifact(
     assert repo.list_evidence_ids(sid) == []
     assert [e for e in repo.list_events(sid) if e.event_type == "evidence.accepted"] == []
 
+
+
+def test_revision_switch_rejects_stale_handle_without_row_event_link_or_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A handle pinned to rev-A stays stale after the source moves to rev-B: no row, event, link, or archive."""
+    from app.sec.archive import iter_archived_documents
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    acc, doc = "0000320193-25-000079", "rev-switch-000079.htm"
+    window = "cited window stays identical"
+    rev_a = f"header-A\n{window}\ntrailer-A"
+    rev_b = f"header-B-CHANGED\n{window}\ntrailer-B-CHANGED"
+    seam.register_document(acc, doc, rev_a)
+    stale = seam.handle_for_registered(window, accession=acc, document=doc)
+    seam.register_document(acc, doc, rev_b)  # same cited span, changed bytes elsewhere
+    with pytest.raises(ValueError, match="ERR_SEC_HANDLE_STALE"):
+        svc.record_evidence(
+            sid, src, _item(f"{sid}:ev:1", matching_passage=window, source_handle=stale,
+                            source_record_id=acc, document_name=doc), repo=repo
+        )
+    assert repo.list_evidence(sid) == []
+    assert repo.list_evidence_ids(sid) == []
+    assert repo.get_session(sid).evidence_ids == []
+    assert [e for e in repo.list_events(sid) if e.event_type == "evidence.accepted"] == []
+    revisions = list(iter_archived_documents(acc, doc, root=tmp_path / "raw"))
+    assert revisions == []  # the stale attempt archived nothing
+
+
+def test_offline_archive_serves_acceptance_when_live_filing_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The immutable archive wins: acceptance reads real archived bytes even with live filing down."""
+    # The module autouse fixture routes get_sec_document to the seam fake; this
+    # test needs the production archive read-back instead, so undo the seam for
+    # app.sec.documents only (the kernel imports get_sec_document lazily from
+    # there) and kill just the live-filing path. _exact_source_bytes stays
+    # seam-patched but is unreachable: the archived row carries raw_archive_path.
+    import importlib as _importlib
+    import inspect as _inspect
+
+    import app.sec.archive as _archive
+    import app.sec.documents as _documents
+    from app.sec.archive import find_archived_document
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    # The autouse fixture patched the module object in place; reload the file to
+    # restore production get_sec_document, then kill just the live-filing path.
+    # _exact_source_bytes stays seam-patched but is unreachable: the archived row
+    # carries raw_archive_path, so the kernel reads real archived bytes.
+    real_mod = _importlib.reload(_documents)
+    monkeypatch.setattr(_documents, "get_sec_document", real_mod.get_sec_document)
+    assert "Archive-first" in _inspect.getsource(_documents.get_sec_document)
+    real_get_sec_document = _documents.get_sec_document
+
+    def _no_live(accession_no: str) -> object:
+        del accession_no
+        raise ValueError("edgar offline")
+
+    monkeypatch.setattr(_documents, "_filing", _no_live)
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    acc, doc = "0000320193-25-000079", "offline-archived-000079.htm"
+    passage = "offline archived passage"
+    full = f"offline header\n{passage}\noffline trailer"
+    canonical_url = f"https://www.sec.gov/Archives/edgar/data/{acc.replace('-', '')}/{doc}"
+    _archive.archive_sec_document(acc, doc, full.encode("utf-8"), url=canonical_url,
+                                  retrieved_at="2025-05-01T00:00:00Z",
+                                  metadata={"known_at": "2025-05-01T00:00:00Z",
+                                            "filed_at": "2025-04-30",
+                                            "representation": "source_bytes"},
+                                  root=tmp_path / "raw")
+    live = real_get_sec_document(acc, doc, as_of="2025-06-30", data_root=tmp_path)
+    assert isinstance(live["text"], str) and passage in str(live["text"])
+    handle = live["source_handle"]
+    assert isinstance(handle, dict)
+    out = svc.record_evidence(
+        sid, src, _item(f"{sid}:ev:1", matching_passage=passage, source_handle=handle,
+                        source_record_id=acc, document_name=doc), repo=repo
+    )
+    stored = repo.get_evidence(str(out["evidence_id"]))
+    provenance = stored["provenance"]
+    assert isinstance(provenance, dict) and provenance["passage"] == passage
+    found = find_archived_document(acc, doc, root=tmp_path / "raw")
+    assert found is not None and found.payload_path.read_bytes() == full.encode("utf-8")
+
+
+def test_canonical_url_wins_over_item_source_uri(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored source_uri and archive URL are the kernel's canonical URL, never the model string."""
+    from app.sec.archive import find_archived_document
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    acc, doc = "0000320193-25-000079", "canonical-url-000079.htm"
+    passage = "canonical url passage"
+    seam.register_document(acc, doc, f"header\n{passage}\ntrailer")
+    handle = seam.handle_for_registered(passage, accession=acc, document=doc)
+    canonical = f"https://www.sec.gov/Archives/edgar/data/{acc.replace('-', '')}/{doc}"
+    out = svc.record_evidence(
+        sid, src, _item(f"{sid}:ev:1", matching_passage=passage, source_handle=handle,
+                        source_record_id=acc, document_name=doc,
+                        source_uri="https://evil.example/x"), repo=repo
+    )
+    stored = repo.get_evidence(str(out["evidence_id"]))
+    assert stored["source_uri"] == canonical
+    found = find_archived_document(acc, doc, root=tmp_path / "raw")
+    assert found is not None and found.url == canonical
 
 def test_evidence_no_per_job_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
