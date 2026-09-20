@@ -3,12 +3,13 @@
   "private": true,
   "scripts": {
     "setup": "python3.14 -m venv venv && venv/bin/pip install --upgrade pip && venv/bin/pip install -r requirements.txt",
-    "test": "venv/bin/pytest && bun test tests/pi_extension.test.ts && (cd needle-harness && bun test)",
+    "test": "venv/bin/pytest && bun run test:ts && (cd needle-harness && bun test)",
+    "test:ts": "bun test tests/pi_extension.test.ts decision/",
     "typecheck": "venv/bin/pyrefly check",
     "typecheck-ts": "tsc --noEmit -p tsconfig.json && (cd needle-harness && bun run typecheck)",
     "test-collect": "venv/bin/pytest --collect-only -q",
     "coverage:py": "venv/bin/coverage run -m pytest; venv/bin/coverage lcov -o coverage-python.lcov",
-    "coverage:ts": "bun test tests/pi_extension.test.ts --coverage --coverage-reporter=lcov --coverage-dir=coverage-ts",
+    "coverage:ts": "bun test tests/pi_extension.test.ts decision/ --coverage --coverage-reporter=lcov --coverage-dir=coverage-ts",
     "coverage:rs": "[ -f Cargo.toml ] || exit 0; cargo llvm-cov --lcov --output-path coverage-rust.lcov",
     "coverage": "bun run coverage:py && bun run coverage:ts && bun run coverage:rs",
     "crap": "poly-crap --coverage coverage-python.lcov --coverage coverage-ts/lcov.info $([ -f coverage-rust.lcov ] && echo \"--coverage coverage-rust.lcov\")",
@@ -52,7 +53,8 @@
   },
   "dependencies": {
     "@oh-my-pi/pi-coding-agent": "18.2.3",
-    "@oh-my-pi/pi-tui": "18.2.3"
+    "@oh-my-pi/pi-tui": "18.2.3",
+    "@typesafe-ai/sdk": "^0.6.0"
   },
   "devDependencies": {
     "@stryker-mutator/core": "^10.0.0",
