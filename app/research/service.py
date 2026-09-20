@@ -1329,6 +1329,11 @@ def _svc_opt_float(data: Mapping[str, object], key: str) -> float | None:
 
 def _provenance_uri(provenance: Mapping[str, object], data: Mapping[str, object]) -> str | None:
     """Ingest source_ref: the kernel-materialized URI (SEC archive URL, FINRA source, web URL)."""
+    if str(provenance.get("kind") or "") == "sec_source":
+        # record_evidence replaced the model string with the kernel canonical URL.
+        candidate = _svc_opt_str(data, "source_uri")
+        if candidate:
+            return candidate
     for key in ("source_uri", "url"):
         value = provenance.get(key)
         if isinstance(value, str) and value.strip():
