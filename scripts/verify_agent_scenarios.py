@@ -4,8 +4,10 @@
 Usage:
     python scripts/verify_agent_scenarios.py [--scenario NAME] [--model LABEL]
         [--provider LABEL] [--model-timeout SECONDS] [--prompt-version VER]
-        [--fixtures-dir DIR] [--json]
+        [--fixtures-dir DIR] [--json] [--jev on|off]
     python scripts/verify_agent_scenarios.py --list
+    python scripts/verify_agent_scenarios.py --jev-compare --scenario NAME
+        [--provider LABEL] [--model LABEL] [--model-timeout SECONDS] [--prompt-version VER]
 
 Each scenario invokes the configured run_live/Pi path, captures the resulting
 ResearchSession and trace, extracts observable outcomes, and runs deterministic
@@ -22,6 +24,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sqlite3
 import subprocess
 import sys
 import tempfile
@@ -135,6 +138,15 @@ def resolve_model_timeout(timeout_arg: str | None, env: object = None) -> int:
 
 def _resolve_model_timeout(args: argparse.Namespace) -> int:
     return resolve_model_timeout(args.model_timeout, os.environ)
+
+
+def _resolve_jev(args: argparse.Namespace, env: object = None) -> bool:
+    """JEV on/off: explicit --jev flag, then STOCKBOT_JEV_OFF inverse, else ON."""
+    lookup: object = os.environ if env is None else env
+    raw = _clean(getattr(args, "jev", None))
+    if raw:
+        return raw != "off"
+    return _clean(_lookup_env_value(lookup, "STOCKBOT_JEV_OFF")) != "1"
 
 
 def _check_pi_ready(provider: str, model: str, timeout_s: int) -> None:
@@ -634,7 +646,7 @@ def _invoke_live(kwargs: _LiveKwargs) -> tuple[dict[str, object] | None, float, 
     return out, (time.monotonic() - t0) * 1000.0, 0
 
 
-def _omp_env(provider: str, model: str, timeout_s: int) -> dict[str, str]:
+def _omp_env(provider: str, model: str, timeout_s: int, jev_on: bool = True) -> dict[str, str]:
     """Model selectors for the OMP child env; empty means OMP CLI default."""
     env: dict[str, str] = {}
     if provider.strip():
@@ -642,17 +654,26 @@ def _omp_env(provider: str, model: str, timeout_s: int) -> dict[str, str]:
     if model.strip():
         env["STOCKBOT_MODEL"] = model.strip()
     env["STOCKBOT_MODEL_TIMEOUT"] = str(timeout_s)
+    if not jev_on:
+        env["STOCKBOT_JEV_OFF"] = "1"
     return env
 
 
-def _run_omp_research(scenario: Scenario, provider: str, model: str, timeout_s: int, tmp: str) -> str:
+def _run_omp_research(
+    scenario: Scenario, provider: str, model: str, timeout_s: int, tmp: str, jev_on: bool = True
+) -> str:
     """Launch production OMP Stockbot on one scenario; return the run id for state reads."""
     from app.thesis.omp_runner import _await_omp, _prepare_launch, _spawn_omp, _verdict
 
     run_id = f"eval-{scenario.name}"
     data_root = str(Path(tmp) / "data")
-    old_model = {k: os.environ.get(k) for k in ("STOCKBOT_PROVIDER", "STOCKBOT_MODEL", "STOCKBOT_MODEL_TIMEOUT")}
-    os.environ.update(_omp_env(provider, model, timeout_s))
+    old_model = {
+        k: os.environ.get(k)
+        for k in ("STOCKBOT_PROVIDER", "STOCKBOT_MODEL", "STOCKBOT_MODEL_TIMEOUT", "STOCKBOT_JEV_OFF")
+    }
+    os.environ.update(_omp_env(provider, model, timeout_s, jev_on))
+    if jev_on:
+        os.environ.pop("STOCKBOT_JEV_OFF", None)
     try:
         launch = _prepare_launch(scenario.question, data_root, scenario.as_of, run_id)
         proc = _spawn_omp(launch, scenario.name)
@@ -680,34 +701,52 @@ def _read_omp_session_id(run_id: str, tmp: str) -> str:
     return sid if isinstance(sid, str) else ""
 
 
-def _run_omp_scenario(scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int) -> EvalInput:
-    """Production-path live eval: OMP + extension + Director + task subagents + kernel."""
+def _run_omp_scenario_in_tmp(
+    scenario: Scenario,
+    provider: str,
+    model: str,
+    prompt_version: str,
+    timeout_s: int,
+    tmp: str,
+    jev_on: bool = True,
+) -> tuple[EvalInput, str]:
+    """One OMP eval inside a caller-owned tmp dir; returns (EvalInput, run id)."""
     _ = prompt_version  # stamp recorded in the run summary only
     t0 = time.monotonic()
-    with tempfile.TemporaryDirectory(prefix="agent-scenario-") as tmp:
-        old = setup_env(tmp)
+    old = setup_env(tmp)
+    try:
         try:
-            try:
-                run_id = _run_omp_research(scenario, provider, model, timeout_s, tmp)
-            except Exception as exc:  # noqa: BLE001 - the verdict reports the crash, never hides it
-                print(f"CRASH {type(exc).__name__}: {exc}", file=sys.stderr)
-                return _crash_eval_input(scenario, (time.monotonic() - t0) * 1000.0)
-            out: dict[str, object] = {
-                "session_id": _read_omp_session_id(run_id, tmp),
-                "evidence_ids": [],
-            }
-            wall_ms = (time.monotonic() - t0) * 1000.0
-            if not out["session_id"]:
-                return _crash_eval_input(scenario, wall_ms)
-            # OMP research has no static tool-call cap: 0 = unlimited, judged on real limits only.
-            return evaluate_and_record(scenario, out, wall_ms, 0)
-        finally:
-            restore_env(old)
+            run_id = _run_omp_research(scenario, provider, model, timeout_s, tmp, jev_on)
+        except Exception as exc:  # noqa: BLE001 - the verdict reports the crash, never hides it
+            print(f"CRASH {type(exc).__name__}: {exc}", file=sys.stderr)
+            return _crash_eval_input(scenario, (time.monotonic() - t0) * 1000.0), ""
+        out: dict[str, object] = {
+            "session_id": _read_omp_session_id(run_id, tmp),
+            "evidence_ids": [],
+        }
+        wall_ms = (time.monotonic() - t0) * 1000.0
+        if not out["session_id"]:
+            return _crash_eval_input(scenario, wall_ms), run_id
+        # OMP research has no static tool-call cap: 0 = unlimited, judged on real limits only.
+        return evaluate_and_record(scenario, out, wall_ms, 0), run_id
+    finally:
+        restore_env(old)
 
 
-def _run_live_scenario(scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int) -> EvalInput:
+def _run_omp_scenario(
+    scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int, jev_on: bool = True
+) -> EvalInput:
+    """Production-path live eval: OMP + extension + Director + task subagents + kernel."""
+    with tempfile.TemporaryDirectory(prefix="agent-scenario-") as tmp:
+        result, _ = _run_omp_scenario_in_tmp(scenario, provider, model, prompt_version, timeout_s, tmp, jev_on)
+        return result
+
+
+def _run_live_scenario(
+    scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int, jev_on: bool = True
+) -> EvalInput:
     """Live eval entrypoint: production OMP path only (run_live retired, see runner.py)."""
-    return _run_omp_scenario(scenario, provider, model, prompt_version, timeout_s)
+    return _run_omp_scenario(scenario, provider, model, prompt_version, timeout_s, jev_on)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -734,6 +773,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument("--prompt-version", default="v1", help="prompt version stamp (default v1)")
     parser.add_argument(
         "--fixtures-dir", default=None, help="accepted for compat; live runs do not use static fixtures"
+    )
+    parser.add_argument(
+        "--jev",
+        choices=("on", "off"),
+        default=None,
+        help="JEV TypeSafe judge for live runs (or STOCKBOT_JEV_OFF=1 for off; default on)",
+    )
+    parser.add_argument(
+        "--jev-compare",
+        action="store_true",
+        help="run one --scenario twice, JEV on then off, and print the outcome delta",
     )
     parser.add_argument("--json", action="store_true", help="print machine-readable summary")
     return parser.parse_args(argv)
@@ -768,9 +818,15 @@ def _find_unknown(names: list[str], by_name: dict[str, Scenario]) -> list[str]:
 
 
 def _eval_one_scenario(
-    name: str, by_name: dict[str, Scenario], provider: str, model: str, prompt_version: str, timeout_s: int
+    name: str,
+    by_name: dict[str, Scenario],
+    provider: str,
+    model: str,
+    prompt_version: str,
+    timeout_s: int,
+    jev_on: bool = True,
 ) -> ScenarioResult:
-    return evaluate(_run_live_scenario(by_name[name], provider, model, prompt_version, timeout_s))
+    return evaluate(_run_live_scenario(by_name[name], provider, model, prompt_version, timeout_s, jev_on))
 
 
 def _run_all_scenarios(
@@ -780,8 +836,9 @@ def _run_all_scenarios(
     model: str,
     prompt_version: str,
     timeout_s: int,
+    jev_on: bool = True,
 ) -> list[ScenarioResult]:
-    return [_eval_one_scenario(name, by_name, provider, model, prompt_version, timeout_s) for name in names]
+    return [_eval_one_scenario(name, by_name, provider, model, prompt_version, timeout_s, jev_on) for name in names]
 
 
 def _failed_results(results: list[ScenarioResult]) -> list[ScenarioResult]:
@@ -859,6 +916,80 @@ def _cli_prereqs(
     return provider, model, timeout_s, names, by_name
 
 
+def _jev_proof_counts(tmp: str, run_id: str) -> tuple[int, int]:
+    """(jev_tool_calls, audits) persisted for one arm's run; (0, 0) when the DB is absent."""
+    db = Path(tmp) / "data" / "runs.sqlite"
+    if not run_id or not db.is_file():
+        return (0, 0)
+    try:
+        conn = sqlite3.connect(str(db))
+        try:
+            jev = conn.execute(
+                "SELECT COUNT(*) FROM agent_events WHERE run_id = ?"
+                " AND event_type IN ('tool_completed', 'tool_failed')"
+                " AND (tool_name LIKE 'research_judge_%' OR tool_name LIKE 'research_review_%')",
+                (run_id,),
+            ).fetchone()
+            audits = conn.execute(
+                "SELECT COUNT(*) FROM agent_events WHERE run_id = ? AND metadata LIKE '%typesafe_audit%'",
+                (run_id,),
+            ).fetchone()
+        finally:
+            conn.close()
+    except sqlite3.Error:
+        return (0, 0)
+    if not jev or not audits:
+        return (0, 0)
+    return (int(jev[0]), int(audits[0]))
+
+
+def _print_jev_arm(arm: str, result: ScenarioResult) -> None:
+    if result.passed:
+        print(f"{arm} PASS {result.scenario_name}")
+    else:
+        print(f"{arm} FAIL {result.scenario_name}: {', '.join(result.violations)}")
+    metrics = result.metrics
+    print(
+        f"{arm} tool_call_count={metrics.tool_call_count} evidence_count={metrics.evidence_count}"
+        f" wall_clock_ms={metrics.wall_clock_ms:.1f} completeness={metrics.completeness}"
+    )
+
+
+def _run_jev_compare(args: argparse.Namespace) -> int:
+    """Paired live eval: same scenario twice, JEV on then off, printing the outcome delta."""
+    if not getattr(args, "scenario", None):
+        print("error: --jev-compare requires exactly one --scenario <name>", file=sys.stderr)
+        return 2
+    prereqs = _cli_prereqs(args)
+    if isinstance(prereqs, int):
+        return prereqs
+    provider, model, timeout_s, _, by_name = prereqs
+    scenario = by_name[args.scenario]
+    on_tmp = tempfile.TemporaryDirectory(prefix="agent-scenario-jev-on-")
+    off_tmp = tempfile.TemporaryDirectory(prefix="agent-scenario-jev-off-")
+    try:
+        on_in, on_run_id = _run_omp_scenario_in_tmp(
+            scenario, provider, model, args.prompt_version, timeout_s, on_tmp.name, True
+        )
+        on_result = evaluate(on_in)
+        off_in, off_run_id = _run_omp_scenario_in_tmp(
+            scenario, provider, model, args.prompt_version, timeout_s, off_tmp.name, False
+        )
+        off_result = evaluate(off_in)
+        on_tools, on_audits = _jev_proof_counts(on_tmp.name, on_run_id)
+        off_tools, off_audits = _jev_proof_counts(off_tmp.name, off_run_id)
+    finally:
+        on_tmp.cleanup()
+        off_tmp.cleanup()
+    print(f"JEV compare {scenario.name} (live via Pi {_model_label(provider, model)})")
+    _print_jev_arm("ON", on_result)
+    _print_jev_arm("OFF", off_result)
+    print(f"audits_on={on_audits} audits_off={off_audits} jev_tool_calls_on={on_tools} jev_tool_calls_off={off_tools}")
+    if off_tools or off_audits or not on_audits:
+        return 1
+    return 0
+
+
 def _report_cli_run(
     args: argparse.Namespace, provider: str, model: str, results: list[ScenarioResult], summary: dict[str, object]
 ) -> int:
@@ -872,11 +1003,13 @@ def _report_cli_run(
 def _run_cli(args: argparse.Namespace) -> int:
     if args.list:
         return _list_scenarios()
+    if getattr(args, "jev_compare", False):
+        return _run_jev_compare(args)
     prereqs = _cli_prereqs(args)
     if isinstance(prereqs, int):
         return prereqs
     provider, model, timeout_s, names, by_name = prereqs
-    results = _run_all_scenarios(names, by_name, provider, model, args.prompt_version, timeout_s)
+    results = _run_all_scenarios(names, by_name, provider, model, args.prompt_version, timeout_s, _resolve_jev(args))
     summary = _build_summary(provider, model, args.prompt_version, results)
     return _report_cli_run(args, provider, model, results, summary)
 

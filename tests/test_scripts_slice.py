@@ -4171,7 +4171,7 @@ def test_run_live_scenario_passes_the_timeout_knob(monkeypatch: pytest.MonkeyPat
     """The resolved per-call budget reaches the OMP research spawn."""
     seen: list[tuple[object, ...]] = []
 
-    def _capture(scenario: object, provider: object, model: object, timeout: object, tmp: object) -> str:
+    def _capture(scenario: object, provider: object, model: object, timeout: object, tmp: object, jev_on: object = True) -> str:
         seen.append((provider, model, timeout))
         return "run:t1"
 

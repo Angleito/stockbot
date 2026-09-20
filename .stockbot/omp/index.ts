@@ -10,7 +10,7 @@ import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { once } from "node:events";
 import { readFileSync, writeFileSync } from "node:fs";
 import type { ExtensionAPI, ExtensionContext, Theme, ToolDefinition } from "@oh-my-pi/pi-coding-agent";
-import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, peekHasPriorWave, peekLatestFreeze, peekTaskFingerprint, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setResearchBridge, startResearch } from "./lib/research-director.ts";
+import { type Advance, advanceOnAgentEnd, blockReasonForRun, clearResearchRun, peekHasPriorWave, peekLatestFreeze, peekTaskFingerprint, planTaskCall, recordTaskResult, researchContextForRun, resumeResearch, setJevOff, setResearchBridge, startResearch } from "./lib/research-director.ts";
 import { TASK_SUBAGENT_LIFECYCLE_CHANNEL, type SubagentLifecyclePayload } from "@oh-my-pi/pi-coding-agent/task";
 import { registerYoutubeAnalytics } from "./lib/youtube-analytics.ts";
 import { Text, type AutocompleteProvider } from "@oh-my-pi/pi-tui";
@@ -666,16 +666,18 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   });
  }
  // Native TypeSafe judge/review tools: in-process via the TS SDK, never via
- // the bridge or Python. Registered unconditionally: semantic judgments never
- // depend on Python either way. Committee agents never receive them (see
- // agents/*.md).
+ // the bridge or Python. Skipped when STOCKBOT_JEV_OFF=1 (JEV off: the model
+ // decides sufficiency with no judge tools or authorizations). Committee
+ // agents never receive them (see agents/*.md).
+ const jevOff = (process.env.STOCKBOT_JEV_OFF ?? "").trim() === "1";
+ setJevOff(jevOff);
  {
   const toolDeps = { getRunId: () => runId };
-  registerResearchJudgeTools(pi, toolDeps);
-  registerOutputReviewTools(pi, { getRunId: () => runId });
+  if (!jevOff) registerResearchJudgeTools(pi, toolDeps);
+  if (!jevOff) registerOutputReviewTools(pi, { getRunId: () => runId });
  }
  const NATIVE_TOOLS: Record<string, true> = {};
- for (const name of [...JUDGE_TOOL_NAMES, ...REVIEW_TOOL_NAMES]) NATIVE_TOOLS[name] = true;
+ for (const name of jevOff ? [] : [...JUDGE_TOOL_NAMES, ...REVIEW_TOOL_NAMES]) NATIVE_TOOLS[name] = true;
 
  // --- thesis workflow (raw text, never YAML-parsed in TS) ---
  const WORKFLOW_PATH = `${ROOT}/.stockbot/omp/thesis-workflow.yaml`;
@@ -788,7 +790,9 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
       return { block: true, reason };
      }
     }
-    if (wantsSource && await peekHasPriorWave(runId, dataRoots.get(runId), asOfs.get(runId))) {
+    // JEV-off: the peek still runs for prompt context (inspect warms lastSeen)
+    // but the reservation block below is skipped, so repeat rounds never block.
+    if (wantsSource && (await peekHasPriorWave(runId, dataRoots.get(runId), asOfs.get(runId))) && !jevOff) {
      const secItems = taskItems.filter((item) => item && typeof item === "object" && (item as Json).agent === "sec-agent");
      for (const item of secItems) {
       const cand = (item as Json).candidate;
@@ -819,7 +823,12 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
      }
     }
     let launchExpected: { sessionId: string; freezeId: string; dossierId: string; coverageHash: string } | null = null;
-    if (wantsCommittee) {
+    // JEV-off: peek still runs for prompt context but never blocks; the
+    // launch reservation below is skipped so the exact trio never needs auth.
+    if (jevOff && wantsCommittee) {
+     try { await peekLatestFreeze(runId, dataRoots.get(runId), asOfs.get(runId)); } catch { /* context only, never blocks */ }
+    }
+    if (!jevOff && wantsCommittee) {
      const reason = "Committee launch needs a TypeSafe coverage COMPLETE for this freeze; call research_judge_coverage with the session and freeze first.";
      const peek = await peekLatestFreeze(runId, dataRoots.get(runId), asOfs.get(runId));
      if (!peek) {
@@ -931,6 +940,15 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
      const finFreeze = freezes[freezes.length - 1] ?? "";
      if (!finFreeze) {
       allowed = false;
+     } else if (jevOff) {
+      // JEV-off: no role/committee/final authorizations; the model's own
+      // synthesis finalizes on a non-empty answer plus an existing freeze.
+      if (finAnswer.length === 0) {
+       allowed = false;
+      } else {
+       finHash = hashAction({ answer: finAnswer, sessionId: finSession, freezeId: finFreeze });
+       allowed = true;
+      }
      } else {
       const trio = await loadCommitteeState(finSession, finFreeze, { dataRoot: dataRoots.get(runId), asOf: asOfs.get(runId) });
       const expected = {
@@ -948,16 +966,18 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
     allowed = false;
    }
    if (!allowed) {
-    const reason = rolesAccepted
-     ? "Finalization needs a TypeSafe committee PASS plus a final-gate PASS on this exact answer; call research_review_committee then research_review_final with the same freeze and answer first."
-     : "Finalization needs TypeSafe ACCEPT on all three role outputs plus committee and final-gate PASS; call research_review_role_output per role, then research_review_committee, then research_review_final with the same freeze and answer.";
+    const reason = jevOff
+     ? "Finalization needs a non-empty answer string for a session with an existing evidence freeze."
+     : rolesAccepted
+      ? "Finalization needs a TypeSafe committee PASS plus a final-gate PASS on this exact answer; call research_review_committee then research_review_final with the same freeze and answer first."
+      : "Finalization needs TypeSafe ACCEPT on all three role outputs plus committee and final-gate PASS; call research_review_role_output per role, then research_review_committee, then research_review_final with the same freeze and answer.";
     emit({ event: "security_block", tool: finInner, reason });
     blocks++;
     return { block: true, reason };
    }
    // Durable gate audit: answer hash rides a routing sqlite row (never prose).
    try {
-    emit({ event: "routing_continuation", reason: "typesafe_finalize_allowed", answer_hash: finHash });
+    emit({ event: "routing_continuation", reason: jevOff ? "jev_off_finalize_allowed" : "typesafe_finalize_allowed", answer_hash: finHash });
    } catch {
     // logging never breaks research
    }
@@ -1292,6 +1312,7 @@ export default async function stockbotExtension(pi: ExtensionAPI, spawnBridge?: 
   if (envAsOf) asOfs.set(runId, envAsOf);
   runQuestions.set(runId, baseQuestion(pendingQuestion));
   void emit({ event: "agent_start", question: pendingQuestion });
+  if (jevOff) void emit({ event: "routing_continuation", reason: "jev_off" });
   pendingQuestion = "";
  });
  pi.on("tool_execution_start", (event) => {

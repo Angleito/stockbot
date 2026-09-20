@@ -26,6 +26,12 @@ export function setResearchBridge(fn: BridgeCall): void {
 export function getResearchBridge(): BridgeCall {
  return bridge;
 }
+// JEV-off bypass: STOCKBOT_JEV_OFF=1 threads here once per OMP process start
+// via setJevOff. Default false keeps every prompt byte-identical to ON.
+let jevOff = false;
+export function setJevOff(v: boolean): void {
+ jevOff = v;
+}
 
 export type Advance = { done: false; prompt: string } | { done: true; answer: string } | null;
 type Stage = "SOURCE_RESEARCH" | "COMMITTEE" | "GATE" | "FINAL";
@@ -506,6 +512,7 @@ async function freezeWave(sessionId: string, wave: number, dataRoot?: string, as
 // the exact-trio task batch (planTaskCall + index gate) is the single creation
 // point after a launch approval is consumed. No jobs are created here.
 function coveragePrompt(sessionId: string, freezeId: string, allowedIds: string, note = ""): string {
+ if (jevOff) return `${note}JEV review is off for this run: you decide sufficiency, no judge calls, no authorizations. Evidence frozen for research session ${sessionId} (freeze ${freezeId}). Reload the freeze with research_read, then dispatch the committee directly as one task batch with exactly one stockbot, one bullbot, and one bearbot task if the evidence suffices, or dispatch another sec-agent round on your own judgment of the remaining gaps. Finalize on your own synthesis once the committee is complete. Allowed evidence ids are: ${allowedIds}.`;
  return `${note}Evidence frozen for research session ${sessionId} (freeze ${freezeId}). Reload the freeze with research_read, then call research_judge_coverage with research_session_id and freeze_id. If COMPLETE, dispatch the committee as one task batch with exactly one stockbot, one bullbot, and one bearbot task. If INCOMPLETE, call research_judge_continuation or research_judge_candidate with gap_id typesafe:coverage:${freezeId}:<VNN>; only a TypeSafe candidate authorization permits another sec-agent round. Allowed evidence ids are: ${allowedIds}.`;
 }
 async function promptTrio(sessionId: string, wave: number, dataRoot?: string, asOf?: string, note = ""): Promise<Advance> {
@@ -621,8 +628,14 @@ export async function advanceOnAgentEnd(runId: string, answer = "", dataRoot?: s
  // Otherwise finalize here; only a TypeSafe continue/candidate auth (consumed
  // by the task gate) may open another round — never an automatic decide call.
  const trioIds = trioJobIdsForFreeze(session, d.trio.fid);
+ if (jevOff && d.gateStopped) {
+  return { done: false, prompt: `${finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), `Wave gate stopped research session ${sid}. JEV review is off for this run: you decide sufficiency, no judge calls, no authorizations. `, trioIds)}` };
+ }
  if (d.gateStopped) {
   return { done: false, prompt: finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), `Wave gate stopped research session ${sid}. `, trioIds) };
+ }
+ if (jevOff && !d.gateSettled) {
+  return { done: false, prompt: `${finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), `Trio complete for research session ${sid}. JEV review is off for this run: you decide sufficiency, no judge calls, no authorizations. `, trioIds)} To investigate a remaining material gap instead, dispatch another sec-agent round on your own judgment of the remaining gaps; finalize on your own synthesis once the committee is complete.` };
  }
  if (!d.gateSettled) {
   return { done: false, prompt: `${finalizePrompt(sid, d.trio.fid, d.freezeEvidenceIds.join(", "), `Trio complete for research session ${sid}. `, trioIds)} To investigate a remaining material gap instead, call research_judge_continuation or research_judge_candidate; only a TypeSafe continue/candidate authorization permits another sec-agent round.` };
