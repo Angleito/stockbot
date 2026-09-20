@@ -3968,7 +3968,12 @@ def test_leaderboard_explicit_date_arms(tmp_path: Path, monkeypatch: pytest.Monk
         calls.append(settlement_date)
         return 0
 
+    def _no_rows(settlement_date: str) -> list[dict[str, object]]:
+        # screens.py dels data_root and pages live FINRA; stub paging so the test stays offline.
+        return []
+
     monkeypatch.setattr(_rd, "refresh_finra_short_interest", _fake_refresh)
+    monkeypatch.setattr(screens, "_fetch_settlement_rows", _no_rows)
     hist = screens.get_short_interest_leaderboard(settlement_date="2026-08-14", as_of="2026-08-14", data_root=data_root)
     assert "error" in hist and calls == []
     live = screens.get_short_interest_leaderboard(settlement_date="2026-08-14", data_root=data_root)
