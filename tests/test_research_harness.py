@@ -4910,6 +4910,7 @@ def test_counterparty_queries_are_assigned_unscoped() -> None:
     )
     assert all(not a.unscoped_queries for a in plain)
 
+
 # ---------------------------------------------------------------------------
 # Hedgefund MVP slice: SEC+FINRA+WEB domains under the kernel's source policy.
 # All offline (fake archive seam, no network). Live golden coverage stays with
@@ -4931,9 +4932,7 @@ def _hf_policy(*sources: str) -> dict[str, JSONValue]:
     return {"research_sources": {"mode": "allowlist", "sources": list(sources)}}
 
 
-def _hf_sid(
-    repo: ResearchRepository, *sources: str, q: str = "NVDA demand?"
-) -> tuple[str, str]:
+def _hf_sid(repo: ResearchRepository, *sources: str, q: str = "NVDA demand?") -> tuple[str, str]:
     """Fresh session (+ first running job) under the requested sources; default SEC-only."""
     from app.research import service as _svc
 
@@ -4941,6 +4940,7 @@ def _hf_sid(
         q, "o", as_of="2025-06-30T00:00:00+00:00", policy=_hf_policy(*sources) if sources else None, repo=repo
     )
     return sid, repo.list_jobs(sid)[0].job_id
+
 
 def test_hf_provenance_maps_domain_and_integrity_in_kernel() -> None:
     """Kernel owns provenance->domain/integrity; evidence_to_dict exposes both on every row."""
@@ -4981,8 +4981,12 @@ def test_hf_provenance_maps_domain_and_integrity_in_kernel() -> None:
         subject="NVDA",
         claim_text=content,
         content=content,
-        content_hash=__import__("app.research.evidence", fromlist=["evidence_content_hash"]).evidence_content_hash(content),
-        retrieved_at=__import__("datetime", fromlist=["datetime"]).datetime(2025, 6, 29, tzinfo=__import__("datetime", fromlist=["UTC"]).UTC),
+        content_hash=__import__("app.research.evidence", fromlist=["evidence_content_hash"]).evidence_content_hash(
+            content
+        ),
+        retrieved_at=__import__("datetime", fromlist=["datetime"]).datetime(
+            2025, 6, 29, tzinfo=__import__("datetime", fromlist=["UTC"]).UTC
+        ),
         provenance=dict(sec),
     )
     stored = evidence_to_dict(rec)
@@ -5099,6 +5103,7 @@ def _hf_cov(**over: object) -> dict[str, object]:
     cov.update(over)
     return cov
 
+
 def _hf_freeze_id(sid: str, wave: int = 1) -> str:
     return f"{sid}:{wave}:freeze"
 
@@ -5190,6 +5195,7 @@ def test_hf_finra_job_cannot_submit_sec_evidence_as_own(tmp_path: Path, monkeypa
     with pytest.raises(ValueError, match="ERR_EVIDENCE_NOT_FOUND"):
         _svc.submit_source_result(fin, coverage=_hf_cov(), evidence_ids=[sec_eid], repo=repo)
     assert repo.get_job(fin).status == "running"
+
 
 def test_hf_exa_job_cannot_submit_finra_evidence_as_own(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Cross-domain isolation: a WEB submit cites only its wave-domain lane, never FINRA evidence."""
@@ -5348,14 +5354,13 @@ def test_hf_admission_rejects_fabricated_sec_handle(tmp_path: Path, monkeypatch:
                     "offset": 0,
                     "max_chars": 5,
                     "text_hash": "x" * 64,
+                    "source_content_hash": "a" * 64,
                 },
             ),
             repo=repo,
         )
     with pytest.raises(ValueError, match="ERR_PROVENANCE_MISMATCH"):
-        _svc.record_evidence(
-            sid, src, _svc_item(f"{sid}:ev:4", source_record_id="0000320193-25-000080"), repo=repo
-        )
+        _svc.record_evidence(sid, src, _svc_item(f"{sid}:ev:4", source_record_id="0000320193-25-000080"), repo=repo)
     assert repo.list_evidence(sid) == []
 
 
@@ -5382,7 +5387,12 @@ def test_hf_admission_rejects_fabricated_web_url(tmp_path: Path, monkeypatch: py
     sid, src = _hf_sid(repo, "SEC", "FINRA", "WEB")
     web_row = {k: v for k, v in _svc_item(f"{sid}:ev:1").items() if k != "source_handle"}
     web_row.update(
-        {"content": "news says up", "claim_text": "news says up", "source_name": "web", "source_uri": "https://example.com/news"}
+        {
+            "content": "news says up",
+            "claim_text": "news says up",
+            "source_name": "web",
+            "source_uri": "https://example.com/news",
+        }
     )
     with pytest.raises(ValueError, match="ERR_RAW_SOURCE_REQUIRED"):
         _svc.record_evidence(sid, src, web_row, repo=repo)
@@ -5390,14 +5400,14 @@ def test_hf_admission_rejects_fabricated_web_url(tmp_path: Path, monkeypatch: py
 
 
 def test_hf_pit_rejects_newer_than_as_of(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """known_at a day past as_of fails PIT_VIOLATION on a distinct accession."""
+    """A filing newer than as_of never becomes evidence: the archive refuses the read or the ingest gate rejects it."""
     from app.research import service as _svc
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _hf_sid(repo)
     passage = "Later passage a day past the cutoff."
-    with pytest.raises(ValueError, match="PIT_VIOLATION|rejected"):
+    with pytest.raises(ValueError, match="PIT_VIOLATION|rejected|ERR_SEC_HANDLE_UNREADABLE"):
         _svc.record_evidence(
             sid,
             src,
@@ -5408,7 +5418,10 @@ def test_hf_pit_rejects_newer_than_as_of(tmp_path: Path, monkeypatch: pytest.Mon
                 document_name="nvda-late.htm",
                 source_uri="https://sec.gov/late",
                 source_handle=seam.handle_for(
-                    passage, accession="0000320193-25-000080", document="nvda-late.htm"
+                    passage,
+                    accession="0000320193-25-000080",
+                    document="nvda-late.htm",
+                    known_at="2025-07-01T00:00:00+00:00",
                 ),
                 known_at="2025-07-01T00:00:00+00:00",
             ),
@@ -5434,6 +5447,10 @@ def test_hf_pit_unknown_time_fails_closed(tmp_path: Path, monkeypatch: pytest.Mo
         source_handle=seam.handle_for(passage, accession="0000320193-25-000081", document="nvda-undated.htm"),
     )
     item.pop("known_at", None)
+    # Archive is the PIT authority: caller known_at is overwritten by the
+    # materialized timing, so unknown time is driven by the archive row.
+    seam._SOURCE_TIMING[("0000320193-25-000081", "nvda-undated.htm")] = ("", "2025-04-30", "2025-05-01T00:00:00Z")
+
     with pytest.raises(ValueError, match="PIT_UNVERIFIED|rejected"):
         _svc.record_evidence(sid, src, item, repo=repo)
     assert repo.list_evidence(sid) == []
@@ -5501,7 +5518,9 @@ def test_hf_finra_only_followup_single_desk(tmp_path: Path, monkeypatch: pytest.
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, _ = _hf_sid(repo, "FINRA")
-    fin = str(_svc.start_job(sid, "source_agent", source="FINRA", budget={"owner": "omp"}, repo=repo, wave_id=1)["job_id"])
+    fin = str(
+        _svc.start_job(sid, "source_agent", source="FINRA", budget={"owner": "omp"}, repo=repo, wave_id=1)["job_id"]
+    )
     assert repo.get_job(fin).source_domain == "FINRA"
     with pytest.raises(ValueError, match="policy_denied"):
         _svc.start_job(sid, "source_agent", source="SEC", repo=repo, wave_id=1)
@@ -5533,7 +5552,13 @@ def test_hf_committee_same_freeze_no_data_tools(tmp_path: Path, monkeypatch: pyt
     assert all(j.wave_id == 1 and j.status == "running" for j in trio.values())
     assert stage_for_session(repo.get_session(sid), repo.list_jobs(sid)) == "COMMITTEE"
     for jid in trio:
-        for tool in ("search_web", "get_sec_document", "research_add_evidence", "research_submit_source_result", "task"):
+        for tool in (
+            "search_web",
+            "get_sec_document",
+            "research_add_evidence",
+            "research_submit_source_result",
+            "task",
+        ):
             with pytest.raises(ValueError, match="forbids|cannot dispatch"):
                 _svc.authorize_and_consume_dispatch(sid, jid, tool, repo=repo)
     check_stage_tool("COMMITTEE", "research_read")
@@ -5621,6 +5646,7 @@ def test_hf_resume_after_one_committee_no_dup(tmp_path: Path, monkeypatch: pytes
     rest_jobs = [jid for jid in rest_jobs_raw if isinstance(jid, str)]
     assert fid in (str(rest["freeze_id"]), repo.get_session(sid).freeze_ids[-1])
     assert len(set(rest_jobs)) == 3
+
 
 def test_hf_provenance_vocab_closed() -> None:
     """Provenance kinds are closed at five: sec_source|finra_record|web_source|search_run|none all validate.
@@ -6115,7 +6141,11 @@ def test_hf_gate_finra_authorized_when_allowed(tmp_path: Path, monkeypatch: pyte
     assert out["authorized"] is True and out["targeted_domain"] == "finra"
     assert out["targeted_question"] == "What does FINRA short interest show for NVDA?"
     sess = repo.get_session(sid)
-    assert sess.current_wave == 2 and sess.status == "targeted_research" and sess.targeted_question == out["targeted_question"]
+    assert (
+        sess.current_wave == 2
+        and sess.status == "targeted_research"
+        and sess.targeted_question == out["targeted_question"]
+    )
 
 
 def test_hf_gate_web_denied_when_sec_only(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -6317,7 +6347,10 @@ def test_hf_finra_sufficient_with_residual_fails_incomplete(tmp_path: Path, monk
     sec_sid, sec = _hf_sid(repo)
     sec_eid = f"{sec_sid}:ev:1"
     _svc.record_evidence(sec_sid, sec, _svc_item(sec_eid), repo=repo)
-    assert _svc.submit_source_result(sec, coverage=_reg_cov(), evidence_ids=[sec_eid], repo=repo)["job_status"] == "completed"
+    assert (
+        _svc.submit_source_result(sec, coverage=_reg_cov(), evidence_ids=[sec_eid], repo=repo)["job_status"]
+        == "completed"
+    )
 
 
 def _hf_replay_item(eid: str, rid: str, passage: str, **over: object) -> dict[str, object]:
@@ -6367,9 +6400,7 @@ def test_hf_replay_rejects_padded_web_citation(tmp_path: Path, monkeypatch: pyte
     out = _svc.record_evidence(
         sid,
         web,
-        _hf_replay_item(
-            f"{sid}:ev:web-exact", rid, highlight, source_name="web", known_at="2025-06-29T00:00:00+00:00"
-        ),
+        _hf_replay_item(f"{sid}:ev:web-exact", rid, highlight, source_name="web", known_at="2025-06-29T00:00:00+00:00"),
         repo=repo,
     )
     assert _hf_prov(out, "kind") == "web_source"
@@ -6406,7 +6437,11 @@ def test_hf_stored_provenance_preserves_tool_result_id(tmp_path: Path, monkeypat
         sid,
         web,
         _hf_replay_item(
-            f"{sid}:ev:web-id", web_rid, "NVDA rallies on demand", source_name="web", known_at="2025-06-29T00:00:00+00:00"
+            f"{sid}:ev:web-id",
+            web_rid,
+            "NVDA rallies on demand",
+            source_name="web",
+            known_at="2025-06-29T00:00:00+00:00",
         ),
         repo=repo,
     )
