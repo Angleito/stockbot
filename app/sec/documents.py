@@ -586,8 +586,8 @@ def _source_handle(
     raw_view: bool,
     resolved_section: str | None,
     query: str | None,
-    content_hash: object,
     source_content_hash: object,
+    content_hash: object = None,
 ) -> dict[str, object]:
     """Canonical source handle for the window just returned.
 
@@ -608,7 +608,6 @@ def _source_handle(
         "max_chars": max_chars,
         "length": len(window),
         "text_hash": hashlib.sha256(window.encode("utf-8")).hexdigest(),
-        "content_hash": content_hash,
         "source_content_hash": source_content_hash,
         "source_uri": _source_uri_for(accession_no, document_name),
     }

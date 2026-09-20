@@ -774,7 +774,6 @@ class _SecHandle:
     document: str | None
     text_hash: str
     source_content_hash: str
-    content_hash: str
     offset: int
     max_chars: int | None
     section: str | None
@@ -804,7 +803,6 @@ def _handle_fields(handle: Mapping[str, object]) -> _SecHandle:
         document=document_raw.strip() if isinstance(document_raw, str) and document_raw.strip() else None,
         text_hash=_handle_str(handle, "text_hash", "ERR_SEC_HANDLE_INVALID"),
         source_content_hash=_handle_hex64(handle, "source_content_hash"),
-        content_hash=_handle_hex64(handle, "content_hash"),
         offset=offset,
         max_chars=max_chars,
         section=_handle_opt_str(handle, "section", "ERR_SEC_HANDLE_INVALID"),
@@ -907,12 +905,6 @@ def materialize_sec_passage(
             "record_evidence: ERR_SEC_HANDLE_STALE "
             "(the document window changed since the handle was issued; re-read the document "
             "with get_sec_document and cite the new handle)"
-        )
-    claimed_content = reloaded.get("content_hash")
-    if _is_hex64(claimed_content) and claimed_content != fields.content_hash:
-        raise ValueError(
-            "record_evidence: ERR_SEC_HANDLE_STALE "
-            "(the document revision changed since the handle was issued; re-read the document)"
         )
     start, end = _locate_passage(window, locator if isinstance(locator, str) else "")
     provenance = sec_source_ref(

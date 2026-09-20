@@ -6,6 +6,10 @@ ResearchDirector task batches + Python kernel verification
 in-process loop (source job -> fetch -> freeze -> trio -> gate) stays only
 because deterministic unit tests pin its step behavior; it must not gain new
 production callers.
+Records built here with record_kind=='evidence' are candidate/materialized
+evidence for deterministic tests only, not production citable evidence:
+only service acceptance persists to the raw archive (runner fetch/materialize
+never archives).
 """
 
 from __future__ import annotations

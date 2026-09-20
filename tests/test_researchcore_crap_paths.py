@@ -801,7 +801,7 @@ def test_materialize_sec_passage_fails_closed_per_handle_defect() -> None:
     # checker green without an escape hatch (those are forbidden in this tree).
     call_untyped = getattr(svc, "materialize_sec_passage")  # noqa: B009 - malformed-input contract; getattr keeps checker green
     tampered_source = {**handle, "source_content_hash": "f" * 64}
-    tampered_content = {**handle, "content_hash": "f" * 64}
+    legacy_content = {**handle, "content_hash": "f" * 64}
     missing_source = {k: v for k, v in handle.items() if k != "source_content_hash"}
     for defect, code in (
         (None, "ERR_SEC_HANDLE_INVALID"),
@@ -811,16 +811,51 @@ def test_materialize_sec_passage_fails_closed_per_handle_defect() -> None:
         (missing_source, "ERR_SEC_HANDLE_INVALID"),
         ({**handle, "text_hash": "0" * 64}, "ERR_SEC_HANDLE_STALE"),
         (tampered_source, "ERR_SEC_HANDLE_STALE"),
-        (tampered_content, "ERR_SEC_HANDLE_STALE"),
         ({**handle, "document_name": "never-stored.htm"}, "ERR_SEC_HANDLE_UNREADABLE"),
     ):
         with pytest.raises(ValueError, match=code):
             call_untyped(defect, passage)
+    # Legacy/extra content_hash is ignored, never invalid: old handles still materialize.
+    assert materialize_sec_passage(legacy_content, passage).provenance["passage"] == passage
+    assert materialize_sec_passage({k: v for k, v in handle.items() if k != "content_hash"}, passage).provenance["passage"] == passage
     # A locator the reloaded window does not contain is never admitted, blank included.
     with pytest.raises(ValueError, match="ERR_PASSAGE_NOT_IN_SOURCE"):
         materialize_sec_passage(handle, "this sentence is not in the window")
     with pytest.raises(ValueError, match="ERR_PASSAGE_NOT_IN_SOURCE"):
         materialize_sec_passage(handle, "   ")
+
+def test_live_handle_survives_archival_when_text_hash_differs_from_source_bytes(tmp_path: Path) -> None:
+    """Live binary/PDF handles stay valid after archival: text_hash names the window, source bytes name the revision."""
+    import hashlib as _hashlib
+
+    from app.research.service import materialize_sec_passage as _materialize
+
+    source_bytes = b"\xff\xfe binary \x00\x01 document bytes with citable text window here"
+    window = source_bytes.decode("utf-8", "replace")
+    assert _hashlib.sha256(window.encode("utf-8")).hexdigest() != _hashlib.sha256(source_bytes).hexdigest()
+    accession, document = "0000320193-25-000079", "bytes-live-archived-000079.bin"
+    handle: dict[str, object] = {
+        "accession_no": accession,
+        "document_name": document,
+        "basis": "raw",
+        "section": None,
+        "query": None,
+        "offset": 0,
+        "max_chars": len(window),
+        "length": len(window),
+        "text_hash": _hashlib.sha256(window.encode("utf-8")).hexdigest(),
+        "source_content_hash": _hashlib.sha256(source_bytes).hexdigest(),
+        "source_uri": f"source://sec/{accession}/{document}",
+    }
+    # Live window served as decoded text; the exact source bytes land in the archive.
+    seam.register_document(accession, document, window)
+    archived = tmp_path / "raw.bin"
+    archived.write_bytes(source_bytes)
+    seam._SOURCE_ARCHIVE_PATH[(accession, document)] = str(archived)
+    materialized = _materialize(handle, window)
+    assert materialized.provenance["passage"] == window
+    assert _hashlib.sha256(materialized.source_bytes).hexdigest() == handle["source_content_hash"]
+    assert materialized.source_content_hash == handle["source_content_hash"]
 
 
 def test_provenance_validation_arms_and_legacy_rows() -> None:

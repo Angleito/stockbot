@@ -1574,7 +1574,9 @@ def test_runner_retention_no_archive_on_reject_or_admit(
 ) -> None:
     """A bogus handle demotes to discovery and a valid handle admits as evidence, but
     neither path archives: the runner materializes from the archive, only service
-    acceptance persists to it."""
+    acceptance persists to it. The record_kind=='evidence' assertion below pins
+    candidate/materialized evidence without archival; it is not equivalent to
+    production evidence admission."""
     from app.sec.archive import iter_archived_documents
 
     monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
@@ -1628,6 +1630,7 @@ def test_runner_retention_no_archive_on_reject_or_admit(
         raw_valid,
         "EV-admit",
     )
+    # Candidate/materialized evidence only: must not be read as production admission.
     assert record.record_kind == "evidence"
     assert list(iter_archived_documents(acc, doc, root=root)) == before2 == []
     assert repo.list_evidence(sid2) == []
