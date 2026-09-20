@@ -81,6 +81,10 @@ CREATE TABLE IF NOT EXISTS coverage_artifacts (
   artifact_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
   created_at TEXT NOT NULL, record TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_coverage_artifacts_session ON coverage_artifacts(session_id);
+CREATE TABLE IF NOT EXISTS tool_results (
+  tool_result_id TEXT PRIMARY KEY, session_id TEXT NOT NULL, job_id TEXT NOT NULL,
+  tool_name TEXT NOT NULL, created_at TEXT NOT NULL, record TEXT NOT NULL);
+CREATE INDEX IF NOT EXISTS ix_tool_results_session ON tool_results(session_id);
 """
 
 
@@ -905,8 +909,53 @@ class ResearchRepository:
             validate_json_mapping(json.loads(str(r["record"])), "<research.sqlite>: coverage artifact") for r in rows
         ]
 
+    def save_tool_result(self, record: Mapping[str, object]) -> str:
+        """Insert one immutable staged tool result; duplicate ids raise ValueError.
+
+        A tool result is the kernel-persisted FINRA/WEB payload a finra_record or
+        web_source ref replays against. Resume never rewrites one (same id =
+        same bytes), so evidence admission can prove the row a citation names.
+        """
+        if not isinstance(record, Mapping):
+            raise ValueError("<research.sqlite>: tool result record must be a mapping")  # noqa: TRY004 - public error contract pins ValueError, tests are oracle
+        where = "<research.sqlite>: tool result"
+        tool_result_id = str(record.get("tool_result_id") or "")
+        session_id = record.get("session_id")
+        job_id = record.get("job_id")
+        tool_name = record.get("tool_name")
+        for key, value in (("tool_result_id", tool_result_id), ("session_id", session_id), ("job_id", job_id), ("tool_name", tool_name)):
+            if not isinstance(value, str) or not value:
+                raise ValueError(f"{where}: {key!r} must be a non-empty string")
+        created = _iso_or_none(record.get("created_at"), "created_at", where) or utcnow().isoformat()
+        with self._connect() as conn:
+            try:
+                conn.execute(
+                    "INSERT INTO tool_results (tool_result_id, session_id, job_id, tool_name, created_at, record) VALUES (?, ?, ?, ?, ?, ?)",
+                    (tool_result_id, session_id, job_id, tool_name, created, _record_json(record, where)),
+                )
+            except sqlite3.IntegrityError:
+                raise ValueError(f"{where}: duplicate tool_result_id {tool_result_id!r}") from None
+        return tool_result_id
+
+    def get_tool_result(self, tool_result_id: str) -> dict[str, JSONValue]:
+        """Load one tool result; raises KeyError when absent."""
+        with self._connect() as conn:
+            row = conn.execute("SELECT record FROM tool_results WHERE tool_result_id = ?", (tool_result_id,)).fetchone()
+        if row is None:
+            raise KeyError(f"unknown tool_result_id: {tool_result_id!r}")
+        return validate_json_mapping(json.loads(str(row["record"])), "<research.sqlite>: tool result")
+
+    def list_tool_results(self, session_id: str) -> list[dict[str, JSONValue]]:
+        """All tool results for one session, oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT record FROM tool_results WHERE session_id = ? ORDER BY created_at, tool_result_id",
+                (session_id,),
+            ).fetchall()
+        return [validate_json_mapping(json.loads(str(r["record"])), "<research.sqlite>: tool result") for r in rows]
+
     def resource_stores(self, session_id: str) -> dict[str, dict[str, object]]:
-        """id->record mappings for read_resource: evidence/freeze/dossier/coverage/job/research."""
+        """id->record mappings for read_resource: evidence/freeze/dossier/coverage/job/research/tool_result."""
         session = self.get_session(session_id)
         evidence: dict[str, object] = {str(r.get("evidence_id", "")): r for r in self.list_evidence(session_id)}
         freezes: dict[str, object] = {}
@@ -926,6 +975,11 @@ class ResearchRepository:
             key = artifact.get("artifact_id")
             if isinstance(key, str):
                 coverage[key] = artifact
+        tool_results: dict[str, object] = {}
+        for row in self.list_tool_results(session_id):
+            key = row.get("tool_result_id")
+            if isinstance(key, str):
+                tool_results[key] = row
         return {
             "evidence": evidence,
             "freeze": freezes,
@@ -933,6 +987,7 @@ class ResearchRepository:
             "coverage": coverage,
             "job": jobs,
             "research": {session_id: session.to_dict()},
+            "tool_result": tool_results,
         }
 
     # -- resume ----------------------------------------------------------

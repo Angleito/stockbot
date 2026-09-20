@@ -119,7 +119,7 @@ def _dispatch_shape_render_doc(result: dict[str, object], max_bytes: int) -> str
 
 
 def _final_ids(refs: object, cap: int = 6) -> str:
-    """Filing refs suffix from evidence ids (capped, empty when none)."""
+    """Evidence-refs suffix from evidence ids (capped, empty when none)."""
     ids: list[str] = [e for e in refs if isinstance(e, str) and e.strip()] if isinstance(refs, list) else []
     return f" [{', '.join(ids[:cap])}]" if ids else ""
 
@@ -131,7 +131,7 @@ def _final_type_suffix(row: dict[str, object]) -> str:
 
 
 def _final_claims_block(claims: object) -> list[str]:
-    """Grounded-claim lines with declared type + filing refs ([] when none)."""
+    """Grounded-claim lines with declared type + evidence refs ([] when none)."""
     items = _as_list(claims)
     lines: list[str] = []
     for item in items:
@@ -145,7 +145,7 @@ def _final_claims_block(claims: object) -> list[str]:
 
 
 def _final_channel_line(item: object) -> str:
-    """One impact-channel line with severity + filing refs."""
+    """One impact-channel line with severity + evidence refs."""
     row = _as_dict(item)
     name = _cell(row.get("name")).strip() or "Exposure"
     severity = _cell(row.get("severity")).strip() or "direct"
@@ -174,7 +174,7 @@ def _final_str_block(items: object) -> list[str]:
 
 
 def _final_effect_line(item: object) -> str:
-    """One first/second-order effect line with declared type + filing refs."""
+    """One first/second-order effect line with declared type + evidence refs."""
     row = _as_dict(item)
     text = _cell(row.get("text", row.get("summary", row.get("name")))).strip()
     return f"- {text}{_final_type_suffix(row)}{_final_ids(row.get('evidence_ids'))}" if text else ""
@@ -190,13 +190,55 @@ def _final_effect_block(items: object) -> list[str]:
     return out
 
 
+_COVERAGE_VERDICT_KEYS = frozenset({"source_domain", "source_sufficiency", "useful_for_question", "complete"})
+
+
+def _final_coverage_block(coverage: object) -> list[str]:
+    """Per-source coverage lines: every surviving scope key under its own name."""
+    cov = _as_dict(coverage)
+    lines: list[str] = []
+    for key in ("sec", "finra", "web"):
+        section = _as_dict(cov.get(key))
+        if not section:
+            continue
+        parts: list[str] = []
+        for field in sorted(section):
+            if field in _COVERAGE_VERDICT_KEYS or field in ("detail", "summary"):
+                continue
+            items = [str(v).strip() for v in _as_list(section.get(field)) if str(v).strip()]
+            if items:
+                parts.append(f"{field}: {', '.join(items)}")
+        detail = _cell(section.get("detail") or section.get("summary")).strip()
+        head = key.upper()
+        if parts or detail:
+            lines.append(f"- {head} — {'; '.join(parts)}{(' — ' + detail) if detail and parts else detail}")
+        else:
+            lines.append(f"- {head}")
+    return lines
+
+
+def _final_source_block(sources: object) -> list[str]:
+    """One line per source row: domain + integrity class + document + evidence id."""
+    lines: list[str] = []
+    for item in _as_list(sources):
+        row = _as_dict(item)
+        evidence_id = _cell(row.get("evidence_id")).strip()
+        domain = _cell(row.get("domain")).strip().upper() or "SOURCE"
+        integrity = _cell(row.get("integrity_class") or row.get("integrity")).strip().upper()
+        document = _cell(row.get("document") or row.get("source_name")).strip()
+        label = f"{domain} [{integrity}]" if integrity else domain
+        head = " ".join(part for part in (label, document) if part) or evidence_id or "source"
+        lines.append(f"- {head} [{evidence_id}]" if evidence_id and head != evidence_id else f"- {head}")
+    return lines
+
+
 def _final_scope_line(scope: object) -> str:
-    """SEC-only scope boundary line (always present)."""
+    """Searched-source scope boundary line (always present)."""
     allowed = _as_list(_as_dict(scope).get("allowed_sources"))
     names = [s for s in (_cell(a).strip() for a in allowed) if s] or ["SEC"]
     joined = ", ".join(names)
     if len(names) == 1 and names[0].upper() == "SEC":
-        return "Scope: SEC filings only; nothing here draws on non-SEC sources."
+        return "Scope: SEC sources only."
     return f"Scope: {joined} sources only."
 
 
@@ -222,6 +264,11 @@ def render_final_result(result: dict[str, object], max_bytes: int = MAX_TOOL_MES
     out = _final_core_lines(result)
     _final_section(
         out,
+        "Base case",
+        [f"- {_cell(result.get('base_case')).strip()}"] if _cell(result.get("base_case")).strip() else [],
+    )
+    _final_section(
+        out,
         "Major direct exposures",
         [_final_channel_line(c) for c in _as_list(result.get("impact_channels")) if _final_channel_line(c)],
     )
@@ -229,15 +276,19 @@ def render_final_result(result: dict[str, object], max_bytes: int = MAX_TOOL_MES
     _final_section(out, "Second-order effects", _final_effect_block(result.get("second_order_effects")))
     _final_section(out, "Bull case", _final_side_block(result.get("bull_case")))
     _final_section(out, "Bear case", _final_side_block(result.get("bear_case")))
+    _final_section(out, "Positioning", _final_str_block(result.get("positioning")))
+    _final_section(out, "Catalysts", _final_str_block(result.get("catalysts")))
     _final_section(out, "Critical disagreements", _final_str_block(result.get("critical_disagreements")))
     _final_section(out, "Uncertainties", _final_str_block(result.get("uncertainties")))
     _final_section(out, "What would change the view", _final_str_block(result.get("what_would_change")))
-    _final_section(out, "SEC-only limitations", _final_str_block(result.get("evidence_limitations")))
-    _final_section(out, "Filing refs", _final_claims_block(result.get("grounded_claims", result.get("claims"))))
+    _final_section(out, "Limitations", _final_str_block(result.get("evidence_limitations")))
+    _final_section(out, "Coverage", _final_coverage_block(result.get("coverage")))
+    _final_section(out, "Sources", _final_source_block(result.get("sources")))
+    _final_section(out, "Evidence refs", _final_claims_block(result.get("grounded_claims", result.get("claims"))))
     out.append(_final_scope_line(result.get("research_scope")))
     text = "\n\n".join(line for line in out if line.strip())
     return _truncate_bytes(
-        text if text.strip() else _cell(result.get("answer")) or "No grounded SEC findings.", max_bytes
+        text if text.strip() else _cell(result.get("answer")) or "No grounded findings.", max_bytes
     )
 
 

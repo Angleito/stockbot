@@ -42,3 +42,6 @@ None
 
 - `as_of` (string): Point-in-time cutoff (ISO-8601); omit for current state.
 - `objective` (string): Objective (defaults to the question).
+- `policy` (object): Optional session policy ({research_sources: {mode, sources}}); omit for SEC-only default.
+- `research_sources` (object): Optional source allowlist ({mode: allowlist, sources}); omit for SEC-only default.
+- `sources` (array): Optional source allowlist shorthand (e.g. [SEC, FINRA, WEB]); omit for SEC-only default.

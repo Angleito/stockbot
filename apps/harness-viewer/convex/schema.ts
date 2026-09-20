@@ -13,6 +13,7 @@ export interface TraceJob {
   failureMessage: string | null;
   assignmentId: string | null;
   role: string | null;
+  sourceDomain?: string | null;
 }
 
 export interface TraceEvent {
@@ -24,6 +25,44 @@ export interface TraceEvent {
 export interface GroundedClaimView {
   text: string;
   evidenceIds: string[];
+}
+
+export interface EvidenceView {
+  evidenceId: string;
+  subject: string;
+  knownAt: string | null;
+  sourceName: string;
+  sourceUri: string | null;
+  domain?: string;
+}
+
+export interface CoverageArtifactView {
+  artifactId: string;
+  waveId: number;
+  claimText: string;
+  searchId: string;
+  query: string;
+}
+
+export interface FinalResultView {
+  answer: string;
+  executiveSummary: string;
+  consensus: string;
+  baseCase: string;
+  bullCase: string;
+  bearCase: string;
+  disagreements: string[];
+  positioning: string[];
+  catalysts: string[];
+  uncertainties: string[];
+  whatChangesTheView: string[];
+  limitations: string[];
+  claims: GroundedClaimView[];
+  sources: { evidenceId: string; domain: string; document: string; integrityClass?: string }[];
+  coverage: Record<string, unknown>;
+  allowedSources: string[];
+  freezeId: string;
+  asOf: string;
 }
 
 export interface ResearchRun {
@@ -39,11 +78,14 @@ export interface ResearchRun {
   provider: string | null;
   model: string | null;
   jobs: TraceJob[];
+  waves?: number[];
   events: TraceEvent[];
   claims: GroundedClaimView[];
-  evidence: { evidenceId: string; subject: string; knownAt: string | null; sourceName: string; sourceUri: string | null }[];
+  evidence: EvidenceView[];
   freezes: { freezeId: string; evidenceIds: string[] }[];
   dossiers: { dossierId: string; findings: GroundedClaimView[] }[];
+  coverageArtifacts?: CoverageArtifactView[];
+  finalResult?: FinalResultView | null;
   committeeRuns: unknown[];
 }
 

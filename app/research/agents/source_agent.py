@@ -77,6 +77,37 @@ def is_sec_tool(name: str) -> bool:
     return TOOL_DOMAINS.get(name) != "portfolio_read"
 
 
+# FINRA-desk allowlist (§4 tools only): dataset catalog + structured records.
+# get_short_pressure_profile is a FINRA+SEC composite the desk may cite for
+# positioning context; canonical shares stay with the SEC desk.
+FINRA_TOOLS: frozenset[str] = frozenset(
+    {
+        "list_finra_datasets",
+        "describe_finra_dataset",
+        "get_finra_datapoints",
+        "query_finra",
+        "get_short_interest",
+        "get_short_pressure_profile",
+        "get_reg_sho_volume",
+        "get_threshold_securities",
+        "get_short_interest_leaderboard",
+    }
+)
+
+
+def is_finra_tool(name: str) -> bool:
+    """Infra guard: one of the FINRA-desk tools, never anything else."""
+    return name in FINRA_TOOLS
+
+
+# Web-desk allowlist: Exa search only, never a canonical SEC/FINRA fact source.
+WEB_TOOLS: frozenset[str] = frozenset({"search_web"})
+
+
+def is_web_tool(name: str) -> bool:
+    """Infra guard: Exa web search only."""
+    return name in WEB_TOOLS
+
 def _coerce_wave(wave_id: int | str) -> int:
     """Accept int>=1 or numeric str; reject bool/non-numeric/<1."""
     if isinstance(wave_id, bool):

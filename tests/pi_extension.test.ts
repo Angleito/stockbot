@@ -603,18 +603,27 @@ import {
 } from "../.stockbot/omp/lib/youtube-analytics.ts";
 import {
 	advanceOnAgentEnd,
+	bindingForOmpSession,
 	checkFreezeDrift,
+	clearChildBinding,
 	freezeContentHash,
 	normalizeAccession,
-	validateProvenance,
-	pitUnverified,
-	pitViolated,
+	parseResearchContextBlock,
+	planChildTaskCall,
 	planTaskCall,
 	recordTaskResult,
+	pitUnverified,
+	pitViolated,
+	researchContextBlock,
+	RESEARCH_CONTEXT_HEADER,
+	researchContextForRun,
+	resolveBindingFromEntries,
 	resumeResearch,
 	setResearchBridge,
 	stageBlockReasonForTest,
 	startResearch,
+	stripResearchBlock,
+	validateProvenance,
 } from "../.stockbot/omp/lib/research-director.ts";
 
 const YT_MARKER = "ZxqUniqueTitleMarker";
@@ -1236,7 +1245,7 @@ test("child sessions keep their own prompt and roster, and skip the Director gat
 	}
 });
 
-test("task interception passes through pre-staging and skips child sessions", async () => {
+test("task interception passes through pre-staging and unbound child sessions", async () => {
 	const { handlers, commands, pi } = fakePiHost();
 	const { resetMainSessionIdentity } = stockbotNS;
 	resetMainSessionIdentity();
@@ -1249,6 +1258,7 @@ test("task interception passes through pre-staging and skips child sessions", as
 		const child = { sessionManager: { id: "child" } };
 		// Main first: the first session manager wins Director identity.
 		expect((await handlers["tool_call"]({ toolName: "task", input: {} }, main)) as unknown).toBeUndefined();
+		// Unbound child passes through; the kernel stays authoritative there.
 		expect((await handlers["tool_call"]({ toolName: "task", input: {} }, child)) as unknown).toBeUndefined();
 		await commands["research"].handler("NVDA inference growth", {});
 		// The research command establishes the trusted run; no agent_start may
@@ -1815,7 +1825,7 @@ test("research director stages fetch, freeze, gate, and finalize via stubbed bri
 
 // --- ResearchDirector restart snapshots: every E1/E2 boundary resumes from the
 // persisted freeze via resumeResearch on a fresh run, never the older runner. ---
-type ResumeJob = { job_id: string; job_type: string; wave_id: number; status: string };
+type ResumeJob = { job_id: string; job_type: string; wave_id: number; status: string; source_domain?: string };
 interface ResumeState {
 	session: Json;
 	jobs: ResumeJob[];
@@ -1883,8 +1893,8 @@ function resumeBridge(state: ResumeState, ops: ResumeOp[], gate?: Json): (req: J
 			case "research.job.start": {
 				n += 1;
 				const jid = `job:auto-${n}`;
-				state.jobs.push({ job_id: jid, job_type: String(req.type), wave_id: Number(req.wave_id), status: "running" });
-				return { result: { job_id: jid, session_id: String(state.session.session_id), status: "running", wave_id: Number(req.wave_id), job_type: String(req.type) } };
+				state.jobs.push({ job_id: jid, job_type: String(req.type), wave_id: Number(req.wave_id), status: "running", source_domain: String(req.source ?? "") });
+				return { result: { job_id: jid, session_id: String(state.session.session_id), status: "running", wave_id: Number(req.wave_id), job_type: String(req.type), source_domain: String(req.source ?? "") } };
 			}
 			case "research.wave.decide":
 				return gate ?? { result: { authorized: false, stop_reason: "no_questions", reason_detail: "trio agrees", targeted_question: "", targeted_domain: "" } };
@@ -2111,6 +2121,33 @@ test("research director restart: authorized wave-2 reuses running source until n
 	expect(resumedB.prompt).toContain("task batch");
 	expect(resumedB.prompt).toContain("stockbot");
 	expectFreezeIds(resumedB.prompt, F2, [E1, E2]);
+});
+
+test("research director restart: wave-2 running source with new evidence keeps fetching without freezing", async () => {
+	const SID = "rs:resume-w2-fetch";
+	const F1 = `${SID}:1:freeze`;
+	const E1 = `${SID}:ev:1`;
+	const E2 = `${SID}:ev:2`;
+	const e1run = [{ freeze_id: F1, wave_id: 1, jobs: ["job:s1", "job:u1", "job:b1"] }];
+	const ops: ResumeOp[] = [];
+	const state: ResumeState = {
+		session: resumeSession(SID, {
+			status: "targeted_research", targeted_question: "How did Q3 go?", targeted_domain: "SEC",
+			evidence_ids: [E1, E2], freeze_ids: [F1], committee_runs: e1run, current_wave: 1,
+		}),
+		jobs: [
+			{ job_id: "job:s1", job_type: "stockbot", wave_id: 1, status: "completed" },
+			{ job_id: "job:u1", job_type: "bullbot", wave_id: 1, status: "completed" },
+			{ job_id: "job:b1", job_type: "bearbot", wave_id: 1, status: "completed" },
+			{ job_id: "job:w2src", job_type: "source_agent", wave_id: 2, status: "running" },
+		],
+		freezes: { [F1]: { freeze_id: F1, session_id: SID, wave_id: 1, evidence_ids: [E1] } },
+	};
+	setResearchBridge(resumeBridge(state, ops));
+	const resumed = await resumeResearch(SID, "run-resume-w2-fetch");
+	expect(resumeTransitions(ops)).toEqual([]);
+	expect(resumed.prompt).toContain("research_add_evidence");
+	expect(resumed.prompt).toContain("job:w2src");
 });
 
 test("research director restart: E2 resumes committee on F2 without source work", async () => {
@@ -2702,7 +2739,7 @@ test("agent_end renders the persisted answer once and resume repeats that same a
 		expect(answer).toContain("Revenue rose on volume (observed_fact)");
 		expect(answer).toContain("What would change the view");
 		expect(answer).toContain("A guidance cut would change the view");
-		expect(answer).toContain("Scope: SEC filings only");
+		expect(answer).toContain("Scope: SEC sources only");
 		// Exactly one render: the finalize note is never prepended to the answer.
 		expect(answer).not.toContain("Finalized session");
 		expect(answer.split(rendered).length - 1).toBe(1);
@@ -2867,6 +2904,56 @@ test("director refuses sec-scout: nested fan-out runs inside sec-agent's own ses
 	expect(plan.block).toBe(true);
 	expect(String(plan.reason)).toContain("Director may not spawn 'sec-scout'");
 });
+test("wave-1 plans one task batch with all three desks when allowed", async () => {
+	const SID = "rs:task-wave1-3";
+	const ops: ResumeOp[] = [];
+	const inner = resumeBridge({
+		session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1, source_policy: { allowed: ["SEC", "FINRA", "WEB"] } }),
+		jobs: [],
+		freezes: {},
+	}, ops);
+	setResearchBridge(async (req: Json) => inner(req));
+	await resumeResearch(SID, "run-task-wave1-3");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-wave1-3", toolCallId: "call-wave1-3" },
+		{ context: "wave1 ctx", tasks: [{ agent: "sec-agent", task: "sec work" }, { agent: "finra-agent", task: "finra work" }, { agent: "exa-agent", task: "web work" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	const tasks = (plan.input as Json).tasks as Json[];
+	expect(tasks.length).toBe(3);
+	const names = tasks.map((t) => String(t.name));
+	expect(names.some((n) => n.startsWith("sec-agent-"))).toBe(true);
+	expect(names.some((n) => n.startsWith("finra-agent-"))).toBe(true);
+	expect(names.some((n) => n.startsWith("exa-agent-"))).toBe(true);
+	const bodies = tasks.map((t) => String(t.task));
+	expect(bodies.some((b) => b.includes("source_domain=SEC"))).toBe(true);
+	expect(bodies.some((b) => b.includes("source_domain=FINRA"))).toBe(true);
+	expect(bodies.some((b) => b.includes("source_domain=WEB"))).toBe(true);
+});
+test("targeted finra wave plans only the requested desk", async () => {
+	const SID = "rs:task-finra-only";
+	setResearchBridge(resumeBridge({
+		session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 2, targeted_domain: "FINRA", source_policy: { allowed: ["SEC", "FINRA", "WEB"] } }),
+		jobs: [],
+		freezes: {},
+	}, []));
+	await resumeResearch(SID, "run-task-finra-only");
+	const plan = await planTaskCall(
+		{ researchKey: "run-task-finra-only", toolCallId: "call-finra-1" },
+		{ tasks: [{ agent: "finra-agent", task: "short interest follow-up" }] },
+	);
+	expect(plan.block).toBeUndefined();
+	const tasks = (plan.input as Json).tasks as Json[];
+	expect(tasks.length).toBe(1);
+	expect(String(tasks[0].name).startsWith("finra-agent-")).toBe(true);
+	expect(String(tasks[0].task)).toContain("source_domain=FINRA");
+	const refused = await planTaskCall(
+		{ researchKey: "run-task-finra-only", toolCallId: "call-finra-2" },
+		{ tasks: [{ agent: "sec-agent", task: "x" }, { agent: "finra-agent", task: "y" }] },
+	);
+	expect(refused.block).toBe(true);
+	expect(String(refused.reason)).toContain("finra-agent");
+});
 test("UX stage gate mirrors kernel allowlists", () => {
 	expect(stageBlockReasonForTest("SOURCE_RESEARCH", "research_add_evidence")).toBeUndefined();
 	expect(stageBlockReasonForTest("SOURCE_RESEARCH", "research_read_search")).toBeUndefined();
@@ -2929,6 +3016,10 @@ test("Provenance parity mirrors kernel shape validation", () => {
 	expect(validateProvenance({ kind: "search_run", search_id: "s1", query: "NVDA filings" })).toEqual({ kind: "search_run", search_id: "s1", query: "NVDA filings" });
 	const sec = validateProvenance({ kind: "sec_source", accession_no: "000032019325000079", document_name: "10-K", passage: "revenue rose" });
 	expect(sec).toEqual({ kind: "sec_source", accession_no: "0000320193-25-000079", document_name: "10-K", passage: "revenue rose", source_uri: null });
+	expect(validateProvenance({ kind: "finra_record", tool_name: "get_short_interest", record_identity: "NVDA|2026-08-14" })).toEqual({ kind: "finra_record", tool_name: "get_short_interest", record_identity: "NVDA|2026-08-14" });
+	expect(validateProvenance({ kind: "web_source", url: "https://example.com/x", excerpt: "NVDA launched X" })).toEqual({ kind: "web_source", url: "https://example.com/x", excerpt: "NVDA launched X" });
+	expect(validateProvenance({ kind: "finra_record", tool_name: "", record_identity: "x" })).toBeNull();
+	expect(validateProvenance({ kind: "web_source", url: "https://example.com/x", excerpt: "" })).toBeNull();
 	for (const bad of [null, undefined, 42, "x", [], { kind: "bogus" }, { kind: "search_run", search_id: "", query: "q" }, { kind: "search_run", search_id: "s" }, { kind: "sec_source", accession_no: "bad", document_name: "d", passage: "p" }, { kind: "sec_source", accession_no: "0000320193-25-000079", document_name: "", passage: "p" }, { kind: "sec_source", accession_no: "0000320193-25-000079", document_name: "d" }]) {
 		expect(validateProvenance(bad)).toBeNull();
 	}
@@ -2949,8 +3040,8 @@ test("Freeze parity mirrors kernel hash and drift", async () => {
 	expect(checkFreezeDrift("E1", ["ev:a"], recs)).toContain("drifted");
 	expect(checkFreezeDrift("E1", ["ev:a", "ev:b"], [...recs, recs[0]])).toContain("duplicate");
 });
-	// Shared-corpus differential 2026-09-17: py hash d2e13c22...746eb11e AGREE,
-	// order-stable AGREE, empty sha256 AGREE; drift ok/short/dup all AGREE.
+// Shared-corpus differential 2026-09-17: py hash d2e13c22...746eb11e AGREE,
+// order-stable AGREE, empty sha256 AGREE; drift ok/short/dup all AGREE.
 test("committee results record three analyses", async () => {
 	const SID = "rs:task-record";
 	const F1 = `${SID}:1:freeze`;
@@ -3128,17 +3219,23 @@ test("tool_result handler records planned task outcomes", async () => {
 		// Deferred seam: main session_start claims identity + bridge before stub.
 		await handlers["session_start"]({}, main);
 		// Stub after session_start (session_start claims the real seam first).
+		const stubJobs: Json[] = [];
+		let stubN = 0;
 		setResearchBridge(async (req: Json) => {
 			kinds.push(String(req.op));
 			if (req.op === "research.session.inspect")
-				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: null } };
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: stubJobs, pending_next_action: null, latest_freeze: null } };
 			if (req.op === "research.session.create")
 				return { result: { session_id: SID } };
-			if (req.op === "research.job.start")
-				return { result: { job_id: "job:handler-1", session_id: SID, status: "running", wave_id: 1, job_type: "source_agent" } };
+			if (req.op === "research.job.start") {
+				stubN += 1;
+				const jid = stubN === 1 ? "job:handler-1" : `job:handler-${stubN}`;
+				stubJobs.push({ job_id: jid, job_type: "source_agent", wave_id: 1, status: "running", source_domain: "SEC" });
+				return { result: { job_id: jid, session_id: SID, status: "running", wave_id: 1, job_type: "source_agent", source_domain: "SEC" } };
+			}
 			if (req.op === "research.job.runtime") return { result: { job_id: "job:handler-1" } };
 			if (req.op === "research.session.resume")
-				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: [], pending_next_action: null, latest_freeze: null } };
+				return { result: { session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }), jobs: stubJobs, pending_next_action: null, latest_freeze: null } };
 			return { error: "unknown_op" };
 		});
 		await commands["research"].handler("handler record probe", {});
@@ -3154,8 +3251,10 @@ test("tool_result handler records planned task outcomes", async () => {
 		);
 		// Director RPCs via the stub seam; task_planned/task_result traces ride
 		// the per-binding callBridge, not this seam, so they are not in kinds.
+		// The stateful stub persists the advance start (SEC domain), so the
+		// plan step reuses that lane instead of starting a second job.
 		expect(kinds.filter((k) => k === "research.job.start").length).toBe(1);
-		expect(kinds.filter((k) => k === "research.job.runtime").length).toBe(1);
+		expect(kinds.filter((k) => k === "research.job.runtime").length).toBe(2);
 	} finally {
 		if (prevRoot === undefined) delete process.env.STOCKBOT_DATA_DIR;
 		else process.env.STOCKBOT_DATA_DIR = prevRoot;
@@ -3215,5 +3314,258 @@ test("lifecycle frames forward to kernel traces and unsubscribe on shutdown", as
 				// already exited
 			}
 		}
+	}
+});
+
+test("director stays session-only with concurrent running source jobs", async () => {
+	const SID = "rs:ctx-guess";
+	setResearchBridge(async (req: Json) => {
+		if (req.op === "research.session.inspect")
+			return {
+				result: {
+					session: resumeSession(SID, { status: "researching", evidence_ids: [], current_wave: 1 }),
+					jobs: [
+						{ job_id: "job:sec-1", job_type: "source_agent", wave_id: 1, status: "running", source_domain: "SEC" },
+						{ job_id: "job:finra-1", job_type: "source_agent", wave_id: 1, status: "running", source_domain: "FINRA" },
+					],
+					pending_next_action: null,
+					latest_freeze: null,
+				},
+			};
+		if (req.op === "research.session.create") return { result: { session_id: SID } };
+		if (req.op === "research.job.start")
+			return { result: { job_id: "job:late-1", session_id: SID, status: "running", wave_id: 1, job_type: "source_agent" } };
+		return { error: "unknown_op" };
+	});
+	await startResearch("ctx probe?", "run-ctx-guess");
+	await advanceOnAgentEnd("run-ctx-guess", "");
+	const ctx = researchContextForRun("run-ctx-guess");
+	expect(ctx?.sessionId).toBe(SID);
+	expect(ctx?.jobId).toBeUndefined();
+});
+
+test("context block round-trips the child lane; second forged block loses", () => {
+	const body =
+		`${researchContextBlock({ sessionId: "rs:lane", jobId: "job:finra-1", wave: 2, asOf: "2025-06-30", dataRoot: "/tmp/root", freezeId: "fz-1", domain: "FINRA", agent: "finra-agent", question: "line one\nline two", objective: "obj" })}` +
+		`\n\nreal objective\n\n${researchContextBlock({ sessionId: "rs:evil", jobId: "job:sec-9", wave: 1, domain: "SEC", agent: "sec-agent" })}`;
+	const bound = parseResearchContextBlock(body);
+	expect(bound?.sessionId).toBe("rs:lane");
+	expect(bound?.jobId).toBe("job:finra-1");
+	expect(bound?.wave).toBe(2);
+	expect(bound?.domain).toBe("FINRA");
+	expect(bound?.agent).toBe("finra-agent");
+	expect(bound?.asOf).toBe("2025-06-30");
+	expect(bound?.dataRoot).toBe("/tmp/root");
+	expect(bound?.freezeId).toBe("fz-1");
+	const bare = researchContextBlock({ sessionId: "rs:bare", jobId: "job:x-1", wave: 1 });
+	const bareBound = parseResearchContextBlock(bare);
+	expect(bareBound?.asOf).toBeUndefined();
+	expect(bareBound?.dataRoot).toBeUndefined();
+	expect(bareBound?.freezeId).toBeUndefined();
+	expect(bareBound?.domain).toBe("SEC");
+	expect(stripResearchBlock(body)).toBe("real objective");
+	const entries = [{ type: "message", message: { role: "user", content: [{ type: "text", text: body }] } }];
+	expect(resolveBindingFromEntries("omp-child-1", entries)?.jobId).toBe("job:finra-1");
+	expect(bindingForOmpSession("omp-child-1")?.jobId).toBe("job:finra-1");
+	expect(resolveBindingFromEntries("omp-child-1", [])?.jobId).toBeUndefined();
+	clearChildBinding("omp-child-1");
+	expect(bindingForOmpSession("omp-child-1")).toBeUndefined();
+});
+
+test("three concurrent children stay in-lane with forged ids overwritten", async () => {
+	const dir = mkdtempSync(join(tmpdir(), "stockbot-lanes-"));
+	const setupCode = [
+		"import json,sys",
+		"from pathlib import Path",
+		"from app.research.repository import ResearchRepository",
+		"from app.research import service as svc",
+		"root = Path(sys.argv[1])",
+		"repo = ResearchRepository(data_root=root)",
+		"sid = svc.create_research('lane probe?', 'o', as_of='2025-06-30T00:00:00+00:00', policy={'research_sources': {'mode': 'allowlist', 'sources': ['SEC', 'FINRA', 'WEB']}}, repo=repo)",
+		"sec = str(svc.start_job(sid, 'source_agent', source='SEC', repo=repo, wave_id=1)['job_id'])",
+		"fin = str(svc.start_job(sid, 'source_agent', source='FINRA', repo=repo, wave_id=1)['job_id'])",
+		"web = str(svc.start_job(sid, 'source_agent', source='WEB', repo=repo, wave_id=1)['job_id'])",
+		"print(json.dumps({'sid': sid, 'sec': sec, 'fin': fin, 'web': web}))",
+	].join("\n");
+	const setup = Bun.spawnSync(["venv/bin/python", "-c", setupCode, dir], { cwd: ROOT });
+	expect(setup.exitCode).toBe(0);
+	const ids = JSON.parse(setup.stdout.toString()) as { sid: string; sec: string; fin: string; web: string };
+	const SID = ids.sid;
+	const logFile = join(dir, "wire.log");
+	const script = `let b='';process.stdin.on('data',c=>{b+=c.toString();let i;while((i=b.indexOf('\\n'))>=0){const l=b.slice(0,i).trim();b=b.slice(i+1);if(!l)continue;try{const o=JSON.parse(l);if(o.op==='describe'){process.stdout.write(JSON.stringify({id:o.id,system_prompt:'p',tools:[{function:{name:'browse_tools',description:'b',parameters:{type:'object'}}},{function:{name:'call_tool',description:'c',parameters:{type:'object'}}},{function:{name:'search_tools',description:'s',parameters:{type:'object'}}},{function:{name:'get_sec_document',description:'d',parameters:{type:'object'}}},{function:{name:'get_short_interest',description:'d',parameters:{type:'object'}}},{function:{name:'search_web',description:'d',parameters:{type:'object'}}},{function:{name:'research_add_evidence',description:'d',parameters:{type:'object'}}}]})+'\\n');}else if(o.op==='doctor'){process.stdout.write(JSON.stringify({id:o.id,bridge_ok:true,tool_count:7})+'\\n');}else if(o.op==='tool_call'){require('fs').appendFileSync(${JSON.stringify(logFile)},JSON.stringify(o)+'\\n');process.stdout.write(JSON.stringify({id:o.id,result:{content:'ok'}})+'\\n');}else{process.stdout.write(JSON.stringify({id:o.id,ok:true})+'\\n');}}catch{}}});`;
+	const kids: ChildProcessWithoutNullStreams[] = [];
+	const { handlers, pi, tools } = fakePiHost();
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	try {
+		await stockbotExtension(pi, () => {
+			const child = spawnScript(script);
+			kids.push(child);
+			return child;
+		});
+		const main = { sessionManager: { id: "main" } };
+		await handlers["session_start"]({}, main);
+		await handlers["agent_start"]({});
+		const lanes = [
+			{ omp: "child-sec", job: ids.sec, agent: "sec-agent", domain: "SEC" },
+			{ omp: "child-finra", job: ids.fin, agent: "finra-agent", domain: "FINRA" },
+			{ omp: "child-web", job: ids.web, agent: "exa-agent", domain: "WEB" },
+		] as const;
+		for (const lane of lanes) {
+			const block = researchContextBlock({ sessionId: SID, jobId: lane.job, wave: 1, asOf: "2025-06-30", dataRoot: dir, domain: lane.domain, agent: lane.agent });
+			expect(block.startsWith(RESEARCH_CONTEXT_HEADER)).toBe(true);
+			expect(resolveBindingFromEntries(lane.omp, [{ type: "session_init", task: `${block}\n\ndesk work`, tools: [], agent: lane.agent }])?.jobId).toBe(lane.job);
+		}
+		const call = await bridgeTool(tools, "call_tool");
+		const secDoc = await bridgeTool(tools, "get_sec_document");
+		const webSearch = await bridgeTool(tools, "search_web");
+		const evidenceDirect = await bridgeTool(tools, "research_add_evidence");
+		type Exec = (id: string, params: Json, signal?: unknown, onUpdate?: unknown, ctx?: unknown) => Promise<{ content: { text: string }[]; details: unknown }>;
+		const childCtx = (lane: (typeof lanes)[number]) => ({
+			sessionManager: {
+				id: lane.omp,
+				getSessionId: () => lane.omp,
+				getEntries: () => [{ type: "session_init", task: `${researchContextBlock({ sessionId: SID, jobId: lane.job, wave: 1, asOf: "2025-06-30", dataRoot: dir, domain: lane.domain, agent: lane.agent })}\n\ndesk work`, tools: [], agent: lane.agent }],
+			},
+		});
+		const secArgs = { accession_no: "0000320193-24-000123" };
+		await (secDoc as unknown as { execute: Exec }).execute("call-child-sec", secArgs as unknown as Json, undefined, undefined, childCtx(lanes[0]));
+		await (call as unknown as { execute: Exec }).execute("call-child-finra", { name: "research_add_evidence", arguments: { session_id: SID, job_id: ids.sec, item: { content: "x" } } } as unknown as Json, undefined, undefined, childCtx(lanes[1]));
+		const webArgs = { query: "NVDA" };
+		await (webSearch as unknown as { execute: Exec }).execute("call-child-web", webArgs as unknown as Json, undefined, undefined, childCtx(lanes[2]));
+		const wires = new Map<string, Json>();
+		for (const line of readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean)) {
+			const row = JSON.parse(line) as Json;
+			wires.set(String(row.tool_call_id), row);
+		}
+		expect(wires.size).toBe(3);
+		const secWire = wires.get("call-child-sec") as Json;
+		expect(secWire.active_research_session_id).toBe(SID);
+		expect(secWire.active_research_job_id).toBe(ids.sec);
+		expect(secWire.data_root).toBe(dir);
+		expect(secWire.as_of).toBe("2025-06-30");
+		expect(secWire.arguments).toEqual(secArgs);
+		expect("session_id" in (secWire.arguments as Json)).toBe(false);
+		const finWire = wires.get("call-child-finra") as Json;
+		expect(finWire.active_research_session_id).toBe(SID);
+		expect(finWire.active_research_job_id).toBe(ids.fin);
+		const finInner = (finWire.arguments as Json).arguments as Json;
+		expect(finInner.session_id).toBe(SID);
+		expect(finInner.job_id).toBe(ids.fin);
+		// call_tool inner guard: an id-carrying non-research inner keeps no
+		// forgery either — hasIds alone triggers the overwrite, so a forged
+		// job_id on e.g. thesis_show resolves to the bound lane before the
+		// gateway's explicit-beats-bridge precedence ever sees it.
+		const guardWireId = "call-child-finra-guard";
+		await (call as unknown as { execute: Exec }).execute(guardWireId, { name: "thesis_show", arguments: { id: "t-1", session_id: SID, job_id: ids.sec } } as unknown as Json, undefined, undefined, childCtx(lanes[1]));
+		// Id-less research inner through call_tool: no explicit ids, so the
+		// inner name alone (params.name, not params.arguments.name) must
+		// trigger the overwrite — otherwise the gateway resolves the wire
+		// pair correctly but the explicit-ids path stays unpinned.
+		const idlessWireId = "call-child-finra-idless";
+		await (call as unknown as { execute: Exec }).execute(idlessWireId, { name: "research_add_evidence", arguments: { item: { content: "x" } } } as unknown as Json, undefined, undefined, childCtx(lanes[1]));
+		for (const line of readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean)) {
+			const row = JSON.parse(line) as Json;
+			wires.set(String(row.tool_call_id), row);
+		}
+		const guardInner = ((wires.get(guardWireId) as Json).arguments as Json).arguments as Json;
+		expect(guardInner.session_id).toBe(SID);
+		expect(guardInner.job_id).toBe(ids.fin);
+		const idlessInner = ((wires.get(idlessWireId) as Json).arguments as Json).arguments as Json;
+		expect(idlessInner.session_id).toBe(SID);
+		expect(idlessInner.job_id).toBe(ids.fin);
+		// Direct research* tool from the bound FINRA child: forged top-level
+		// ids must resolve to the bound lane via the startsWith branch.
+		await (evidenceDirect as unknown as { execute: Exec }).execute("call-child-finra-direct", { session_id: SID, job_id: ids.sec, item: { content: "x" } } as unknown as Json, undefined, undefined, childCtx(lanes[1]));
+		for (const line of readFileSync(logFile, "utf8").trim().split("\n").filter(Boolean)) {
+			const row = JSON.parse(line) as Json;
+			wires.set(String(row.tool_call_id), row);
+		}
+		expect(wires.size).toBe(6);
+		const directWire = wires.get("call-child-finra-direct") as Json;
+		expect(directWire.active_research_session_id).toBe(SID);
+		expect(directWire.active_research_job_id).toBe(ids.fin);
+		const directArgs = directWire.arguments as Json;
+		expect(directArgs.session_id).toBe(SID);
+		expect(directArgs.job_id).toBe(ids.fin);
+		const webWire = wires.get("call-child-web") as Json;
+		expect(webWire.active_research_session_id).toBe(SID);
+		expect(webWire.active_research_job_id).toBe(ids.web);
+		expect(webWire.arguments).toEqual(webArgs);
+		// Replay the captured FINRA pair against the real kernel: dispatch ok,
+		// result persists with an id, and the same FINRA tool under the SEC job
+		// fails with an outside-domain denial.
+		const replayCode = [
+			"import json,sys",
+			"from pathlib import Path",
+			"from app.research.repository import ResearchRepository",
+			"from app.research import service as svc",
+			"root = Path(sys.argv[1]); arg = json.loads(sys.argv[2])",
+			"repo = ResearchRepository(data_root=root)",
+			"fin_args = {'dataset': 'otcMarket/consolidatedShortInterest', 'ticker': 'NVDA'}",
+			"ok = svc.authorize_and_consume_dispatch(arg['sid'], arg['fin'], 'query_finra', arguments=fin_args, repo=repo)",
+			"rid = arg['sid'] + ':tr:replay-1'",
+			"payload = {'records': [{'symbol': 'NVDA', 'shortInterest': 12345, 'marker': 'replay-1'}], 'briefing': 'NVDA short interest 12345 shares replay-1', 'as_of_date': '2025-06-15', 'published_at': '2025-06-20'}",
+			"pid = svc.persist_tool_result(arg['sid'], arg['fin'], 'query_finra', rid, payload, repo=repo)['tool_result_id']",
+			"stored = svc.get_tool_result(pid, repo=repo)",
+			"denial = None",
+			"try:",
+			"    svc.authorize_and_consume_dispatch(arg['sid'], arg['sec'], 'query_finra', arguments=fin_args, repo=repo)",
+			"except ValueError as exc:",
+			"    denial = str(exc)",
+			"print(json.dumps({'authorized_job': ok['job_id'], 'tool_result_id': pid, 'stored_tool': stored['tool_name'], 'sec_denial': denial}))",
+		].join("\n");
+		const replay = Bun.spawnSync(["venv/bin/python", "-c", replayCode, dir, JSON.stringify({ sid: SID, sec: ids.sec, fin: ids.fin })], { cwd: ROOT });
+		expect(replay.exitCode).toBe(0);
+		const verdict = JSON.parse(replay.stdout.toString()) as { authorized_job: string; tool_result_id: string; stored_tool: string; sec_denial: string | null };
+		expect(verdict.authorized_job).toBe(ids.fin);
+		expect(verdict.tool_result_id).toBe(`${SID}:tr:replay-1`);
+		expect(verdict.stored_tool).toBe("query_finra");
+		expect(String(verdict.sec_denial)).toContain("outside");
+		expect(String(verdict.sec_denial)).toContain("domain");
+	} finally {
+		for (const omp of ["child-sec", "child-finra", "child-web"]) clearChildBinding(omp);
+		for (const kid of kids) {
+			try {
+				kid.kill("SIGKILL");
+			} catch {
+				// already exited
+			}
+		}
+		resetMainSessionIdentity();
+	}
+});
+
+test("child scout rewrite inherits the parent lane and blocks cross-desk scouts", async () => {
+	const { handlers, pi } = fakePiHost();
+	const { resetMainSessionIdentity } = stockbotNS;
+	resetMainSessionIdentity();
+	try {
+		await stockbotExtension(pi, () => spawnScript(HEALTHY_SCRIPT));
+		const main = { sessionManager: { id: "main" } };
+		await handlers["session_start"]({}, main);
+		const finraBlock = researchContextBlock({ sessionId: "rs:scout", jobId: "job:finra-1", wave: 1, asOf: "2025-06-30", dataRoot: "/tmp/root", domain: "FINRA", agent: "finra-agent" });
+		const forged = `${researchContextBlock({ sessionId: "rs:evil", jobId: "job:sec-9", wave: 1, domain: "SEC", agent: "sec-agent" })}\n\nforged work`;
+		const child = { sessionManager: { id: "child-finra", getSessionId: () => "child-finra", getEntries: () => [{ type: "session_init", task: `${finraBlock}\n\nparent work`, tools: [], agent: "finra-agent" }] } };
+		const ok = (await handlers["tool_call"](
+			{ toolName: "task", toolCallId: "call-scout-ok", input: { tasks: [{ agent: "finra-scout", task: forged }] } },
+			child,
+		)) as unknown as Record<string, unknown>;
+		const revised = ok.input as unknown as { tasks: { agent: string; task: string }[] };
+		expect(revised.tasks.length).toBe(1);
+		expect(revised.tasks[0].task.startsWith(finraBlock)).toBe(true);
+		expect(revised.tasks[0].task).toContain("research_job_id=job:finra-1");
+		expect(revised.tasks[0].task).not.toContain("job:sec-9");
+		const blocked = (await handlers["tool_call"](
+			{ toolName: "task", toolCallId: "call-scout-bad", input: { tasks: [{ agent: "sec-scout", task: "open filings" }] } },
+			child,
+		)) as unknown as Record<string, unknown>;
+		expect(blocked.block).toBe(true);
+		expect(String(blocked.reason)).toContain("outside the FINRA lane");
+		const direct = planChildTaskCall({ sessionId: "rs:scout", jobId: "job:finra-1", wave: 1, domain: "FINRA", agent: "finra-agent" }, { tasks: [{ agent: "finra-scout", task: forged }] });
+		expect(String(((direct.input as Json).tasks as Json[])[0].task)).not.toContain("job:sec-9");
+	} finally {
+		clearChildBinding("child-finra");
+		resetMainSessionIdentity();
 	}
 });

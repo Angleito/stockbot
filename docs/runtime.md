@@ -21,3 +21,14 @@ Architecture: OMP is the agent runtime, ResearchDirector (`.stockbot/omp/lib/res
 is the research orchestrator, the Python kernel (`app/research/`) is the
 deterministic verifier. Thesis monitoring launches the same OMP path via
 `app/thesis/omp_runner.py`.
+
+`app/research/runner.py` is a deterministic eval harness only (retired live
+loop kept as a test helper): OMP owns orchestration, the kernel owns evidence,
+PIT, freeze, and stages. Production and eval orchestration never call
+`run_live`/`resume_live`.
+
+Live golden (opt-in only, never CI): `bun run verify:hedgefund-live` runs one
+golden scenario through the production OMP path with real SEC/FINRA/Exa
+credentials (`HEDGEFUND_LIVE=1`, `SEC_EDGAR_IDENTITY`, `FINRA_CLIENT_ID` /
+`FINRA_CLIENT_SECRET`, `EXA_ENABLED=1` + `EXA_API_KEY`) and re-exports the
+read-only harness-viewer projection. Without the opt-in flag it exits 2.

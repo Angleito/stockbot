@@ -2520,9 +2520,9 @@ class _LiveRun:
         try:
             empty: dict[str, JSONValue] = {
                 "answer": (
-                    "No PIT-eligible SEC evidence was found; the question cannot be answered "
-                    "from SEC filings within the session scope. Limitations: SEC-only, "
-                    "as_of-filtered corpus."
+                    "No PIT-eligible evidence was found; the question cannot be answered "
+                    "from the allowed sources within the session scope. Limitations: "
+                    "searched-source scope, as_of-filtered corpus."
                 ),
                 "freeze_id": "",
                 "claims": [],

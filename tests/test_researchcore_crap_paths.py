@@ -2483,9 +2483,13 @@ def test_next_wave_low_gain() -> None:
 
 
 def test_next_wave_not_actionable() -> None:
+    # Director is policy-unaware: SEC|FINRA|WEB are actionable here; the service
+    # post-check fails closed per session source_policy (see test_hf_gate_*).
     deps, _ = _deps()
-    w1 = _w1_with([_req(domain="WEB")])
+    w1 = _w1_with([_req(domain="PIGEON")])
     assert decide_next_wave(w1, deps=deps).stop_reason == "not_actionable"
+    w2 = _w1_with([_req(domain="WEB")])
+    assert decide_next_wave(w2, deps=deps).stop_reason == "continue"
 
 
 def test_next_wave_continue_picks_best() -> None:
