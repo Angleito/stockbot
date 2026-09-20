@@ -1,24 +1,20 @@
+import { createHash } from "node:crypto";
 import type { Evidence } from "./types";
-
-let counter = 0;
-
-export function resetEvidenceIds(): void {
-  counter = 0;
-}
 
 export function makeEvidence(
   source: string,
   content: string,
   opts?: { title?: string; url?: string },
 ): Evidence {
-  counter += 1;
+  const body = content.slice(0, 8000);
+  const id = `ev:${createHash("sha256").update(body).digest("hex").slice(0, 16)}`;
   return {
-    id: `E${counter}`,
+    id,
     source,
     title: opts?.title,
     url: opts?.url,
     retrievedAt: new Date().toISOString(),
-    content,
+    content: body,
   };
 }
 

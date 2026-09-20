@@ -5,9 +5,9 @@ export function AgentConsole({ events, reasoning }: { events: AgentEvent[]; reas
   let answer = "";
   for (const e of events) if (e.type === "answer_delta") answer += e.text;
   const head = events.filter(
-    (e) => e.type !== "answer_delta" && e.type !== "done" && e.type !== "error" && e.type !== "reasoning_start",
+    (e) => e.type !== "answer_delta" && e.type !== "done" && e.type !== "error" && e.type !== "failed" && e.type !== "reasoning_start",
   );
-  const tail = events.filter((e) => e.type === "done" || e.type === "error");
+  const tail = events.filter((e) => e.type === "done" || e.type === "error" || e.type === "failed");
   const streaming = reasoning && tail.length === 0;
   return (
     <div className="flex-1 space-y-2 overflow-y-auto px-4 py-4 text-sm">

@@ -1,7 +1,7 @@
 import { spawn, type ChildProcessWithoutNullStreams } from "node:child_process";
 import { randomUUID } from "node:crypto";
 import { makeEvidence } from "../agent/evidence";
-import type { ToolResult } from "../agent/types";
+import type { FailureCategory, ToolResult } from "../agent/types";
 
 const ROOT = process.cwd().endsWith("needle-harness")
   ? process.cwd().replace(/\/needle-harness$/, "")
@@ -9,9 +9,10 @@ const ROOT = process.cwd().endsWith("needle-harness")
 const BRIDGE_CMD = `${ROOT}/venv/bin/python`;
 const BRIDGE_ARGS = [`${ROOT}/scripts/tool_bridge.py`];
 
+export type BridgeResultMeta = { source_handle?: unknown; source_refs?: unknown };
 export type BridgeReply = {
   id?: unknown;
-  result?: { content?: unknown; error?: unknown };
+  result?: { content?: unknown; error?: unknown; error_type?: unknown; meta?: BridgeResultMeta };
   error?: unknown;
 };
 
@@ -116,24 +117,71 @@ class StockbotBridge {
 }
 
 const bridge = new StockbotBridge();
+// ponytail: keyword ladder over verbatim kernel/gateway text; bridge error_type wins when known. Add branches for new distinct refusals, never collapse to one string.
+function categorizeFailure(message: string, errorType?: unknown): { category: FailureCategory; retryable: boolean } {
+  if (errorType === "deadline_exceeded") return { category: "deadline_exceeded", retryable: false };
+  if (errorType === "run_budget_exceeded") return { category: "tool_budget_exhausted", retryable: false };
+  if (errorType === "evidence_budget_exceeded") return { category: "token_budget_exhausted", retryable: false };
+  if (errorType === "invalid_research_context") return { category: "policy_denied", retryable: false };
+  const low = message.toLowerCase();
+  if (low.includes("research_loop_detected") || low.includes("repeats an action") || low.includes("already ran"))
+    return { category: "research_loop_detected", retryable: false };
+  if (low.includes("duplicate")) return { category: "duplicate_research_action", retryable: false };
+  if (low.includes("budget") || low.includes("quota")) {
+    if (low.includes("token")) return { category: "token_budget_exhausted", retryable: false };
+    if (low.includes("job")) return { category: "job_budget_exhausted", retryable: false };
+    if (low.includes("wave")) return { category: "wave_budget_exhausted", retryable: false };
+    return { category: "tool_budget_exhausted", retryable: false };
+  }
+  if (low.includes("deadline")) return { category: "deadline_exceeded", retryable: false };
+  if (low.includes("timeout") || low.includes("timed out") || low.includes("timed_out") || low.includes("expired"))
+    return { category: "timeout", retryable: true };
+  if (
+    low.includes("policy") ||
+    low.includes("denied") ||
+    low.includes("not permitted") ||
+    low.includes("not authorized") ||
+    low.includes("blocked") ||
+    low.includes("intent") ||
+    low.includes("private") ||
+    low.includes("egress") ||
+    low.includes("withheld")
+  )
+    return { category: "policy_denied", retryable: false };
+  if (low.includes("provider")) return { category: "provider_error", retryable: true };
+  return { category: "tool_error", retryable: false };
+}
 
 export async function invoke(name: string, args: Record<string, unknown>, sessionId: string): Promise<ToolResult> {
-  const msg = await bridge.call({ op: "tool.invoke", name, arguments: args, session_id: sessionId });
+  let msg: BridgeReply;
+  try {
+    msg = await bridge.call({ op: "tool.invoke", name, arguments: args, session_id: sessionId });
+  } catch (err) {
+    const error = err instanceof Error ? err.message : String(err);
+    return { ok: false, error, ...categorizeFailure(error) };
+  }
+  const errType = msg.result != null && typeof msg.result === "object" ? msg.result.error_type : undefined;
   if (msg.result && typeof msg.result === "object" && typeof msg.result.error === "string" && msg.result.error) {
-    return { ok: false, error: msg.result.error };
+    const error = msg.result.error;
+    return { ok: false, error, ...categorizeFailure(error, errType) };
   }
   if (msg.error !== undefined && msg.error !== null && msg.error !== "") {
-    return { ok: false, error: typeof msg.error === "string" ? msg.error : JSON.stringify(msg.error) };
+    const error = typeof msg.error === "string" ? msg.error : JSON.stringify(msg.error);
+    return { ok: false, error, ...categorizeFailure(error) };
   }
   const result = msg.result ?? {};
   const content =
     "content" in result && typeof result.content === "string"
-      ? result.content
+      ? result.content.slice(0, 8000)
       : JSON.stringify("content" in result ? result.content ?? result : result).slice(0, 8000);
-  return {
-    ok: true,
-    evidence: makeEvidence(name, content.slice(0, 8000), { title: name }),
-  };
+  const evidence = makeEvidence(name, content.slice(0, 8000), { title: name });
+  const meta = result.meta;
+  if (meta != null && typeof meta === "object" && ("source_refs" in meta || "source_handle" in meta)) {
+    const sourceRefs = "source_refs" in meta ? (meta as BridgeResultMeta).source_refs : undefined;
+    const sourceHandle = "source_handle" in meta ? (meta as BridgeResultMeta).source_handle : undefined;
+    evidence.handle = JSON.stringify({ source_handle: sourceHandle, source_refs: sourceRefs }).slice(0, 2000);
+  }
+  return { ok: true, evidence };
 }
 
 export async function endSession(sessionId: string): Promise<void> {

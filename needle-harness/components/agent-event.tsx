@@ -59,5 +59,9 @@ export function AgentEventView({ event }: { event: AgentEvent }) {
     }
     case "error":
       return <div className="text-red-400">✗ {event.message}</div>;
+    case "tool_failed":
+      return <div className="pl-4 text-zinc-500">├─ {event.tool} / ✗ {event.category} — {event.preview}</div>;
+    case "failed":
+      return <div className="text-red-400">✗ {event.category}: {event.message}</div>;
   }
 }

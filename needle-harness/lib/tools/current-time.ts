@@ -13,7 +13,7 @@ export const get_current_time: Tool = {
         }),
       };
     } catch (e) {
-      return { ok: false, error: String(e) };
+      return { ok: false as const, error: String(e), category: "tool_error" as const, retryable: false };
     }
   },
 };
