@@ -46,10 +46,12 @@ now = datetime.now(timezone.utc).strftime("%a %Y-%m-%d")
 weights = resolve_weights()
 kwargs = {
     "tools": TOOLS,
+    # Binding args-only rule lives per-request in _arguments_prompt (kernel path); shared system stays legacy until loop.ts cutover removes start/step.
     "system": (
         f"date: {now} UTC; locale: en-US; "
-        "Args-only execution worker: the caller names exactly one tool; call it once "
-        "with grounded arguments or return an error. Never select, chain, or judge sufficiency."
+        "Route retrieval only: call a tool only with entities/terms from the request or prior results. "
+        "SEC questions: prefer find_sec_entities then search_sec_filings then get_sec_document chains. "
+        "Return no call when evidence suffices."
     ),
     "buffer_size": 65536,
 }

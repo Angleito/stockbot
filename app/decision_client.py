@@ -53,6 +53,10 @@ _SENTINEL_DESCRIPTIONS = {
     REASON_SENTINEL: "Escalate to the reasoner (decompose/analyze proposals); no tool call fits this node.",
     RESOLVED_SENTINEL: "Existing evidence resolves the node; no further tool call needed.",
 }
+# Opt-in parallel fan-out: runner-up joins only when close to the winner and above floor (cap keeps blast radius small).
+_PARALLEL_MIN_PROB = 0.35
+_PARALLEL_WINDOW = 0.15
+_PARALLEL_CAP = 3
 
 # Mirror of decision/jev.ts EVIDENCE_STATE_OPTIONS (choice labels are the contract).
 EVIDENCE_STATE_OPTIONS = {
@@ -769,10 +773,22 @@ class JevClient:
         else:
             if winner not in set_of_registry:
                 raise ValueError(f"decide: tool_selection winner {winner!r} not in registry")
+            winner_prob = probabilities.get(winner, 0.0)
+            ranked = sorted(
+                (
+                    t
+                    for t in set_of_registry
+                    if probabilities.get(t, 0.0) >= _PARALLEL_MIN_PROB
+                    and probabilities.get(t, 0.0) >= winner_prob - _PARALLEL_WINDOW
+                ),
+                key=lambda t: probabilities.get(t, 0.0),
+                reverse=True,
+            )[:_PARALLEL_CAP]
+            names = (winner, *(t for t in ranked if t != winner))[:_PARALLEL_CAP]
             out = ToolDecision(
                 action="invoke",
                 tool_name=winner,
-                tool_names=(winner,),
+                tool_names=names,
                 probabilities=probabilities,
                 confidence=confidence,
             )
