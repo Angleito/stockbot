@@ -152,362 +152,137 @@ def test_unparseable_schedule_yields_no_records():
     )
 
 
-def test_store_queries_both_ownership_directions(tmp_path: Path) -> None:
-    from app.sec.store import query_beneficial_ownership, store_beneficial_ownership
+def test_live_ownership_per_accession(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    from app.sec.models import Filing
+    from app.sec.store import query_beneficial_ownership
 
-    assert (
-        store_beneficial_ownership(
-            {
-                "accession": "0000000000-25-000013",
-                "form": "SC 13D",
-                "subject_cik": 320193,
-                "subject_name": "Subject Co",
-                "filer_cik": 999001,
-                "filer_name": "Owner LP",
-                "shares": 5000000,
-                "percent": 6.2,
-                "known_at": "2024-03-10",
-            },
-            root=tmp_path,
-        )
-        == 1
+    assert query_beneficial_ownership(subject_cik=320193, root=tmp_path) == []
+    assert query_beneficial_ownership(root=tmp_path) == []
+    sched = _schedule([_Person("999001", "Owner LP", agg=5000000, pct=6.2)], purpose="control")
+    sched.issuer_info = SimpleNamespace(cik="320193", name="Subject Co")
+    filing = Filing(
+        form="SC 13D",
+        accession_no="ACC-13D",
+        filed_at="2024-03-10",
+        filer_cik=999001,
+        filer_name="Owner LP",
+        accepted_at=None,
+        known_at="2024-03-10T00:00:00Z",
+        report_period=None,
+        primary_document="primary",
+        is_amendment=False,
+        amendment_of=None,
+        source="http://x",
     )
-    by_subject = query_beneficial_ownership(subject_cik=320193, root=tmp_path)
-    assert [r["filer_cik"] for r in by_subject] == ["999001"]
-    assert by_subject[0]["subject_name"] == "Subject Co"
-    by_owner = query_beneficial_ownership(owner_cik=999001, root=tmp_path)
-    assert [r["subject_cik"] for r in by_owner] == ["320193"]
+
+    import app.sec.store as sec_store_mod
+
+    def _fake_meta(accession: str, as_of: str | None = None) -> Filing:
+        if accession == "ACC-13D":
+            return filing
+        raise ValueError(f"unknown accession {accession!r}")
+
+    def _fake_load(accession_no: str) -> SimpleNamespace:
+        assert accession_no == "ACC-13D"
+        return sched
+
+    monkeypatch.setattr(sec_store_mod, "_gateway_get_filing", _fake_meta)
+    monkeypatch.setattr(ownership, "load_schedule", _fake_load)
+    rows = query_beneficial_ownership(accession="ACC-13D", root=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["filer_cik"] == "999001"
+    assert rows[0]["subject_cik"] == "320193"
+    assert rows[0]["subject_name"] == "Subject Co"
     # Filer and subject never share a fallback identity.
-    assert by_owner[0]["filer_cik"] != by_owner[0]["subject_cik"]
+    assert rows[0]["filer_cik"] != rows[0]["subject_cik"]
 
-
-def test_store_queries_13f_both_directions(tmp_path: Path) -> None:
-    from app.sec.store import query_13f_holdings, store_13f_holding
-
-    assert (
-        store_13f_holding(
-            {
-                "accession": "0000000000-25-000014",
-                "form": "13F-HR",
-                "manager_cik": 103567,
-                "manager_name": "Sample Manager LLC",
-                "issuer_name": "Sample Issuer Inc",
-                "class_title": "COM",
-                "cusip": "594918104",
-                "shares": 1000,
-                "value": 50000,
-                "known_at": "2024-02-14",
-                "source_row": 1,
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    by_manager = query_13f_holdings(manager_cik=103567, root=tmp_path)
-    assert by_manager[0]["cusip"] == "594918104"
-    by_security = query_13f_holdings(security="594918104", root=tmp_path)
-    assert [r["manager_cik"] for r in by_security] == ["103567"]
-
-
-def test_13f_former_name_validity_and_as_of(tmp_path: Path) -> None:
-    from app.sec.store import (
-        query_13f_holdings_for_issuer,
-        query_13f_issuer_candidates,
-        store_13f_holding,
-    )
-    from app.storage import parquet as _pq
-
-    now = "2024-06-01T00:00:00Z"
-    _pq.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": "sec:cik:0000000009",
-                "name": "New Co",
-                "entity_type": "company",
-                "sic": None,
-                "source": "sec-submissions",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    _pq.write_rows(
-        "entity_aliases",
-        [
-            {
-                "alias_type": "former_name",
-                "alias_value": "Old Co",
-                "entity_id": "sec:cik:0000000009",
-                "security_id": None,
-                "source": "sec-submissions",
-                "valid_from": "2020-01-01",
-                "valid_to": "2025-01-01",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    assert (
-        len(query_13f_issuer_candidates("Old Co", report_period="2024-03-31", holding_known_at=None, root=tmp_path))
-        == 1
-    )
-    assert query_13f_issuer_candidates("Old Co", report_period="2026-01-01", holding_known_at=None, root=tmp_path) == []
+def test_13f_cusip_normalizes_live_per_accession(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import insider as _ins
+    from app.sec.models import Filing
+    from app.sec.store import query_13f_holdings
 
-    h = _ins._holding_row_to_record(
-        {"Cusip": "123456789", "Issuer": "Old Co", "ReportPeriod": "2024-03-31"},
+    assert query_13f_holdings(manager_cik=103567, root=tmp_path) == []
+    filing = Filing(
+        form="13F-HR",
+        accession_no="ACC-DASH",
+        filed_at="2024-05-15",
+        filer_cik=103567,
+        filer_name="Sample Manager LLC",
+        accepted_at=None,
+        known_at="2024-05-15T00:00:00Z",
+        report_period="2024-03-31",
+        primary_document="infotable.xml",
+        is_amendment=False,
+        amendment_of=None,
+        source="http://x",
+    )
+
+    import app.sec.documents as sec_docs
+    import app.sec.store as sec_store_mod
+
+    def _fake_meta(accession: str, as_of: str | None = None) -> Filing:
+        if accession == "ACC-DASH":
+            return filing
+        raise ValueError(f"unknown accession {accession!r}")
+
+    monkeypatch.setattr(sec_store_mod, "_gateway_get_filing", _fake_meta)
+    table = [{"Cusip": "0378-33100", "Issuer": "Apple Inc", "ReportPeriod": "2024-03-31", "Class": "COM"}]
+
+    def _fake_edgar(accession: str) -> SimpleNamespace:
+        assert accession == "ACC-DASH"
+        return SimpleNamespace(obj=lambda: SimpleNamespace(infotable=table))
+
+    monkeypatch.setattr(sec_docs, "get_by_accession_number", _fake_edgar)
+    # Dashed input normalizes to canonical on live per-accession resolution.
+    rows = query_13f_holdings(accession="ACC-DASH", root=tmp_path)
+    assert len(rows) == 1
+    assert rows[0]["cusip"] == "037833100"
+    assert rows[0]["security_id"] == "cusip:037833100"
+    # Pure 13F normalization keeps distinct rows and stable ids per filing.
+    base_row = {
+        "Cusip": "037833100",
+        "Issuer": "Apple Inc",
+        "ReportPeriod": "2024-03-31",
+        "Class": "COM",
+        "SharesPrnAmount": 1000,
+        "Value": 50000,
+        "InvestmentDiscretion": "Sole",
+        "OtherManager": "1",
+        "Type": "Shares",
+        "SoleVoting": 1000,
+        "SharedVoting": 0,
+        "NonVoting": 0,
+    }
+    rows_in = [dict(base_row), dict(base_row)]
+    holdings = _ins.normalize_13f_holdings(
+        rows_in,
         manager_name="M",
         manager_cik="5",
-        accession_no="ACC-F",
+        accession_no="ACC-ROWS",
         report_period="2024-03-31",
         filed_at="2024-05-15",
-        document_name="d",
+        document_name="infotable.xml",
         known_at="2024-05-15T00:00:00Z",
-        source_url=None,
-        source_row=1,
     )
-    _ins.observe_13f_security(h, raw_archive_path="/tmp/p", content_hash="hf", retrieved_at=now, root=tmp_path)
-    store_13f_holding(h.to_dict(), root=tmp_path)
-    assert len(query_13f_holdings_for_issuer("sec:cik:0000000009", as_of="2024-06-01", root=tmp_path)) == 1
-    assert query_13f_holdings_for_issuer("sec:cik:0000000009", as_of="2024-01-01", root=tmp_path) == []
-    # Legacy null security_id still maps via CUSIP.
-    store_13f_holding(
-        {
-            "accession": "ACC-LEG",
-            "document_name": "d",
-            "manager_cik": "6",
-            "manager_name": "LM",
-            "report_period": "2024-03-31",
-            "issuer_name": "Old Co",
-            "entity_id": None,
-            "security_id": None,
-            "class_title": "COM",
-            "cusip": "123456789",
-            "filed_at": "2024-05-15",
-            "known_at": "2024-05-15T00:00:00Z",
-            "source_row": 1,
-        },
-        root=tmp_path,
+    assert [h.source_row for h in holdings] == [1, 2]
+    assert [h.shares_prn_type for h in holdings] == ["SH", "SH"]
+    assert len({h.holding_id for h in holdings}) == 2
+    repeat = _ins.normalize_13f_holdings(
+        rows_in,
+        manager_name="M",
+        manager_cik="5",
+        accession_no="ACC-ROWS",
+        report_period="2024-03-31",
+        filed_at="2024-05-15",
+        document_name="infotable.xml",
+        known_at="2024-05-15T00:00:00Z",
     )
-    assert len(query_13f_holdings_for_issuer("sec:cik:0000000009", root=tmp_path)) == 2
+    assert [h.holding_id for h in repeat] == [h.holding_id for h in holdings]
 
 
-def test_13f_cusip_canonical_round_trip(tmp_path: Path) -> None:
-    from app.sec.store import query_13f_holdings, store_13f_holding
-    from app.storage import parquet as _pq
-
-    assert (
-        store_13f_holding(
-            {
-                "accession": "0000000000-25-000020",
-                "manager_cik": 103567,
-                "manager_name": "Sample Manager LLC",
-                "issuer_name": "Apple Inc",
-                "class_title": "COM",
-                "cusip": "0378-33100",
-                "shares": 1000,
-                "value": 50000,
-                "known_at": "2024-02-14",
-                "source_row": 1,
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    by_manager = query_13f_holdings(manager_cik=103567, root=tmp_path)
-    assert by_manager[0]["cusip"] == "037833100"
-    assert [r["cusip"] for r in query_13f_holdings(security="0378-33100", root=tmp_path)] == ["037833100"]
-    # Legacy dashed-stored row is found by normalized input (no migration).
-    _pq.write_rows(
-        "sec_13f_holdings",
-        [
-            {
-                "accession": "0000000000-25-000021",
-                "manager_cik": "103567",
-                "cusip": "0378-33100",
-                "isin": None,
-                "security_id": None,
-                "known_at": "2024-02-14",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    assert len(query_13f_holdings(security="037833100", root=tmp_path)) == 2
-    # Empty-after-strip maps to None, not "".
-    assert (
-        store_13f_holding(
-            {
-                "accession": "0000000000-25-000022",
-                "manager_cik": 103567,
-                "cusip": "- -",
-                "known_at": "2024-02-14",
-                "source_row": 1,
-            },
-            root=tmp_path,
-        )
-        == 1
-    )
-    by_accession = query_13f_holdings(accession="0000000000-25-000022", root=tmp_path)
-    assert by_accession[0]["cusip"] is None
-
-
-def test_13f_issuer_dedupes_legacy_cusip(tmp_path: Path) -> None:
-    from app.sec.store import query_13f_holdings_for_issuer
-    from app.storage import parquet as _pq
-
-    now = "2024-06-01T00:00:00Z"
-    _pq.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": "sec:cik:0000320193",
-                "name": "Apple Inc",
-                "entity_type": "company",
-                "sic": None,
-                "source": "sec-submissions",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    _pq.write_rows(
-        "entity_aliases",
-        [
-            {
-                "alias_type": "cusip",
-                "alias_value": "037833100",
-                "entity_id": "sec:cik:0000320193",
-                "security_id": "cusip:037833100",
-                "source": "sec-13f",
-                "valid_from": "2024-01-01",
-                "valid_to": "2025-01-01",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "sec-13f-security-v1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    base = {
-        "accession": "ACC-DUP",
-        "manager_cik": "5",
-        "manager_name": "M",
-        "issuer_name": "Apple Inc",
-        "report_period": "2024-03-31",
-        "class_title": "COM",
-        "filed_at": "2024-05-15",
-        "known_at": "2024-05-15T00:00:00Z",
-    }
-    _pq.write_rows(
-        "sec_13f_holdings",
-        [
-            {
-                **base,
-                "cusip": "037833100",
-                "isin": None,
-                "security_id": None,
-                "entity_id": None,
-                "source_row": None,
-                "holding_id": None,
-            },
-            {
-                **base,
-                "cusip": "0378-33100",
-                "isin": None,
-                "security_id": None,
-                "entity_id": None,
-                "source_row": None,
-                "holding_id": None,
-            },
-            {
-                **base,
-                "cusip": "0378-33100",
-                "isin": None,
-                "security_id": None,
-                "entity_id": None,
-                "shares": 999,
-                "source_row": None,
-                "holding_id": None,
-            },
-            {
-                **base,
-                "cusip": "037833100",
-                "isin": None,
-                "security_id": None,
-                "entity_id": None,
-                "voting": "sole=1000",
-                "source_row": None,
-                "holding_id": None,
-            },
-        ],
-        root=tmp_path / "parquet",
-    )
-    rows = query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path)
-    assert len(rows) == 3
-    assert all("_rn" not in r for r in rows)
-    by_key = {(r.get("shares"), r.get("voting")): r for r in rows}
-    assert by_key[(None, None)]["cusip"] == "037833100"
-    assert by_key[(999.0, None)]["cusip"] == "0378-33100"
-    assert (None, "sole=1000") in by_key
-
-
-def test_13f_distinct_rows_survive_shared_filing(tmp_path: Path) -> None:
+def test_13f_shared_filing_rows_normalize_distinctly() -> None:
     from app.sec import insider as _ins
-    from app.sec.store import (
-        query_13f_holdings,
-        query_13f_holdings_for_issuer,
-        store_13f_holding,
-    )
-    from app.storage import parquet as _pq
 
-    now = "2024-06-01T00:00:00Z"
-    _pq.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": "sec:cik:0000320193",
-                "name": "Apple Inc",
-                "entity_type": "company",
-                "sic": None,
-                "source": "sec-submissions",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    _pq.write_rows(
-        "entity_aliases",
-        [
-            {
-                "alias_type": "cusip",
-                "alias_value": "037833100",
-                "entity_id": "sec:cik:0000320193",
-                "security_id": "cusip:037833100",
-                "source": "sec-13f",
-                "valid_from": "2024-01-01",
-                "valid_to": "2025-01-01",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "sec-13f-security-v1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
     base_row = {
         "Cusip": "037833100",
         "Issuer": "Apple Inc",
@@ -559,28 +334,8 @@ def test_13f_distinct_rows_survive_shared_filing(tmp_path: Path) -> None:
         known_at="2024-05-15T00:00:00Z",
     )
     assert [h.holding_id for h in repeat] == holding_ids
-    dicts = []
-    for h in holdings:
-        d = h.to_dict()
-        d["content_hash"] = "shared-filing-hash"
-        dicts.append(d)
-    assert [store_13f_holding(d, root=tmp_path) for d in dicts] == [1, 1, 1]
-    assert [store_13f_holding(d, root=tmp_path) for d in dicts] == [0, 0, 0]
 
-    def _by_source_row(row: dict[str, object]) -> int:
-        source_row = row["source_row"]
-        assert isinstance(source_row, int)
-        return source_row
 
-    direct = sorted(query_13f_holdings(manager_cik="5", root=tmp_path), key=_by_source_row)
-    assert [r["shares_prn_type"] for r in direct] == ["SH", "SH", "PRN"]
-    governed = sorted(query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path), key=_by_source_row)
-    assert all("_rn" not in r for r in governed)
-    # Rows 1-2 are one logical holding (differ only by source_row) and dedupe;
-    # the shares/value/voting-distinct third row survives.
-    assert len(governed) == 2
-    assert governed[-1]["source_row"] == 3
-    assert governed[0]["source_row"] in (1, 2)
 
 
 @pytest.mark.parametrize(
@@ -603,120 +358,20 @@ def test_cusip_contract(raw: str | None, expected: str | None) -> None:
     assert cusip_security_id("---") is None
 
 
-def test_13f_cusip_form_insensitive_dedup(tmp_path: Path) -> None:
-    from app.sec.store import query_13f_holdings, store_13f_holding
-    from app.storage import parquet as _pq
+def test_empty_cusip_is_none() -> None:
+    from app.sec import insider as _ins
 
-    base = {
-        "accession": "ACC-DEDUP",
-        "manager_cik": "5",
-        "manager_name": "M",
-        "issuer_name": "Apple Inc",
-        "report_period": "2024-03-31",
-        "class_title": "COM",
-        "filed_at": "2024-05-15",
-        "known_at": "2024-05-15T00:00:00Z",
-        "source_row": 1,
-    }
-    assert store_13f_holding({**base, "cusip": "0378-33100"}, root=tmp_path) == 1
-    assert query_13f_holdings(manager_cik="5", root=tmp_path)[0]["cusip"] == "037833100"
-    assert store_13f_holding({**base, "cusip": "037833100"}, root=tmp_path) == 0
-    assert store_13f_holding({**base, "cusip": " 0378 33100 "}, root=tmp_path) == 0
-    assert _pq.count_rows("sec_13f_holdings", root=tmp_path / "parquet") == 1
-    assert store_13f_holding({**base, "accession": "ACC-EMPTY", "cusip": "---"}, root=tmp_path) == 1
-    assert store_13f_holding({**base, "accession": "ACC-EMPTY2", "cusip": ""}, root=tmp_path) == 1
-    assert query_13f_holdings(accession="ACC-EMPTY", root=tmp_path)[0]["cusip"] is None
-    assert query_13f_holdings(accession="ACC-EMPTY2", root=tmp_path)[0]["cusip"] is None
-
-
-def test_13f_dashed_query_finds_canonical(tmp_path: Path) -> None:
-    from app.sec.store import query_13f_holdings, store_13f_holding
-
-    assert (
-        store_13f_holding(
-            {
-                "accession": "0000000000-25-000030",
-                "manager_cik": 103567,
-                "manager_name": "Sample Manager LLC",
-                "issuer_name": "Apple Inc",
-                "class_title": "COM",
-                "cusip": "037833100",
-                "shares": 1000,
-                "value": 50000,
-                "known_at": "2024-02-14",
-                "source_row": 1,
-            },
-            root=tmp_path,
-        )
-        == 1
+    # Empty-after-strip normalizes to None at the row-record boundary.
+    empty = _ins._holding_row_to_record(
+        {"Cusip": "---", "Issuer": "Apple Inc", "ReportPeriod": "2024-03-31"},
+        manager_name="M",
+        manager_cik="5",
+        accession_no="ACC-EMPTY",
+        report_period="2024-03-31",
+        filed_at="2024-05-15",
+        document_name="d",
+        known_at="2024-05-15T00:00:00Z",
+        source_url=None,
+        source_row=1,
     )
-    assert len(query_13f_holdings(security="0378-33100", root=tmp_path)) == 1
-    assert len(query_13f_holdings(cusip="0378-33100", root=tmp_path)) == 1
-    assert len(query_13f_holdings(security="cusip:037833100", root=tmp_path)) == 1
-
-
-def test_13f_legacy_dashed_row_maps_to_issuer(tmp_path: Path) -> None:
-    from app.sec.store import query_13f_holdings_for_issuer
-    from app.storage import parquet as _pq
-
-    now = "2024-06-01T00:00:00Z"
-    _pq.write_rows(
-        "entities",
-        [
-            {
-                "entity_id": "sec:cik:0000320193",
-                "name": "Apple Inc",
-                "entity_type": "company",
-                "sic": None,
-                "source": "sec-submissions",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    _pq.write_rows(
-        "entity_aliases",
-        [
-            {
-                "alias_type": "cusip",
-                "alias_value": "037833100",
-                "entity_id": "sec:cik:0000320193",
-                "security_id": "cusip:037833100",
-                "source": "sec-13f",
-                "valid_from": "2024-01-01",
-                "valid_to": "2025-01-01",
-                "known_at": "2024-01-01T00:00:00Z",
-                "retrieved_at": now,
-                "content_hash": None,
-                "parser_version": "sec-13f-security-v1",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    # Pre-fix dashed row written direct, bypassing the writer normalizer.
-    _pq.write_rows(
-        "sec_13f_holdings",
-        [
-            {
-                "accession": "ACC-LEGACY",
-                "manager_cik": "5",
-                "manager_name": "M",
-                "report_period": "2024-03-31",
-                "issuer_name": "Apple Inc",
-                "class_title": "COM",
-                "cusip": "0378-33100",
-                "isin": None,
-                "security_id": None,
-                "entity_id": None,
-                "filed_at": "2024-05-15",
-                "known_at": "2024-05-15T00:00:00Z",
-            }
-        ],
-        root=tmp_path / "parquet",
-    )
-    rows = query_13f_holdings_for_issuer("sec:cik:0000320193", root=tmp_path)
-    assert len(rows) == 1
-    assert rows[0]["cusip"] == "0378-33100"
+    assert empty.cusip is None

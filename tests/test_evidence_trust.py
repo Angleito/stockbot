@@ -9,7 +9,6 @@ from app.domain.evidence.source_quality import classify_source
 from app.domain.market.securities import SecurityResolution
 from app.security.context import Integrity
 from app.services.evidence_claims import build_evidence_claims, claim_to_enriched_dict
-from app.storage import parquet
 from app.tools import plan_public_search_queries, suggest_public_search_queries
 
 
@@ -79,17 +78,13 @@ def test_unknown_ticker_unresolved():
     assert c.subject_resolution == ResolutionStatus.UNRESOLVED
 
 
-def test_claim_persist_writes_only_evidence_claims(tmp_path: Path):
-    root = tmp_path / "parquet"
+def test_claim_enriched_dict_shapes_persisted_row(tmp_path: Path):
+    del tmp_path
     (c,) = build_evidence_claims(
         reader_items=[_item("ABC")], resolve=_amb, retrieved_fallback="2026-01-01T00:00:00+00:00"
     )
-    rows = [claim_to_enriched_dict(c)]
-    assert parquet.write_rows("evidence_claims", rows, root=root) == 1
-    assert parquet.write_rows("evidence_claims", rows, root=root) == 0
-    assert parquet.count_rows("evidence_claims", root=root) == 1
-    for other in ("financial_facts", "entities", "entity_aliases", "portfolio_snapshots"):
-        assert parquet.count_rows(other, root=root) == 0
+    d = claim_to_enriched_dict(c)
+    assert d["subject_resolution"] == "ambiguous" and d["reported_ticker"] == "ABC"
 
 
 def test_planner_exposes_no_portfolio_or_snapshot():

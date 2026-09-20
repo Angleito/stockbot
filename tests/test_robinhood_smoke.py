@@ -19,6 +19,7 @@ invoked.
 from __future__ import annotations
 
 import os
+import sqlite3
 from datetime import UTC, datetime
 from pathlib import Path
 
@@ -34,7 +35,6 @@ from app.services.portfolio_sync import (
     read_latest_snapshot,
     sync_robinhood_portfolio,
 )
-from app.storage import parquet
 
 pytestmark = [
     pytest.mark.robinhood_smoke,
@@ -111,20 +111,27 @@ def test_robinhood_smoke_discovery_and_portfolio_sync(tmp_path: Path) -> None:
         position.account_id for position in snapshot.positions
     ]
 
-    for table_name in ("portfolio_snapshots", "portfolio_positions"):
-        table = parquet.read_table(table_name, root=data_root / "parquet")
-        for column in table.column_names:
-            assert not any(part in column.lower() for part in FORBIDDEN_COLUMNS), (
-                f"{table_name}.{column} is a forbidden column"
-            )
-        for account in accounts:
-            raw_account_id = account.account_id
-            assert not any(
-                raw_account_id in str(cell)
-                for column in table.column_names
-                for cell in table.column(column).to_pylist()
+    conn = sqlite3.connect(str(data_root / "portfolio.sqlite"))
+    try:
+        for table_name in ("portfolio_snapshots", "portfolio_positions"):
+            columns = [str(row[1]) for row in conn.execute(f"PRAGMA table_info({table_name})")]
+            assert columns, f"{table_name} was not persisted"
+            for column in columns:
+                assert not any(part in column.lower() for part in FORBIDDEN_COLUMNS), (
+                    f"{table_name}.{column} is a forbidden column"
+                )
+            cells = [
+                str(cell)
+                for row in conn.execute(f"SELECT * FROM {table_name}")
+                for cell in row
                 if cell is not None
-            ), f"persisted {table_name} leaks raw broker account id"
+            ]
+            for account in accounts:
+                assert not any(account.account_id in cell for cell in cells), (
+                    f"persisted {table_name} leaks raw broker account id"
+                )
+    finally:
+        conn.close()
 
     print("Robinhood smoke passed")
     print(f"  accounts: {len(accounts)}")

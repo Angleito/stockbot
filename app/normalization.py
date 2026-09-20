@@ -8,6 +8,10 @@ from __future__ import annotations
 import re
 from datetime import UTC, date, datetime
 
+import pandera.polars as pa
+import polars as pl
+from pandera.typing.polars import Series
+
 from .domain.market import ids
 
 COMPANY_TICKERS_PARSER_VERSION = "sec-company-tickers-v1"
@@ -44,6 +48,159 @@ CANONICAL_CONCEPTS: dict[str, tuple[str, ...]] = {
         "PaymentsOfDividends",
     ),
 }
+
+
+def _is_non_blank(value: object) -> bool:
+    """True for non-blank strings (row values that must carry an ID/key)."""
+    return isinstance(value, str) and bool(value.strip())
+
+
+def _is_parseable_timestamp(value: object) -> bool:
+    """True when a value parses as an ISO-8601 instant (``Z`` accepted)."""
+    if not isinstance(value, str) or not value.strip():
+        return False
+    try:
+        datetime.fromisoformat(value.replace("Z", "+00:00"))
+    except ValueError:
+        return False
+    return True
+
+
+def _validate(rows: list[dict[str, object]], model: type[pa.DataFrameModel]) -> None:
+    """Validate one normalized dataset's rows; empty is valid, else raises."""
+    if rows:
+        model.validate(pl.from_dicts(rows, strict=False))
+
+
+class FinancialFactsFrame(pa.DataFrameModel):
+    """Boundary shape for ``financial_facts`` rows."""
+
+    fact_id: Series[str] = pa.Field(nullable=False)
+    known_at: Series[str] = pa.Field(nullable=False)
+    retrieved_at: Series[str] = pa.Field(nullable=False)
+    content_hash: Series[str] = pa.Field(nullable=False)
+    source_url: Series[str] = pa.Field(nullable=False)
+    source_record_id: Series[str] = pa.Field(nullable=False)
+    class Config:  # pyrefly: ignore[bad-override] - canonical pandera DataFrameModel Config pattern
+        strict = False
+        coerce = True
+
+    @pa.check("fact_id", "known_at", "retrieved_at", "content_hash", "source_url", "source_record_id",
+              element_wise=True)
+    def _non_blank(cls, value: object) -> bool:
+        return _is_non_blank(value)
+
+    @pa.check("known_at", "retrieved_at", element_wise=True)
+    def _timestamp(cls, value: object) -> bool:
+        return _is_parseable_timestamp(value)
+
+
+class ShortInterestFrame(pa.DataFrameModel):
+    """Boundary shape for ``short_interest`` rows."""
+
+    row_id: Series[str] = pa.Field(nullable=False)
+    known_at: Series[str] = pa.Field(nullable=False)
+    retrieved_at: Series[str] = pa.Field(nullable=False)
+    content_hash: Series[str] = pa.Field(nullable=False)
+    source_url: Series[str] = pa.Field(nullable=False)
+    source_record_id: Series[str] = pa.Field(nullable=False)
+    class Config:  # pyrefly: ignore[bad-override] - canonical pandera DataFrameModel Config pattern
+        strict = False
+        coerce = True
+
+    @pa.check("row_id", "known_at", "retrieved_at", "content_hash", "source_url", "source_record_id",
+              element_wise=True)
+    def _non_blank(cls, value: object) -> bool:
+        return _is_non_blank(value)
+
+    @pa.check("known_at", "retrieved_at", element_wise=True)
+    def _timestamp(cls, value: object) -> bool:
+        return _is_parseable_timestamp(value)
+
+
+class DividendEventsFrame(pa.DataFrameModel):
+    """Boundary shape for ``dividend_events`` rows."""
+
+    dividend_event_id: Series[str] = pa.Field(nullable=False)
+    known_at: Series[str] = pa.Field(nullable=False)
+    content_hash: Series[str] = pa.Field(nullable=False)
+    source_url: Series[str] = pa.Field(nullable=False)
+    class Config:  # pyrefly: ignore[bad-override] - canonical pandera DataFrameModel Config pattern
+        strict = False
+        coerce = True
+
+    @pa.check("dividend_event_id", "known_at", "content_hash", "source_url", element_wise=True)
+    def _non_blank(cls, value: object) -> bool:
+        return _is_non_blank(value)
+
+    @pa.check("known_at", element_wise=True)
+    def _timestamp(cls, value: object) -> bool:
+        return _is_parseable_timestamp(value)
+
+
+class EntityFrame(pa.DataFrameModel):
+    """Boundary shape for ``entities`` rows."""
+
+    entity_id: Series[str] = pa.Field(nullable=False)
+    known_at: Series[str] = pa.Field(nullable=False)
+    retrieved_at: Series[str] = pa.Field(nullable=False)
+    content_hash: Series[str] = pa.Field(nullable=False)
+    class Config:  # pyrefly: ignore[bad-override] - canonical pandera DataFrameModel Config pattern
+        strict = False
+        coerce = True
+
+    @pa.check("entity_id", "known_at", "retrieved_at", "content_hash", element_wise=True)
+    def _non_blank(cls, value: object) -> bool:
+        return _is_non_blank(value)
+
+    @pa.check("known_at", "retrieved_at", element_wise=True)
+    def _timestamp(cls, value: object) -> bool:
+        return _is_parseable_timestamp(value)
+
+
+class AliasFrame(pa.DataFrameModel):
+    """Boundary shape for ``entity_aliases`` rows."""
+
+    alias_type: Series[str] = pa.Field(nullable=False)
+    alias_value: Series[str] = pa.Field(nullable=False)
+    entity_id: Series[str] = pa.Field(nullable=False)
+    source: Series[str] = pa.Field(nullable=False)
+    valid_from: Series[str] = pa.Field(nullable=True)
+    known_at: Series[str] = pa.Field(nullable=False)
+    retrieved_at: Series[str] = pa.Field(nullable=False)
+    content_hash: Series[str] = pa.Field(nullable=False)
+    class Config:  # pyrefly: ignore[bad-override] - canonical pandera DataFrameModel Config pattern
+        strict = False
+        coerce = True
+
+    @pa.check("alias_type", "alias_value", "entity_id", "source", "known_at", "retrieved_at", "content_hash",
+              element_wise=True)
+    def _non_blank(cls, value: object) -> bool:
+        return _is_non_blank(value)
+
+    @pa.check("known_at", "retrieved_at", element_wise=True)
+    def _timestamp(cls, value: object) -> bool:
+        return _is_parseable_timestamp(value)
+
+
+class SecurityFrame(pa.DataFrameModel):
+    """Boundary shape for ``securities`` rows."""
+
+    security_id: Series[str] = pa.Field(nullable=False)
+    known_at: Series[str] = pa.Field(nullable=False)
+    retrieved_at: Series[str] = pa.Field(nullable=False)
+    content_hash: Series[str] = pa.Field(nullable=False)
+    class Config:  # pyrefly: ignore[bad-override] - canonical pandera DataFrameModel Config pattern
+        strict = False
+        coerce = True
+
+    @pa.check("security_id", "known_at", "retrieved_at", "content_hash", element_wise=True)
+    def _non_blank(cls, value: object) -> bool:
+        return _is_non_blank(value)
+
+    @pa.check("known_at", "retrieved_at", element_wise=True)
+    def _timestamp(cls, value: object) -> bool:
+        return _is_parseable_timestamp(value)
 
 
 def _ticker_values(raw: object) -> list[object]:
@@ -115,6 +272,8 @@ def normalize_sec_tickers(raw: object, *, retrieved_at: str, content_hash: str) 
         entity_row, alias_row = _ticker_rows(item, ticker, cik, retrieved_at, content_hash)
         entities.append(entity_row)
         aliases.append(alias_row)
+    _validate(entities, EntityFrame)
+    _validate(aliases, AliasFrame)
     return {"entities": entities, "entity_aliases": aliases}
 
 
@@ -946,6 +1105,9 @@ def normalize_sec_company_facts(
         content_hash=content_hash,
     )
     securities = [_company_security(security_id, entity_id, financial_facts, known, retrieved_at, content_hash)]
+    _validate(financial_facts, FinancialFactsFrame)
+    _validate(dividend_events, DividendEventsFrame)
+    _validate(securities, SecurityFrame)
     return {
         "documents": documents,
         "financial_facts": financial_facts,
@@ -1065,14 +1227,66 @@ def normalize_finra_short_interest(
 ) -> dict[str, list[dict[str, object]]]:
     if known_at:
         _check_finra_known_at(settlement_date, retrieved_at, known_at)
-    short_interest: list[dict[str, object]] = []
-    for row in rows:
-        if not isinstance(row, dict):
-            continue
-        symbol = _finra_symbol(row)
-        if symbol is None:
-            continue
-        short_interest.append(
-            _finra_row(settlement_date, retrieved_at, known_at, content_hash, source_url, source_record_id, row, symbol)
+    dict_rows = [row for row in rows if isinstance(row, dict)]
+    if not dict_rows:
+        return {"short_interest": []}
+    # Object holder: source cells mix ints, floats, strings, and bytes, which
+    # have no common supertype for pl.from_dicts. Row-wise helpers stay the
+    # single home of per-cell semantics; Polars owns the projection only.
+    frame = pl.DataFrame({"_row": pl.Series("_row", dict_rows, dtype=pl.Object)})
+    short_interest: list[dict[str, object]] = (
+        frame.with_columns(
+            pl.col("_row").map_elements(_finra_symbol, return_dtype=pl.String).alias("symbol_code"),
+            pl.col("_row")
+            .map_elements(lambda row: str(row.get("issueName") or "").strip() or None, return_dtype=pl.String)
+            .alias("issue_name"),
+            pl.col("_row").map_elements(_finra_short_position, return_dtype=pl.Float64).alias("short_position"),
+            pl.col("_row")
+            .map_elements(lambda row: _to_float(row.get("previousShortPositionQuantity")), return_dtype=pl.Float64)
+            .alias("prev_position"),
+            pl.col("_row")
+            .map_elements(lambda row: _to_float(row.get("averageDailyVolumeQuantity")), return_dtype=pl.Float64)
+            .alias("avg_daily_volume"),
+            pl.col("_row")
+            .map_elements(lambda row: _to_float(row.get("daysToCoverQuantity")), return_dtype=pl.Float64)
+            .alias("days_to_cover"),
         )
+        .filter(pl.col("symbol_code").is_not_null())
+        .with_columns(
+            pl.concat_str(
+                [pl.lit(f"finra:row:{settlement_date}:"), pl.col("symbol_code"), pl.lit(f":{content_hash[:12]}")]
+            ).alias("row_id"),
+            pl.concat_str([pl.lit("finra:symbol:"), pl.col("symbol_code")]).alias("entity_id"),
+            pl.lit(None, dtype=pl.String).alias("security_id"),
+            pl.lit(settlement_date).alias("settlement_date"),
+            pl.lit(source_url).alias("source_url"),
+            pl.lit(source_record_id).alias("source_record_id"),
+            # Explicit publication date wins when provided; otherwise retrieved_at
+            # is the conservative known_at (no FINRA calendar lookup in-repo).
+            pl.lit(known_at if known_at else retrieved_at).alias("known_at"),
+            pl.lit(retrieved_at).alias("retrieved_at"),
+            pl.lit(content_hash).alias("content_hash"),
+            pl.lit(SHORT_INTEREST_PARSER_VERSION).alias("parser_version"),
+        )
+        .select(
+            "row_id",
+            "entity_id",
+            "security_id",
+            "symbol_code",
+            "issue_name",
+            "settlement_date",
+            "short_position",
+            "prev_position",
+            "avg_daily_volume",
+            "days_to_cover",
+            "source_url",
+            "source_record_id",
+            "known_at",
+            "retrieved_at",
+            "content_hash",
+            "parser_version",
+        )
+        .to_dicts()
+    )
+    _validate(short_interest, ShortInterestFrame)
     return {"short_interest": short_interest}

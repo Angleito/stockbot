@@ -3,7 +3,7 @@
 Covers decision paths (auth/budget/routing/parsing/error-fallback) for:
 app/pi_gateway.py, app/research/service.py, app/research/repository.py,
 app/research/jobs.py, app/research/director.py, app/research/agents/**,
-app/services/**, app/storage/runs.py, app/storage/parquet.py,
+app/services/**, app/storage/runs.py,
 app/domain/**, app/analytics/**, app/tools.py, app/research/runner.py.
 Plain pytest, tmp_path DBs, fakes for models/dispatch.
 """
@@ -85,18 +85,15 @@ from app.services import research_data, sec_facts
 from app.services.account_identity import local_account_id
 from app.services.dividend_analysis import cadence_from_events, lifecycle_from_events
 from app.services.evidence_claims import build_evidence_claims
-from app.services.evidence_resolution import resolve_subject, warehouse_name_to_ticker
+from app.services.evidence_resolution import resolve_subject
 from app.services.herdr_client import HerdrClient, WorkerMap
 from app.services.portfolio_sync import persist_snapshot, read_latest_snapshot
 from app.services.research_data import (
-    _short_interest_has_legacy_v1,
-    backfill_finra_known_at,
     prepare_short_interest_data,
     refresh_finra_short_interest,
     refresh_sec_tickers,
 )
 from app.services.sec_facts import DividendEventRow, FinancialFactRow
-from app.storage import parquet
 from app.storage import runs as runs_mod
 from app.storage.runs import RunRecorder, get_runs_db_path
 from app.thesis.models import Thesis
@@ -824,27 +821,68 @@ def test_materialize_sec_passage_fails_closed_per_handle_defect() -> None:
     materialized = materialize_sec_passage(handle, "Data   center revenue grew 142% year over year")
     # The stored text is the archive's slice of the cited span, not the locator string.
     cited = "Data center revenue grew 142% year over year"
-    assert materialized["passage"] == cited and materialized["basis"] == "rendered"
-    assert (materialized["offset"], materialized["end"]) == (0, len(cited))
-    assert materialized["text_hash"] == handle["text_hash"]
+    assert materialized.provenance["passage"] == cited and materialized.provenance["basis"] == "rendered"
+    assert (materialized.provenance["offset"], materialized.provenance["end"]) == (0, len(cited))
+    assert materialized.provenance["text_hash"] == handle["text_hash"]
     # Malformed locators are deliberately outside the handle type; getattr keeps the
     # checker green without an escape hatch (those are forbidden in this tree).
     call_untyped = getattr(svc, "materialize_sec_passage")  # noqa: B009 - malformed-input contract; getattr keeps checker green
+    tampered_source = {**handle, "source_content_hash": "f" * 64}
+    legacy_content = {**handle, "content_hash": "f" * 64}
+    missing_source = {k: v for k, v in handle.items() if k != "source_content_hash"}
     for defect, code in (
         (None, "ERR_SEC_HANDLE_INVALID"),
         ({**handle, "basis": "guessed"}, "ERR_SEC_HANDLE_INVALID"),
         ({**handle, "accession_no": "not-an-accession"}, "ERR_SEC_HANDLE_INVALID"),
         ({**handle, "offset": -1}, "ERR_SEC_HANDLE_INVALID"),
+        (missing_source, "ERR_SEC_HANDLE_INVALID"),
         ({**handle, "text_hash": "0" * 64}, "ERR_SEC_HANDLE_STALE"),
+        (tampered_source, "ERR_SEC_HANDLE_STALE"),
         ({**handle, "document_name": "never-stored.htm"}, "ERR_SEC_HANDLE_UNREADABLE"),
     ):
         with pytest.raises(ValueError, match=code):
             call_untyped(defect, passage)
+    # Legacy/extra content_hash is ignored, never invalid: old handles still materialize.
+    assert materialize_sec_passage(legacy_content, passage).provenance["passage"] == passage
+    assert materialize_sec_passage({k: v for k, v in handle.items() if k != "content_hash"}, passage).provenance["passage"] == passage
     # A locator the reloaded window does not contain is never admitted, blank included.
     with pytest.raises(ValueError, match="ERR_PASSAGE_NOT_IN_SOURCE"):
         materialize_sec_passage(handle, "this sentence is not in the window")
     with pytest.raises(ValueError, match="ERR_PASSAGE_NOT_IN_SOURCE"):
         materialize_sec_passage(handle, "   ")
+
+def test_live_handle_survives_archival_when_text_hash_differs_from_source_bytes(tmp_path: Path) -> None:
+    """Live binary/PDF handles stay valid after archival: text_hash names the window, source bytes name the revision."""
+    import hashlib as _hashlib
+
+    from app.research.service import materialize_sec_passage as _materialize
+
+    source_bytes = b"\xff\xfe binary \x00\x01 document bytes with citable text window here"
+    window = source_bytes.decode("utf-8", "replace")
+    assert _hashlib.sha256(window.encode("utf-8")).hexdigest() != _hashlib.sha256(source_bytes).hexdigest()
+    accession, document = "0000320193-25-000079", "bytes-live-archived-000079.bin"
+    handle: dict[str, object] = {
+        "accession_no": accession,
+        "document_name": document,
+        "basis": "raw",
+        "section": None,
+        "query": None,
+        "offset": 0,
+        "max_chars": len(window),
+        "length": len(window),
+        "text_hash": _hashlib.sha256(window.encode("utf-8")).hexdigest(),
+        "source_content_hash": _hashlib.sha256(source_bytes).hexdigest(),
+        "source_uri": f"source://sec/{accession}/{document}",
+    }
+    # Live window served as decoded text; the exact source bytes land in the archive.
+    seam.register_document(accession, document, window)
+    archived = tmp_path / "raw.bin"
+    archived.write_bytes(source_bytes)
+    seam._SOURCE_ARCHIVE_PATH[(accession, document)] = str(archived)
+    materialized = _materialize(handle, window)
+    assert materialized.provenance["passage"] == window
+    assert _hashlib.sha256(materialized.source_bytes).hexdigest() == handle["source_content_hash"]
+    assert materialized.source_content_hash == handle["source_content_hash"]
 
 
 def test_provenance_validation_arms_and_legacy_rows() -> None:
@@ -897,6 +935,211 @@ def test_evidence_duplicate_identity_returns_prior(tmp_path: Path, monkeypatch: 
     dup = svc.record_evidence(sid, src, _item(f"{sid}:ev:2"), repo=repo)
     assert dup == {"evidence_id": f"{sid}:ev:1", "accepted": False, "duplicate_of": f"{sid}:ev:1"}
 
+
+def test_evidence_identity_conflict_names_identity_key(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """The lost-race catch in _persist_evidence_record keys off 'identity_key' in the message."""
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    first = svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    stored = repo.get_evidence(str(first["evidence_id"]))
+    with pytest.raises(ValueError, match="identity_key"):
+        repo.save_evidence({**stored, "evidence_id": f"{sid}:ev:race"})
+    metadata = stored["metadata"]
+    assert isinstance(metadata, dict)
+    hit = repo.find_evidence_by_identity(sid, str(metadata["identity_key"]))
+    assert hit is not None and hit["evidence_id"] == first["evidence_id"]
+    assert repo.list_evidence_ids(sid) == [str(first["evidence_id"])]
+
+
+def test_acceptance_archives_verified_window_bytes_not_rendered_text(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Accepted SEC evidence archives the full exact bytes; one revision, no PIT conflict."""
+    from app.sec import documents
+    from app.sec.archive import find_archived_document
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    acc, doc = "0000320193-25-000079", "two-windows-000079.htm"
+    first = "first cited sentence"
+    second = "second cited sentence"
+    full = f"{first}\n{second}"
+    seam.register_document(acc, doc, full)
+    h1 = seam.handle_for_registered(first, accession=acc, document=doc)
+    h2 = seam.handle_for_registered(second, accession=acc, document=doc)
+    out1 = svc.record_evidence(
+        sid, src, _item(f"{sid}:ev:1", matching_passage=first, source_handle=h1,
+                        source_record_id=acc, document_name=doc), repo=repo
+    )
+    out2 = svc.record_evidence(
+        sid, src, _item(f"{sid}:ev:2", matching_passage=second, source_handle=h2,
+                        source_record_id=acc, document_name=doc), repo=repo
+    )
+    for out in (out1, out2):
+        stored = repo.get_evidence(str(out["evidence_id"]))
+        provenance = stored["provenance"]
+        assert isinstance(provenance, dict)
+        found = find_archived_document(str(provenance["accession_no"]), str(provenance["document_name"]), root=tmp_path / "raw")
+        assert found is not None
+        assert found.payload_path.read_bytes() == full.encode("utf-8")
+        assert len(full) > len(first) and len(full) > len(second)
+    assert documents.get_sec_document(acc, doc, as_of="2025-06-30", data_root=tmp_path)["text"] == full
+
+
+
+
+def test_acceptance_archive_failure_raises_without_row_event_or_link(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A preservation failure can never masquerade as accepted evidence."""
+    import app.sec.archive as _archive
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+
+    def _boom(*args: object, **kwargs: object) -> object:
+        del args, kwargs
+        raise OSError("disk down")
+
+    monkeypatch.setattr(_archive, "archive_sec_document", _boom)
+    with __import__("pytest").raises(OSError, match="disk down"):
+        svc.record_evidence(sid, src, _item(f"{sid}:ev:1"), repo=repo)
+    assert repo.list_evidence(sid) == []
+    assert repo.list_evidence_ids(sid) == []
+    assert [e for e in repo.list_events(sid) if e.event_type == "evidence.accepted"] == []
+
+
+def test_source_bytes_unavailable_emits_no_source_artifact(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Missing exact bytes fail closed: no row, no event, no session link."""
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    passage = "byte-less passage"
+    handle = seam.handle_for(passage, no_source_bytes=True)
+    with pytest.raises(ValueError, match="ERR_NO_SOURCE_BYTES"):
+        svc.record_evidence(
+            sid, src, {**_item(f"{sid}:ev:1"), "matching_passage": passage, "source_handle": handle}, repo=repo
+        )
+    assert repo.list_evidence(sid) == []
+    assert repo.list_evidence_ids(sid) == []
+    assert [e for e in repo.list_events(sid) if e.event_type == "evidence.accepted"] == []
+
+
+
+def test_revision_switch_rejects_stale_handle_without_row_event_link_or_archive(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A handle pinned to rev-A stays stale after the source moves to rev-B: no row, event, link, or archive."""
+    from app.sec.archive import iter_archived_documents
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    acc, doc = "0000320193-25-000079", "rev-switch-000079.htm"
+    window = "cited window stays identical"
+    rev_a = f"header-A\n{window}\ntrailer-A"
+    rev_b = f"header-B-CHANGED\n{window}\ntrailer-B-CHANGED"
+    seam.register_document(acc, doc, rev_a)
+    stale = seam.handle_for_registered(window, accession=acc, document=doc)
+    seam.register_document(acc, doc, rev_b)  # same cited span, changed bytes elsewhere
+    with pytest.raises(ValueError, match="ERR_SEC_HANDLE_STALE"):
+        svc.record_evidence(
+            sid, src, _item(f"{sid}:ev:1", matching_passage=window, source_handle=stale,
+                            source_record_id=acc, document_name=doc), repo=repo
+        )
+    assert repo.list_evidence(sid) == []
+    assert repo.list_evidence_ids(sid) == []
+    assert repo.get_session(sid).evidence_ids == []
+    assert [e for e in repo.list_events(sid) if e.event_type == "evidence.accepted"] == []
+    revisions = list(iter_archived_documents(acc, doc, root=tmp_path / "raw"))
+    assert revisions == []  # the stale attempt archived nothing
+
+
+def test_offline_archive_serves_acceptance_when_live_filing_unavailable(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The immutable archive wins: acceptance reads real archived bytes even with live filing down."""
+    # The module autouse fixture routes get_sec_document to the seam fake; this
+    # test needs the production archive read-back instead, so undo the seam for
+    # app.sec.documents only (the kernel imports get_sec_document lazily from
+    # there) and kill just the live-filing path. _exact_source_bytes stays
+    # seam-patched but is unreachable: the archived row carries raw_archive_path.
+    import importlib as _importlib
+    import inspect as _inspect
+
+    import app.sec.archive as _archive
+    import app.sec.documents as _documents
+    from app.sec.archive import find_archived_document
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    # The autouse fixture patched the module object in place; reload the file to
+    # restore production get_sec_document, then kill just the live-filing path.
+    # _exact_source_bytes stays seam-patched but is unreachable: the archived row
+    # carries raw_archive_path, so the kernel reads real archived bytes.
+    real_mod = _importlib.reload(_documents)
+    monkeypatch.setattr(_documents, "get_sec_document", real_mod.get_sec_document)
+    assert "Archive-first" in _inspect.getsource(_documents.get_sec_document)
+    real_get_sec_document = _documents.get_sec_document
+
+    def _no_live(accession_no: str) -> object:
+        del accession_no
+        raise ValueError("edgar offline")
+
+    monkeypatch.setattr(_documents, "_filing", _no_live)
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    acc, doc = "0000320193-25-000079", "offline-archived-000079.htm"
+    passage = "offline archived passage"
+    full = f"offline header\n{passage}\noffline trailer"
+    canonical_url = f"https://www.sec.gov/Archives/edgar/data/{acc.replace('-', '')}/{doc}"
+    _archive.archive_sec_document(acc, doc, full.encode("utf-8"), url=canonical_url,
+                                  retrieved_at="2025-05-01T00:00:00Z",
+                                  metadata={"known_at": "2025-05-01T00:00:00Z",
+                                            "filed_at": "2025-04-30",
+                                            "representation": "source_bytes"},
+                                  root=tmp_path / "raw")
+    live = real_get_sec_document(acc, doc, as_of="2025-06-30", data_root=tmp_path)
+    assert isinstance(live["text"], str) and passage in str(live["text"])
+    handle = live["source_handle"]
+    assert isinstance(handle, dict)
+    out = svc.record_evidence(
+        sid, src, _item(f"{sid}:ev:1", matching_passage=passage, source_handle=handle,
+                        source_record_id=acc, document_name=doc), repo=repo
+    )
+    stored = repo.get_evidence(str(out["evidence_id"]))
+    provenance = stored["provenance"]
+    assert isinstance(provenance, dict) and provenance["passage"] == passage
+    found = find_archived_document(acc, doc, root=tmp_path / "raw")
+    assert found is not None and found.payload_path.read_bytes() == full.encode("utf-8")
+
+
+def test_canonical_url_wins_over_item_source_uri(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The stored source_uri and archive URL are the kernel's canonical URL, never the model string."""
+    from app.sec.archive import find_archived_document
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    repo = _repo(tmp_path, monkeypatch)
+    sid, src = _sid(repo)
+    acc, doc = "0000320193-25-000079", "canonical-url-000079.htm"
+    passage = "canonical url passage"
+    seam.register_document(acc, doc, f"header\n{passage}\ntrailer")
+    handle = seam.handle_for_registered(passage, accession=acc, document=doc)
+    canonical = f"https://www.sec.gov/Archives/edgar/data/{acc.replace('-', '')}/{doc}"
+    out = svc.record_evidence(
+        sid, src, _item(f"{sid}:ev:1", matching_passage=passage, source_handle=handle,
+                        source_record_id=acc, document_name=doc,
+                        source_uri="https://evil.example/x"), repo=repo
+    )
+    stored = repo.get_evidence(str(out["evidence_id"]))
+    assert stored["source_uri"] == canonical
+    found = find_archived_document(acc, doc, root=tmp_path / "raw")
+    assert found is not None and found.url == canonical
 
 def test_evidence_no_per_job_cap(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
@@ -2483,16 +2726,28 @@ def test_safety_ratio_arms() -> None:
     assert growth["verdict"] == "insufficient_data"
 
 
-# --- _dividend_fundamental via store: store hit + PIT miss ---
-def test_dividend_fundamental_store_and_pit(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+# --- _dividend_fundamental via gateway: live hit + PIT miss ---
+def test_dividend_fundamental_store_and_pit(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.normalization import normalize_sec_company_facts, normalize_sec_tickers
 
-    monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", tmp_path)
     cik, ret = 21344, "2026-08-01T00:00:00Z"
-    for name, rows in normalize_sec_tickers(
+    alias_rows = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": "KO", "title": "KO Corp"}}, retrieved_at=ret, content_hash="t"
-    ).items():
-        parquet.write_rows(name, rows, root=tmp_path / "parquet")
+    )["entity_aliases"]
+    aliases = [
+        TickerAlias(
+            alias_type=str(r.get("alias_type")),
+            alias_value=str(r.get("alias_value")),
+            entity_id=str(r.get("entity_id")),
+            security_id=r.get("security_id") if isinstance(r.get("security_id"), str) else None,
+            source=str(r.get("source")),
+            known_at=r.get("known_at") if isinstance(r.get("known_at"), str) else None,
+            retrieved_at=r.get("retrieved_at") if isinstance(r.get("retrieved_at"), str) else None,
+            valid_from=None,
+            valid_to=None,
+        )
+        for r in alias_rows
+    ]
     div_units = [
         {"start": s, "end": e, "val": v, "accn": a, "fy": fy, "fp": fp, "filed": f}
         for v, s, e, fy, fp, f, a in [
@@ -2507,12 +2762,25 @@ def test_dividend_fundamental_store_and_pit(tmp_path: Path, monkeypatch: pytest.
         "entityName": "KO",
         "facts": {"us-gaap": {"CommonStockDividendsPerShareDeclared": {"units": {"USD/shares": div_units}}}},
     }
-    for name, rows in normalize_sec_company_facts(
+    facts = normalize_sec_company_facts(
         payload, retrieved_at=ret, content_hash="d", source_url="u", source_record_id="r"
-    ).items():
-        parquet.write_rows(name, rows, root=tmp_path / "parquet")
+    )
+
+    class _Gateway:
+        def ticker_candidates(self, ticker: str, as_of: object) -> list[TickerAlias]:
+            del as_of
+            return list(aliases) if ticker == "KO" else []
+
+        def company_facts(self, cik_no: int, as_of: str | None = None) -> dict[str, list[dict[str, object]]]:
+            assert cik_no == cik
+            rows = [dict(r) for r in facts.get("financial_facts", [])]
+            if as_of is not None:
+                rows = [r for r in rows if str(r.get("known_at", ""))[:10] <= as_of]
+            return {"financial_facts": rows, "dividend_events": []}
+
+    monkeypatch.setattr(sec_facts, "_gateway", lambda: _Gateway())
     hit = sec_facts.get_fundamentals("KO", "dividends", as_of="2026-08-10")
-    assert hit["data_source"] == "store" and hit["ttm_dividend_per_share"] == 2.10
+    assert hit["data_source"] == "live" and hit["ttm_dividend_per_share"] == 2.10
     miss = sec_facts.get_fundamentals("KO", "dividends", as_of="2020-01-01")
     assert miss.get("error_type") == "pit_data_unavailable"
 
@@ -2529,7 +2797,10 @@ class _Resp:
 
 def _mocks(monkeypatch: pytest.MonkeyPatch, get_script: list[object], page_script: list[object]) -> None:
     def _fake_get(url: str, **k: object) -> object:
-        return get_script.pop(0)
+        item = get_script.pop(0)
+        if isinstance(item, Exception):
+            raise item
+        return item
 
     def _fake_page(g: object, n: object, p: object) -> object:
         return page_script.pop(0)
@@ -2537,7 +2808,7 @@ def _mocks(monkeypatch: pytest.MonkeyPatch, get_script: list[object], page_scrip
     def _no_sleep(s: float) -> None:
         return None
 
-    monkeypatch.setattr(research_data.requests, "get", _fake_get)
+    monkeypatch.setattr(research_data, "_edgar_get", _fake_get)
     monkeypatch.setattr(research_data.finra_client, "ingestion_post_query", _fake_page)
     monkeypatch.setattr(research_data.time, "sleep", _no_sleep)
 
@@ -2557,7 +2828,7 @@ def test_refresh_sec_tickers_skips_malformed(monkeypatch: pytest.MonkeyPatch) ->
     def _fake_now() -> str:
         return "2026-08-01T00:00:00Z"
 
-    monkeypatch.setattr(research_data, "_sec_get", _fake_sec)
+    monkeypatch.setattr(research_data, "_edgar_get", _fake_sec)
     monkeypatch.setattr(research_data, "_utc_now", _fake_now)
     import tempfile
 
@@ -2592,39 +2863,12 @@ def test_prepare_unresolved_and_enrichment_failure(tmp_path: Path, monkeypatch: 
     finra_rows = [{"symbolCode": "AAPL", "settlementDate": "2026-08-14", "currentShortPositionQuantity": 5}]
     _mocks(
         monkeypatch,
-        [_Resp(json.dumps(ticks).encode()), _Resp(b"boom", 500), _Resp(json.dumps(facts).encode())],
+        [json.dumps(ticks).encode(), RuntimeError("boom"), json.dumps(facts).encode()],
         [(json.dumps(finra_rows).encode(), finra_rows, {"record-total": "1"})],
     )
     out = prepare_short_interest_data("2026-08-14", tickers=["AAPL", "ZZZ"], data_root=tmp_path)
     assert out["unresolved_tickers"] == ["ZZZ"]
     assert out["failed_enrichments"] == [] or isinstance(out["failed_enrichments"], list)
-
-
-def test_short_interest_legacy_probe_and_backfill(tmp_path: Path) -> None:
-    root = tmp_path / "parquet"
-    root.mkdir(parents=True, exist_ok=True)
-    assert _short_interest_has_legacy_v1(root) is False  # empty table, no legacy rows
-    v2: dict[str, object] = {
-        "row_id": "r1",
-        "entity_id": None,
-        "security_id": None,
-        "symbol_code": "A",
-        "issue_name": "A",
-        "settlement_date": "2026-08-14",
-        "short_position": 1.0,
-        "prev_position": None,
-        "avg_daily_volume": None,
-        "days_to_cover": None,
-        "source_url": "u",
-        "source_record_id": "r",
-        "known_at": "2026-08-30T00:00:00Z",
-        "retrieved_at": "2026-08-30T00:00:00Z",
-        "content_hash": "h",
-        "parser_version": "finra-short-interest-v2",
-    }
-    parquet.write_rows("short_interest", [v2], root=root)
-    assert _short_interest_has_legacy_v1(root) is False
-    assert backfill_finra_known_at(data_root=tmp_path) == {"rewritten": 0}
 
 
 # --- evidence_resolution: match-arm boundaries ---
@@ -2676,10 +2920,14 @@ def test_resolve_subject_ticker_name_unresolved() -> None:
     assert not r4.resolved
 
 
-def test_warehouse_name_to_ticker_guards() -> None:
-    assert warehouse_name_to_ticker("") is None
-    assert warehouse_name_to_ticker("   ") is None
-    assert warehouse_name_to_ticker("No Such Company XYZ 123") is None
+def test_resolve_subject_unresolved_guards() -> None:
+    asof = datetime(2026, 6, 1, tzinfo=_dt.UTC)
+    assert resolve_subject(
+        ticker=None, name="", aliases_by_ticker=_aliases_empty, name_to_ticker=_name_none, as_of=asof
+    ).resolved is False
+    assert resolve_subject(
+        ticker=None, name="No Such Company XYZ 123", aliases_by_ticker=_aliases_empty, name_to_ticker=_name_none, as_of=asof
+    ).resolved is False
 
 
 # --- dividend_analysis: cadence + lifecycle arms ---
@@ -2758,12 +3006,6 @@ def test_read_latest_snapshot_empty_and_legacy(tmp_path: Path) -> None:
     persist_snapshot(snap, data_root=tmp_path)
     restored = read_latest_snapshot(data_root=tmp_path)
     assert restored is not None and restored.cash is not None
-    # legacy: drop portfolio_accounts -> reconstruct from positions is empty-safe
-    import shutil
-
-    shutil.rmtree(tmp_path / "parquet" / "portfolio_accounts", ignore_errors=True)
-    restored2 = read_latest_snapshot(data_root=tmp_path)
-    assert restored2 is not None
 
 
 # --- herdr_client: fake transport for init/read/subscribe/request ---
@@ -3001,58 +3243,19 @@ def test_runs_db_path_env_override(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 # ---------------------------------------------------------------------------
-# parquet.py: write stages
+# ids.py: deterministic SEC identity helpers (replaces warehouse dedup pin)
 # ---------------------------------------------------------------------------
 
 
-def _fact_row(
-    entity_id: str = "sec:cik:0000320193",
-    value: float = 100.0,
-    period_end: str = "2026-08-01",
-    filed: str = "2026-08-02",
-    accession: str = "0000320193-26-000001",
-    known_at: str = "2026-08-02T00:00:00Z",
-) -> dict[str, object]:
+def test_sec_identity_helpers_deterministic() -> None:
     from app.domain.market import ids
 
-    cik = int(entity_id.removeprefix("sec:cik:"))
-    return {
-        "fact_id": ids.sec_fact_id(cik, accession, "EntityCommonStockSharesOutstanding", period_end, value),
-        "entity_id": entity_id,
-        "security_id": ids.sec_security_id(cik),
-        "concept": "EntityCommonStockSharesOutstanding",
-        "original_concept": "dei:EntityCommonStockSharesOutstanding",
-        "value": value,
-        "unit": "shares",
-        "duration_type": "instant",
-        "period_end": period_end,
-        "filed_at": filed,
-        "accession": accession,
-        "frame": None,
-        "known_at": known_at,
-        "retrieved_at": "2026-08-21T12:00:00Z",
-        "source_url": "https://data.sec.gov/api/xbrl/companyfacts/CIK0000320193.json",
-        "source_record_id": "cik0000320193",
-        "content_hash": "abc",
-        "parser_version": "financial-facts-v1",
-    }
-
-
-def test_parquet_write_stages(tmp_path: Path) -> None:
-    """Partition/key/append stages: empty, unknown part, dedup, unpartitioned."""
-    root = tmp_path / "data" / "parquet"
-    assert parquet.write_rows("financial_facts", [], root=root) == 0
-    row = _fact_row()
-    assert parquet.write_rows("financial_facts", [row], root=root) == 1
-    assert parquet.write_rows("financial_facts", [row], root=root) == 0
-    bad = dict(row)
-    bad["fact_id"] = "other-id"
-    bad["period_end"] = "not-a-date"
-    assert parquet.write_rows("financial_facts", [bad], root=root) == 1
-    assert (root / "financial_facts" / "period_end_year=unknown").is_dir()
-    assert parquet._partition_year(None) is None
-    assert parquet._partition_year("junk") is None
-    assert parquet._group_partitions(parquet.dataset("portfolio_snapshots"), [{}]) == {"none": [{}]}
+    cik = 320193
+    accession = "0000320193-26-000001"
+    first = ids.sec_fact_id(cik, accession, "EntityCommonStockSharesOutstanding", "2026-08-01", 100.0)
+    assert first == ids.sec_fact_id(cik, accession, "EntityCommonStockSharesOutstanding", "2026-08-01", 100.0)
+    assert ids.sec_security_id(cik) == ids.sec_security_id(cik)
+    assert sec_facts._validated_fact_row({}) is None
 
 
 # ---------------------------------------------------------------------------
@@ -3765,8 +3968,7 @@ def test_leaderboard_explicit_date_arms(tmp_path: Path, monkeypatch: pytest.Monk
     hist = screens.get_short_interest_leaderboard(settlement_date="2026-08-14", as_of="2026-08-14", data_root=data_root)
     assert "error" in hist and calls == []
     live = screens.get_short_interest_leaderboard(settlement_date="2026-08-14", data_root=data_root)
-    assert "error" in live and calls == ["2026-08-14"]
-    assert screens._refresh_published_cycle("2099-01-31", data_root) is None or True
+    assert "error" in live
 
 
 # --- tools: envelopes/routing (from /tmp/rc_coretools.py) ---
@@ -4131,21 +4333,9 @@ def test_alternative_signals_import_failure(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_alternative_signals_ok_and_failure(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.google_data.signals as sig
-
-    def _qs_ok(**k: object) -> list[dict[str, object]]:
-        return [{"id": 1}] * 3
-
-    monkeypatch.setattr(sig, "query_signals", _qs_ok)
     out = tools_mod._find_alternative_signals({"limit": 2}, "m")
-    assert out["status"] == "ok" and out["continuation"] is True
-
-    def _qs_boom(**k: object) -> list[dict[str, object]]:
-        raise RuntimeError("x")
-
-    monkeypatch.setattr(sig, "query_signals", _qs_boom)
-    err = tools_mod._find_alternative_signals({}, "m")
-    assert err["soft"] is True
+    assert out["status"] == "ok" and out["continuation"] is False
+    assert out["signals"] == [] and out["count"] == 0
 
 
 def test_trend_geos_window_and_handler(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -4239,12 +4429,6 @@ def test_suggest_queries_edges() -> None:
 
 
 def test_investigate_arms(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.google_data.signals as sig
-
-    def _sig_down(**k: object) -> list[dict[str, object]]:
-        raise RuntimeError("down")
-
-    monkeypatch.setattr(sig, "query_signals", _sig_down)
     out = execute_tool("investigate_social_arbitrage_candidate", {"term": "Stanley"}, "m", context=RCTX)
     gaps = out["gaps"]
     assert isinstance(gaps, list)
@@ -4566,16 +4750,6 @@ def test_diff_filings_arms(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_resolve_and_obligations(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.services.evidence_resolution as er
-
-    def _wtk(n: str) -> str | None:
-        if n == "Apple":
-            return " aapl "
-        raise RuntimeError("x")
-
-    monkeypatch.setattr(er, "warehouse_name_to_ticker", _wtk)
-    assert tools_mod._warehouse_ticker("Apple") == "AAPL"
-    assert tools_mod._warehouse_ticker("Nope") is None
     import app.sec.client as cli
 
     def _find_msft(n: str, limit: int = 3) -> list[dict[str, object]]:
@@ -4589,7 +4763,6 @@ def test_resolve_and_obligations(monkeypatch: pytest.MonkeyPatch) -> None:
 
     monkeypatch.setattr(cli, "find_sec_company", _find_boom)
     assert tools_mod._edgar_ticker("X") is None
-    assert tools_mod._resolve_company_to_ticker("Apple") == "AAPL"
 
     def _rct(n: str) -> str | None:
         return "AAPL" if n == "apple" else None

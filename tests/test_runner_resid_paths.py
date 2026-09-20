@@ -542,6 +542,7 @@ def test_complete_wave_tail_synth_and_none(tmp_path: Path, monkeypatch: pytest.M
         "wave_decision",
         "novelty",
         "waves",
+        "bundle_dir",
     }
     assert tail["stop_reason"] == "complete:wave2"
     assert tail["wave_id"] == 2
@@ -1562,3 +1563,76 @@ def test_substantive_ids_filters_frozen_ids_against_the_ledger() -> None:
     assert _substantive_ids(["E1", "EV-nav"], set()) == ["E1", "EV-nav"]
     assert _substantive_ids([], {"E1"}) == []
     assert _substantive_ids(["A", "B", "A"], {"A", "B"}) == ["A", "B", "A"]
+
+
+# --- runner retention: fetch/materialize never archives (service acceptance does) ---
+
+
+def test_runner_retention_no_archive_on_reject_or_admit(
+    tmp_path: Path,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A bogus handle demotes to discovery and a valid handle admits as evidence, but
+    neither path archives: the runner materializes from the archive, only service
+    acceptance persists to it. The record_kind=='evidence' assertion below pins
+    candidate/materialized evidence without archival; it is not equivalent to
+    production evidence admission."""
+    from app.sec.archive import iter_archived_documents
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    acc, doc = "0000320193-25-000079", "nvda-20250331.htm"
+    root = tmp_path / "raw"
+    base = _fake_dispatch()
+
+    def _bogus(name: str, args: dict[str, object]) -> dict[str, object]:
+        raw = base(name, args)
+        if name == "call_tool" and str(args.get("name", "")) in (
+            "get_sec_document",
+            "get_sec_filing",
+        ):
+            raw["source_handle"] = {"basis": "guessed"}
+        return raw
+
+    before = list(iter_archived_documents(acc, doc, root=root))
+    assert before == []
+    run = _make_run(repo, _bogus)
+    sid = run._create_session("NVDA demand?", "", None)
+    assert run._fetch_wave(sid, 1, "NVDA demand?", run.source_jobs[0], "") == []
+    docs = [
+        row
+        for row in repo.list_evidence(sid)
+        if isinstance(row.get("metadata"), dict)
+        and row["metadata"].get("tool") in ("get_sec_document", "get_sec_filing")
+    ]
+    assert docs, "the bogus-handle reads are still recorded for provenance"
+    assert all(row["record_kind"] == "discovery" for row in docs)
+    assert [row for row in repo.list_evidence(sid) if row.get("record_kind") == "evidence"] == []
+    assert [e for e in repo.list_events(sid) if e.event_type == "evidence.accepted"] == []
+    assert repo.get_session(sid).evidence_ids == []
+    assert list(iter_archived_documents(acc, doc, root=root)) == before == []
+
+    run2 = _make_run(repo)
+    sid2 = run2._create_session("NVDA demand?", "", None)
+    raw_valid = base(
+        "call_tool",
+        {"name": "get_sec_document", "arguments": {"accession_no": acc, "document_name": doc}},
+    )
+    before2 = list(iter_archived_documents(acc, doc, root=root))
+    record = run2._build_evidence_record(
+        sid2,
+        1,
+        "NVDA demand?",
+        run2.source_jobs[0],
+        "get_sec_document",
+        {"name": "get_sec_document", "arguments": {"accession_no": acc, "document_name": doc}},
+        raw_valid,
+        "EV-admit",
+    )
+    # Candidate/materialized evidence only: must not be read as production admission.
+    assert record.record_kind == "evidence"
+    assert list(iter_archived_documents(acc, doc, root=root)) == before2 == []
+    assert repo.list_evidence(sid2) == []
+    assert [e for e in repo.list_events(sid2) if e.event_type == "evidence.accepted"] == []
+    assert repo.get_session(sid2).evidence_ids == []

@@ -1,8 +1,6 @@
-"""Canonical analytical storage: immutable raw archive + versioned Parquet
-datasets queried through DuckDB.
+"""Ops storage: immutable raw archive + run ledger + id helpers.
 
-This is the point-in-time foundation described in FUTURE_ARCHITECTURE.md
-Phase 0.  Connectors archive source payloads under data/raw/; normalizers
-write versioned Parquet datasets under data/parquet/; analytics queries those
-datasets through DuckDB with mandatory ``known_at <= as_of`` filters.
+Live reads come from providers through ``app.data_sources``; the
+portfolio snapshot store lives in ``app.services.portfolio_sync``
+(``portfolio.sqlite``). Nothing here is an analytical warehouse.
 """

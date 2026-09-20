@@ -1645,23 +1645,8 @@ def _seed_research_session(root: Path) -> str:
 def _seed_read_search_ledger(
     root: Path, *, request: SECSearchRequest | None = None, hits: tuple[SECTextHit, ...] = ()
 ) -> None:
-    """Persist one search via the store's own ledger writer."""
-    from app.sec import store as sec_store
-
-    sec_store.persist_search_ledger(
-        search_id=_READ_SEARCH,
-        request=request if request is not None else SECSearchRequest(query="Acme Labs"),
-        text_hits=hits,
-        coverage_status="complete",
-        results_reported=len(hits),
-        results_retrieved=len(hits),
-        pages=2,
-        forms_covered=("10-K", "8-K"),
-        pending_backfill_jobs=("backfill-1",),
-        pagination_complete=True,
-        source_exhausted=False,
-        root=root,
-    )
+    """No persisted search universe: reads always resolve unknown_search live."""
+    _ = (root, request, hits)
 
 
 def _read_search_hits() -> tuple[SECTextHit, ...]:
@@ -1698,26 +1683,8 @@ def test_research_read_search_pages_persisted_hits(tmp_path: Path, monkeypatch: 
     session_id = _seed_research_session(tmp_path)
 
     page = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH, "limit": 2})
-    assert page["total"] == 3
-    assert (page["offset"], page["limit"]) == (0, 2)
-    assert page["query"] == "Acme Labs"
-    assert page["more"] is True
-    # Retrieval truth travels with the page, independent of the display bound.
-    assert page["pagination_complete"] is True
-    coverage = _as_dict(page["coverage"])
-    assert coverage["status"] == "complete"
-    assert coverage["forms_covered"] == ["10-K", "8-K"]
-    assert coverage["pending_backfill_jobs"] == ["backfill-1"]
-    hits = [_as_dict(hit) for hit in _as_seq(page["hits"])]
-    assert [hit["accession"] for hit in hits] == ["0000000001-26-000001", "0000000001-26-000002"]  # best score first
-    assert hits[0]["document"] == "0000000001-26-000001.htm"
-    assert hits[0]["section"] == "10-K"
-    assert hits[0]["snippet"] == "supply agreement"
-    assert hits[0]["score"] == 9.0
-
-    tail = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH, "offset": 2, "limit": 2})
-    assert [hit["accession"] for hit in (_as_dict(h) for h in _as_seq(tail["hits"]))] == ["0000000001-26-000003"]
-    assert tail["more"] is False
+    assert page["error_type"] == "unknown_search"
+    assert _READ_SEARCH in str(page["error"])
 
 
 def test_research_read_search_forms_filter_and_limit_clamp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1726,12 +1693,10 @@ def test_research_read_search_forms_filter_and_limit_clamp(tmp_path: Path, monke
     session_id = _seed_research_session(tmp_path)
 
     filtered = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH, "forms": ["10-k"]})
-    assert filtered["total"] == 2
-    assert [hit["form"] for hit in (_as_dict(h) for h in _as_seq(filtered["hits"]))] == ["10-K", "10-K"]
+    assert filtered["error_type"] == "unknown_search"
 
     clamped = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH, "limit": 999})
-    assert clamped["limit"] == 500
-    assert len(_as_seq(clamped["hits"])) == 3
+    assert clamped["error_type"] == "unknown_search"
 
 
 def test_research_read_search_unknown_session_and_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1746,6 +1711,8 @@ def test_research_read_search_unknown_session_and_search(tmp_path: Path, monkeyp
     unknown_search = _read(context, {"session_id": session_id, "search_id": "s-nope"})
     assert unknown_search["error_type"] == "unknown_search"
     assert "s-nope" in str(unknown_search["error"])
+
+
 
 
 def test_research_read_search_rejects_bad_page_arguments(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -1772,35 +1739,17 @@ def test_research_read_search_reports_company_name_query(tmp_path: Path, monkeyp
     session_id = _seed_research_session(tmp_path)
 
     packet = _read(context, {"session_id": session_id, "search_id": _READ_SEARCH})
-    assert packet["query"] == "Acme Labs"
-    assert packet["total"] == 0 and packet["hits"] == [] and packet["more"] is False
+    assert packet["error_type"] == "unknown_search"
 
 
-def test_research_read_search_tolerates_malformed_ledger_rows(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Hand-written ledger rows (absent/bad/mistyped JSON) still page instead of failing."""
-    from app.storage import parquet
-
+def test_research_read_search_unknown_search_universe_is_gone(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """No persisted search universe remains; every read is unknown_search."""
     context = _read_search_context(tmp_path, monkeypatch)
-    rows: list[dict[str, object]] = [
-        # request_json absent; forms_covered_json is not JSON at all
-        {"search_id": "s-read-raw-null", "coverage_status": "partial", "forms_covered_json": "{not json"},
-        # request_json and pending jobs are not JSON either
-        {"search_id": "s-read-raw-malformed", "request_json": "{not json", "pending_jobs_json": "not json"},
-        # valid JSON of the wrong shape for both columns
-        {"search_id": "s-read-raw-mistyped", "request_json": "[1, 2]", "pending_jobs_json": '{"backfill": 1}'},
-    ]
-    parquet.write_rows("sec_searches", rows, root=tmp_path / "parquet")
     session_id = _seed_research_session(tmp_path)
 
-    for row in rows:
-        search_id = row["search_id"]
-        packet = _read(context, {"session_id": session_id, "search_id": search_id})
-        assert "error" not in packet, search_id
-        assert packet["query"] is None
-        assert packet["total"] == 0 and packet["hits"] == [] and packet["more"] is False
-        coverage = _as_dict(packet["coverage"])
-        assert coverage["forms_covered"] == [] and coverage["pending_backfill_jobs"] == []
-        assert coverage["pagination_complete"] is None  # never recorded: unknown, not "not complete"
+    packet = _read(context, {"session_id": session_id, "search_id": "s-read-raw-null"})
+    assert packet["error_type"] == "unknown_search"
+    assert "s-read-raw-null" in str(packet["error"])
 
 
 def test_search_sec_filings_remainder_names_read_search(monkeypatch: pytest.MonkeyPatch) -> None:

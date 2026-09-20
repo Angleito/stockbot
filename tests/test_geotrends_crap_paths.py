@@ -236,38 +236,12 @@ def test_trends_region_geo_base_suffix_arm() -> None:
     assert trends._region_geo_base({"country_code": "US"}, {"country": "US"}) == "US"
 
 
-def test_trends_country_scope_no_country_none() -> None:
-    assert trends._country_scope_decision("US", {}) is None
-    assert trends._country_scope_decision("US:CA", {"country_code": "US"}) is True
-    assert trends._country_scope_decision("GB", {"country_code": "US"}) is False
-
-
-def test_trends_cached_record_refresh_non_matching_empty() -> None:
-    assert trends._cached_record_refresh({"source_record_id": "other|x", "table": "t"}) == ""
-    assert trends._cached_record_refresh({"source_record_id": "tbl|2024-01-01", "table": "tbl"}) == "2024-01-01"
-
-
 # --- signals: coverage passthrough + version match arms -------------------------
 
 
 def test_signals_narrow_blob_coverage_preset_passthrough() -> None:
     periods, geos, rows = signals._narrow_blob_coverage({}, ["2024-Q1"], ["US"])
     assert periods == ["2024-Q1"] and geos == ["US"] and rows == []
-
-
-def test_signals_known_version_no_match_none() -> None:
-    cand: dict[str, object] = {"signal_id": "s1", "known_at": "2024-02-01", "score": 3}
-    other: dict[str, object] = {"signal_id": "other", "known_at": "x"}
-    changed: dict[str, object] = {"signal_id": "s1", "known_at": "2024-01-01", "score": 9}
-    assert signals._known_version([other], cand) is None
-    assert signals._known_version([changed], cand) is None
-
-
-def test_signals_known_version_same_content() -> None:
-    cand: dict[str, object] = {"signal_id": "s1", "known_at": "2024-02-01", "score": 3}
-    prior: dict[str, object] = {"signal_id": "s1", "known_at": "2024-01-01", "score": 3}
-    known = signals._known_version([prior], cand)
-    assert known is not None and known["known_at"] == "2024-01-01"
 
 
 # --- youtube: ledger/decode/consent/main arms ------------------------------------
@@ -568,35 +542,6 @@ def test_datacommons_hierarchy_happy(monkeypatch: pytest.MonkeyPatch) -> None:
     assert out["hierarchy"] == {"x": 1}
 
 
-def test_signals_blob_coverage_parses_and_reads_versions(tmp_path: Path) -> None:
-    periods, geos, rows = signals._narrow_blob_coverage(
-        {"periods_covered": ["2024-Q1"], "geos_covered": ["US"], "observations": [{"period": "2024-Q1", "score": 1.0}]},
-        None,
-        None,
-    )
-    assert periods == ["2024-Q1"] and geos == ["US"]
-    assert rows and rows[0]["period"] == "2024-Q1"
-    p = tmp_path / "signals.jsonl"
-    p.write_text('{"signal_id": "s1"}\n\n{"signal_id": "s2"}\n')
-    prior = signals._read_prior_versions(p)
-    assert [d["signal_id"] for d in prior] == ["s1", "s2"]
-    assert signals._read_prior_versions(tmp_path / "missing.jsonl") == []
-
-
-def test_trends_backfill_blob_parses() -> None:
-    import json as _json
-
-    row: dict[str, object] = {
-        "features_json": _json.dumps({"f": 1}),
-        "observation_id": "o",
-        "features_json_extra": None,
-    }
-    blob = trends._backfill_features_blob(row)
-    assert blob == {"f": 1}
-    assert trends._backfill_features_blob({}) is None
-    assert trends._backfill_features_blob({"features_json": ""}) is None
-
-
 def test_submit_via_client_happy_all_files(
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
@@ -697,10 +642,6 @@ def test_bq_make_client_real_import_path_no_network(
     err, client, billing = bigquery_client._make_client(None, "proj")
     assert err is None and isinstance(client, _Client)
     assert seen["project"] == "proj" and billing is None
-
-
-def test_trends_backfill_blob_non_dict_none() -> None:
-    assert trends._backfill_features_blob({"features_json": "123"}) is None
 
 
 def test_analyst_quote_price_arms(monkeypatch: pytest.MonkeyPatch) -> None:

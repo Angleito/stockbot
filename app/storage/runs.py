@@ -505,7 +505,7 @@ class RunRecorder:
         as_of: str | None,
         rendered_text: str,
     ) -> None:
-        """Persist one rendered-evidence record (what the model received)."""
+        """Persist one rendered-evidence record (what the model received: metadata index only)."""
         with self._lock:
             if not self.enabled:
                 return

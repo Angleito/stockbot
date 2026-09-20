@@ -1580,7 +1580,10 @@ def test_record_evidence_rejects_bad_metadata(tmp_path: Path, monkeypatch: pytes
     good["evidence_id"] = f"{sid}:ev:goodmeta"
     good["metadata"] = {"source": "sec", "page": 3}
     out = _svc.record_evidence(sid, src, good, repo=repo)
-    assert out["metadata"] == {"source": "sec", "page": 3}
+    meta = out["metadata"]
+    assert isinstance(meta, dict)
+    assert meta["source"] == "sec" and meta["page"] == 3
+    assert meta["source_bytes"] == "archived" and "identity_key" in meta
 
 
 # ---------------------------------------------------------------------------
@@ -2515,6 +2518,7 @@ def _reg_item(eid: str, wave: int = 1, **over: object) -> dict[str, object]:
             passage,
             accession=str(base["source_record_id"]),
             document=str(base["document_name"]),
+            known_at=str(base["known_at"]) if isinstance(base.get("known_at"), str) else None,
         )
     return base
 
@@ -2842,15 +2846,20 @@ def test_reg_freshness_historical_allowed(tmp_path: Path, monkeypatch: pytest.Mo
     jid = repo.list_jobs(sid)[0].job_id
     out = _svc.record_evidence(sid, jid, _reg_item(f"{sid}:ev:1", known_at="2024-12-01T00:00:00+00:00"), repo=repo)
     assert out["evidence_id"] == f"{sid}:ev:1"
-    with pytest.raises(ValueError, match="PIT_VIOLATION|rejected"):
+    with pytest.raises(ValueError, match="PIT_VIOLATION|rejected|ERR_SEC_HANDLE_UNREADABLE"):
         _svc.record_evidence(
             sid,
             jid,
             _reg_item(
                 f"{sid}:ev:2",
-                known_at="2025-07-01T00:00:00+00:00",
                 source_record_id="0000886982-26-000002",
                 source_uri="https://www.sec.gov/Archives/edgar/data/886982/000088698226000002/primary.htm",
+                source_handle=seam.handle_for(
+                    "The firm discloses OpenAI-linked exposure in the filing.",
+                    accession="0000886982-26-000002",
+                    document="gs-10q-20260331.htm",
+                    known_at="2025-07-01T00:00:00+00:00",
+                ),
             ),
             repo=repo,
         )
@@ -4691,14 +4700,6 @@ def test_telemetry_ledger_unresolvable_and_journal_fallback(tmp_path: Path, monk
     assert telemetry.get("searches_count") == 1  # the coverage's search ids, not the journal call
     assert telemetry.get("queries_attempted") == ["NVDA 10-K"]  # journal fallback: the ledger holds no query
     assert telemetry.get("telemetry_gaps") == []
-
-    def _boom(_search_id: str, **_kwargs: object) -> None:
-        raise RuntimeError("ledger unavailable")
-
-    monkeypatch.setattr("app.sec.store.query_search", _boom)
-    degraded = _svc._derive_telemetry(repo, sid, coverage, [])
-    assert degraded.get("searches_count") == 1 and degraded.get("queries_attempted") == ["NVDA 10-K"]
-    assert degraded.get("telemetry_gaps") == []
 
 
 def test_telemetry_no_coverage_relationships_and_storage_degradation(

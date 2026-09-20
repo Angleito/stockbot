@@ -1,6 +1,9 @@
 """Unit tests for the generic obligations engine (Layer 1 XBRL + Layer 2
-note-text + Layer 3 balance sheet). Offline: parsers are tested against
-sanitized fixture markdown (tests/fixtures/obligations/), HTTP is mocked.
+note-text + Layer 3 balance sheet). Live-only seams: filing text is stubbed
+through edgar_client, XBRL facts are fixture FinancialFactRows stubbed at
+_xbrl_gateway_facts, and note text archives on acceptance via raw_archive.
+
+Warehouse-removal seam: live providers (SourceGateway + normalization + raw_archive) serve reads, nothing is persisted; a future warehouse slots in behind the gateway.
 """
 
 from __future__ import annotations
@@ -12,70 +15,9 @@ from unittest.mock import MagicMock
 import pytest
 
 from app import obligations
+from app.storage import raw_archive
 
 FIXTURES = Path(__file__).parent / "fixtures" / "obligations"
-
-NVDA_COMMITMENTS = (
-    (FIXTURES / "NVDA_10K_notes.json").read_text() if (FIXTURES / "NVDA_10K_notes.json").exists() else None
-)
-
-
-def _note_md(ticker: str, title_fragment: str) -> str:
-    data: dict[str, object] = json.loads((FIXTURES / f"{ticker}_10K_notes.json").read_text())
-    notes = data["notes"]
-    assert isinstance(notes, dict)
-    for title, md in notes.items():
-        assert isinstance(md, str)
-        if title_fragment.lower() in title.lower():
-            return md
-    raise KeyError(f"{title_fragment} not in {ticker} fixture: {list(notes)}")
-
-
-def test_sentence_amounts_nvda_supply_cloud():
-    md = _note_md("NVDA", "Commitments")
-    rows = obligations._parse_sentence_amounts(md)
-    by_kind: dict[str, list[float]] = {}
-    for r in rows:
-        by_kind.setdefault(r["kind"], []).append(r["amount_billions"])
-    # 10-K fixture discloses $95.2B (10-Q updates it to $119B live).
-    assert 95.2 in by_kind.get("supply", [])
-    # Cloud total (27.0) plus its per-year schedule rows (7.0, 6.0, ...).
-    assert 27.0 in by_kind.get("cloud", [])
-    assert 11.4 in by_kind.get("investment", [])
-
-
-def test_sentence_amounts_program_capacity_excluded():
-    md = _note_md("NVDA", "Debt")
-    rows = obligations._parse_sentence_amounts(md)
-    # Commercial paper program capacity ($25B) is not an obligation.
-    assert not any(r["amount_billions"] == 25.0 for r in rows)
-
-
-def test_fiscal_year_table_parsing():
-    md = _note_md("NVDA", "Leases")
-    table = obligations._parse_fiscal_year_table(md)
-    amounts = {r["fiscal_year"]: r["amount_millions"] for r in table}
-    assert amounts.get("2027") in (460, 493)
-    assert "Thereafter" in amounts or "2032 and thereafter" in amounts
-
-
-def test_tax_note_does_not_flood_generic_obligations():
-    md = _note_md("NVDA", "Income Taxes")
-    rows = obligations._parse_sentence_amounts(md)
-    assert all(r["kind"] == "other" for r in rows)
-
-
-def test_classify_contractual_vs_contingent():
-    assert obligations._classify("non-cancelable lease agreements") == "contractual"
-    assert obligations._classify("commitments are cancellable, rescheduled") == "contingent"
-    assert obligations._classify("capacity may be reduced or terminated") == "contingent"
-    assert obligations._classify("plain commitment") == "contractual"
-
-
-def test_amount_kind_priority():
-    assert obligations._amount_kind("cloud service agreement commitments were $30 billion") == "cloud"
-    assert obligations._amount_kind("investment commitments are $11.4 billion") == "investment"
-    assert obligations._amount_kind("manufacturing, supply, and capacity commitments were $119 billion") == "supply"
 
 
 class FakeCache:
@@ -141,7 +83,95 @@ class FakeFiling:
         return self._doc
 
 
-def _install(monkeypatch: pytest.MonkeyPatch, notes_md: dict[str, str], bs_md: str = "") -> FakeFiling:
+def _note_md(ticker: str, title_fragment: str) -> str:
+    data: dict[str, object] = json.loads((FIXTURES / f"{ticker}_10K_notes.json").read_text())
+    notes = data["notes"]
+    assert isinstance(notes, dict)
+    for title, md in notes.items():
+        assert isinstance(md, str)
+        if title_fragment.lower() in title.lower():
+            return md
+    raise KeyError(f"{title_fragment} not in {ticker} fixture: {list(notes)}")
+
+
+def test_sentence_amounts_nvda_supply_cloud():
+    md = _note_md("NVDA", "Commitments")
+    rows = obligations._parse_sentence_amounts(md)
+    by_kind: dict[str, list[float]] = {}
+    for r in rows:
+        by_kind.setdefault(r["kind"], []).append(r["amount_billions"])
+    # 10-K fixture discloses $95.2B (10-Q updates it to $119B live).
+    assert 95.2 in by_kind.get("supply", [])
+    # Cloud total (27.0) plus its per-year schedule rows (7.0, 6.0, ...).
+    assert 27.0 in by_kind.get("cloud", [])
+    assert 11.4 in by_kind.get("investment", [])
+
+
+def test_sentence_amounts_program_capacity_excluded():
+    md = _note_md("NVDA", "Debt")
+    rows = obligations._parse_sentence_amounts(md)
+    # Commercial paper program capacity ($25B) is not an obligation.
+    assert not any(r["amount_billions"] == 25.0 for r in rows)
+
+
+def test_fiscal_year_table_parsing():
+    md = _note_md("NVDA", "Leases")
+    table = obligations._parse_fiscal_year_table(md)
+    amounts = {r["fiscal_year"]: r["amount_millions"] for r in table}
+    assert amounts.get("2027") in (460, 493)
+    assert "Thereafter" in amounts or "2032 and thereafter" in amounts
+
+
+def test_tax_note_does_not_flood_generic_obligations():
+    md = _note_md("NVDA", "Income Taxes")
+    rows = obligations._parse_sentence_amounts(md)
+    assert all(r["kind"] == "other" for r in rows)
+
+
+def test_classify_contractual_vs_contingent():
+    assert obligations._classify("non-cancelable lease agreements") == "contractual"
+    assert obligations._classify("commitments are cancellable, rescheduled") == "contingent"
+    assert obligations._classify("capacity may be reduced or terminated") == "contingent"
+    assert obligations._classify("plain commitment") == "contractual"
+
+
+def test_amount_kind_priority():
+    assert obligations._amount_kind("cloud service agreement commitments were $30 billion") == "cloud"
+    assert obligations._amount_kind("investment commitments are $11.4 billion") == "investment"
+    assert obligations._amount_kind("manufacturing, supply, and capacity commitments were $119 billion") == "supply"
+
+
+def _fact(
+    concept: str = "PurchaseObligations",
+    value: float = 5e9,
+    period_end: str = "2026-05-02",
+    filed_at: str = "2026-08-26",
+    known_at: str = "2026-08-27T00:00:00Z",
+    accession: str = "000123-26-000001",
+    **overrides: object,
+) -> dict[str, object]:
+    row: dict[str, object] = {
+        "concept": concept,
+        "value": value,
+        "period_start": "2026-02-01",
+        "period_end": period_end,
+        "fiscal_year": 2026,
+        "fiscal_period": "Q1",
+        "filed_at": filed_at,
+        "accession": accession,
+        "known_at": known_at,
+        "source_url": "",
+    }
+    row.update(overrides)
+    return row
+
+
+def _install(
+    monkeypatch: pytest.MonkeyPatch,
+    notes_md: dict[str, str],
+    bs_md: str = "",
+    facts: list[dict[str, object]] | None = None,
+) -> FakeFiling:
     notes = FakeNotes({t: FakeNote(t, md) for t, md in notes_md.items()})
     doc = FakeDoc(notes, bs_md)
     filing = FakeFiling()
@@ -153,12 +183,16 @@ def _install(monkeypatch: pytest.MonkeyPatch, notes_md: dict[str, str], bs_md: s
         def get_filings(self, form: list[str] | None = None) -> list[FakeFiling]:
             return [filing]
 
-        def get_facts(self) -> object:
-            raise RuntimeError("no facts in fixture")
+    # Filing text comes from the edgar seam; XBRL facts are fixture
+    # FinancialFactRows at the gateway seam (empty by default, populated
+    # per test); archiving stays live so acceptance still writes raw/.
+    fixture_facts = list(facts) if facts is not None else []
 
-    # The edgar seam lives in edgar_client (get_company/get_latest_report);
-    # get_facts raises so the XBRL layer is absent, exactly as before.
+    def _fake_gateway_facts(ticker: str) -> list[dict[str, object]]:
+        return list(fixture_facts)
+
     monkeypatch.setattr(obligations.edgar_client, "get_company", FakeCompany)
+    monkeypatch.setattr(obligations, "_xbrl_gateway_facts", _fake_gateway_facts)
     monkeypatch.setattr(obligations, "cache", FakeCache())
     filing._doc = doc
     return filing
@@ -197,22 +231,22 @@ def test_get_obligations_empty_ticker():
     assert "error" in result
 
 
-def test_get_obligations_persist_is_explicit(monkeypatch: pytest.MonkeyPatch):
-    data: dict[str, object] = json.loads((FIXTURES / "NVDA_10K_notes.json").read_text())
-    notes_md = data["notes"]
-    assert isinstance(notes_md, dict)
-    _install(monkeypatch, notes_md)
-    calls: list[tuple[list[dict[str, object]], dict[str, object]]] = []
-
-    def _fake_persist(rows: list[dict[str, object]], data_root: str | None = None, **kw: object) -> dict[str, int]:
-        calls.append((rows, kw))
-        return {"events_written": 0, "evidence_written": 0, "skipped_no_filing_date": 0}
-
-    monkeypatch.setattr(obligations, "persist_obligation_events", _fake_persist)
-    obligations.get_obligations("NVDA")
-    assert calls == []
-    obligations.get_obligations("NVDA", persist=True)
-    assert len(calls) == 1
+def test_archive_on_acceptance_anchors_note_text(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
+    """Note text that became evidence archives write-once under raw/."""
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    md = "The company's non-cancelable supply commitments were $13.3 billion as of September 27, 2025."
+    _install_layered(
+        monkeypatch,
+        {"10-K": ({"Commitments and Contingencies": md}, "2026-02-01")},
+    )
+    result = obligations.get_obligations("SYN")
+    assert "error" not in result
+    _rows = result["obligations"]
+    assert isinstance(_rows, list)
+    assert any(r["type"] == "supply" and r["amount_billions"] == 13.3 for r in _rows)
+    record = raw_archive.find("sec", "filing-note-text", "filing-text:SYN:2026-02-01:acc-10-K", root=tmp_path / "raw")
+    assert record is not None
+    assert record.payload_path.read_bytes() == md.encode()
 
 
 def test_8k_guarantee_parsing():
@@ -225,15 +259,18 @@ def test_8k_guarantee_parsing():
     assert obligations._billion(matches[0].group(1), matches[0].group(2)) == 105.0
 
 
-def test_balance_sheet_lines():
+def test_balance_sheet_lines(monkeypatch: pytest.MonkeyPatch):
     bs_md = "| Accounts payable | $13,097 |\n| Total liabilities | $64,000 |\n"
     data: dict[str, object] = json.loads((FIXTURES / "NVDA_10K_notes.json").read_text())
     notes_md = data["notes"]
     assert isinstance(notes_md, dict)
-    _install(__import__("pytest").MonkeyPatch(), notes_md, bs_md)
-    obligations._balance_sheet_liabilities("NVDA")
-    # MonkeyPatch fixture not used here; run directly against a stub instead.
-    assert True
+    _install(monkeypatch, notes_md, bs_md)
+    rows = obligations._balance_sheet_liabilities("NVDA")
+    assert len(rows) == 2
+    by_type = {r["type"]: r["amount_billions"] for r in rows}
+    assert by_type["bs_accounts_payable"] == pytest.approx(13.097)
+    assert by_type["bs_total_liabilities"] == pytest.approx(64.0)
+    assert all(r["status"] == "on_balance_sheet" for r in rows)
 
 
 def _obligation_row(**overrides: object) -> dict[str, object]:
@@ -257,186 +294,6 @@ def _obligation_row(**overrides: object) -> dict[str, object]:
     }
     row.update(overrides)
     return row
-
-
-def test_persist_obligation_events_roundtrip(tmp_path: Path):
-    """Events/evidence rows land with known_at == filing date (never the
-    wall clock / extraction time), anchored to the archived report text."""
-    from app.storage import parquet, raw_archive
-
-    text = (
-        "NVIDIA's non-cancelable purchase obligations are $119.0 billion, "
-        "payable through fiscal 2030. NVIDIA's aggregate payment obligation "
-        "under the Agreements is capped at $105 billion."
-    )
-    payload = text.encode()
-    raw_archive.archive(
-        "sec",
-        "filing-note-text",
-        "filing-text:NVDA:2026-02-25:0001",
-        payload,
-        url="",
-        retrieved_at="2026-08-26T00:00:00Z",
-        root=tmp_path / "raw",
-    )
-    rows = [
-        _obligation_row(
-            excerpt=text, content_hash="abc", _accession="0001", _archive_key="filing-text:NVDA:2026-02-25:0001"
-        ),
-    ]
-    summary = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
-    assert summary == {
-        "events_written": 1,
-        "capital_events_written": 0,
-        "evidence_written": 1,
-        "skipped_no_filing_date": 0,
-        "skipped_proxied": 0,
-    }
-
-    events = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
-    (event,) = events
-    assert event["event_id"] == "sec:event:NVDA:abc"
-    assert event["event_type"] == "purchase_commitments"
-    assert event["amount_billions"] == 119.0
-    assert event["ticker"] == "NVDA"
-    # known_at is the filing date, never the extraction timestamp.
-    assert event["known_at"] == "2026-02-25"
-    assert event["filed_at"] == "2026-02-25"
-    assert event["known_at"] != "2026-08-26T00:00:00Z"
-    assert event["retrieved_at"] == "2026-08-26T00:00:00Z"
-    assert event["accession"] == "0001"
-
-    evidence = parquet.read_table("evidence", root=tmp_path / "parquet").to_pylist()
-    (ev,) = evidence
-    assert ev["event_id"] == event["event_id"]
-    assert ev["source_type"] == "filing_text"
-    assert ev["archive_key"] == "filing-text:NVDA:2026-02-25:0001"
-    assert ev["content_hash"] == raw_archive.content_hash(payload)
-    # Verbatim excerpt found at its expected offsets in the archived text.
-    assert ev["span_start"] == text.find(text)
-    assert (ev["span_start"], ev["span_end"]) == (0, len(text))
-    assert ev["excerpt"] == text
-
-    # Deterministic rerun writes nothing new.
-    rerun = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
-    assert rerun == {
-        "events_written": 0,
-        "capital_events_written": 0,
-        "evidence_written": 0,
-        "skipped_no_filing_date": 0,
-        "skipped_proxied": 0,
-    }
-    assert parquet.read_table("events", root=tmp_path / "parquet").num_rows == 1
-    assert parquet.read_table("evidence", root=tmp_path / "parquet").num_rows == 1
-
-
-def test_persist_obligation_events_spans_and_skips(tmp_path: Path):
-    """Non-verbatim excerpts get NULL spans; XBRL rows carry no archive;
-    rows without any filing date are skipped, never written with a wrong
-    known_at."""
-    from app.storage import parquet, raw_archive
-
-    root = tmp_path
-    text = "The disclosed supply commitments total $119.0 billion."
-    raw_archive.archive(
-        "sec",
-        "filing-note-text",
-        "filing-text:NVDA:2026-02-25:0001",
-        text.encode(),
-        url="",
-        retrieved_at="2026-08-26T00:00:00Z",
-        root=root / "raw",
-    )
-    rows = [
-        # Verbatim excerpt: spans found.
-        _obligation_row(
-            excerpt=text, content_hash="abc", _accession="0001", _archive_key="filing-text:NVDA:2026-02-25:0001"
-        ),
-        # Non-verbatim excerpt against the archived text: NULL spans.
-        _obligation_row(
-            excerpt="totally different sentence.",
-            content_hash="def",
-            _accession="0001",
-            _archive_key="filing-text:NVDA:2026-02-25:0001",
-        ),
-        # XBRL-fact row: no archive reference, filing date from the report.
-        _obligation_row(excerpt="XBRL fact = 100", content_hash="ghi", concept="us-gaap:PurchaseObligation"),
-        # No filing date at all: skipped entirely.
-        _obligation_row(filed=None, as_of=None, content_hash="jkl"),
-        # No archive annotation: truthful absence, never a phantom key.
-        _obligation_row(excerpt=text, content_hash="mno", _accession="0001"),
-    ]
-    summary = obligations.persist_obligation_events(rows, data_root=str(root))
-    assert summary["skipped_no_filing_date"] == 1
-    assert summary["events_written"] == 4
-    assert summary["evidence_written"] == 4
-    assert parquet.read_table("events", root=root / "parquet").num_rows == 4
-
-    evidence = {r["event_id"]: r for r in parquet.read_table("evidence", root=root / "parquet").to_pylist()}
-    verbatim = evidence["sec:event:NVDA:abc"]
-    assert verbatim["archive_key"] == "filing-text:NVDA:2026-02-25:0001"
-    assert verbatim["span_start"] == 0
-    assert verbatim["span_end"] == len(text)
-    not_verbatim = evidence["sec:event:NVDA:def"]
-    assert not_verbatim["archive_key"] == "filing-text:NVDA:2026-02-25:0001"
-    assert not_verbatim["span_start"] is None
-    assert not_verbatim["span_end"] is None
-    xbrl = evidence["sec:event:NVDA:ghi"]
-    assert xbrl["source_type"] == "xbrl_fact"
-    assert xbrl["archive_key"] is None
-    assert xbrl["span_start"] is None
-    assert xbrl["span_end"] is None
-    missing = evidence["sec:event:NVDA:mno"]
-    assert missing["archive_key"] is None
-    assert missing["content_hash"] is None
-    assert missing["span_start"] is None
-    assert missing["span_end"] is None
-
-
-def test_persist_uses_historical_ticker_owner(tmp_path: Path):
-    """A 2024 filing for a reused ticker resolves to the 2024 owner, not the 2026 one."""
-    from app.domain.market.ids import sec_entity_id
-    from app.normalization import normalize_sec_tickers
-    from app.storage import parquet
-
-    for cik, retrieved in [(111, "2024-06-01T00:00:00Z"), (222, "2026-06-01T00:00:00Z")]:
-        datasets = normalize_sec_tickers(
-            {"0": {"cik_str": cik, "ticker": "XYZ", "title": f"Entity {cik}"}},
-            retrieved_at=retrieved,
-            content_hash=f"tickers-{cik}",
-        )
-        for name, rows in datasets.items():
-            parquet.write_rows(name, rows, root=tmp_path / "parquet")
-    row = _obligation_row(
-        ticker="XYZ",
-        filed="2024-08-01",
-        as_of="2024-08-01",
-        known_at="2024-08-10T00:00:00Z",
-        retrieved_at="2024-08-10T00:00:00Z",
-        content_hash="hist1",
-        _accession="0001",
-    )
-    summary = obligations.persist_obligation_events([row], data_root=str(tmp_path))
-    assert summary["events_written"] == 1
-    events = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
-    assert events[0]["entity_id"] == sec_entity_id(111)
-
-
-def test_persist_evidence_ids_distinct_across_tickers(tmp_path: Path):
-    """Same content_hash under two tickers yields two events and two distinct evidence_ids."""
-    from app.storage import parquet
-
-    rows = [
-        _obligation_row(ticker="AAA", content_hash="samehash123", _accession="0001"),
-        _obligation_row(ticker="BBB", content_hash="samehash123", _accession="0001"),
-    ]
-    summary = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
-    assert summary["events_written"] == 2
-    assert summary["evidence_written"] == 2
-    assert parquet.read_table("events", root=tmp_path / "parquet").num_rows == 2
-    evidence = parquet.read_table("evidence", root=tmp_path / "parquet").to_pylist()
-    assert len(evidence) == 2
-    assert evidence[0]["evidence_id"] != evidence[1]["evidence_id"]
 
 
 def test_table_schedule_keeps_thereafter_bucket():
@@ -519,31 +376,11 @@ def test_collect_note_rows_unreconciled_supply_keeps_horizon():
     assert any(isinstance(h, dict) and h.get("paid_in_remainder_of_fy") == "2027" for h in horizons)
 
 
-def test_persist_obligation_events_schedule_json(tmp_path: Path):
-    """Per-year schedules persist per event; rows without one store NULL."""
-    from app.storage import parquet
-
-    rows = [
-        _obligation_row(
-            content_hash="sched1",
-            schedule=[
-                {"fiscal_year": "2027", "amount_billions": 4.0},
-                {"fiscal_year": "Thereafter", "amount_billions": 1.0},
-            ],
-        ),
-        _obligation_row(content_hash="flat1", type="vendor_commitments", revenue_matched=False),
-    ]
-    summary = obligations.persist_obligation_events(rows, data_root=str(tmp_path))
-    assert summary["events_written"] == 2
-    events = {e["event_id"]: e for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()}
-    assert json.loads(events["sec:event:NVDA:sched1"]["schedule_json"]) == [
-        {"fiscal_year": "2027", "amount_billions": 4.0},
-        {"fiscal_year": "Thereafter", "amount_billions": 1.0},
-    ]
-    assert events["sec:event:NVDA:flat1"]["schedule_json"] is None
-
-
-def _install_layered(monkeypatch: pytest.MonkeyPatch, notes_by_form: dict[str, tuple[dict[str, str], str]]) -> None:
+def _install_layered(
+    monkeypatch: pytest.MonkeyPatch,
+    notes_by_form: dict[str, tuple[dict[str, str], str]],
+    facts: list[dict[str, object]] | None = None,
+) -> None:
     """Form-aware mocked EDGAR: {form: ({title: md}, filing_date)}; 8-K -> none."""
 
     def fake_get_company(ticker: str) -> object:
@@ -561,12 +398,15 @@ def _install_layered(monkeypatch: pytest.MonkeyPatch, notes_by_form: dict[str, t
                         out.append(filing)
                 return out
 
-            def get_facts(self) -> object:
-                raise RuntimeError("no facts in fixture")
-
         return _C()
 
+    fixture_facts = list(facts) if facts is not None else []
+
+    def _fake_gateway_facts(ticker: str) -> list[dict[str, object]]:
+        return list(fixture_facts)
+
     monkeypatch.setattr(obligations.edgar_client, "get_company", fake_get_company)
+    monkeypatch.setattr(obligations, "_xbrl_gateway_facts", _fake_gateway_facts)
     monkeypatch.setattr(obligations, "cache", FakeCache())
 
 
@@ -706,45 +546,11 @@ def test_schedule_change_changes_content_hash():
     assert obligations._content_hash(base) != obligations._content_hash(nosched)
 
 
-def test_persist_unquantified_exposures(tmp_path: Path):
-    """Unquantified exposures persist as amount-None contingent events."""
-    from app.storage import parquet
-
-    exp = {
-        "ticker": "SYN",
-        "type": "indemnities",
-        "trigger": "unknown",
-        "filed": "2026-02-01",
-        "known_at": "2026-08-26T00:00:00Z",
-        "parser_version": obligations.PARSER_VERSION,
-        "source": "SEC EDGAR 2026-02-01 Guarantees note",
-        "excerpt": "The company may indemnify its officers.",
-        "_accession": "0001",
-    }
-    exp["content_hash"] = obligations._content_hash(exp)
-    summary = obligations.persist_obligation_events([], data_root=str(tmp_path), unquantified=[exp])
-    assert summary == {
-        "events_written": 1,
-        "capital_events_written": 0,
-        "evidence_written": 1,
-        "skipped_no_filing_date": 0,
-        "skipped_proxied": 0,
-    }
-    (event,) = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
-    assert event["amount_billions"] is None
-    assert event["certainty"] == "contingent"
-    assert event["filed_at"] == "2026-02-01"
-    assert event["known_at"] == "2026-02-01"
-    assert event["schedule_json"] is None
-    (evidence,) = parquet.read_table("evidence", root=tmp_path / "parquet").to_pylist()
-    assert evidence["event_id"] == event["event_id"]
-    assert evidence["excerpt"] == exp["excerpt"]
-
-
 def _install_with_8k(
     monkeypatch: pytest.MonkeyPatch,
     notes_by_form: dict[str, tuple[dict[str, str], str]],
     filings_8k: list[tuple[str, list[str], str, str]],
+    facts: list[dict[str, object]] | None = None,
 ) -> None:
     """Form-aware mocked EDGAR plus a canned 8-K stream.
 
@@ -784,12 +590,15 @@ def _install_with_8k(
                         out.append(filing)
                 return out
 
-            def get_facts(self) -> object:
-                raise RuntimeError("no facts in fixture")
-
         return _C()
 
+    fixture_facts = list(facts) if facts is not None else []
+
+    def _fake_gateway_facts(ticker: str) -> list[dict[str, object]]:
+        return list(fixture_facts)
+
     monkeypatch.setattr(obligations.edgar_client, "get_company", fake_get_company)
+    monkeypatch.setattr(obligations, "_xbrl_gateway_facts", _fake_gateway_facts)
     monkeypatch.setattr(obligations, "cache", FakeCache())
 
 
@@ -822,10 +631,8 @@ def test_schedule_table_reconciles_to_headline(monkeypatch: pytest.MonkeyPatch):
     assert snap_total == pytest.approx(13.3, abs=0.05)
 
 
-def test_schedule_components_roundtrip_flag_and_replay(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Component flags survive persist -> replay; snapshot stays ~$13.3B."""
-    from app.storage import parquet
-
+def test_schedule_components_flag_and_legacy_backfill(monkeypatch: pytest.MonkeyPatch):
+    """Headline + table reconcile once; dropping flags re-derives them."""
     md = (
         "Supply commitments were $13.3 billion as of September 27, 2025. "
         "Future payments are as follows (in millions):\n"
@@ -849,202 +656,15 @@ def test_schedule_components_roundtrip_flag_and_replay(monkeypatch: pytest.Monke
     _live_snapshot = live["current_snapshot"]
     assert isinstance(_live_snapshot, list)
     assert sum(r["amount_billions"] for r in _live_snapshot) == pytest.approx(13.3, abs=0.05)
-    summary = obligations.persist_obligation_events(_live_obligations, data_root=str(tmp_path))
-    assert summary["events_written"] == 7
-    stored = {e["event_id"]: e for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()}
-    assert len(stored) == 7
-    stored_comps = [e for e in stored.values() if e.get("schedule_component") is True]
-    assert len(stored_comps) == 6
-    assert all(e["headline_type"] == "supply" for e in stored_comps)
-    (stored_headline,) = [e for e in stored.values() if e.get("schedule_component") is not True]
-    assert stored_headline["amount_billions"] == 13.3
-    assert stored_headline["schedule_component"] is None
-    assert stored_headline["headline_type"] is None
-    replayed = obligations.get_obligations_as_of("SYN", "2026-03-01", data_root=str(tmp_path))
-    assert "error" not in replayed
-    _replayed_obligations = replayed["obligations"]
-    assert isinstance(_replayed_obligations, list)
-    assert len(_replayed_obligations) == 7
-    assert len([r for r in _replayed_obligations if r.get("schedule_component")]) == 6
-    assert all(r["headline_type"] == "supply" for r in _replayed_obligations if r.get("schedule_component"))
-    _replayed_snapshot = replayed["current_snapshot"]
-    assert isinstance(_replayed_snapshot, list)
-    assert sum(r["amount_billions"] for r in _replayed_snapshot) == pytest.approx(13.3, abs=0.05)
-    (replayed_headline,) = [r for r in _replayed_obligations if r["type"] == "supply" and r["amount_billions"] == 13.3]
-    assert [y["fiscal_year"] for y in replayed_headline["schedule"]] == [
-        "2026",
-        "2027",
-        "2028",
-        "2029",
-        "2030",
-        "Thereafter",
-    ]
-
-
-def test_schedule_components_legacy_null_flags_replay(tmp_path: Path):
-    """Events stored without flags replay to the same ~$13.3B snapshot."""
-    from app.domain.events import sec_event_id
-    from app.storage import parquet
-
-    table = [
-        ("2026", 4.752),
-        ("2027", 3.708),
-        ("2028", 1.981),
-        ("2029", 1.306),
-        ("2030", 0.788),
-        ("Thereafter", 0.773),
-    ]
-    store_rows: list[dict[str, object]] = [
-        {
-            "event_id": sec_event_id("SYN", "legacy-head"),
-            "ticker": "SYN",
-            "event_type": "supply",
-            "amount_billions": 13.3,
-            "certainty": "contractual",
-            "status": "future_cash_obligation",
-            "revenue_matched": False,
-            "default_triggered": False,
-            "fiscal_year": None,
-            "schedule_json": json.dumps([{"fiscal_year": fy, "amount_billions": amt} for fy, amt in table]),
-            "filed_at": "2026-02-01",
-            "known_at": "2026-02-01",
-            "source": "SEC EDGAR 2026-02-01 Commitments and Contingencies note",
-            "content_hash": "legacy-head",
-            "parser_version": obligations.PARSER_VERSION,
-        },
-    ]
-    for i, (fy, amt) in enumerate(table):
-        ch = f"legacy-c{i}"
-        store_rows.append(
-            {
-                "event_id": sec_event_id("SYN", ch),
-                "ticker": "SYN",
-                "event_type": "purchase_commitments",
-                "amount_billions": amt,
-                "certainty": "contractual",
-                "status": "future_cash_obligation",
-                "revenue_matched": False,
-                "default_triggered": False,
-                "fiscal_year": fy,
-                "filed_at": "2026-02-01",
-                "known_at": "2026-02-01",
-                "source": "SEC EDGAR 2026-02-01 Commitments and Contingencies note table",
-                "content_hash": ch,
-                "parser_version": obligations.PARSER_VERSION,
-            }
-        )
-    assert parquet.write_rows("events", store_rows, root=tmp_path / "parquet") == 7
-    replayed = obligations.get_obligations_as_of("SYN", "2026-03-01", data_root=str(tmp_path))
-    assert "error" not in replayed
-    _replayed_obligations = replayed["obligations"]
-    assert isinstance(_replayed_obligations, list)
-    assert len(_replayed_obligations) == 7
-    comps = [r for r in _replayed_obligations if r.get("schedule_component")]
-    assert len(comps) == 6
-    assert all(c["headline_type"] == "supply" for c in comps)
-    _replayed_snapshot = replayed["current_snapshot"]
-    assert isinstance(_replayed_snapshot, list)
-    assert sum(r["amount_billions"] for r in _replayed_snapshot) == pytest.approx(13.3, abs=0.05)
-
-
-def test_schedule_components_legacy_mixed_notes_replay(tmp_path: Path):
-    """Same filing, two notes: supply table replays flagged, lease table stays independent."""
-    from app.domain.events import sec_event_id
-    from app.storage import parquet
-
-    supply_table = [
-        ("2026", 4.752),
-        ("2027", 3.708),
-        ("2028", 1.981),
-        ("2029", 1.306),
-        ("2030", 0.788),
-        ("Thereafter", 0.773),
-    ]
-    lease_table = [
-        ("2026", 1.5),
-        ("2027", 1.4),
-        ("2028", 1.1),
-        ("2029", 0.6),
-        ("Thereafter", 0.4),
-    ]
-    store_rows: list[dict[str, object]] = [
-        {
-            "event_id": sec_event_id("SYN", "mixed-head"),
-            "ticker": "SYN",
-            "event_type": "supply",
-            "amount_billions": 13.3,
-            "certainty": "contractual",
-            "status": "future_cash_obligation",
-            "revenue_matched": False,
-            "default_triggered": False,
-            "fiscal_year": None,
-            "schedule_json": json.dumps([{"fiscal_year": fy, "amount_billions": amt} for fy, amt in supply_table]),
-            "filed_at": "2026-02-01",
-            "known_at": "2026-02-01",
-            "source": "SEC EDGAR 2026-02-01 Commitments and Contingencies note",
-            "content_hash": "mixed-head",
-            "parser_version": obligations.PARSER_VERSION,
-        },
-    ]
-    for i, (fy, amt) in enumerate(supply_table):
-        ch = f"mixed-supply-c{i}"
-        store_rows.append(
-            {
-                "event_id": sec_event_id("SYN", ch),
-                "ticker": "SYN",
-                "event_type": "purchase_commitments",
-                "amount_billions": amt,
-                "certainty": "contractual",
-                "status": "future_cash_obligation",
-                "revenue_matched": False,
-                "default_triggered": False,
-                "fiscal_year": fy,
-                "filed_at": "2026-02-01",
-                "known_at": "2026-02-01",
-                "source": "SEC EDGAR 2026-02-01 Commitments and Contingencies note table",
-                "content_hash": ch,
-                "parser_version": obligations.PARSER_VERSION,
-            }
-        )
-    for i, (fy, amt) in enumerate(lease_table):
-        ch = f"mixed-lease-c{i}"
-        store_rows.append(
-            {
-                "event_id": sec_event_id("SYN", ch),
-                "ticker": "SYN",
-                "event_type": "operating_leases",
-                "amount_billions": amt,
-                "certainty": "contractual",
-                "status": "future_cash_obligation",
-                "revenue_matched": False,
-                "default_triggered": False,
-                "fiscal_year": fy,
-                "filed_at": "2026-02-01",
-                "known_at": "2026-02-01",
-                "source": "SEC EDGAR 2026-02-01 Leases note table",
-                "content_hash": ch,
-                "parser_version": obligations.PARSER_VERSION,
-            }
-        )
-    assert parquet.write_rows("events", store_rows, root=tmp_path / "parquet") == 12
-    replayed = obligations.get_obligations_as_of("SYN", "2026-03-01", data_root=str(tmp_path))
-    assert "error" not in replayed
-    _replayed_obligations = replayed["obligations"]
-    assert isinstance(_replayed_obligations, list)
-    assert len(_replayed_obligations) == 12
-    comps = [r for r in _replayed_obligations if r.get("schedule_component")]
-    assert len(comps) == 6
-    assert all(c["headline_type"] == "supply" for c in comps)
-    lease_rows = [r for r in _replayed_obligations if r.get("type") == "operating_leases"]
-    assert len(lease_rows) == 5
-    assert all(r.get("schedule_component") is None for r in lease_rows)
-    snap = replayed["current_snapshot"]
-    assert isinstance(snap, list)
-    assert sum(r["amount_billions"] for r in snap if r.get("type") == "supply") == pytest.approx(13.3, abs=0.05)
-    lease_snap = [r for r in snap if r.get("type") == "operating_leases"]
-    assert sum(r["amount_billions"] for r in lease_snap) == pytest.approx(5.0, abs=0.05)
-    assert all(r.get("schedule_component") is None for r in lease_snap)
-    assert not [r for r in snap if r.get("type") == "purchase_commitments"]
+    unflagged = [dict(r) for r in _live_obligations]
+    for row in unflagged:
+        row.pop("schedule_component", None)
+        row.pop("headline_type", None)
+    obligations._apply_legacy_component_flags(unflagged)
+    assert len([r for r in unflagged if r.get("schedule_component")]) == 6
+    assert all(r["headline_type"] == "supply" for r in unflagged if r.get("schedule_component"))
+    snapshot, _ = obligations._current_snapshot(unflagged)
+    assert sum(r["amount_billions"] for r in snapshot) == pytest.approx(13.3, abs=0.05)
 
 
 def test_reconciliation_ambiguity_attaches_closest_and_warns():
@@ -1065,39 +685,13 @@ def test_reconciliation_ambiguity_attaches_closest_and_warns():
     assert "ambiguous" in _warning
 
 
-def test_xbrl_store_provenance_stamps_fact_dates(monkeypatch: pytest.MonkeyPatch):
+def test_xbrl_gateway_provenance_stamps_fact_dates(monkeypatch: pytest.MonkeyPatch):
     """An August-filed fact is stamped August, never the February 10-K proxy."""
-
-    def _fake_store_facts(ticker: str) -> list[dict[str, object]]:
-        return [
-            {
-                "concept": "PurchaseObligations",
-                "value": 5e9,
-                "period_start": "2026-02-01",
-                "period_end": "2026-05-02",
-                "fiscal_year": 2026,
-                "fiscal_period": "Q1",
-                "filed_at": "2026-08-26",
-                "accession": "000123-26-000001",
-                "known_at": "2026-08-27T00:00:00Z",
-                "source_url": "",
-            }
-        ]
-
-    monkeypatch.setattr(obligations, "_xbrl_store_facts", _fake_store_facts)
-
-    class NoFacts:
-        def to_dataframe(self):
-            raise RuntimeError("no live facts")
-
-    class _C:
-        def get_facts(self):
-            return NoFacts()
-
-    def _fake_get_company(ticker: str) -> object:
-        return _C()
-
-    monkeypatch.setattr(obligations.edgar_client, "get_company", _fake_get_company)
+    _install_layered(
+        monkeypatch,
+        {"10-K": ({"Commitments and Contingencies": "No dollar amounts here."}, "2026-02-01")},
+        [_fact()],
+    )
     rows = obligations._xbrl_obligations("SYN")
     (row,) = [r for r in rows if r["type"] == "purchase_commitments"]
     assert row["filed"] == "2026-08-26"
@@ -1105,46 +699,6 @@ def test_xbrl_store_provenance_stamps_fact_dates(monkeypatch: pytest.MonkeyPatch
     assert row["as_of"] == "2026-05-02"
     assert row["_accession"] == "000123-26-000001"
     assert row["concept"] == "PurchaseObligations"
-    assert "_coverage_warning" not in row
-
-
-def test_xbrl_live_fallback_warns_proxied(monkeypatch: pytest.MonkeyPatch):
-    """Empty store + live facts: latest-10-K proxy date plus a warning."""
-    import pandas as pd
-
-    def _fake_empty_facts(ticker: str) -> list[dict[str, object]]:
-        return []
-
-    monkeypatch.setattr(obligations, "_xbrl_store_facts", _fake_empty_facts)
-
-    class _Facts:
-        def to_dataframe(self):
-            return pd.DataFrame(
-                [
-                    {"concept": "PurchaseObligations", "value": 5e9, "period_end": "2026-05-02"},
-                ]
-            )
-
-    class _C:
-        def get_facts(self):
-            return _Facts()
-
-    def _fake_get_company(ticker: str) -> object:
-        return _C()
-
-    monkeypatch.setattr(obligations.edgar_client, "get_company", _fake_get_company)
-
-    def _fake_latest_report(ticker: str, form: str) -> tuple[FakeFiling, None]:
-        return (FakeFiling(date="2026-02-25"), None)
-
-    monkeypatch.setattr(obligations, "_latest_report", _fake_latest_report)
-    rows = obligations._xbrl_obligations("SYN")
-    (row,) = [r for r in rows if r["type"] == "purchase_commitments"]
-    assert row["filed"] == "2026-02-25"
-    _warning = row["_coverage_warning"]
-    assert isinstance(_warning, str)
-    assert "proxied" in _warning
-    assert "PurchaseObligations" in _warning
 
 
 def test_three_indemnities_yield_three_rows(monkeypatch: pytest.MonkeyPatch):
@@ -1497,10 +1051,8 @@ def test_8k_amended_then_terminated_zeroes_with_notice(monkeypatch: pytest.Monke
     assert any("canceled amount unknown" in w for w in _warnings)
 
 
-def test_8k_lifecycle_staggered_ingestion(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Jan persists status-less; Mar amendment dedups Jan, never mutates it."""
-    from app.storage import parquet
-
+def test_8k_lifecycle_amendment_marks_earlier_row(monkeypatch: pytest.MonkeyPatch):
+    """A later amount-less amendment stamps the earlier quantified row amended; snapshot retains $10B."""
     jan = (
         "2026-01-15",
         ["Item 1.01"],
@@ -1522,154 +1074,32 @@ def test_8k_lifecycle_staggered_ingestion(monkeypatch: pytest.MonkeyPatch, tmp_p
     assert isinstance(_jan_obligations, list)
     jan_only = [r for r in _jan_obligations if r["type"] == "8k_guarantees"]
     assert len(jan_only) == 1
-    first = obligations.persist_obligation_events(jan_only, data_root=str(tmp_path))
-    assert first["events_written"] == 1
-    jan_snapshot = dict(
-        {e["filed_at"]: e for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()}["2026-01-15"]
-    )
+    assert jan_only[0]["amount_billions"] == 10.0
+    assert "lifecycle_status" not in jan_only[0]
     _install_with_8k(monkeypatch, {}, [jan, mar])
     _both_result = obligations.get_obligations("SYN")
     _both_obligations = _both_result["obligations"]
     assert isinstance(_both_obligations, list)
     both = [r for r in _both_obligations if r["type"] == "8k_guarantees"]
     assert len(both) == 2
-    second = obligations.persist_obligation_events(both, data_root=str(tmp_path))
-    assert second["events_written"] == 1
-    events = {e["filed_at"]: e for e in parquet.read_table("events", root=tmp_path / "parquet").to_pylist()}
-    assert set(events) == {"2026-01-15", "2026-03-10"}
-    assert events["2026-01-15"] == jan_snapshot
-    assert "lifecycle_status" not in events["2026-01-15"]
-    assert events["2026-01-15"]["amount_billions"] == 10.0
-    assert events["2026-03-10"]["amount_billions"] is None
-    assert events["2026-03-10"]["lifecycle_event"] == "amendment"
-    assert events["2026-01-15"]["agreement_key"] == events["2026-03-10"]["agreement_key"]
-    rebuilt = [
-        {
-            "type": "8k_guarantees",
-            "amount_billions": e["amount_billions"],
-            "filed": e["filed_at"],
-            "_lifecycle_event": e["lifecycle_event"],
-            "agreement_key": e["agreement_key"],
-        }
-        for e in events.values()
-    ]
-    obligations._resolve_8k_lifecycle(rebuilt)
-    by_filed = {r["filed"]: r for r in rebuilt}
+    by_filed = {r["filed"]: r for r in both}
     assert by_filed["2026-01-15"]["amount_billions"] == 10.0
     assert by_filed["2026-01-15"].get("lifecycle_status") == "amended"
-
-
-def test_obligations_as_of_before_amendment(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Jan-only store replayed in Feb: $10B unamended, no retained warning."""
-    from app.storage import parquet  # noqa: F401
-
-    _install_with_8k(
-        monkeypatch,
-        {},
-        [
-            (
-                "2026-01-15",
-                ["Item 1.01"],
-                (
-                    "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
-                    "obligation cumulatively capped at $10 billion under the Agreements."
-                ),
-                "acc-jan",
-            )
-        ],
-    )
-    _jan_result = obligations.get_obligations("SYN")
-    _jan_obligations = _jan_result["obligations"]
-    assert isinstance(_jan_obligations, list)
-    jan_only = [r for r in _jan_obligations if r["type"] == "8k_guarantees"]
-    obligations.persist_obligation_events(jan_only, data_root=str(tmp_path))
-    replay = obligations.get_obligations_as_of("SYN", "2026-02-01", data_root=str(tmp_path))
-    _replay_snapshot = replay["current_snapshot"]
-    assert isinstance(_replay_snapshot, list)
-    snap = [r for r in _replay_snapshot if r["type"] == "8k_guarantees"]
-    assert len(snap) == 1 and snap[0]["amount_billions"] == 10.0
-    assert "lifecycle_status" not in snap[0]
-    _replay_coverage = replay["coverage"]
-    assert isinstance(_replay_coverage, dict)
-    _replay_warnings = _replay_coverage["warnings"]
-    assert isinstance(_replay_warnings, list)
-    assert not any("did not disclose a replacement amount" in w for w in _replay_warnings)
-
-
-def test_obligations_as_of_retains_amended(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Jan+Mar store replayed in Apr: Jan amended $10B with retained warning."""
-    from app.storage import parquet  # noqa: F401
-
-    _install_with_8k(
-        monkeypatch,
-        {},
-        [
-            (
-                "2026-01-15",
-                ["Item 1.01"],
-                (
-                    "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
-                    "obligation cumulatively capped at $10 billion under the Agreements."
-                ),
-                "acc-jan",
-            ),
-            (
-                "2026-03-10",
-                ["Item 1.01"],
-                "The company amended the Guarantee Agreement with Alpha Holdings.",
-                "acc-mar",
-            ),
-        ],
-    )
-    _both_result = obligations.get_obligations("SYN")
-    _both_obligations = _both_result["obligations"]
-    assert isinstance(_both_obligations, list)
-    both = [r for r in _both_obligations if r["type"] == "8k_guarantees"]
-    obligations.persist_obligation_events(both, data_root=str(tmp_path))
-    replay = obligations.get_obligations_as_of("SYN", "2026-04-01", data_root=str(tmp_path))
-    _replay_snapshot = replay["current_snapshot"]
-    assert isinstance(_replay_snapshot, list)
-    snap = [r for r in _replay_snapshot if r["type"] == "8k_guarantees"]
+    assert by_filed["2026-03-10"]["amount_billions"] is None
+    _snapshot = _both_result["current_snapshot"]
+    assert isinstance(_snapshot, list)
+    snap = [r for r in _snapshot if r["type"] == "8k_guarantees"]
     assert len(snap) == 1 and snap[0]["amount_billions"] == 10.0
     assert snap[0].get("lifecycle_status") == "amended"
-    _replay_coverage = replay["coverage"]
-    assert isinstance(_replay_coverage, dict)
-    _replay_warnings = _replay_coverage["warnings"]
-    assert isinstance(_replay_warnings, list)
-    assert any("did not disclose a replacement amount" in w for w in _replay_warnings)
+    _coverage = _both_result["coverage"]
+    assert isinstance(_coverage, dict)
+    _warnings = _coverage["warnings"]
+    assert isinstance(_warnings, list)
+    assert any("did not disclose a replacement amount" in w for w in _warnings)
 
 
-def test_obligations_as_of_empty(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Pre-history replay returns the _no_data error shape."""
-    _install_with_8k(
-        monkeypatch,
-        {},
-        [
-            (
-                "2026-01-15",
-                ["Item 1.01"],
-                (
-                    "The company entered into a guarantee agreement with Alpha Holdings, with aggregate payment "
-                    "obligation cumulatively capped at $10 billion under the Agreements."
-                ),
-                "acc-jan",
-            )
-        ],
-    )
-    _jan_result = obligations.get_obligations("SYN")
-    _jan_obligations = _jan_result["obligations"]
-    assert isinstance(_jan_obligations, list)
-    jan_only = [r for r in _jan_obligations if r["type"] == "8k_guarantees"]
-    obligations.persist_obligation_events(jan_only, data_root=str(tmp_path))
-    replay = obligations.get_obligations_as_of("SYN", "2025-01-01", data_root=str(tmp_path))
-    assert "error" in replay
-    _replay_error = replay["error"]
-    assert isinstance(_replay_error, str)
-    assert "2025-01-01" in _replay_error
-
-
-def test_capital_persist_replay_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_path: Path):
-    """Dollar-less buyback persists to capital_events and replays as capital only."""
+def test_capital_buyback_stays_capital_only(monkeypatch: pytest.MonkeyPatch):
+    """A dollar-less buyback lands in capital only; quantified ledger and snapshot stay empty."""
     _install_layered(
         monkeypatch,
         {
@@ -1677,26 +1107,14 @@ def test_capital_persist_replay_roundtrip(monkeypatch: pytest.MonkeyPatch, tmp_p
         },
     )
     result = obligations.get_obligations("SYN")
-    assert result["capital_allocation"]
     _capital = result["capital_allocation"]
     assert isinstance(_capital, list)
-    summary = obligations.persist_obligation_events([], data_root=str(tmp_path), capital=_capital)
-    assert summary["capital_events_written"] == 1 and summary["events_written"] == 0
-    replay = obligations.get_obligations_as_of("SYN", "2026-03-01", data_root=str(tmp_path))
-    _replay_capital = replay["capital_allocation"]
-    assert isinstance(_replay_capital, list)
-    assert len(_replay_capital) == 1
-    _first_capital = _replay_capital[0]
-    assert isinstance(_first_capital, dict)
-    assert _first_capital["trigger"] == "board_discretion"
-    assert replay["obligations"] == [] and replay["current_snapshot"] == []
+    assert len(_capital) == 1
+    assert result["obligations"] == [] and result["current_snapshot"] == []
 
 
-def test_payment_timing_roundtrip_and_retune(tmp_path: Path):
-    """A 95/24 front-loaded horizon round-trips as JSON; correcting it to
-    90/29 retunes identity; reruns write zero rows."""
-    from app.storage import parquet
-
+def test_payment_timing_retunes_content_hash():
+    """A 95/24 front-loaded horizon vs 90/29 retunes identity; identical rows hash stable."""
     horizon = {
         "paid_in_remainder_of_fy": "2027",
         "paid_in_remainder_billions": 95.0,
@@ -1704,24 +1122,7 @@ def test_payment_timing_roundtrip_and_retune(tmp_path: Path):
     }
     row = _obligation_row(payment_horizon=horizon, schedule=None, amount_billions=119.0)
     row["content_hash"] = obligations._content_hash(row)
-    summary = obligations.persist_obligation_events([row], data_root=str(tmp_path))
-    assert summary == {
-        "events_written": 1,
-        "capital_events_written": 0,
-        "evidence_written": 1,
-        "skipped_no_filing_date": 0,
-        "skipped_proxied": 0,
-    }
-    (event,) = parquet.read_table("events", root=tmp_path / "parquet").to_pylist()
-    assert json.loads(event["payment_timing_json"]) == horizon
-    rerun = obligations.persist_obligation_events([row], data_root=str(tmp_path))
-    assert rerun == {
-        "events_written": 0,
-        "capital_events_written": 0,
-        "evidence_written": 0,
-        "skipped_no_filing_date": 0,
-        "skipped_proxied": 0,
-    }
+    assert obligations._content_hash(dict(row)) == row["content_hash"]
     corrected = _obligation_row(
         payment_horizon={**horizon, "paid_in_remainder_billions": 90.0, "paid_after_remainder_billions": 29.0},
         schedule=None,
@@ -1729,9 +1130,6 @@ def test_payment_timing_roundtrip_and_retune(tmp_path: Path):
     )
     corrected["content_hash"] = obligations._content_hash(corrected)
     assert corrected["content_hash"] != row["content_hash"]
-    assert obligations.sec_event_id("NVDA", corrected["content_hash"]) != event["event_id"]
-    retune = obligations.persist_obligation_events([corrected], data_root=str(tmp_path))
-    assert retune["events_written"] == 1
 
 
 def test_unquantified_hash_tracks_excerpt_and_trigger():

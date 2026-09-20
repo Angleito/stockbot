@@ -62,7 +62,7 @@ THESIS_ID_PLACEHOLDER = "thesis-placeholder"
 THESIS_ID_TOOLS = frozenset({"thesis_show", "thesis_refine", "thesis_watch", "thesis_journal", "thesis_status"})
 RESEARCH_SESSION_PLACEHOLDER = "research-session-placeholder"
 RESEARCH_SESSION_TOOLS = frozenset({"research_resume", "research_status", "research_cancel", "research_read"})
-FINRA_SEED_TOOLS = frozenset({"get_short_interest_leaderboard"})
+FINRA_SMOKE_TOOLS = frozenset({"get_short_interest_leaderboard"})
 # Prerequisite edges derive from TOOL_DISCOVERY_REGISTRY (single source with
 # app/tools.py); per-edge description citations enforced by
 # tests/test_verify_pi_tools.py::test_prereq_chains_are_documented_in_descriptions.
@@ -503,128 +503,47 @@ def ensure_research_fixture(store: Path) -> str:
     return str(out["session_id"])
 
 
-FINRA_SEED_DATASETS = ("short_interest", "entity_aliases", "securities", "financial_facts")
+FINRA_SMOKE_TOOLS = frozenset({"get_short_interest_leaderboard"})
 FINRA_SETTLEMENT_ENV = "PI_VERIFY_SETTLEMENT_DATE"
-FETCH_TOP_SYMBOLS_SQL = (
-    "SELECT symbol_code, MAX(short_position) AS pos FROM short_interest "
-    "WHERE settlement_date = ? GROUP BY symbol_code ORDER BY pos DESC NULLS LAST LIMIT 25"
-)
 _SETTLEMENT_RE = re.compile(r"^\d{4}-\d{2}-\d{2}$")
 
 
-def missing_finra_datasets(durable: Path) -> list[str]:
-    """Durable FINRA seed datasets absent as directories."""
-    return [n for n in FINRA_SEED_DATASETS if not (durable / "parquet" / n).is_dir()]
-
-
-def _ticker_ciks_from_sec(sec: object) -> dict[str, int]:
-    """Ticker->CIK map from a refresh_sec_tickers payload; {} when malformed."""
-    raw_map = sec.get("ticker_ciks") if isinstance(sec, dict) else None
-    ticker_ciks: dict[str, int] = {}
-    if not isinstance(raw_map, dict):
-        return ticker_ciks
-    for k, v in raw_map.items():
-        if isinstance(k, str) and isinstance(v, int):
-            ticker_ciks[k] = v
-    return ticker_ciks
-
-
-def _resolve_top_symbols(rows: object, ticker_ciks: dict[str, int]) -> tuple[list[str], list[tuple[str, int]]]:
-    """(top symbols, resolved (symbol, cik)) from a top-symbols query result."""
-    rows_list: list[object] = rows if isinstance(rows, list) else []
-    symbols = [str(r["symbol_code"]).strip().upper() for r in rows_list if isinstance(r, dict) and r.get("symbol_code")]
-    return symbols, [(s, ticker_ciks[s]) for s in symbols if s in ticker_ciks]
-
-
-def _enrich_resolved(research_data: object, resolved: list[tuple[str, int]], durable: Path) -> list[dict[str, object]]:
-    """Refresh company facts for resolved symbols; returns per-symbol failures."""
-    failed: list[dict[str, object]] = []
-    for sym, cik in resolved:
-        try:
-            getattr(research_data, "refresh_sec_company_facts")(cik, data_root=durable)  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
-        except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-            failed.append({"ticker": sym, "cik": cik, "error": f"{type(exc).__name__}: {exc}"})
-    return failed
-
-
-def _confirm_leaderboard_for(screens: object, durable: Path, settlement_date: str, resolved: int, failed: int) -> None:
-    """Confirm the leaderboard serves entries for this durable store."""
-    confirm = getattr(screens, "get_short_interest_leaderboard")(limit=5, data_root=durable)  # noqa: B009 - dynamic boundary, no stubs; getattr keeps checker green
-    entries = confirm.get("entries") if isinstance(confirm, dict) else None
-    if not isinstance(confirm, dict) or "error" in confirm or not isinstance(entries, list) or not entries:
-        err = confirm.get("error") if isinstance(confirm, dict) else None
-        raise RuntimeError(
-            f"verify fetch confirmation failed for settlement {settlement_date} "
-            f"(resolved={resolved} failed={failed}): {err or 'zero entries'}"
-        )
-    print(f"verify fetch: confirmed {len(entries)} entries for {settlement_date}")
-
-
-def fetch_finra_fixture(durable: Path, settlement_date: str) -> None:
-    """Fetch missing durable datasets with the existing refresh functions; writes to durable only."""
-    from app.analytics import screens
-    from app.services import research_data
-    from app.storage import duckdb
-
-    sec = research_data.refresh_sec_tickers(data_root=durable)
-    ticker_ciks = _ticker_ciks_from_sec(sec)
-    print(f"verify fetch: tickers={len(ticker_ciks)}")
-    research_data.refresh_finra_short_interest(settlement_date, data_root=durable)
-    rows = duckdb.query(
-        FETCH_TOP_SYMBOLS_SQL,
-        params=[settlement_date],
-        data_root=durable,
-    )
-    symbols, resolved = _resolve_top_symbols(rows, ticker_ciks)
-    print(f"verify fetch: top={len(symbols)} resolved={len(resolved)} skipped={len(symbols) - len(resolved)}")
-    failed = _enrich_resolved(research_data, resolved, durable)
-    if failed:
-        print(f"verify fetch: failed_enrichments={failed}")
-    _confirm_leaderboard_for(screens, durable, settlement_date, len(resolved), len(failed))
+def _provider_smoke_error(tool_names: list[str]) -> str | None:
+    """Live-or-cached provider smoke check for FINRA tools; None when unneeded/ok."""
+    if not any(t in FINRA_SMOKE_TOOLS for t in tool_names):
+        return None
+    try:
+        from app.analytics import screens as _screens
+    except Exception as exc:  # noqa: BLE001 - import failure is the smoke verdict
+        return f"provider smoke failed: screens import: {exc}"
+    settlement = (os.getenv(FINRA_SETTLEMENT_ENV, "") or "").strip()
+    try:
+        if settlement and _SETTLEMENT_RE.match(settlement):
+            result = _screens.get_short_interest_leaderboard(limit=1, settlement_date=settlement)
+        else:
+            result = _screens.get_short_interest_leaderboard(limit=1)
+    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return f"provider smoke failed: {type(exc).__name__}: {exc}"
+    if not isinstance(result, dict) or "error" in result:
+        err = result.get("error") if isinstance(result, dict) else None
+        return f"provider smoke failed: {err or 'leaderboard error'}"
+    return None
 
 
 def ensure_finra_fixture(durable: Path, tool_names: list[str]) -> int:
-    """Fetch-once gate for the verify matrix; 0 ok, 1 with stderr on missing date/fetch failure."""
-    if not any(t in FINRA_SEED_TOOLS for t in tool_names):
+    """Live-or-cached provider smoke gate for the verify matrix; 0 ok, 1 with stderr."""
+    del durable
+    error = _provider_smoke_error(tool_names)
+    if error is None:
         return 0
-    missing = missing_finra_datasets(durable)
-    if not missing:
-        return 0
-    settlement = (os.getenv(FINRA_SETTLEMENT_ENV, "") or "").strip()
-    if not settlement or not _SETTLEMENT_RE.match(settlement):
-        print(
-            f"{FINRA_SETTLEMENT_ENV} is required to fetch missing durable datasets {missing} "
-            f"(e.g. {FINRA_SETTLEMENT_ENV}=2026-08-14)",
-            file=sys.stderr,
-        )
-        return 1
-    try:
-        fetch_finra_fixture(durable, settlement)
-    except Exception as exc:  # noqa: BLE001 - intentional best-effort boundary, never aborts
-        print(f"verify fetch failed for settlement {settlement}: {type(exc).__name__}: {exc}", file=sys.stderr)
-        return 1
-    return 0
+    print(error, file=sys.stderr)
+    return 1
 
 
 def seed_finra_fixture(store: Path, durable: Path) -> None:
-    """Copy leaderboard inputs from the durable store into the batch store.
-
-    Verify batches run in an isolated store that starts empty, so the
-    FINRA short-interest snapshot plus its SEC join inputs would otherwise
-    be missing and get_short_interest_leaderboard fails deterministically.
-    Plain file copy (never symlink): batch runs must not append to the
-    operator's durable datasets. Warns and continues when the durable
-    store has nothing to copy; the tool then fails in-attempt with the
-    refresh-data hint instead of breaking unrelated tools here.
-    """
-    if store.resolve() == durable.resolve():
-        return
-    for name in FINRA_SEED_DATASETS:
-        src = durable / "parquet" / name
-        if not src.is_dir():
-            print(f"verify seed: durable dataset missing, skipping: {src}", file=sys.stderr)
-            continue
-        shutil.copytree(src, store / "parquet" / name, dirs_exist_ok=True)
+    """No-op: the leaderboard reads live providers per invocation (nothing to seed)."""
+    del store, durable
+    return None
 
 
 class _VerifyCase(TypedDict):
@@ -2411,7 +2330,7 @@ def _substitute_placeholder(args: dict[str, object], placeholder: str, real_id: 
 def _verification_args(tool: str, base_args: Mapping[str, object], store_dir: Path, durable: Path) -> dict[str, object]:
     """Per-attempt args with isolated fixtures seeded; never mutates base_args."""
     args = dict(base_args)
-    if tool in FINRA_SEED_TOOLS:
+    if tool in FINRA_SMOKE_TOOLS:
         seed_finra_fixture(store_dir, durable)
     if tool in THESIS_ID_TOOLS:
         _substitute_placeholder(args, THESIS_ID_PLACEHOLDER, ensure_thesis_fixture(store_dir.resolve()))
@@ -3362,7 +3281,7 @@ def _resolve_matrix_args(tool_names: list[str]) -> dict[str, dict[str, object]] 
 
 
 def _matrix_context(tool_names: list[str]) -> tuple[Path, Path, Path] | int:
-    """(batch root, cwd, durable) or 1 after a FINRA fixture failure."""
+    """(batch root, cwd, durable) or 1 after the provider smoke check fails."""
     batch = _batch_id()
     root = Path("data/verify") / batch
     cwd = Path.cwd()

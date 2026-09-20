@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import argparse
 import ast
+from datetime import UTC, datetime
 from pathlib import Path
 
 import pytest
@@ -22,11 +23,8 @@ import scripts.verify_type_escape_hatches as vte
 from app.policy import Capability, RequestContext
 from app.research.evals.scenarios import Scenario, ScenarioFamily
 from app.research.stage import check_stage_tool, stage_for_session
-from app.services.evidence_resolution import (
-    _clean_lookup_name,
-    _matching_ids,
-    warehouse_name_to_ticker,
-)
+from app.domain.market.identity import resolve_ticker_aliases
+from app.domain.market.securities import TickerAlias
 
 # --- verify_judge: concurrency + as_of helpers ---
 
@@ -363,12 +361,20 @@ def test_stage_trio_helpers():
 
 
 def test_evidence_resolution_helpers():
-    assert _clean_lookup_name("  ") is None
-    assert _clean_lookup_name("Acme") == ("Acme", "acme")
-    rows: list[dict[str, object]] = [{"name": "Acme", "entity_id": "e1"}, {"name": "Other", "entity_id": "e2"}]
-    assert _matching_ids(rows, "name", "entity_id", "acme") == {"e1"}
-    assert warehouse_name_to_ticker("") is None
-    assert warehouse_name_to_ticker("No Such Company XYZ 123") is None
+    alias = TickerAlias(
+        alias_type="ticker",
+        alias_value="ACME",
+        entity_id="e1",
+        security_id="s1",
+        source="t",
+        valid_from=None,
+        valid_to=None,
+        known_at="2026-01-01T00:00:00Z",
+        retrieved_at="2026-01-01T00:00:00Z",
+    )
+    asof = datetime(2026, 6, 1, tzinfo=UTC)
+    assert resolve_ticker_aliases("ACME", [alias], as_of=asof).resolved is True
+    assert resolve_ticker_aliases("NOPE", [], as_of=asof).resolved is False
 
 
 # --- app/tools.py::_thesis_refine (validation + no-op only) ---

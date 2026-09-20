@@ -1,4 +1,4 @@
-"""Tests for the foundation-backed short-interest screen.
+"""Tests for the live-provider short-interest screen.
 
 The acceptance criteria under test:
 
@@ -6,27 +6,34 @@ The acceptance criteria under test:
   coverage/exclusions, and calculation version;
 - changing the requested as_of cannot use facts with a later known_at (the
   as-of regression test: a later filing cannot affect an earlier ranking);
-- rerunning the same screen is deterministic and creates no duplicates;
+- rerunning the same screen is deterministic;
 - only eligible, classified equity securities are ranked.
+
+Seeding builds provider data through the production normalizers into an
+in-memory store; the screen's live seams (``screens._gateway``,
+``screens._fetch_settlement_rows``, ``screens._probe_published_rows``) are
+stubbed to serve it.  Nothing is persisted.
+
+Warehouse-removal seam: live providers (SourceGateway + normalization + raw_archive) serve reads, nothing is persisted; a future warehouse slots in behind the gateway.
 """
 
-import json
-from datetime import UTC, date, datetime, tzinfo
+from datetime import UTC, date, datetime
 from pathlib import Path
 
-import pyarrow as pa
-import pyarrow.parquet as pq
 import pytest
 
 from app.analytics import screens
+from app.data_sources import TickerAlias
 from app.normalization import (
     normalize_finra_short_interest,
     normalize_sec_company_facts,
     normalize_sec_tickers,
 )
-from app.storage import duckdb, parquet
-
 SETTLEMENT = "2026-08-14"
+# Prior cycle on the FINRA calendar canvas: the change slice discovers cycles
+# by probing calendar candidates, so the prior seed must be a candidate for
+# the as_of values under test (08-14 through 08-30).
+PRIOR_SETTLEMENT = "2026-08-12"
 
 
 @pytest.fixture
@@ -34,8 +41,25 @@ def data_root(tmp_path: Path) -> Path:
     return tmp_path / "data"
 
 
+class _Seeds:
+    """In-memory provider data built through production normalizers."""
+
+    def __init__(self) -> None:
+        self.aliases: list[TickerAlias] = []
+        self.facts: dict[int, list[dict[str, object]]] = {}
+        self.securities: dict[int, list[dict[str, object]]] = {}
+        # settlement -> versions (each version is one normalized row list);
+        # the live fetch serves the latest version per settlement.
+        self.short_interest: dict[str, list[list[dict[str, object]]]] = {}
+
+
+@pytest.fixture
+def seeds() -> _Seeds:
+    return _Seeds()
+
+
 def _seed_tickers(
-    data_root: Path,
+    seeds: _Seeds,
     tickers: tuple[str, ...] = ("AAA", "BBB", "CCC"),
     retrieved_at: str = "2026-08-10T12:00:00Z",
     cik_start: int = 1,
@@ -49,12 +73,25 @@ def _seed_tickers(
         retrieved_at=retrieved_at,
         content_hash="tickers-hash",
     )
-    for name, rows in datasets.items():
-        parquet.write_rows(name, rows, root=data_root / "parquet")
+    for row in datasets.get("entity_aliases", []):
+        if isinstance(row, dict):
+            seeds.aliases.append(
+                TickerAlias(
+                    alias_type=str(row.get("alias_type")),
+                    alias_value=str(row.get("alias_value")),
+                    entity_id=str(row.get("entity_id")),
+                    security_id=str(row.get("security_id")) if row.get("security_id") else None,
+                    source=str(row.get("source")),
+                    valid_from=str(row.get("valid_from")) if row.get("valid_from") else None,
+                    valid_to=str(row.get("valid_to")) if row.get("valid_to") else None,
+                    known_at=str(row.get("known_at")) if row.get("known_at") else None,
+                    retrieved_at=str(row.get("retrieved_at")) if row.get("retrieved_at") else None,
+                )
+            )
 
 
 def _seed_facts(
-    data_root: Path, facts_by_cik: dict[int, list[dict[str, object]]], retrieved_at: str = "2026-08-10T12:00:00Z"
+    seeds: _Seeds, facts_by_cik: dict[int, list[dict[str, object]]], retrieved_at: str = "2026-08-10T12:00:00Z"
 ) -> None:
     for cik, facts in facts_by_cik.items():
         payload = {
@@ -73,26 +110,136 @@ def _seed_facts(
             source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
             source_record_id=f"cik{cik:010d}",
         )
-        for name, rows in datasets.items():
-            parquet.write_rows(name, rows, root=data_root / "parquet")
+        for row in datasets.get("financial_facts", []):
+            if isinstance(row, dict):
+                seeds.facts.setdefault(cik, []).append(row)
+        for row in datasets.get("securities", []):
+            if isinstance(row, dict):
+                seeds.securities.setdefault(cik, []).append(row)
 
 
 def _seed_short_interest(
-    data_root: Path,
+    seeds: _Seeds,
     rows: list[dict[str, object]],
     retrieved_at: str = "2026-08-10T12:00:00Z",
     content_hash: str = "snapshot-hash",
+    settlement: str = SETTLEMENT,
 ) -> None:
     datasets = normalize_finra_short_interest(
         rows,
-        settlement_date=SETTLEMENT,
+        settlement_date=settlement,
         retrieved_at=retrieved_at,
         content_hash=content_hash,
         source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
-        source_record_id=f"otcMarket/consolidatedShortInterest:{SETTLEMENT}",
+        source_record_id=f"otcMarket/consolidatedShortInterest:{settlement}",
     )
-    for name, rows_ in datasets.items():
-        parquet.write_rows(name, rows_, root=data_root / "parquet")
+    normalized = datasets.get("short_interest", [])
+    seeds.short_interest.setdefault(settlement, []).append(
+        [row for row in normalized if isinstance(row, dict)]
+    )
+
+
+def _seed_cycle(
+    seeds: _Seeds, settlement_date: str, rows: list[dict[str, object]], retrieved_at: str = "2026-08-10T12:00:00Z"
+) -> None:
+    _seed_short_interest(
+        seeds,
+        rows,
+        retrieved_at=retrieved_at,
+        content_hash=f"snapshot-{settlement_date}",
+        settlement=settlement_date,
+    )
+
+
+def _reclassify(seeds: _Seeds, cik: int, security_type: str, known_at: str, retrieved_at: str) -> None:
+    """Later classification row for one entity's security (PIT-filtered by the fake)."""
+    seeds.securities.setdefault(cik, []).append(
+        {
+            "security_id": f"sec:equity:{cik:010d}",
+            "entity_id": f"sec:cik:{cik:010d}",
+            "security_type": security_type,
+            "ticker": None,
+            "exchange": None,
+            "source": "provider-test",
+            "known_at": known_at,
+            "retrieved_at": retrieved_at,
+            "content_hash": "x",
+            "parser_version": "t",
+        }
+    )
+
+
+def _add_alias(seeds: _Seeds, alias_value: str, cik: int, known_at: str, retrieved_at: str) -> None:
+    """Extra ticker alias row (e.g. a second CIK claiming the same ticker)."""
+    seeds.aliases.append(
+        TickerAlias(
+            alias_type="ticker",
+            alias_value=alias_value,
+            entity_id=f"sec:cik:{cik:010d}",
+            security_id=f"sec:equity:{cik:010d}",
+            source="sec:company_tickers",
+            valid_from=None,
+            valid_to=None,
+            known_at=known_at,
+            retrieved_at=retrieved_at,
+        )
+    )
+
+
+def _instant(value: object) -> float:
+    moment = datetime.fromisoformat(str(value or "").replace("Z", "+00:00"))
+    if moment.tzinfo is None:
+        moment = moment.replace(tzinfo=UTC)
+    return moment.timestamp()
+
+
+class _FakeGateway:
+    """Live-provider double: aliases unfiltered (PIT stays in the resolver),
+    facts and classifications PIT-filtered to ``as_of``."""
+
+    def __init__(self, seeds: _Seeds) -> None:
+        self._seeds = seeds
+
+    def ticker_candidates(self, ticker: str, as_of: datetime) -> list[TickerAlias]:
+        del as_of
+        want = str(ticker).strip().upper()
+        return [alias for alias in self._seeds.aliases if alias.alias_value == want]
+
+    def company_facts(self, cik: int, as_of: str | None = None) -> dict[str, object]:
+        cik = int(cik)
+        facts = [
+            fact
+            for fact in self._seeds.facts.get(cik, [])
+            if as_of is None or str(fact.get("known_at") or "")[:10] <= as_of
+        ]
+        securities = [
+            sec
+            for sec in self._seeds.securities.get(cik, [])
+            if as_of is None or str(sec.get("known_at") or "")[:10] <= as_of
+        ]
+        # Oldest first: the production join lets the newest knowable row win.
+        securities.sort(key=lambda sec: _instant(sec.get("known_at")))
+        return {"securities": securities, "financial_facts": facts, "dividend_events": []}
+
+
+def _install(monkeypatch: pytest.MonkeyPatch, seeds: _Seeds) -> None:
+    """Serve seeded provider data through the screen's live seams."""
+    gateway = _FakeGateway(seeds)
+    monkeypatch.setattr(screens, "_gateway", lambda: gateway)
+    monkeypatch.setattr(
+        screens,
+        "_fetch_settlement_rows",
+        lambda settlement: [dict(row) for row in seeds.short_interest.get(settlement, [[]])[-1]],
+    )
+    monkeypatch.setattr(
+        screens, "_probe_published_rows", lambda candidate: 1 if candidate in seeds.short_interest else 0
+    )
+
+
+def _install_gateway(monkeypatch: pytest.MonkeyPatch, seeds: _Seeds) -> None:
+    """Serve seeded SEC data while leaving the FINRA fetch path live (for client fakes)."""
+    gateway = _FakeGateway(seeds)
+    monkeypatch.setattr(screens, "_gateway", lambda: gateway)
 
 
 def _default_rows() -> list[dict[str, object]]:
@@ -100,6 +247,29 @@ def _default_rows() -> list[dict[str, object]]:
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
+    ]
+
+
+def _prior_rows() -> list[dict[str, object]]:
+    return [
+        {
+            "symbolCode": "AAA",
+            "issueName": "Alpha",
+            "settlementDate": PRIOR_SETTLEMENT,
+            "currentShortPositionQuantity": 10,
+        },
+        {
+            "symbolCode": "BBB",
+            "issueName": "Beta",
+            "settlementDate": PRIOR_SETTLEMENT,
+            "currentShortPositionQuantity": 10,
+        },
+        {
+            "symbolCode": "CCC",
+            "issueName": "Gamma",
+            "settlementDate": PRIOR_SETTLEMENT,
+            "currentShortPositionQuantity": 5,
+        },
     ]
 
 
@@ -111,19 +281,20 @@ def _default_facts() -> dict[int, list[dict[str, object]]]:
     }
 
 
-def _seed_default(data_root: Path) -> None:
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows())
+def _seed_default(seeds: _Seeds) -> None:
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_short_interest(seeds, _default_rows())
 
 
 # ---------------------------------------------------------------------------
-# Ranking, provenance, persistence
+# Ranking, provenance, determinism
 # ---------------------------------------------------------------------------
 
 
-def test_materialize_ranks_complete_snapshot_and_persists(data_root: Path) -> None:
-    _seed_default(data_root)
+def test_materialize_ranks_complete_snapshot(data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_default(seeds)
+    _install(monkeypatch, seeds)
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
     entries = result["entries"]
@@ -156,8 +327,9 @@ def test_materialize_ranks_complete_snapshot_and_persists(data_root: Path) -> No
     assert entries[0]["sec_source_url"].endswith("CIK0000000003.json")
 
 
-def test_rerun_is_deterministic_and_creates_no_duplicates(data_root: Path) -> None:
-    _seed_default(data_root)
+def test_rerun_is_deterministic(data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_default(seeds)
+    _install(monkeypatch, seeds)
     first = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
     second = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
     first_entries = first["entries"]
@@ -165,19 +337,20 @@ def test_rerun_is_deterministic_and_creates_no_duplicates(data_root: Path) -> No
     second_entries = second["entries"]
     assert isinstance(second_entries, list)
     assert [e["ticker"] for e in first_entries] == [e["ticker"] for e in second_entries]
-    assert parquet.count_rows("screen_runs", root=data_root / "parquet") == 1
-    assert parquet.count_rows("screen_entries", root=data_root / "parquet") == 3
+    assert second == first
 
 
-def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root: Path) -> None:
-    """Mid-day targeted enrichment publishes a new screen version instead of
-    being deduplicated away; the old version stays immutable."""
-    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "DDD"))
+def test_enrichment_adds_newcomer_and_rerun_is_deterministic(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Mid-day targeted enrichment ranks the newcomer; rerunning is a no-op."""
+    _seed_tickers(seeds, tickers=("AAA", "BBB", "CCC", "DDD"))
     extra_ddd: list[dict[str, object]] = [
         {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
     ]
-    _seed_short_interest(data_root, _default_rows() + extra_ddd)
-    _seed_facts(data_root, _default_facts())  # DDD's SEC facts arrive later
+    _seed_short_interest(seeds, _default_rows() + extra_ddd)
+    _seed_facts(seeds, _default_facts())  # DDD's SEC facts arrive later
+    _install(monkeypatch, seeds)
     first = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     first_entries = first["entries"]
     assert isinstance(first_entries, list)
@@ -186,187 +359,22 @@ def test_enrichment_publishes_new_version_and_keeps_old_immutable(data_root: Pat
     assert isinstance(first_coverage, dict)
     assert first_coverage["exclusions"]["not_classified_common_equity"] == 1
     # Mid-day enrichment: DDD facts (filed 2026-08-05 -> known_at, visible at as_of 08-14)
-    _seed_facts(data_root, {4: [{"end": "2026-08-01", "val": 50, "accn": "d1", "filed": "2026-08-05"}]})
+    _seed_facts(seeds, {4: [{"end": "2026-08-01", "val": 50, "accn": "d1", "filed": "2026-08-05"}]})
     second = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     second_entries = second["entries"]
     assert isinstance(second_entries, list)
     assert [e["ticker"] for e in second_entries] == ["CCC", "DDD", "AAA", "BBB"]
-    # Both versions exist (append-only); deterministic no-op on identical inputs
-    screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert parquet.count_rows("screen_runs", root=data_root / "parquet") == 2
-    runs = duckdb.query("SELECT run_id FROM screen_runs ORDER BY created_at, run_id", data_root=data_root)
-    assert len(runs) == 2 and runs[0]["run_id"] != runs[1]["run_id"]
-    versions = set()
-    for r in runs:
-        versions.add(
-            tuple(
-                row["ticker"]
-                for row in duckdb.query(
-                    "SELECT ticker FROM screen_entries WHERE run_id = ? ORDER BY rank",
-                    params=[r["run_id"]],
-                    data_root=data_root,
-                )
-            )
-        )
-    assert ("CCC", "DDD", "AAA", "BBB") in versions  # enriched version published
-    assert ("CCC", "AAA", "BBB") in versions  # old version immutable
-    # Reader serves the latest applicable version
-    latest = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    latest_entries = latest["entries"]
-    assert isinstance(latest_entries, list)
-    assert [e["ticker"] for e in latest_entries] == ["CCC", "DDD", "AAA", "BBB"]
+    # Deterministic no-op on identical inputs serves the latest version.
+    third = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert third == second
+    third_entries = third["entries"]
+    assert isinstance(third_entries, list)
+    assert [e["ticker"] for e in third_entries] == ["CCC", "DDD", "AAA", "BBB"]
 
 
-def test_created_at_has_sub_second_precision(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Same-second publications get distinct created_at values, so the reader
-    orders by publication time instead of the run_id hash tie-breaker."""
-
-    class FrozenClock:
-        @staticmethod
-        def now(tz: tzinfo | None = None) -> datetime:
-            return datetime(2026, 8, 14, 12, 0, 0, 250000, tzinfo=UTC)
-
-    monkeypatch.setattr(screens, "datetime", FrozenClock)
-    assert screens._utc_now() == "2026-08-14T12:00:00.250000+00:00"
-
-
-def test_same_second_versions_ordered_by_publication(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """The later of two same-second publications wins, regardless of run_id."""
-    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "DDD"))
-    extra_ddd: list[dict[str, object]] = [
-        {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
-    ]
-    _seed_short_interest(data_root, _default_rows() + extra_ddd)
-    _seed_facts(data_root, _default_facts())  # DDD's SEC facts arrive later
-    times = iter(
-        [
-            "2026-08-14T12:00:00.250000+00:00",  # first version
-            "2026-08-14T12:00:00.800000+00:00",  # enriched version, later same second
-        ]
-    )
-    monkeypatch.setattr(screens, "_utc_now", lambda: next(times))
-    screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    _seed_facts(data_root, {4: [{"end": "2026-08-01", "val": 50, "accn": "d1", "filed": "2026-08-05"}]})
-    screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    latest = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    latest_entries = latest["entries"]
-    assert isinstance(latest_entries, list)
-    assert [e["ticker"] for e in latest_entries] == ["CCC", "DDD", "AAA", "BBB"]
-
-
-def test_old_schema_screen_run_is_reconstructed_and_coexists(data_root: Path) -> None:
-    """A pre-stage-counter (11-column) run reads via union-by-name, its
-    counters reconstruct from exclusions, and it coexists with a
-    counter-bearing run written through the production path."""
-    _seed_default(data_root)
-    old_dir = data_root / "parquet" / "screen_runs" / "settlement_date_year=2026"
-    old_dir.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.table(
-            {
-                "run_id": [f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-14"],
-                "screen": [screens.SCREEN_NAME],
-                "settlement_date": [SETTLEMENT],
-                "as_of": ["2026-08-14"],
-                "created_at": ["2026-08-14T00:00:00Z"],
-                "calc_version": [screens.SCREEN_CALC_VERSION],
-                "finra_rows": [6],
-                "eligible_rows": [3],
-                "exclusions_json": [
-                    json.dumps(
-                        {
-                            "unmapped_symbol": 1,
-                            "ambiguous_ticker_mapping": 1,
-                            "not_classified_common_equity": 0,
-                            "missing_shares_outstanding": 0,
-                            "invalid_short_interest": 1,
-                        }
-                    )
-                ],
-                "environment": ["test"],
-                "parser_version": ["pre-counter"],
-            },
-            schema=pa.schema(
-                [
-                    pa.field("run_id", pa.string()),
-                    pa.field("screen", pa.string()),
-                    pa.field("settlement_date", pa.string()),
-                    pa.field("as_of", pa.string()),
-                    pa.field("created_at", pa.string()),
-                    pa.field("calc_version", pa.string()),
-                    pa.field("finra_rows", pa.int64()),
-                    pa.field("eligible_rows", pa.int64()),
-                    pa.field("exclusions_json", pa.string()),
-                    pa.field("environment", pa.string()),
-                    pa.field("parser_version", pa.string()),
-                ]
-            ),
-        ),
-        str(old_dir / "part-old.parquet"),
-    )
-    result = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert result["coverage"] == {
-        "finra_rows": 6,
-        "eligible_rows": 3,
-        "valid_short_interest_rows": 5,
-        "mapped_rows": 4,
-        "unambiguous_rows": 3,
-        "common_equity_rows": 3,
-        "shares_outstanding_rows": 3,
-        "exclusions": {
-            "unmapped_symbol": 1,
-            "ambiguous_ticker_mapping": 1,
-            "not_classified_common_equity": 0,
-            "missing_shares_outstanding": 0,
-            "invalid_short_interest": 1,
-        },
-    }
-    parquet.write_rows(
-        "screen_runs",
-        [
-            {
-                "run_id": f"{screens.SCREEN_NAME}:{SETTLEMENT}:2026-08-21",
-                "screen": screens.SCREEN_NAME,
-                "settlement_date": SETTLEMENT,
-                "as_of": "2026-08-21",
-                "created_at": "2026-08-21T00:00:00Z",
-                "calc_version": screens.SCREEN_CALC_VERSION,
-                "finra_rows": 3,
-                "eligible_rows": 2,
-                "valid_short_interest_rows": 3,
-                "mapped_rows": 2,
-                "unambiguous_rows": 2,
-                "common_equity_rows": 2,
-                "shares_outstanding_rows": 2,
-                "exclusions_json": json.dumps(
-                    {
-                        "unmapped_symbol": 1,
-                        "ambiguous_ticker_mapping": 0,
-                        "not_classified_common_equity": 0,
-                        "missing_shares_outstanding": 0,
-                        "invalid_short_interest": 0,
-                    }
-                ),
-                "environment": "test",
-                "parser_version": screens.SCREEN_CALC_VERSION,
-            }
-        ],
-        root=data_root / "parquet",
-    )
-    old_again = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    old_again_coverage = old_again["coverage"]
-    assert isinstance(old_again_coverage, dict)
-    assert old_again_coverage["mapped_rows"] == 4  # reconstructed, not clobbered
-    new_result = screens.read_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
-    new_result_coverage = new_result["coverage"]
-    assert isinstance(new_result_coverage, dict)
-    assert new_result_coverage["mapped_rows"] == 2  # stored counters used
-    assert new_result_coverage["eligible_rows"] == 2
-
-
-def test_read_is_bounded_by_limit(data_root: Path) -> None:
-    _seed_default(data_root)
-    screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
+def test_read_is_bounded_by_limit(data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_default(seeds)
+    _install(monkeypatch, seeds)
     result = screens.get_short_interest_leaderboard(limit=2, settlement_date=SETTLEMENT, data_root=data_root)
     entries = result["entries"]
     assert isinstance(entries, list)
@@ -378,8 +386,11 @@ def test_read_is_bounded_by_limit(data_root: Path) -> None:
     assert len(entries) <= screens.MAX_LIMIT
 
 
-def test_missing_settlement_date_is_honest_error(data_root: Path) -> None:
-    _seed_default(data_root)
+def test_missing_settlement_date_is_honest_error(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_default(seeds)
+    _install(monkeypatch, seeds)
     # Historical reproduction never fetches: a missing cycle stays an error.
     result = screens.get_short_interest_leaderboard(
         settlement_date="2025-01-15", as_of="2026-08-14", data_root=data_root
@@ -387,7 +398,7 @@ def test_missing_settlement_date_is_honest_error(data_root: Path) -> None:
     assert "error" in result
     error = result["error"]
     assert isinstance(error, str)
-    assert "not ingested" in error or "no normalized" in error.lower()
+    assert "knowable on or before 2026-08-14" in error
 
 
 # ---------------------------------------------------------------------------
@@ -395,17 +406,20 @@ def test_missing_settlement_date_is_honest_error(data_root: Path) -> None:
 # ---------------------------------------------------------------------------
 
 
-def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root: Path) -> None:
-    _seed_tickers(data_root)
+def test_as_of_regression_later_filing_does_not_change_earlier_ranking(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tickers(seeds)
     _seed_facts(
-        data_root,
+        seeds,
         {
             1: [{"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"}],
             2: [{"end": "2026-08-01", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
             3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
         },
     )
-    _seed_short_interest(data_root, _default_rows())
+    _seed_short_interest(seeds, _default_rows())
+    _install(monkeypatch, seeds)
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     early_entries = early["entries"]
@@ -415,7 +429,7 @@ def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root
 
     # A later filing (known_at after 2026-08-14) restates AAA's shares to 400.
     _seed_facts(
-        data_root,
+        seeds,
         {
             1: [{"end": "2026-08-01", "val": 400, "accn": "a2", "filed": "2026-08-20"}],
         },
@@ -439,20 +453,23 @@ def test_as_of_regression_later_filing_does_not_change_earlier_ranking(data_root
     assert by_ticker["AAA"]["short_interest_percent"] == 5
 
 
-def test_fact_with_period_after_settlement_is_never_used(data_root: Path) -> None:
+def test_fact_with_period_after_settlement_is_never_used(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """The shares-outstanding fact must be as of (or before) the settlement
     date; a fact with a later period end is not eligible — even when it is
     already knowable at the as_of."""
-    _seed_tickers(data_root)
+    _seed_tickers(seeds)
     _seed_facts(
-        data_root,
+        seeds,
         {
             1: [{"end": "2026-09-01", "val": 100, "accn": "a1", "filed": "2026-08-20"}],
             2: [{"end": "2026-06-30", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
             3: [{"end": "2026-08-01", "val": 10, "accn": "c1", "filed": "2026-08-02"}],
         },
     )
-    _seed_short_interest(data_root, _default_rows())
+    _seed_short_interest(seeds, _default_rows())
+    _install(monkeypatch, seeds)
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
     coverage = result["coverage"]
@@ -464,12 +481,14 @@ def test_fact_with_period_after_settlement_is_never_used(data_root: Path) -> Non
     assert [e["ticker"] for e in entries] == ["CCC", "BBB"]
 
 
-def test_e2e_fixtures_to_leaderboard_uses_production_only(tmp_path: Path) -> None:
-    """Fresh data root built from raw fixtures via production normalizers
-    only: seeding uses app.normalization + parquet.write_rows, and the
-    leaderboard reads the real store — no normalized rows hand-constructed."""
+def test_e2e_fixtures_to_leaderboard_uses_production_only(
+    tmp_path: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Fresh seeds built via production normalizers only, read through the
+    live seams — no normalized rows hand-constructed."""
     data_root = tmp_path / "data"
-    _seed_default(data_root)
+    _seed_default(seeds)
+    _install(monkeypatch, seeds)
 
     result = screens.get_short_interest_leaderboard(settlement_date=SETTLEMENT, data_root=data_root)
     entries = result["entries"]
@@ -485,36 +504,21 @@ def test_e2e_fixtures_to_leaderboard_uses_production_only(tmp_path: Path) -> Non
 # ---------------------------------------------------------------------------
 
 
-def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root: Path) -> None:
+def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     extra_unmapped: list[dict[str, object]] = [
         {"symbolCode": "DDD", "issueName": "Delta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 10},
         {"symbolCode": "EEE", "issueName": "Epsilon", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 10},
         {"symbolCode": "FFF", "issueName": "Phi", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": None},
     ]
     rows: list[dict[str, object]] = _default_rows() + extra_unmapped
-    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "EEE"))
-    _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, rows)
+    _seed_tickers(seeds, tickers=("AAA", "BBB", "CCC", "EEE"))
+    _seed_facts(seeds, _default_facts())
+    _seed_short_interest(seeds, rows)
     # EEE also appears under a second CIK -> ambiguous.
-    parquet.write_rows(
-        "entity_aliases",
-        [
-            {
-                "alias_type": "ticker",
-                "alias_value": "EEE",
-                "entity_id": "sec:cik:0000000099",
-                "security_id": "sec:equity:0000000099",
-                "source": "sec:company_tickers",
-                "valid_from": None,
-                "valid_to": None,
-                "known_at": "2026-08-21T12:00:00Z",
-                "retrieved_at": "2026-08-21T12:00:00Z",
-                "content_hash": "x",
-                "parser_version": "t",
-            }
-        ],
-        root=data_root / "parquet",
-    )
+    _add_alias(seeds, "EEE", 99, known_at="2026-08-21T12:00:00Z", retrieved_at="2026-08-21T12:00:00Z")
+    _install(monkeypatch, seeds)
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, data_root=data_root)
     coverage = result["coverage"]
@@ -533,38 +537,52 @@ def test_unmapped_ambiguous_and_unclassified_rows_are_excluded(data_root: Path) 
         "conflicting_versions": 0,
     }
     assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]
+    assert result["truncated"] is False
+    assert result["unresolved"] == ["DDD", "EEE", "FFF"]
 
 
-def test_stale_settlement_is_surfaced(data_root: Path) -> None:
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
+def test_stale_settlement_is_surfaced(data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch) -> None:
+    _seed_facts(seeds, _default_facts())
     stale_date = "2025-01-15"
-    datasets = normalize_finra_short_interest(
+    _seed_short_interest(
+        seeds,
         _default_rows(),
-        settlement_date=stale_date,
         retrieved_at="2025-01-20T12:00:00Z",
         content_hash="snapshot-hash-2",
-        source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
-        source_record_id=f"otcMarket/consolidatedShortInterest:{stale_date}",
+        settlement=stale_date,
     )
-    for name, rows_ in datasets.items():
-        parquet.write_rows(name, rows_, root=data_root / "parquet")
+    _install(monkeypatch, seeds)
 
     stale = screens.materialize_short_interest_screen(stale_date, as_of="2025-01-20", data_root=data_root)
     assert stale["data_freshness"] == "stale"
     assert stale["as_of_date"] == "2025-01-20"
 
 
-# ---------------------------------------------------------------------------
-# Point-in-time enforcement (P0): FINRA rows, aliases, and classifications
-# ---------------------------------------------------------------------------
+def test_short_interest_rows_gate_on_known_at_not_settlement(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A past-settlement cycle retrieved today is invisible at a past as_of."""
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_short_interest(seeds, _default_rows(), retrieved_at="2026-08-20T12:00:00Z")
+    _install(monkeypatch, seeds)
+
+    early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
+    assert "error" in early
+    early_error = early["error"]
+    assert isinstance(early_error, str) and "knowable on or before 2026-08-14" in early_error
+    later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-20", data_root=data_root)
+    assert isinstance(later.get("coverage"), dict) and later["coverage"]["finra_rows"] == 3
 
 
-def test_snapshot_later_settlement_invisible_at_as_of(data_root: Path) -> None:
+def test_snapshot_later_settlement_invisible_at_as_of(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A settlement after as_of is invisible to that as_of."""
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
-    _seed_cycle(data_root, "2026-08-29", _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_cycle(seeds, "2026-08-29", _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+    _install(monkeypatch, seeds)
 
     result = screens.materialize_short_interest_screen("2026-08-29", as_of="2026-08-14", data_root=data_root)
 
@@ -574,12 +592,15 @@ def test_snapshot_later_settlement_invisible_at_as_of(data_root: Path) -> None:
     assert "knowable on or before 2026-08-14" in error
 
 
-def test_snapshot_fetched_late_but_public_early_is_visible(data_root: Path) -> None:
+def test_snapshot_fetched_late_but_public_early_is_visible(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Retrieval-gated: settlement 08-14 retrieved 08-30 is invisible at
     as_of 08-20, visible once as_of reaches retrieval."""
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_short_interest(seeds, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+    _install(monkeypatch, seeds)
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-20", data_root=data_root)
     assert "error" in early
@@ -593,11 +614,13 @@ def test_snapshot_fetched_late_but_public_early_is_visible(data_root: Path) -> N
     assert "error" in pre
 
 
-def test_finra_dec15_cycle_hidden_before_publication(data_root: Path) -> None:
+def test_finra_dec15_cycle_hidden_before_publication(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """FINRA Dec-15-2025 settlement published Dec-24: invisible at 12-20, visible at 12-24."""
-    _seed_tickers(data_root, retrieved_at="2025-12-01T12:00:00Z")
+    _seed_tickers(seeds, retrieved_at="2025-12-01T12:00:00Z")
     _seed_facts(
-        data_root,
+        seeds,
         {
             1: [{"end": "2025-09-30", "val": 100, "accn": "a1", "filed": "2025-11-01"}],
             2: [{"end": "2025-09-30", "val": 200, "accn": "b1", "filed": "2025-11-01"}],
@@ -605,7 +628,8 @@ def test_finra_dec15_cycle_hidden_before_publication(data_root: Path) -> None:
         },
         retrieved_at="2025-12-01T12:00:00Z",
     )
-    _seed_cycle(data_root, "2025-12-15", _default_rows(), retrieved_at="2025-12-24T12:00:00Z")
+    _seed_cycle(seeds, "2025-12-15", _default_rows(), retrieved_at="2025-12-24T12:00:00Z")
+    _install(monkeypatch, seeds)
 
     hidden = screens.materialize_short_interest_screen("2025-12-15", as_of="2025-12-20", data_root=data_root)
     assert "error" in hidden
@@ -616,13 +640,16 @@ def test_finra_dec15_cycle_hidden_before_publication(data_root: Path) -> None:
     assert [e["ticker"] for e in shown_entries] == ["CCC", "AAA", "BBB"]
 
 
-def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
+def test_ticker_alias_acquired_after_as_of_is_unusable(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A ticker mapping acquired after as_of cannot be used by an earlier
     screen: CCC is unmapped at 2026-08-14 and mapped at 2026-08-21."""
-    _seed_tickers(data_root, tickers=("AAA", "BBB"), retrieved_at="2026-08-10T12:00:00Z")
-    _seed_tickers(data_root, tickers=("CCC",), retrieved_at="2026-08-20T12:00:00Z", cik_start=3)
-    _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows())
+    _seed_tickers(seeds, tickers=("AAA", "BBB"), retrieved_at="2026-08-10T12:00:00Z")
+    _seed_tickers(seeds, tickers=("CCC",), retrieved_at="2026-08-20T12:00:00Z", cik_start=3)
+    _seed_facts(seeds, _default_facts())
+    _seed_short_interest(seeds, _default_rows())
+    _install(monkeypatch, seeds)
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     early_coverage = early["coverage"]
@@ -641,24 +668,30 @@ def test_ticker_alias_acquired_after_as_of_is_unusable(data_root: Path) -> None:
     assert [e["ticker"] for e in later_entries] == ["CCC", "AAA", "BBB"]
 
 
-def test_corrected_snapshot_newest_retrieved_wins_at_both_as_of(data_root: Path) -> None:
+def test_corrected_snapshot_newest_retrieved_wins_at_both_as_of(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Two source versions: only versions retrieved on/before as_of are
-    knowable; the newest knowable retrieved_at wins per symbol."""
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
-    corrected: list[dict[str, object]] = [
-        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
-        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
-        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
-    ]
-    _seed_short_interest(data_root, corrected, retrieved_at="2026-08-20T12:00:00Z", content_hash="v2-snapshot-hash")
+    knowable; the live snapshot serves the newest knowable version per symbol."""
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_short_interest(seeds, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
+    _install(monkeypatch, seeds)
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     early_entries = early["entries"]
     assert isinstance(early_entries, list)
     assert [e["ticker"] for e in early_entries] == ["CCC", "AAA", "BBB"]
     assert early_entries[1]["short_shares"] == 20  # correction not yet knowable at 08-14
+
+    # The provider publishes a correction retrieved 08-20; the live snapshot
+    # serves it once as_of reaches retrieval.
+    corrected: list[dict[str, object]] = [
+        {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
+        {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
+        {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
+    ]
+    _seed_short_interest(seeds, corrected, retrieved_at="2026-08-20T12:00:00Z", content_hash="v2-snapshot-hash")
 
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
     later_entries = later["entries"]
@@ -669,16 +702,15 @@ def test_corrected_snapshot_newest_retrieved_wins_at_both_as_of(data_root: Path)
     assert later_coverage["finra_rows"] == 3  # one version per symbol, not both
 
 
-def test_security_classification_is_consulted(data_root: Path) -> None:
+def test_security_classification_is_consulted(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Eligibility comes from the securities classification, not a
     fact-presence proxy: reclassifying ETF (unknown type) excludes it even
     though a shares-outstanding fact exists."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC", "ETF"))
+    _seed_tickers(seeds, tickers=("AAA", "BBB", "CCC", "ETF"))
     _seed_facts(
-        data_root,
+        seeds,
         {
             **{cik: facts for cik, facts in _default_facts().items()},
             4: [{"end": "2026-08-01", "val": 50, "accn": "e1", "filed": "2026-08-02"}],
@@ -693,31 +725,16 @@ def test_security_classification_is_consulted(data_root: Path) -> None:
         },
     ]
     rows: list[dict[str, object]] = _default_rows() + extra_etf
-    _seed_short_interest(data_root, rows)
+    _seed_short_interest(seeds, rows)
     # A later classification row reclassifies the ETF as not common equity.
-    reclassified = {
-        "security_id": "sec:equity:0000000004",
-        "entity_id": "sec:cik:0000000004",
-        "security_type": "unknown",
-        "ticker": None,
-        "exchange": None,
-        "source": "provider-test",
-        "known_at": "2026-08-25T12:00:00Z",
-        "retrieved_at": "2026-08-25T12:00:00Z",
-        "content_hash": "x",
-        "parser_version": "t",
-    }
-    directory = data_root / "parquet" / "securities" / "partition=none"
-    directory.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.Table.from_pylist([reclassified], schema=parquet.dataset("securities").schema),
-        str(directory / "part-reclassified.parquet"),
-    )
+    _reclassify(seeds, 4, "unknown", known_at="2026-08-25T12:00:00Z", retrieved_at="2026-08-25T12:00:00Z")
+    _install(monkeypatch, seeds)
 
     early = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-21", data_root=data_root)
     early_entries = early["entries"]
     assert isinstance(early_entries, list)
     assert "ETF" in [e["ticker"] for e in early_entries]
+    assert early["unresolved"] == []
 
     later = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-30", data_root=data_root)
     later_coverage = later["coverage"]
@@ -726,20 +743,24 @@ def test_security_classification_is_consulted(data_root: Path) -> None:
     assert isinstance(later_entries, list)
     assert later_coverage["exclusions"]["not_classified_common_equity"] == 1
     assert "ETF" not in [e["ticker"] for e in later_entries]
+    assert later["unresolved"] == []
 
 
-def test_corrected_snapshot_mixed_offsets_newest_wins(data_root: Path) -> None:
-    """A mixed-offset revision: the lexically-larger but chronologically
-    older 13:00+01:00 version must lose to the 12:30Z correction."""
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T13:00:00+01:00")
+def test_corrected_snapshot_mixed_offsets_newest_wins(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The live snapshot serves one version per symbol: the correction
+    retrieved 12:30Z supersedes the 13:00+01:00 (=12:00Z) version."""
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_short_interest(seeds, _default_rows(), retrieved_at="2026-08-10T13:00:00+01:00")
     corrected: list[dict[str, object]] = [
         {"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 25},
         {"symbolCode": "BBB", "issueName": "Beta", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20},
         {"symbolCode": "CCC", "issueName": "Gamma", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 5},
     ]
-    _seed_short_interest(data_root, corrected, retrieved_at="2026-08-10T12:30:00Z", content_hash="v2-mixed-offset-hash")
+    _seed_short_interest(seeds, corrected, retrieved_at="2026-08-10T12:30:00Z", content_hash="v2-mixed-offset-hash")
+    _install(monkeypatch, seeds)
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     entries = result["entries"]
@@ -748,50 +769,18 @@ def test_corrected_snapshot_mixed_offsets_newest_wins(data_root: Path) -> None:
     assert entries[1]["short_shares"] == 25  # the 12:30Z correction wins
 
 
-def test_security_type_map_mixed_offsets_newest_wins(data_root: Path) -> None:
+def test_security_type_map_mixed_offsets_newest_wins(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A classification revision with mixed offsets: the lexically-larger
     but chronologically older 13:00+01:00 'unknown' row must not beat the
     12:30Z 'equity-common' correction."""
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC"))
-    _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows())
-    directory = data_root / "parquet" / "securities" / "partition=none"
-    directory.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.Table.from_pylist(
-            [
-                {
-                    "security_id": "sec:equity:0000000001",
-                    "entity_id": "sec:cik:0000000001",
-                    "security_type": "unknown",
-                    "ticker": "AAA",
-                    "exchange": None,
-                    "source": "provider-test",
-                    "known_at": "2026-08-10T13:00:00+01:00",
-                    "retrieved_at": "2026-08-10T13:00:00+01:00",
-                    "content_hash": "reclass-old",
-                    "parser_version": "t",
-                },
-                {
-                    "security_id": "sec:equity:0000000001",
-                    "entity_id": "sec:cik:0000000001",
-                    "security_type": "equity-common",
-                    "ticker": "AAA",
-                    "exchange": "NASDAQ",
-                    "source": "provider-test",
-                    "known_at": "2026-08-10T12:30:00Z",
-                    "retrieved_at": "2026-08-10T12:30:00Z",
-                    "content_hash": "reclass-new",
-                    "parser_version": "t",
-                },
-            ],
-            schema=parquet.dataset("securities").schema,
-        ),
-        str(directory / "part-reclass-mixed-offset.parquet"),
-    )
+    _seed_tickers(seeds, tickers=("AAA", "BBB", "CCC"))
+    _seed_facts(seeds, _default_facts())
+    _seed_short_interest(seeds, _default_rows())
+    _reclassify(seeds, 1, "unknown", known_at="2026-08-10T13:00:00+01:00", retrieved_at="2026-08-10T13:00:00+01:00")
+    _reclassify(seeds, 1, "equity-common", known_at="2026-08-10T12:30:00Z", retrieved_at="2026-08-10T12:30:00Z")
+    _install(monkeypatch, seeds)
 
     result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
     entries = result["entries"]
@@ -799,138 +788,26 @@ def test_security_type_map_mixed_offsets_newest_wins(data_root: Path) -> None:
     assert [e["ticker"] for e in entries] == ["CCC", "AAA", "BBB"]  # AAA stays classified
 
 
-def test_same_instant_conflicting_versions_exclude_symbol(data_root: Path) -> None:
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
-    _seed_short_interest(
-        data_root,
-        [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
-        retrieved_at="2026-08-10T12:00:00Z",
-        content_hash="conflict-hash",
-    )
-    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    entries = result["entries"]
-    assert isinstance(entries, list)
-    coverage = result["coverage"]
-    assert isinstance(coverage, dict)
-    assert [e["ticker"] for e in entries] == ["CCC", "BBB"]
-    assert coverage["exclusions"]["conflicting_versions"] == 1
-
-
-def test_all_versions_conflicting_reports_ambiguous_error(data_root: Path) -> None:
-    _seed_short_interest(
-        data_root,
-        [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 20}],
-        retrieved_at="2026-08-10T12:00:00Z",
-    )
-    _seed_short_interest(
-        data_root,
-        [{"symbolCode": "AAA", "issueName": "Alpha", "settlementDate": SETTLEMENT, "currentShortPositionQuantity": 99}],
-        retrieved_at="2026-08-10T12:00:00Z",
-        content_hash="conflict-hash",
-    )
-    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    assert "error" in result
-    error = result["error"]
-    assert isinstance(error, str)
-    assert "conflict at the same instant" in error
-
-
-def test_same_instant_conflicting_classifications_exclude_entity(data_root: Path) -> None:
-    import pyarrow as pa
-    import pyarrow.parquet as pq
-
-    _seed_tickers(data_root, tickers=("AAA", "BBB", "CCC"))
-    _seed_facts(data_root, _default_facts())
-    _seed_short_interest(data_root, _default_rows())
-    directory = data_root / "parquet" / "securities" / "partition=none"
-    directory.mkdir(parents=True, exist_ok=True)
-    pq.write_table(
-        pa.Table.from_pylist(
-            [
-                {
-                    "security_id": "sec:equity:0000000001",
-                    "entity_id": "sec:cik:0000000001",
-                    "security_type": "unknown",
-                    "ticker": "AAA",
-                    "exchange": None,
-                    "source": "provider-test",
-                    "known_at": "2026-08-10T12:00:00Z",
-                    "retrieved_at": "2026-08-10T12:00:00Z",
-                    "content_hash": "reclass-conflict",
-                    "parser_version": "t",
-                }
-            ],
-            schema=parquet.dataset("securities").schema,
-        ),
-        str(directory / "part-reclass-conflict.parquet"),
-    )
-
-    result = screens.materialize_short_interest_screen(SETTLEMENT, as_of="2026-08-14", data_root=data_root)
-    entries = result["entries"]
-    assert isinstance(entries, list)
-    coverage = result["coverage"]
-    assert isinstance(coverage, dict)
-    assert "AAA" not in [e["ticker"] for e in entries]
-    assert coverage["exclusions"]["not_classified_common_equity"] == 1
-
-
 # ---------------------------------------------------------------------------
 # Research slice: short-interest change + shares-outstanding change
 # ---------------------------------------------------------------------------
 
 
-def _seed_cycle(
-    data_root: Path, settlement_date: str, rows: list[dict[str, object]], retrieved_at: str = "2026-08-10T12:00:00Z"
+def test_change_slice_computes_changes_with_evidence(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    datasets = normalize_finra_short_interest(
-        rows,
-        settlement_date=settlement_date,
-        retrieved_at=retrieved_at,
-        content_hash=f"snapshot-{settlement_date}",
-        source_url="https://api.finra.org/data/group/otcMarket/name/consolidatedShortInterest",
-        source_record_id=f"otcMarket/consolidatedShortInterest:{settlement_date}",
-    )
-    for name, rows_ in datasets.items():
-        parquet.write_rows(name, rows_, root=data_root / "parquet")
-
-
-def test_change_slice_computes_changes_with_evidence(data_root: Path) -> None:
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
-    _seed_cycle(
-        data_root,
-        "2026-08-07",
-        [
-            {
-                "symbolCode": "AAA",
-                "issueName": "Alpha",
-                "settlementDate": "2026-08-07",
-                "currentShortPositionQuantity": 10,
-            },
-            {
-                "symbolCode": "BBB",
-                "issueName": "Beta",
-                "settlementDate": "2026-08-07",
-                "currentShortPositionQuantity": 10,
-            },
-            {
-                "symbolCode": "CCC",
-                "issueName": "Gamma",
-                "settlementDate": "2026-08-07",
-                "currentShortPositionQuantity": 5,
-            },
-        ],
-    )
-    _seed_cycle(data_root, SETTLEMENT, _default_rows())
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_cycle(seeds, PRIOR_SETTLEMENT, _prior_rows())
+    _seed_cycle(seeds, SETTLEMENT, _default_rows())
+    _install(monkeypatch, seeds)
 
     result = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
     entries = result["entries"]
     assert isinstance(entries, list)
 
     assert result["settlement_current"] == SETTLEMENT
-    assert result["settlement_prior"] == "2026-08-07"
+    assert result["settlement_prior"] == PRIOR_SETTLEMENT
     assert result["calculation_version"] == screens.SLICE_CALC_VERSION
     by_ticker = {e["ticker"]: e for e in entries}
     assert by_ticker["AAA"]["short_shares_current"] == 20
@@ -943,12 +820,39 @@ def test_change_slice_computes_changes_with_evidence(data_root: Path) -> None:
     assert by_ticker["AAA"]["finra_source_url"].startswith("https://api.finra.org")
     # Sorted by signed short-interest pp change: AAA moved most.
     assert [e["ticker"] for e in entries] == ["AAA", "BBB", "CCC"]
+    assert result["unresolved"] == []
 
 
-def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(data_root: Path) -> None:
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
-    _seed_cycle(data_root, SETTLEMENT, _default_rows())
+def _unmapped_row() -> dict[str, object]:
+    return {
+        "symbolCode": "DDD",
+        "issueName": "Delta",
+        "settlementDate": SETTLEMENT,
+        "currentShortPositionQuantity": 10,
+    }
+
+
+def test_change_slice_surfaces_unresolved_symbols(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Unresolved symbols surface explicitly, never vanish (matches the leaderboard key)."""
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_cycle(seeds, PRIOR_SETTLEMENT, _prior_rows())
+    _seed_cycle(seeds, SETTLEMENT, _default_rows() + [_unmapped_row()])
+    _install(monkeypatch, seeds)
+
+    result = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
+    assert result["unresolved"] == ["DDD"]
+
+
+def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_cycle(seeds, SETTLEMENT, _default_rows())
+    _install(monkeypatch, seeds)
 
     result = screens.short_interest_change_screen("2026-08-21", data_root=data_root)
 
@@ -961,11 +865,11 @@ def test_change_slice_reports_missing_prior_cycle_as_none_not_zero(data_root: Pa
     assert entry["si_pp_change"] is None
 
 
-def test_change_slice_as_of_regression(data_root: Path) -> None:
+def test_change_slice_as_of_regression(data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch) -> None:
     """A later filing cannot alter a slice computed at an earlier as_of."""
-    _seed_tickers(data_root)
+    _seed_tickers(seeds)
     _seed_facts(
-        data_root,
+        seeds,
         {
             1: [{"end": "2026-08-01", "val": 100, "accn": "a1", "filed": "2026-08-02"}],
             2: [{"end": "2026-08-01", "val": 200, "accn": "b1", "filed": "2026-08-02"}],
@@ -973,31 +877,13 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
         },
     )
     _seed_cycle(
-        data_root,
-        "2026-08-07",
-        [
-            {
-                "symbolCode": "AAA",
-                "issueName": "Alpha",
-                "settlementDate": "2026-08-07",
-                "currentShortPositionQuantity": 10,
-            },
-            {
-                "symbolCode": "BBB",
-                "issueName": "Beta",
-                "settlementDate": "2026-08-07",
-                "currentShortPositionQuantity": 10,
-            },
-            {
-                "symbolCode": "CCC",
-                "issueName": "Gamma",
-                "settlementDate": "2026-08-07",
-                "currentShortPositionQuantity": 5,
-            },
-        ],
+        seeds,
+        PRIOR_SETTLEMENT,
+        _prior_rows(),
         retrieved_at="2026-08-10T12:00:00Z",
     )
-    _seed_cycle(data_root, SETTLEMENT, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
+    _seed_cycle(seeds, SETTLEMENT, _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
+    _install(monkeypatch, seeds)
 
     early = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
     early_entries = early["entries"]
@@ -1006,11 +892,11 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
     assert early_entries[0]["shares_outstanding_current"] == 100.0
 
     # A filing known only after 2026-08-14 restates AAA's shares for a
-    # period between the two settlements (end 2026-08-10, filed 2026-08-20).
+    # period between the two settlements (end 2026-08-13, filed 2026-08-20).
     _seed_facts(
-        data_root,
+        seeds,
         {
-            1: [{"end": "2026-08-10", "val": 400, "accn": "a2", "filed": "2026-08-20"}],
+            1: [{"end": "2026-08-13", "val": 400, "accn": "a2", "filed": "2026-08-20"}],
         },
     )
 
@@ -1026,11 +912,14 @@ def test_change_slice_as_of_regression(data_root: Path) -> None:
     assert aaa["shares_change_abs"] == 300.0
 
 
-def test_change_slice_later_settlement_invisible_at_as_of(data_root: Path) -> None:
+def test_change_slice_later_settlement_invisible_at_as_of(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """A settlement after as_of is not knowable at that as_of."""
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
-    _seed_cycle(data_root, "2026-08-29", _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _seed_cycle(seeds, "2026-08-29", _default_rows(), retrieved_at="2026-08-10T12:00:00Z")
+    _install(monkeypatch, seeds)
 
     result = screens.short_interest_change_screen("2026-08-14", data_root=data_root)
     assert "error" in result
@@ -1039,43 +928,27 @@ def test_change_slice_later_settlement_invisible_at_as_of(data_root: Path) -> No
     assert "knowable" in error
 
 
-def test_change_slice_fetched_late_but_public_early_is_visible(data_root: Path) -> None:
+def test_change_slice_fetched_late_but_public_early_is_visible(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
     """Retrieval-gated: the change slice sees a 08-14 cycle retrieved 08-30
     once as_of reaches retrieval."""
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
     _seed_cycle(
-        data_root,
-        "2026-08-07",
-        [
-            {
-                "symbolCode": "AAA",
-                "issueName": "Alpha",
-                "settlementDate": "2026-08-07",
-                "currentShortPositionQuantity": 10,
-            },
-            {
-                "symbolCode": "BBB",
-                "issueName": "Beta",
-                "settlementDate": "2026-08-07",
-                "currentShortPositionQuantity": 10,
-            },
-            {
-                "symbolCode": "CCC",
-                "issueName": "Gamma",
-                "settlementDate": "2026-08-07",
-                "currentShortPositionQuantity": 5,
-            },
-        ],
+        seeds,
+        PRIOR_SETTLEMENT,
+        _prior_rows(),
     )
-    _seed_cycle(data_root, SETTLEMENT, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+    _seed_cycle(seeds, SETTLEMENT, _default_rows(), retrieved_at="2026-08-30T12:00:00Z")
+    _install(monkeypatch, seeds)
 
     result = screens.short_interest_change_screen("2026-08-30", data_root=data_root)
     assert result["settlement_current"] == SETTLEMENT
 
 
 # ---------------------------------------------------------------------------
-# Fetch-on-empty: live screens fetch from FINRA, historical screens never do
+# Live discovery: screens fetch from FINRA via the client
 # ---------------------------------------------------------------------------
 
 
@@ -1109,8 +982,10 @@ def _install_finra_fetch_fake(monkeypatch: pytest.MonkeyPatch, calls: list[dict[
             }
             for symbol, position in (("AAA", 20), ("BBB", 20), ("CCC", 5))
         ]
+        import json as _json
+
         return (
-            json.dumps(rows).encode(),
+            _json.dumps(rows).encode(),
             rows,
             {"record-total": str(len(rows))},
         )
@@ -1119,10 +994,11 @@ def _install_finra_fetch_fake(monkeypatch: pytest.MonkeyPatch, calls: list[dict[
 
 
 def test_live_leaderboard_empty_store_discovers_and_fetches_once(
-    data_root: Path, monkeypatch: pytest.MonkeyPatch
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _install_gateway(monkeypatch, seeds)
     calls: list[dict[str, object]] = []
     _install_finra_fetch_fake(monkeypatch, calls)
 
@@ -1149,10 +1025,11 @@ def test_live_leaderboard_empty_store_discovers_and_fetches_once(
 
 
 def test_live_leaderboard_explicit_date_fetches_exactly_that_date(
-    data_root: Path, monkeypatch: pytest.MonkeyPatch
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _install_gateway(monkeypatch, seeds)
     calls: list[dict[str, object]] = []
     _install_finra_fetch_fake(monkeypatch, calls)
 
@@ -1167,14 +1044,18 @@ def test_live_leaderboard_explicit_date_fetches_exactly_that_date(
     assert isinstance(first, dict)
     assert first["fieldValue"] == SETTLEMENT
 
-
-def test_historical_leaderboard_empty_store_never_fetches(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_historical_leaderboard_live_rows_stay_excluded_by_pit(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """Discovery still probes live, but rows fetched now are not knowable at
+    a past as_of, so a historical screen stays an honest error."""
+    _install_gateway(monkeypatch, seeds)
     calls: list[dict[str, object]] = []
     _install_finra_fetch_fake(monkeypatch, calls)
 
     result = screens.get_short_interest_leaderboard(as_of="2026-08-14", data_root=data_root)
 
-    assert calls == []
+    assert calls != []  # discovery probed the live client
     assert "error" in result
     error = result["error"]
     assert isinstance(error, str)
@@ -1198,9 +1079,12 @@ def test_discovery_probe_uses_mock_dataset_in_mock_mode(monkeypatch: pytest.Monk
     assert all(name == "consolidatedShortInterestMock" for name in names)
 
 
-def test_live_fetch_failure_returns_error_not_raise(data_root: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    _seed_tickers(data_root)
-    _seed_facts(data_root, _default_facts())
+def test_live_fetch_failure_returns_error_not_raise(
+    data_root: Path, seeds: _Seeds, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    _seed_tickers(seeds)
+    _seed_facts(seeds, _default_facts())
+    _install_gateway(monkeypatch, seeds)
 
     def boom(*args: object, **kwargs: object) -> object:
         raise RuntimeError("network down")

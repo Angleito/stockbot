@@ -1,22 +1,24 @@
 """Portfolio research view: SEC + FINRA enrichment per position.
 
-Deterministic, point-in-time enrichment over the normalized datasets
-(``financial_facts`` from SEC EDGAR, ``short_interest`` from FINRA), gated
-by ``known_at <= as_of`` via the DuckDB query layer.  Missing data is
-reported as absent (empty dicts / None), never estimated or zeroed.
+Deterministic, point-in-time enrichment over live providers (SEC EDGAR
+company facts, FINRA short interest), scoped by ``as_of`` through the
+``SourceGateway`` seam. Missing data is reported as absent (empty dicts /
+None), never estimated or zeroed.
 """
 
 from __future__ import annotations
 
 from dataclasses import dataclass
-from datetime import date
+from datetime import UTC, date, datetime
 from decimal import Decimal
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 from ..analytics.screens import _resolve_as_of
-from ..config import get_data_root
 from ..domain.portfolio import PortfolioSnapshot, Position
-from ..storage import duckdb
+
+if TYPE_CHECKING:
+    from ..data_sources import SourceGateway
 
 SEC_CONCEPTS: tuple[str, ...] = (
     "Revenue",
@@ -25,8 +27,6 @@ SEC_CONCEPTS: tuple[str, ...] = (
     "LongTermDebt",
     "EntityCommonStockSharesOutstanding",
 )
-
-DEFAULT_DATA_ROOT = get_data_root()
 
 
 @dataclass(frozen=True)
@@ -42,20 +42,25 @@ def enrich_portfolio_research(
     *,
     as_of: date | None = None,
     data_root: Path | None = None,
+    gateway: SourceGateway | None = None,
 ) -> list[PortfolioResearchPosition]:
     """Enrich every snapshot position with its latest SEC facts and FINRA
-    short-interest metrics, each restricted to ``known_at <= as_of``."""
-    data_root = Path(data_root) if data_root else get_data_root()
+    short-interest metrics, each scoped to ``as_of`` via live providers."""
     as_of_str = _resolve_as_of(as_of.isoformat() if as_of is not None else None)
+    del data_root
+    if gateway is None:
+        from app.data_sources import SourceGateway as _Gateway
+
+        gateway = _Gateway()
     results: list[PortfolioResearchPosition] = []
     for position in snapshot.positions:
         if position.entity_id is not None:
-            sec_metrics = _sec_metrics(position.entity_id, as_of_str, data_root)
+            sec_metrics = _sec_metrics(gateway, position.entity_id, as_of_str)
         else:
             sec_metrics: dict[str, object] = {}
         ticker = (position.ticker or "").strip()
         if ticker:
-            finra_metrics = _finra_metrics(ticker, as_of_str, data_root)
+            finra_metrics = _finra_metrics(gateway, ticker, as_of_str)
         else:
             finra_metrics: dict[str, object] = {}
         results.append(
@@ -69,69 +74,123 @@ def enrich_portfolio_research(
     return results
 
 
-def _sec_metrics(entity_id: str, as_of: str, data_root: Path) -> dict[str, object]:
-    """Latest knowable fact per SEC concept for an entity; missing concepts
-    are simply absent from the result."""
+def _cik_of(entity_id: str) -> int | None:
+    """CIK int for SEC entity ids (None when not an SEC identity)."""
+    if not entity_id.startswith("sec:cik:"):
+        return None
+    try:
+        return int(entity_id.split(":")[-1])
+    except ValueError:
+        return None
+
+
+def _sec_metrics(gateway: SourceGateway, entity_id: str, as_of: str) -> dict[str, object]:
+    """Latest fact per SEC concept for an entity; missing concepts are
+    simply absent from the result."""
+    cik = _cik_of(entity_id)
+    if cik is None:
+        return {}
+    try:
+        facts = gateway.company_facts(cik, as_of=as_of)
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
+        return {}
+    rows = facts.get("financial_facts") if isinstance(facts, dict) else None
+    if not isinstance(rows, list):
+        return {}
     metrics: dict[str, object] = {}
     for concept in SEC_CONCEPTS:
-        fact = _latest_sec_fact(entity_id, concept, as_of, data_root)
+        fact = _latest_concept_fact(rows, concept)
         if fact is not None:
             metrics[concept] = fact
     return metrics
 
 
-def _latest_sec_fact(entity_id: str, concept: str, as_of: str, data_root: Path) -> dict[str, object] | None:
-    clause, param = duckdb.as_of_clause(as_of)
-    rows = duckdb.query(
-        "SELECT value, period_end, filed_at, accession, source_url "
-        "FROM financial_facts "
-        f"WHERE entity_id = ? AND concept = ? AND {clause} "
-        "ORDER BY filed_at DESC, period_end DESC, accession DESC "
-        "LIMIT 1",
-        params=[entity_id, concept, param],
-        data_root=data_root,
+def _latest_fact_key(fact: dict[str, object]) -> tuple[str, str, str]:
+    """Sort key: true latest filing first by filed_at, period end, accession."""
+    return (
+        str(fact.get("filed_at") or ""),
+        str(fact.get("period_end") or ""),
+        str(fact.get("accession") or ""),
     )
-    if not rows:
+
+
+def _latest_concept_fact(rows: list[object], concept: str) -> dict[str, object] | None:
+    """Latest fact of one concept by (filed_at, period_end, accession)."""
+    cands = [row for row in rows if isinstance(row, dict) and row.get("concept") == concept]
+    if not cands:
         return None
-    row = rows[0]
+    row = max(cands, key=_latest_fact_key)
     return {
         "value": _decimal(row.get("value")),
-        "period_end": str(row.get("period_end") or ""),
-        "filed_at": str(row.get("filed_at") or ""),
+        "period_end": _iso_date(row.get("period_end")),
+        "filed_at": _iso_date(row.get("filed_at")),
         "accession": row.get("accession"),
         "source_url": row.get("source_url"),
     }
 
 
-def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, object]:
-    """Latest knowable short-interest metrics for a ticker's newest
-    eligible settlement cycle.
+def _iso_date(value: object) -> str:
+    """Provider date/datetime to ISO date text (empty when missing)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).date().isoformat()
+    if isinstance(value, date):
+        return value.isoformat()
+    return "" if value is None else str(value)
 
-    The newest eligible settlement date wins first (``settlement_date <=
-    as_of`` and knowable on or before ``as_of``); within that settlement,
-    the newest source revision wins (mirroring ``screens._snapshot_rows``
-    per-settlement semantics).  Same-instant conflicting versions yield no
-    metrics (empty dict -> freshness finra fields None).
+
+def _iso_instant(value: object) -> str:
+    """Provider datetime to ISO instant text (empty when missing)."""
+    if isinstance(value, str):
+        return value
+    if isinstance(value, datetime):
+        moment = value if value.tzinfo is not None else value.replace(tzinfo=UTC)
+        return moment.astimezone(UTC).isoformat().replace("+00:00", "Z")
+    if isinstance(value, date):
+        return value.isoformat()
+    return "" if value is None else str(value)
+
+
+def _finra_day_key(fact: dict[str, object]) -> tuple[str, str]:
+    """Sort key: newest source revision wins within one settlement day."""
+    return (str(fact.get("known_at") or ""), str(fact.get("retrieved_at") or ""))
+
+
+def _finra_variants(rows: list[dict[str, object]]) -> set[tuple[str, ...]]:
+    """Distinct material value tuples (same-day conflict detection)."""
+    return {
+        tuple(
+            str(row.get(key))
+            for key in ("short_position", "prev_position", "avg_daily_volume", "days_to_cover", "issue_name")
+        )
+        for row in rows
+    }
+
+
+def _finra_metrics(gateway: SourceGateway, ticker: str, as_of: str) -> dict[str, object]:
+    """Latest short-interest metrics for a ticker's newest eligible
+    settlement cycle (``settlement_date <= as_of``).
+
+    Same-day conflicting versions yield no metrics (empty dict ->
+    freshness finra fields None).
     """
-    clause, param = duckdb.as_of_clause(as_of)
-    rows = duckdb.query(
-        "SELECT settlement_date, short_position, prev_position, "
-        "avg_daily_volume, days_to_cover, known_at, retrieved_at FROM ("
-        "SELECT settlement_date, short_position, prev_position, "
-        "avg_daily_volume, days_to_cover, known_at, retrieved_at, "
-        "row_number() OVER (PARTITION BY symbol_code ORDER BY CAST(settlement_date AS DATE) DESC, CAST(known_at AS TIMESTAMPTZ) DESC NULLS LAST, CAST(retrieved_at AS TIMESTAMPTZ) DESC NULLS LAST) AS _rn, "
-        "count(DISTINCT list_value(CAST(short_position AS VARCHAR), CAST(prev_position AS VARCHAR), CAST(avg_daily_volume AS VARCHAR), CAST(days_to_cover AS VARCHAR), CAST(issue_name AS VARCHAR))) OVER (PARTITION BY symbol_code, CAST(settlement_date AS DATE), CAST(known_at AS TIMESTAMPTZ), CAST(retrieved_at AS TIMESTAMPTZ)) AS _variants "
-        "FROM short_interest "
-        "WHERE symbol_code = UPPER(?) "
-        "AND CAST(settlement_date AS DATE) <= CAST(? AS DATE) "
-        f"AND {clause}"
-        ") WHERE _rn = 1 AND _variants = 1",
-        params=[ticker, as_of, param],
-        data_root=data_root,
-    )
-    if not rows:
+    try:
+        rows = gateway.short_interest(ticker, as_of=as_of)
+    except Exception:  # noqa: BLE001 - intentional best-effort boundary, never aborts
         return {}
-    row = rows[0]
+    if not isinstance(rows, list):
+        return {}
+    dated = [row for row in rows if isinstance(row, dict) and str(row.get("settlement_date") or "")]
+    eligible = [row for row in dated if str(row.get("settlement_date") or "")[:10] <= as_of]
+    if not eligible:
+        return {}
+    latest_day = max(str(row.get("settlement_date") or "")[:10] for row in eligible)
+    same_day = [row for row in eligible if str(row.get("settlement_date") or "")[:10] == latest_day]
+    if len(_finra_variants(same_day)) > 1:
+        return {}
+    row = max(same_day, key=_finra_day_key)
     short_position = _decimal(row.get("short_position"))
     prev_position = _decimal(row.get("prev_position"))
     change: Decimal | None = None
@@ -146,10 +205,10 @@ def _finra_metrics(ticker: str, as_of: str, data_root: Path) -> dict[str, object
         "short_interest_change": change,
         "short_interest_change_pct": change_pct,
         "days_to_cover": _decimal(row.get("days_to_cover")),
-        "settlement_date": str(row.get("settlement_date") or ""),
+        "settlement_date": _iso_date(row.get("settlement_date")),
         "avg_daily_volume": _decimal(row.get("avg_daily_volume")),
-        "known_at": str(row.get("known_at") or ""),
-        "retrieved_at": str(row.get("retrieved_at") or ""),
+        "known_at": _iso_date(row.get("known_at")),
+        "retrieved_at": _iso_instant(row.get("retrieved_at")),
     }
 
 

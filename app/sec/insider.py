@@ -1,9 +1,11 @@
-"""Deterministic Forms 3/4/5 + 144 insider normalization (no network)."""
+"""Deterministic Forms 3/4/5 + 144 insider normalization (no network).
+
+Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind these live readers, never inside normalization.
+"""
 
 from collections.abc import Callable, Iterable
 from datetime import date, datetime
 from pathlib import Path
-from typing import Protocol
 
 from .cusip import normalize_cusip, normalize_isin
 from .models import (
@@ -17,8 +19,7 @@ from .models import (
 # via getattr and validated before building insider/13F domain objects.
 
 
-class _ParquetWriter(Protocol):
-    def write_rows(self, name: str, rows: list[dict[str, object]], root: Path | None = ...) -> int: ...
+_HOLDING_FORMS = ("13F-HR", "13F-HR/A")
 
 
 TRANSACTION_KINDS = {
@@ -980,387 +981,138 @@ def _holding_identifiers_of(holding: InstitutionalHolding) -> tuple[str | None, 
     return cusip, isin, _13f_security_id(cusip, isin)
 
 
-def _provenance_field_of(holding: InstitutionalHolding, *names: str) -> str | None:
-    try:
-        for name in names:
-            raw = getattr(holding, name, None)
-            if raw:
-                return str(raw)
-    except Exception:  # noqa: BLE001 - provenance field degrades to None on malformed holding, never raises
+
+
+def _check_as_of_opt(as_of: str | None) -> str | None:
+    """Strict YYYY-MM-DD gate shared by the live query wrappers."""
+    if as_of is None:
         return None
-    return None
-
-
-def _holding_provenance_of(
-    holding: InstitutionalHolding,
-    raw_archive_path: str | Path | None,
-) -> tuple[str | None, str, object, str | None]:
-    known = _provenance_field_of(holding, "known_at", "filed_at")
-    accession = _provenance_field_of(holding, "accession_no", "accession") or ""
+    text = str(as_of)
     try:
-        source_url = getattr(holding, "source_url", None)
-    except Exception:  # noqa: BLE001 - provenance read degrades to None, never raises
-        source_url = None
+        date.fromisoformat(text)
+    except ValueError:
+        raise ValueError(f"invalid as_of date: {as_of!r} (expected YYYY-MM-DD)") from None
+    return text
+
+
+def _known_as_of_record(record: object, as_of: str | None) -> bool:
+    """PIT visibility over InsiderTransaction/InstitutionalHolding records."""
+    if as_of is None:
+        return True
+    from .models import pit_of
+
+    value, _basis = pit_of(record)
+    return value is not None and value[:10] <= as_of
+
+
+def _cap(records: list[InsiderTransaction], limit: int) -> list[InsiderTransaction]:
+    return records if limit is None else records[:limit]
+
+
+def _cap_holdings(records: list[InstitutionalHolding], limit: int) -> list[InstitutionalHolding]:
+    return records if limit is None else records[:limit]
+
+
+# Seam: live 13F holdings normalize per filing via SourceGateway + normalization + raw_archive + write_bundle; NOTE: warehouse slots behind live readers.
+
+def _manager_filings(
+    manager_cik: int | str, *, as_of: str | None, limit: int | None
+) -> list[InstitutionalHolding]:
+    """Live 13F-HR/A holdings for one manager CIK via provider filings."""
+    from .documents import get_by_accession_number
+    from .filings import list_sec_filings as _live_list
+
     try:
-        raw_path = str(raw_archive_path) if raw_archive_path is not None else None
-    except Exception:  # noqa: BLE001 - provenance read degrades to None, never raises
-        raw_path = None
-    return known, accession, source_url, raw_path
-
-
-def _security_row_of(
-    *,
-    security_id: str,
-    known: str | None,
-    retrieved_at: str | None,
-    content_hash: str | None,
-    accession: str,
-    source_url: object,
-    raw_path: str | None,
-    cusip: str | None,
-    isin: str | None,
-    class_title: str | None,
-) -> dict[str, object]:
-    return {
-        "security_id": security_id,
-        "entity_id": None,
-        "security_type": "equity",
-        "ticker": None,
-        "exchange": None,
-        "source": "sec-13f",
-        "known_at": known,
-        "retrieved_at": retrieved_at,
-        "content_hash": content_hash,
-        "parser_version": "sec-13f-security-v1",
-        "cik": None,
-        "accession": accession or None,
-        "source_url": source_url,
-        "raw_archive_path": raw_path,
-        "cusip": cusip,
-        "isin": isin,
-        "class_title": class_title,
-    }
-
-
-def _valid_period_of(holding: InstitutionalHolding) -> tuple[str, str | None]:
-    try:
-        issuer_name = str(getattr(holding, "issuer_name", None) or "").strip()
-    except Exception:  # noqa: BLE001 - holding field coerces to the empty fallback, never raises
-        issuer_name = ""
-    try:
-        report_period = str(getattr(holding, "report_period", None) or "").strip()[:10] or None
-    except Exception:  # noqa: BLE001 - holding period coerces to None, never raises
-        report_period = None
-    if report_period is None:
-        return issuer_name, None
-    try:
-        date.fromisoformat(report_period)
-        return issuer_name, report_period
-    except Exception:  # noqa: BLE001 - malformed period validates to None, never raises
-        return issuer_name, None
-
-
-def _issuer_candidates_of(
-    issuer_name: str, valid_period: str, known: str | None, root: Path | str | None
-) -> list[dict[str, object]] | None:
-    try:
-        from . import store as _store
-
-        return _store.query_13f_issuer_candidates(
-            issuer_name, report_period=valid_period, holding_known_at=known, root=root
-        )
-    except Exception:  # noqa: BLE001 - issuer candidates degrade to None on storage failure, never raises
-        return None
-
-
-def _valid_to_of(valid_period: str) -> str | None:
-    try:
-        base = date.fromisoformat(valid_period)
-        from datetime import timedelta as _td
-
-        return (base + _td(days=1)).strftime("%Y-%m-%d")
-    except Exception:  # noqa: BLE001 - malformed period validates to None, never raises
-        return None
-
-
-def _candidate_stamp_of(cand: dict[str, object], key: str) -> str:
-    try:
-        return str((cand or {}).get(key) or "")
-    except Exception:  # noqa: BLE001 - candidate stamp coerces to empty, never raises
-        return ""
-
-
-def _latest_stamp(own: str | None, candidate: str) -> str | None:
-    options = [v for v in [own or "", candidate] if v]
-    return max(options) if options else own
-
-
-def _alias_times(known: str | None, retrieved_at: str | None, cand: dict[str, object]) -> tuple[str | None, str | None]:
-    return (
-        _latest_stamp(known, _candidate_stamp_of(cand, "known_at")),
-        _latest_stamp(retrieved_at, _candidate_stamp_of(cand, "retrieved_at")),
-    )
-
-
-def _write_alias_rows(
-    *,
-    cusip: str | None,
-    isin: str | None,
-    eid: str,
-    security_id: str,
-    valid_period: str,
-    valid_to: str,
-    alias_known: str | None,
-    alias_ret: str | None,
-    accession: str,
-    source_url: object,
-    parquet_root: Path | None,
-    parquet: _ParquetWriter,
-    _hash: Callable[[bytes], str],
-) -> int:
-    written = 0
-    for alias_type, alias_value in (("cusip", cusip), ("isin", isin)):
-        if not alias_value:
-            continue
-        seed = f"{alias_type}|{alias_value}|{eid}|{security_id}|{valid_period}|{valid_to}"
-        written += parquet.write_rows(
-            "entity_aliases",
-            [
-                {
-                    "alias_type": alias_type,
-                    "alias_value": alias_value,
-                    "entity_id": eid,
-                    "security_id": security_id,
-                    "source": "sec-13f",
-                    "valid_from": valid_period,
-                    "valid_to": valid_to,
-                    "known_at": alias_known,
-                    "retrieved_at": alias_ret,
-                    "content_hash": _hash(seed.encode("utf-8")),
-                    "parser_version": "sec-13f-security-v1",
-                    "cik": None,
-                    "accession": accession or None,
-                    "source_url": source_url,
-                }
-            ],
-            root=parquet_root,
-        )
-    return written
-
-
-def _write_candidate_aliases(
-    *,
-    candidates: list[dict[str, object]],
-    cusip: str | None,
-    isin: str | None,
-    security_id: str,
-    valid_period: str,
-    valid_to: str,
-    known: str | None,
-    retrieved_at: str | None,
-    accession: str,
-    source_url: object,
-    parquet_root: Path | None,
-    parquet: _ParquetWriter,
-    _hash: Callable[[bytes], str],
-) -> int:
-    written = 0
-    for cand in candidates or []:
+        filings = _live_list(manager_cik, forms=list(_HOLDING_FORMS), as_of=as_of, limit=limit)
+    except Exception:
+        return []
+    out: list[InstitutionalHolding] = []
+    for filing in filings:
         try:
-            eid = str((cand or {}).get("entity_id") or "").strip()
-        except Exception:  # noqa: BLE001, S112 - malformed candidate is skipped, alias sync continues
+            inner = get_by_accession_number(filing.accession_no).obj()  # type: ignore[union-attr]
+        except Exception:
             continue
-        if not eid:
+        table = None
+        for attr in ("infotable", "information_table", "holdings", "info_table"):
+            try:
+                table = getattr(inner, attr, None)
+            except Exception:
+                table = None
+            if table is not None:
+                break
+        if table is None:
             continue
-        alias_known, alias_ret = _alias_times(known, retrieved_at, cand)
-        written += _write_alias_rows(
-            cusip=cusip,
-            isin=isin,
-            eid=eid,
-            security_id=security_id,
-            valid_period=valid_period,
-            valid_to=valid_to,
-            alias_known=alias_known,
-            alias_ret=alias_ret,
-            accession=accession,
-            source_url=source_url,
-            parquet_root=parquet_root,
-            parquet=parquet,
-            _hash=_hash,
-        )
-    return written
-
-
-def _class_title_of(holding: InstitutionalHolding) -> str | None:
-    try:
-        return str(getattr(holding, "class_title", None) or "").strip() or None
-    except Exception:  # noqa: BLE001 - class title coerces to None, never raises
-        return None
-
-
-def _write_security_row(
-    *,
-    security_id: str,
-    known: str | None,
-    retrieved_at: str | None,
-    content_hash: str | None,
-    accession: str,
-    source_url: object,
-    raw_path: str | None,
-    cusip: str | None,
-    isin: str | None,
-    class_title: str | None,
-    root: Path | str | None,
-) -> tuple[int, Path | None]:
-    from pathlib import Path as _Path
-
-    from ..storage import parquet
-
-    parquet_root = _Path(root) / "parquet" if root is not None else None
-    written = parquet.write_rows(
-        "securities",
-        [
-            _security_row_of(
-                security_id=security_id,
-                known=known,
-                retrieved_at=retrieved_at,
-                content_hash=content_hash,
-                accession=accession,
-                source_url=source_url,
-                raw_path=raw_path,
-                cusip=cusip,
-                isin=isin,
-                class_title=class_title,
+        try:
+            out.extend(
+                normalize_13f_holdings(
+                    table,
+                    manager_cik=str(manager_cik),
+                    accession_no=filing.accession_no,
+                    filed_at=getattr(filing, "filed_at", None),
+                    known_at=getattr(filing, "known_at", None),
+                )
             )
-        ],
-        root=parquet_root,
-    )
-    return written, parquet_root
-
-
-def _write_governed_aliases(
-    *,
-    holding: InstitutionalHolding,
-    cusip: str | None,
-    isin: str | None,
-    security_id: str,
-    known: str | None,
-    retrieved_at: str | None,
-    accession: str,
-    source_url: object,
-    parquet_root: Path | None,
-    root: Path | str | None,
-) -> int | None:
-    from ..storage import parquet as _parquet
-    from ..storage.raw_archive import content_hash as _hash
-
-    issuer_name, valid_period = _valid_period_of(holding)
-    if not issuer_name or valid_period is None:
-        return None
-    candidates = _issuer_candidates_of(issuer_name, valid_period, known, root)
-    if not candidates:
-        return None
-    valid_to = _valid_to_of(valid_period)
-    if valid_to is None:
-        return None
-    return _write_candidate_aliases(
-        candidates=candidates,
-        cusip=cusip,
-        isin=isin,
-        security_id=security_id,
-        valid_period=valid_period,
-        valid_to=valid_to,
-        known=known,
-        retrieved_at=retrieved_at,
-        accession=accession,
-        source_url=source_url,
-        parquet_root=parquet_root,
-        parquet=_parquet,
-        _hash=_hash,
-    )
-
-
-def observe_13f_security(
-    holding: InstitutionalHolding,
-    *,
-    raw_archive_path: str | Path | None,
-    content_hash: str | None,
-    retrieved_at: str | None,
-    root: Path | str | None = None,
-) -> int:
-    """Persist one 13F security + governed CUSIP/ISIN issuer aliases.
-
-    Provisional security only; issuer mapping comes from exact
-    current/former-name candidates valid at the holding report period.
-    Returns rows written across the security/alias datasets.
-    """
-    from ..storage import parquet
-    from ..storage.raw_archive import content_hash as _hash
-
-    cusip, isin, security_id = _holding_identifiers_of(holding)
-    if not security_id:
-        return 0
-    known, accession, source_url, raw_path = _holding_provenance_of(holding, raw_archive_path)
-    written, parquet_root = _write_security_row(
-        security_id=security_id,
-        known=known,
-        retrieved_at=retrieved_at,
-        content_hash=content_hash,
-        accession=accession,
-        source_url=source_url,
-        raw_path=raw_path,
-        cusip=cusip,
-        isin=isin,
-        class_title=_class_title_of(holding),
-        root=root,
-    )
-    extra = _write_governed_aliases(
-        holding=holding,
-        cusip=cusip,
-        isin=isin,
-        security_id=security_id,
-        known=known,
-        retrieved_at=retrieved_at,
-        accession=accession,
-        source_url=source_url,
-        parquet_root=parquet_root,
-        root=root,
-    )
-    _ = (parquet, _hash)
-    return written if extra is None else written + extra
+        except Exception:
+            continue
+    return [rec for rec in out if _known_as_of_record(rec, as_of)]
 
 
 def query_issuer_insiders(
     issuer_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
-) -> list[dict[str, object]]:
-    """Issuer -> reporting owners over ``sec_insider_transactions`` (PIT)."""
-    from . import store as _store
-
-    return _store.query_insider_transactions(issuer_cik=issuer_cik, as_of=as_of, root=root, limit=limit)
+) -> list[InsiderTransaction]:
+    """Issuer -> live ownership transactions normalized per filing (PIT in domain)."""
+    del root
+    bound = _check_as_of_opt(as_of)
+    try:
+        return _cap(get_insider_activity(issuer_cik, as_of=bound, limit=limit), limit)
+    except Exception:
+        return []
 
 
 def query_person_transactions(
     owner_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
-) -> list[dict[str, object]]:
-    """Person -> transactions over ``sec_insider_transactions`` (PIT)."""
-    from . import store as _store
-
-    return _store.query_insider_transactions(owner_cik=owner_cik, as_of=as_of, root=root, limit=limit)
+) -> list[InsiderTransaction]:
+    """Person -> live transactions filtered to one owner CIK (PIT in domain)."""
+    del root
+    bound = _check_as_of_opt(as_of)
+    want = str(owner_cik).strip()
+    try:
+        txns = get_insider_activity(owner_cik, as_of=bound, limit=limit)
+    except Exception:
+        return []
+    out = [txn for txn in txns if str(getattr(txn, "owner_cik", "") or "").strip() in ("", want)]
+    return _cap(out, limit)
 
 
 def query_manager_holdings(
     manager_cik: int | str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
-) -> list[dict[str, object]]:
-    """Manager -> holdings over ``sec_13f_holdings`` (PIT)."""
-    from . import store as _store
+) -> list[InstitutionalHolding]:
+    """Manager -> live 13F holdings normalized per filing (PIT in domain)."""
+    del root
+    bound = _check_as_of_opt(as_of)
+    return _cap_holdings(_manager_filings(manager_cik, as_of=bound, limit=limit), limit)
 
-    return _store.query_13f_holdings(manager_cik=manager_cik, as_of=as_of, root=root, limit=limit)
+
+def _security_matches(holding: InstitutionalHolding, want: str) -> bool:
+    cusip, isin, security_id = _holding_identifiers_of(holding)
+    candidates = {str(v or "").strip().upper() for v in (cusip, isin, security_id)}
+    return want.strip().upper() in candidates
 
 
 def query_security_managers(
     security: str, *, as_of: str | None = None, root: Path | str | None = None, limit: int = 200
-) -> list[dict[str, object]]:
-    """Security (CUSIP/ISIN/security_id) -> managers over ``sec_13f_holdings``."""
-    from . import store as _store
+) -> list[InstitutionalHolding]:
+    """Security (CUSIP/ISIN/security_id) -> live holdings filtered in domain."""
+    del root
+    bound = _check_as_of_opt(as_of)
+    want = str(security or "").strip().upper()
+    if not want:
+        return []
+    return _cap_holdings(
+        [rec for rec in _manager_filings(security, as_of=bound, limit=None) if _security_matches(rec, want)],
+        limit,
+    )
 
-    return _store.query_13f_holdings(security=security, as_of=as_of, root=root, limit=limit)
+
+
+

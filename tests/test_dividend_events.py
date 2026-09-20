@@ -1,52 +1,108 @@
 """Past/present/future-declared dividend events (app/services/sec_facts.py).
 
-Isolation reuses the _seed_ticker/parquet.write_rows pattern from
-tests/test_dividends.py: every test seeds one ticker plus dividend facts and
-dividend_events rows under tmp_path, then queries get_fundamentals as_of a
+Isolation reuses the gateway-stub seeding pattern from tests/test_dividends.py:
+every test seeds one ticker plus dividend facts and dividend_events rows into
+an in-memory SourceGateway double, then queries get_fundamentals as_of a
 fixed date with Yahoo stubbed out.
-"""
 
-from pathlib import Path
+Warehouse-removal seam: live providers (SourceGateway + normalization + raw_archive) serve reads, nothing is persisted; a future warehouse slots in behind the gateway.
+"""
 
 import pytest
 
 from app import valuation
 from app.domain.market import ids
+from app.domain.market.securities import TickerAlias
 from app.normalization import (
     DIVIDEND_PER_SHARE_CONCEPT,
     normalize_sec_company_facts,
     normalize_sec_tickers,
 )
 from app.services import sec_facts
-from app.storage import parquet
 
 KO_CIK = 21344
 RETRIEVED_AT = "2026-08-01T00:00:00Z"
 AS_OF = "2026-08-10"
 
 
-@pytest.fixture
-def store(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> Path:
-    """Isolated data root for every service query."""
-    monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", tmp_path)
-    return tmp_path
+class _Gateway:
+    """SourceGateway double: normalized rows in, PIT-filtered company_facts out."""
+
+    def __init__(self) -> None:
+        self.alias_rows: list[dict[str, object]] = []
+        self.facts_by_cik: dict[int, dict[str, list[dict[str, object]]]] = {}
+
+    def ticker_candidates(self, ticker: str, as_of: object = None) -> list["TickerAlias"]:
+        """All aliases for the ticker, unfiltered (PIT stays in resolve_ticker_aliases)."""
+        del as_of
+        want = str(ticker).strip().upper()
+        out: list["TickerAlias"] = []
+        for row in self.alias_rows:
+            if str(row.get("alias_value") or "").strip().upper() != want:
+                continue
+            security_id = row.get("security_id")
+            out.append(
+                TickerAlias(
+                    alias_type=str(row.get("alias_type")),
+                    alias_value=str(row.get("alias_value")),
+                    entity_id=str(row.get("entity_id")),
+                    security_id=str(security_id) if security_id else None,
+                    source=str(row.get("source")),
+                    valid_from=str(row.get("valid_from")) if row.get("valid_from") else None,
+                    valid_to=str(row.get("valid_to")) if row.get("valid_to") else None,
+                    known_at=str(row.get("known_at")) if row.get("known_at") else None,
+                    retrieved_at=str(row.get("retrieved_at")) if row.get("retrieved_at") else None,
+                )
+            )
+        return out
+
+    def company_facts(self, cik: int, as_of: str | None = None) -> dict[str, object]:
+        """Full normalized dict, PIT-filtered to as_of like the live gateway."""
+        facts = self.facts_by_cik.get(int(cik))
+        if facts is None:
+            return {"documents": [], "financial_facts": [], "securities": [], "dividend_events": []}
+        out: dict[str, object] = {name: list(rows) for name, rows in facts.items()}
+        if as_of is None:
+            return out
+        for name, rows in out.items():
+            if isinstance(rows, list):
+                out[name] = [
+                    row
+                    for row in rows
+                    if isinstance(row, dict) and str(row.get("known_at") or "")[:10] <= as_of
+                ]
+        return out
 
 
-def _seed_ticker(tmp_path: Path, cik: int, ticker: str) -> None:
+def _merge(gw: _Gateway, cik: int, datasets: dict[str, list[dict[str, object]]]) -> None:
+    merged = dict(gw.facts_by_cik.get(cik, {}))
+    for name, rows in datasets.items():
+        merged[name] = list(merged.get(name, [])) + list(rows)
+    gw.facts_by_cik[cik] = merged
+
+
+def _seed_ticker(gw: _Gateway, cik: int, ticker: str) -> None:
     datasets = normalize_sec_tickers(
         {"0": {"cik_str": cik, "ticker": ticker, "title": f"{ticker} Corp"}},
         retrieved_at=RETRIEVED_AT,
         content_hash=f"tickers-{cik}",
     )
-    for name, rows in datasets.items():
-        parquet.write_rows(name, rows, root=tmp_path / "parquet")
+    gw.alias_rows.extend(datasets.get("entity_aliases", []))
+
+
+@pytest.fixture
+def gateway(monkeypatch: pytest.MonkeyPatch) -> _Gateway:
+    """SourceGateway double behind sec_facts._gateway (no warehouse)."""
+    gw = _Gateway()
+    monkeypatch.setattr(sec_facts, "_gateway", lambda: gw)
+    return gw
 
 
 def _div_fact(val: float, start: str, end: str, fy: int, fp: str, filed: str, accn: str) -> dict[str, object]:
     return {"start": start, "end": end, "val": val, "accn": accn, "fy": fy, "fp": fp, "filed": filed}
 
 
-def _seed_dividends(tmp_path: Path, cik: int, facts: list[dict[str, object]]) -> None:
+def _seed_dividends(gw: _Gateway, cik: int, facts: list[dict[str, object]]) -> None:
     payload = {
         "cik": cik,
         "entityName": f"CIK{cik}",
@@ -61,15 +117,14 @@ def _seed_dividends(tmp_path: Path, cik: int, facts: list[dict[str, object]]) ->
         source_url=f"https://data.sec.gov/api/xbrl/companyfacts/CIK{cik:010d}.json",
         source_record_id=f"cik{cik:010d}",
     )
-    for name, rows in datasets.items():
-        parquet.write_rows(name, rows, root=tmp_path / "parquet")
+    _merge(gw, cik, datasets)
 
 
-def _seed_quarters(tmp_path: Path) -> None:
-    """Four contiguous quarters (TTM 2.10) so the store path serves events."""
-    _seed_ticker(tmp_path, KO_CIK, "KO")
+def _seed_quarters(gw: _Gateway) -> None:
+    """Four contiguous quarters (TTM 2.10) so the live path serves events."""
+    _seed_ticker(gw, KO_CIK, "KO")
     _seed_dividends(
-        tmp_path,
+        gw,
         KO_CIK,
         [
             _div_fact(0.51, "2025-07-01", "2025-09-30", 2025, "Q3", "2025-10-28", "q3"),
@@ -78,7 +133,6 @@ def _seed_quarters(tmp_path: Path) -> None:
             _div_fact(0.54, "2026-04-01", "2026-06-30", 2026, "Q2", "2026-07-28", "q2"),
         ],
     )
-
 
 def _event(
     cik: int,
@@ -121,9 +175,10 @@ def _event(
     }
 
 
-def _seed_events(tmp_path: Path, rows: list[dict[str, object]]) -> None:
-    parquet.write_rows("dividend_events", rows, root=tmp_path / "parquet")
-
+def _seed_events(gw: _Gateway, rows: list[dict[str, object]]) -> None:
+    merged = dict(gw.facts_by_cik.get(KO_CIK, {}))
+    merged["dividend_events"] = list(merged.get("dividend_events", [])) + list(rows)
+    gw.facts_by_cik[KO_CIK] = merged
 
 def _fail_on_price(monkeypatch: pytest.MonkeyPatch) -> None:
     def _boom(ticker: str) -> dict[str, object]:
@@ -132,11 +187,11 @@ def _fail_on_price(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(valuation, "get_live_quote", _boom)
 
 
-def test_upcoming_vs_paid_split(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upcoming_vs_paid_split(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK, "ev-paid", 0.51, decl="2026-06-15", record="2026-06-30", pay="2026-07-01", accn="0000000001"
@@ -168,11 +223,11 @@ def test_upcoming_vs_paid_split(store: Path, monkeypatch: pytest.MonkeyPatch) ->
     assert result["row_count"] == len(annual)
 
 
-def test_future_declaration_invisible_at_earlier_as_of(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_future_declaration_invisible_at_earlier_as_of(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK,
@@ -193,12 +248,12 @@ def test_future_declaration_invisible_at_earlier_as_of(store: Path, monkeypatch:
     assert result["events_coverage"] == "no_structured_events"
 
 
-def test_duplicate_accessions_dedup_to_one(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_duplicate_accessions_dedup_to_one(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     event_id = ids.sec_dividend_event_id(KO_CIK, 0.54, "2026-08-29", "2026-09-15", "regular")
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK,
@@ -229,14 +284,14 @@ def test_duplicate_accessions_dedup_to_one(store: Path, monkeypatch: pytest.Monk
     assert next_declared["amount_per_share"] == 0.54
 
 
-def test_amended_amount_supersedes_via_latest_known_at(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_amended_amount_supersedes_via_latest_known_at(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     old_id = ids.sec_dividend_event_id(KO_CIK, 0.50, "2026-08-29", "2026-09-15", "regular")
     new_id = ids.sec_dividend_event_id(KO_CIK, 0.54, "2026-08-29", "2026-09-15", "regular")
     assert old_id != new_id
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK,
@@ -267,11 +322,11 @@ def test_amended_amount_supersedes_via_latest_known_at(store: Path, monkeypatch:
     assert next_declared["accession"] == "0000000007"
 
 
-def test_incomplete_event_excluded_from_last_next(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_incomplete_event_excluded_from_last_next(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK, "ev-full", 0.54, decl="2026-08-01", record="2026-08-29", pay="2026-09-15", accn="0000000008"
@@ -290,11 +345,11 @@ def test_incomplete_event_excluded_from_last_next(store: Path, monkeypatch: pyte
     assert all(e["accession"] != "0000000009" for e in past)
 
 
-def test_restated_q1_still_wins_ttm_while_events_classify(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_restated_q1_still_wins_ttm_while_events_classify(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_ticker(store, KO_CIK, "KO")
+    _seed_ticker(gateway, KO_CIK, "KO")
     _seed_dividends(
-        store,
+        gateway,
         KO_CIK,
         [
             _div_fact(0.50, "2025-01-01", "2025-03-31", 2025, "Q1", "2025-04-29", "k1"),
@@ -306,7 +361,7 @@ def test_restated_q1_still_wins_ttm_while_events_classify(store: Path, monkeypat
         ],
     )
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK, "ev-ko-next", 0.53, decl="2026-07-20", record="2026-08-29", pay="2026-09-15", accn="0000000010"
@@ -322,11 +377,11 @@ def test_restated_q1_still_wins_ttm_while_events_classify(store: Path, monkeypat
     assert result["last_dividend"] is None
 
 
-def test_upcoming_excluded_from_past(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_upcoming_excluded_from_past(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK, "ev-paid-2", 0.51, decl="2026-06-15", record="2026-06-30", pay="2026-07-01", accn="0000000011"
@@ -343,13 +398,13 @@ def test_upcoming_excluded_from_past(store: Path, monkeypatch: pytest.MonkeyPatc
     assert past[0]["payment_date"] == "2026-07-01"
 
 
-def test_amendment_canonicalizes_to_latest(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_amendment_canonicalizes_to_latest(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     old_id = ids.sec_dividend_event_id(KO_CIK, 0.50, "2026-06-30", "2026-07-01", "regular")
     new_id = ids.sec_dividend_event_id(KO_CIK, 0.54, "2026-06-30", "2026-07-01", "regular")
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK,
@@ -383,11 +438,11 @@ def test_amendment_canonicalizes_to_latest(store: Path, monkeypatch: pytest.Monk
     assert past[0]["amount_per_share"] == 0.54
 
 
-def test_event_only_surfaces_without_aggregate(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_event_only_surfaces_without_aggregate(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_ticker(store, KO_CIK, "KO")
+    _seed_ticker(gateway, KO_CIK, "KO")
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK, "ev-only", 0.51, decl="2026-06-15", record="2026-06-30", pay="2026-07-01", accn="0000000015"
@@ -395,7 +450,7 @@ def test_event_only_surfaces_without_aggregate(store: Path, monkeypatch: pytest.
         ],
     )
     result = sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)
-    assert result["data_source"] == "store"
+    assert result["data_source"] == "live"
     assert result["dividend_status"] == "unknown"
     assert result["ttm_dividend_per_share"] is None
     last = result["last_dividend"]
@@ -404,11 +459,11 @@ def test_event_only_surfaces_without_aggregate(store: Path, monkeypatch: pytest.
     assert result["row_count"] == 0
 
 
-def test_analysis_wired_through_store(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_analysis_wired_through_live(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK, f"ev-q{i}", 0.50, record=f"2025-0{i + 1}-15" if i < 9 else None, pay=pay, accn=f"000000002{i}"
@@ -422,11 +477,11 @@ def test_analysis_wired_through_store(store: Path, monkeypatch: pytest.MonkeyPat
     assert "growth_trend" in result
 
 
-def test_coverage_matrix(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_coverage_matrix(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK,
@@ -442,7 +497,7 @@ def test_coverage_matrix(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     )
     assert sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["events_coverage"] == "text_only"
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK,
@@ -459,11 +514,11 @@ def test_coverage_matrix(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     assert sec_facts.get_fundamentals("KO", "dividends", as_of=AS_OF)["events_coverage"] == "structured_and_text"
 
 
-def test_cross_source_duplicate_merges_to_one_payment(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_cross_source_duplicate_merges_to_one_payment(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK,
@@ -499,11 +554,11 @@ def test_cross_source_duplicate_merges_to_one_payment(store: Path, monkeypatch: 
     assert result["events_coverage"] == "structured_and_text"
 
 
-def test_unknown_matches_special_by_amount_not_first_bucket(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unknown_matches_special_by_amount_not_first_bucket(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK,
@@ -549,11 +604,11 @@ def test_unknown_matches_special_by_amount_not_first_bucket(store: Path, monkeyp
     assert result["total_paid_per_share"] == 2.50
 
 
-def test_unknown_amount_match_ignores_row_order(store: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+def test_unknown_amount_match_ignores_row_order(gateway: _Gateway, monkeypatch: pytest.MonkeyPatch) -> None:
     _fail_on_price(monkeypatch)
-    _seed_quarters(store)
+    _seed_quarters(gateway)
     _seed_events(
-        store,
+        gateway,
         [
             _event(
                 KO_CIK,
@@ -603,7 +658,7 @@ def test_unknown_amount_match_ignores_row_order(store: Path, monkeypatch: pytest
 
 
 # --- Phase 4: pure lifecycle analysis (app/services/dividend_analysis.py) ---
-# These tests call the pure module directly with plain dicts: no store fixture,
+# These tests call the pure module directly with plain dicts: no gateway fixture,
 # no network, no Yahoo. Running fixture-free IS the purity proof.
 
 import datetime as _dt

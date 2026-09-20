@@ -67,7 +67,7 @@ CREATE INDEX IF NOT EXISTS ix_jobs_session ON jobs(session_id);
 CREATE INDEX IF NOT EXISTS ix_journal_session ON journal(session_id, sequence);
 CREATE TABLE IF NOT EXISTS evidence (
   evidence_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
-  known_at TEXT, as_of TEXT, record TEXT NOT NULL);
+  known_at TEXT, as_of TEXT, identity_key TEXT, record TEXT NOT NULL);
 CREATE INDEX IF NOT EXISTS ix_evidence_session ON evidence(session_id);
 CREATE TABLE IF NOT EXISTS freezes (
   freeze_id TEXT PRIMARY KEY, session_id TEXT NOT NULL,
@@ -373,6 +373,35 @@ class ResumeState:
     open_job_ids: list[str] = field(default_factory=list)
 
 
+def _migrate_evidence_identity(conn: sqlite3.Connection) -> None:
+    """Lazy identity_key column + unique index + json_extract backfill."""
+    for stmt in (
+        "ALTER TABLE evidence ADD COLUMN identity_key TEXT",
+        "CREATE UNIQUE INDEX IF NOT EXISTS ux_evidence_session_identity ON evidence(session_id, identity_key)",
+        "UPDATE evidence SET identity_key = json_extract(record, '$.metadata.identity_key') WHERE identity_key IS NULL AND json_extract(record, '$.metadata.identity_key') IS NOT NULL",
+    ):
+        try:
+            conn.execute(stmt)
+        except sqlite3.Error:
+            pass
+
+
+def _evidence_identity_key(record: Mapping[str, object]) -> str | None:
+    """Identity key from the stored metadata; None when absent or blank."""
+    meta = record.get("metadata")
+    raw_key = meta.get("identity_key") if isinstance(meta, dict) else None
+    return raw_key if isinstance(raw_key, str) and raw_key else None
+
+
+def _duplicate_evidence_error(
+    conn: sqlite3.Connection, where: str, evidence_id: str, identity_key: str | None
+) -> ValueError:
+    """Evidence-id conflict wins; otherwise the identity conflict."""
+    if conn.execute("SELECT 1 FROM evidence WHERE evidence_id = ?", (evidence_id,)).fetchone():
+        return ValueError(f"{where}: duplicate evidence_id {evidence_id!r}")
+    return ValueError(f"{where}: duplicate identity_key {identity_key!r}")
+
+
 class ResearchRepository:
     """Per-operation SQLite connections; no shared state.
 
@@ -423,6 +452,7 @@ class ResearchRepository:
             conn.execute("ALTER TABLE jobs ADD COLUMN last_heartbeat_at TEXT")
         except sqlite3.Error:
             pass
+        _migrate_evidence_identity(conn)
         return conn
 
     # -- sessions ------------------------------------------------------
@@ -709,20 +739,22 @@ class ResearchRepository:
             raise ValueError(f"{where}: 'evidence_id' must be a non-empty string")
         if not isinstance(session_id, str) or not session_id:
             raise ValueError(f"{where}: 'session_id' must be a non-empty string")
+        identity_key = _evidence_identity_key(record)
         with self._connect() as conn:
             try:
                 conn.execute(
-                    "INSERT INTO evidence (evidence_id, session_id, known_at, as_of, record) VALUES (?, ?, ?, ?, ?)",
+                    "INSERT INTO evidence (evidence_id, session_id, known_at, as_of, identity_key, record) VALUES (?, ?, ?, ?, ?, ?)",
                     (
                         evidence_id,
                         session_id,
                         _iso_or_none(record.get("known_at"), "known_at", where),
                         _iso_or_none(record.get("as_of"), "as_of", where),
+                        identity_key,
                         _record_json(record, where),
                     ),
                 )
             except sqlite3.IntegrityError:
-                raise ValueError(f"{where}: duplicate evidence_id {evidence_id!r}") from None
+                raise _duplicate_evidence_error(conn, where, str(evidence_id), identity_key) from None
         return evidence_id
 
     def get_evidence(self, evidence_id: str) -> dict[str, JSONValue]:
@@ -741,6 +773,28 @@ class ResearchRepository:
                 (session_id,),
             ).fetchall()
         return [validate_json_mapping(json.loads(str(r["record"])), "<research.sqlite>: evidence") for r in rows]
+
+    def find_evidence_by_identity(self, session_id: str, identity_key: str) -> dict[str, JSONValue] | None:
+        """One evidence record by identity key; None when blank or absent."""
+        if not identity_key:
+            return None
+        with self._connect() as conn:
+            row = conn.execute(
+                "SELECT record FROM evidence WHERE session_id = ? AND identity_key = ? LIMIT 1",
+                (session_id, identity_key),
+            ).fetchone()
+        if row is None:
+            return None
+        return validate_json_mapping(json.loads(str(row["record"])), "<research.sqlite>: evidence")
+
+    def list_evidence_ids(self, session_id: str) -> list[str]:
+        """Evidence ids for one session, oldest first."""
+        with self._connect() as conn:
+            rows = conn.execute(
+                "SELECT evidence_id FROM evidence WHERE session_id = ? ORDER BY rowid",
+                (session_id,),
+            ).fetchall()
+        return [str(r["evidence_id"]) for r in rows]
 
     def save_freeze(self, record: Mapping[str, object]) -> str:
         """Insert one freeze record; duplicate ids raise ValueError."""

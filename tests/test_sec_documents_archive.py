@@ -101,15 +101,31 @@ def test_archive_first_bounded_windows_and_local_fallback(tmp_path: Path, monkey
     digest = hashlib.sha256(BIG.encode("utf-8")).hexdigest()
     assert first["content_hash"] == digest
     assert first["source_content_hash"] == digest
-    assert first["raw_archive_path"]
-    assert first["known_at"] and first["retrieved_at"]
-    assert first["source_url"]
+    # selective retention: a live read archives nothing until evidence is accepted
+    assert first["raw_archive_path"] is None
+    assert first["retrieved_at"] is None
+    assert first["known_at"] and first["source_url"]
+
+    # seed the archive directly; the window is served back with the network down
+    from app.sec import archive as _archive
+
+    record = _archive.archive_sec_document(
+        ACC,
+        DOC,
+        BIG.encode("utf-8"),
+        url=str(first["source_url"]),
+        retrieved_at="2026-01-15T00:00:00Z",
+        metadata={"known_at": first["known_at"], "filed_at": "2026-01-15", "representation": "normalized_text"},
+        root=tmp_path / "raw",
+    )
 
     def _boom(accession_no: str) -> NoReturn:
         raise RuntimeError("network down")
 
     monkeypatch.setattr(documents, "get_by_accession_number", _boom)
-    second = tools.execute_tool("get_sec_document", {"accession_no": ACC, "offset": 12000}, "test", context=_ctx())
+    second = tools.execute_tool(
+        "get_sec_document", {"accession_no": ACC, "document_name": DOC, "offset": 12000}, "test", context=_ctx()
+    )
     assert second["text"] == BIG[12000:24000]
     assert (second["offset"], second["end_offset"]) == (12000, 24000)
     assert second["more_available"] is True
@@ -117,58 +133,58 @@ def test_archive_first_bounded_windows_and_local_fallback(tmp_path: Path, monkey
     assert second["content_hash"] == first["content_hash"]
     assert second["source_content_hash"] == first["source_content_hash"]
     assert second["known_at"] == first["known_at"]
-    assert second["raw_archive_path"] == first["raw_archive_path"]
+    assert second["retrieved_at"] == "2026-01-15T00:00:00Z"
+    assert second["raw_archive_path"] == str(record.payload_path)
 
-    assert documents.get_sec_filing_text(ACC) == BIG
+    assert documents.get_sec_filing_text(ACC, DOC) == BIG
 
     for bad in ({"offset": -1}, {"max_chars": 0}, {"max_chars": 32001}, {"offset": 60000}):
-        rejected = tools.execute_tool("get_sec_document", {"accession_no": ACC, **bad}, "test", context=_ctx())
+        rejected = tools.execute_tool(
+            "get_sec_document", {"accession_no": ACC, "document_name": DOC, **bad}, "test", context=_ctx()
+        )
         assert rejected["error_type"] == "invalid_tool_arguments"
 
 
 def test_conflicting_revisions_latest_warns_historical_conflicts(tmp_path: Path) -> None:
-    from app.sec import store as _store
+    from app.sec import archive as _archive
 
     acc = "0000000000-26-000002"
-    _store.store_document_text(
-        "doc:a",
-        "aaa revision text",
-        accession=acc,
-        document_name=DOC,
-        source_url="https://sec/x",
-        known_at="2026-02-01T00:00:00Z",
+    known_at = "2026-02-01T00:00:00Z"
+    _archive.archive_sec_document(
+        acc,
+        DOC,
+        b"aaa revision text",
+        url="https://sec/x",
         retrieved_at="2026-02-01T00:00:00Z",
-        root=tmp_path,
+        metadata={"known_at": known_at, "filed_at": "2026-02-01", "representation": "normalized_text"},
+        root=tmp_path / "raw",
     )
-    _store.store_document_text(
-        "doc:z",
-        "zzz revision text",
-        accession=acc,
-        document_name=DOC,
-        source_url="https://sec/x",
-        known_at="2026-02-01T00:00:00Z",
-        retrieved_at="2026-02-01T00:00:00Z",
-        root=tmp_path,
-    )
+    with pytest.warns(UserWarning, match="immutable revision"):
+        _archive.archive_sec_document(
+            acc,
+            DOC,
+            b"zzz revision text",
+            url="https://sec/x",
+            retrieved_at="2026-02-02T00:00:00Z",
+            metadata={"known_at": known_at, "filed_at": "2026-02-01", "representation": "normalized_text"},
+            root=tmp_path / "raw",
+        )
 
-    latest = documents.get_sec_document(acc, data_root=tmp_path)
-    hashes = {t: hashlib.sha256(t.encode()).hexdigest() for t in ("aaa revision text", "zzz revision text")}
-
-    def _by_hash(revision_text: str) -> str:
-        return hashes[revision_text]
-
-    winner = max(hashes, key=_by_hash)
-    assert latest["text"] == winner
+    latest = documents.get_sec_document(acc, DOC, data_root=tmp_path)
+    # same known_at: latest retrieved_at wins, with the conflict retained and named
+    assert latest["text"] == "zzz revision text"
     assert latest["cache_hit"] is True
     warnings = latest.get("warnings", [])
     assert isinstance(warnings, list)
     assert any(isinstance(w, str) and "conflicting revisions" in w for w in warnings)
 
-    conflict = documents.get_sec_document(acc, as_of="2026-03-01", data_root=tmp_path)
+    conflict = documents.get_sec_document(acc, DOC, as_of="2026-03-01", data_root=tmp_path)
     assert conflict["error_type"] == "pit_revision_conflict"
 
 
 def test_byte_attachment_archives_source_bytes(tmp_path: Path) -> None:
+    from app.sec import archive as _archive
+
     payload = b"\xff\xfe binary \x00\x01 document bytes"
 
     acc = "0000000000-26-000003"
@@ -183,14 +199,38 @@ def test_byte_attachment_archives_source_bytes(tmp_path: Path) -> None:
     assert out["source_content_hash"] == hashlib.sha256(payload).hexdigest()
     assert out["content_hash"] == hashlib.sha256(payload.decode("utf-8", "replace").encode("utf-8")).hexdigest()
     assert out["source_content_hash"] != out["content_hash"]
-    assert Path(str(out["raw_archive_path"])).read_bytes() == payload
-    # a binary payload never leaves as text: NUL-free empty text plus an explicit marker
+    # selective retention: the live read archives nothing
+    assert out["raw_archive_path"] is None
     assert out["source_representation"] == "binary_unsupported"
     assert out["text"] == ""
     assert out["total_chars"] == 0
     warnings = out["warnings"]
     assert isinstance(warnings, list)
     assert any("has no text representation" in str(w) for w in warnings)
+
+    # seed the archive directly; the window is served back
+    record = _archive.archive_sec_document(
+        acc,
+        DOC,
+        payload,
+        url="https://sec/bytes",
+        retrieved_at="2026-01-15T00:00:00Z",
+        metadata={"known_at": "2026-01-15", "filed_at": "2026-01-15", "representation": "source_bytes"},
+        root=tmp_path / "raw",
+    )
+    served = documents.get_sec_document(acc, DOC, data_root=tmp_path)
+    assert served["cache_hit"] is True
+    assert served["source_content_hash"] == hashlib.sha256(payload).hexdigest()
+    assert Path(str(served["raw_archive_path"])).read_bytes() == payload
+    assert served["raw_archive_path"] == str(record.payload_path)
+    # a binary payload never leaves as text: NUL-free empty text plus an explicit marker
+    assert served["source_representation"] == "binary_unsupported"
+    assert served["text"] == ""
+    assert served["total_chars"] == 0
+    assert served["cache_hit"] is True
+    served_warnings = served["warnings"]
+    assert isinstance(served_warnings, list)
+    assert any("has no text representation" in str(w) for w in served_warnings)
 
 
 def test_archived_bounded_uses_row_name_and_slice() -> None:
@@ -237,7 +277,7 @@ def test_pdf_payload_without_pdftotext_is_binary_unsupported(tmp_path: Path, mon
     assert (out["offset"], out["end_offset"], out["total_chars"], out["more_available"]) == (0, 0, 0, False)
     assert out["source_content_hash"] == hashlib.sha256(PDF_BYTES).hexdigest()
     assert out["content_hash"] == hashlib.sha256(PDF_BYTES.decode("utf-8", "replace").encode("utf-8")).hexdigest()
-    assert Path(str(out["raw_archive_path"])).read_bytes() == PDF_BYTES
+    assert out["raw_archive_path"] is None
     warnings = out["warnings"]
     assert isinstance(warnings, list)
     assert any("pdftotext unavailable" in str(w) for w in warnings)
@@ -283,24 +323,17 @@ def test_pdf_extraction_failure_stays_unsupported(tmp_path: Path, monkeypatch: p
 def test_archived_pdf_row_extracts_text_and_drops_control_chars(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
-    from app.sec import store as _store
+    from app.sec import archive as _archive
 
     acc = "0000000000-26-000007"
-    payload_path = tmp_path / "form8k2.pdf.json"
-    payload_path.write_bytes(PDF_BYTES)
-    _store.store_document_text(
-        "doc:pdf",
-        PDF_BYTES.decode("utf-8", "replace"),
-        accession=acc,
-        document_name="form8k2.pdf",
-        source_url="https://sec/form8k2.pdf",
-        raw_archive_path=str(payload_path),
-        source_representation="source_bytes",
-        source_content_hash=hashlib.sha256(PDF_BYTES).hexdigest(),
-        filed_at="2015-04-29",
-        known_at="2015-04-29",
+    record = _archive.archive_sec_document(
+        acc,
+        "form8k2.pdf",
+        PDF_BYTES,
+        url="https://sec/form8k2.pdf",
         retrieved_at="2015-04-29T00:00:00Z",
-        root=tmp_path,
+        metadata={"known_at": "2015-04-29", "filed_at": "2015-04-29", "representation": "source_bytes"},
+        root=tmp_path / "raw",
     )
     monkeypatch.setattr(shutil, "which", _fake_pdftotext(tmp_path))
 
@@ -309,9 +342,115 @@ def test_archived_pdf_row_extracts_text_and_drops_control_chars(
     assert out["text"] == PDF_TEXT
     assert not any(char in PDF_TEXT for char in "\x00\x07\x0c")
     assert out["total_chars"] == len(PDF_TEXT)
-    assert out["raw_archive_path"] == str(payload_path)
+    assert out["raw_archive_path"] == str(record.payload_path)
     assert out["warnings"] == ["pdf text extracted via pdftotext"]
 
     raw_out = documents.get_sec_document(acc, "form8k2.pdf", data_root=tmp_path, raw=True)
     assert raw_out["view"] == "raw"
     assert raw_out["text"] == PDF_TEXT + "\n"
+
+
+def test_archived_row_without_known_at_rejected_historically_but_served_latest(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """A row archived without known_at never passes a historical as_of; latest still wins."""
+    from app.sec import archive as _archive
+
+    acc = "0000000000-26-000009"
+    _archive.archive_sec_document(
+        acc,
+        DOC,
+        b"legacy archived text",
+        url="https://sec/legacy",
+        retrieved_at="2026-01-15T00:00:00Z",
+        metadata={"evidence_id": "legacy", "session_id": "legacy"},
+        root=tmp_path / "raw",
+    )
+    latest = documents.get_sec_document(acc, DOC, data_root=tmp_path)
+    assert latest["text"] == "legacy archived text"
+    assert latest["cache_hit"] is True
+    calls: list[str] = []
+
+    def _down(accession_no: str) -> NoReturn:
+        calls.append(accession_no)
+        raise AssertionError("live fetch must not run when archive rows exist but fail PIT")
+
+    monkeypatch.setattr(documents, "get_by_accession_number", _down)
+    rows = documents._archived_rows_of(acc, DOC, "2026-03-01", tmp_path, None)
+    assert rows == []
+    assert calls == []
+
+
+def test_accepted_2026_filing_rejected_at_2025_read(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """P0 end-to-end: a 2026 acceptance is never served to a 2025 historical read."""
+    import tests.research_source_seam as seam
+    from app.research import service as svc
+    from app.research.repository import ResearchRepository
+
+    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(tmp_path))
+    monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
+    repo = ResearchRepository()
+    real_get_sec_document = documents.get_sec_document
+    seam.install(monkeypatch)
+    try:
+        sid = svc.create_research("NVDA demand?", "o", as_of="2026-06-30T00:00:00+00:00", repo=repo)
+        src = repo.list_jobs(sid)[0].job_id
+        passage = "Data center revenue grew 142 percent in fiscal 2026."
+        handle = seam.handle_for(passage, accession=ACC, document=DOC, known_at="2026-01-20T00:00:00+00:00")
+        stored = svc.record_evidence(
+            sid,
+            src,
+            {
+                "evidence_id": f"{sid}:ev:1",
+                "wave_id": 1,
+                "content": "c",
+                "claim_text": "c",
+                "subject": "NVDA",
+                "source_name": "SEC",
+                "source_uri": "https://sec.gov/x",
+                "source_record_id": ACC,
+                "document_name": DOC,
+                "matching_passage": passage,
+                "known_at": "2024-01-01T00:00:00+00:00",
+                "source_handle": handle,
+            },
+            repo=repo,
+        )
+        row = repo.get_evidence(str(stored["evidence_id"]))
+        assert str(row["known_at"]).startswith("2026")
+        sid25 = svc.create_research("NVDA demand?", "o", as_of="2025-06-30T00:00:00+00:00", repo=repo)
+        src25 = repo.list_jobs(sid25)[0].job_id
+        with pytest.raises(ValueError, match="ERR_SEC_HANDLE_UNREADABLE"):
+            svc.record_evidence(
+                sid25,
+                src25,
+                {
+                    "evidence_id": f"{sid25}:ev:1",
+                    "wave_id": 1,
+                    "content": "c",
+                    "claim_text": "c",
+                    "subject": "NVDA",
+                    "source_name": "SEC",
+                    "source_uri": "https://sec.gov/x",
+                    "source_record_id": ACC,
+                    "document_name": DOC,
+                    "matching_passage": passage,
+                    "known_at": "2026-01-20T00:00:00+00:00",
+                    "source_handle": handle,
+                },
+                repo=repo,
+            )
+    finally:
+        monkeypatch.setattr(documents, "get_sec_document", real_get_sec_document)
+    latest = documents.get_sec_document(ACC, DOC, data_root=tmp_path)
+    assert latest["text"] == passage
+    assert latest["cache_hit"] is True
+
+    assert documents._archived_rows_of(ACC, DOC, "2025-01-01", tmp_path, None) == []
+
+    def _fake_2026_filing(accession_no: str) -> _FakeFiling:
+        return _FakeFiling(BIG, accession=ACC)
+
+    monkeypatch.setattr(documents, "get_by_accession_number", _fake_2026_filing)
+    with pytest.raises(ValueError, match="not known as of"):
+        documents.get_sec_document(ACC, DOC, as_of="2025-01-01", data_root=tmp_path)

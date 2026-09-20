@@ -6,6 +6,10 @@ ResearchDirector task batches + Python kernel verification
 in-process loop (source job -> fetch -> freeze -> trio -> gate) stays only
 because deterministic unit tests pin its step behavior; it must not gain new
 production callers.
+Records built here with record_kind=='evidence' are candidate/materialized
+evidence for deterministic tests only, not production citable evidence:
+only service acceptance persists to the raw archive (runner fetch/materialize
+never archives).
 """
 
 from __future__ import annotations
@@ -13,9 +17,11 @@ from __future__ import annotations
 import json
 import threading
 from collections.abc import Callable, Mapping, Sequence
+from typing import TYPE_CHECKING
 from concurrent.futures import ThreadPoolExecutor
 from dataclasses import replace
 from datetime import UTC, datetime
+from pathlib import Path
 from time import monotonic
 
 from app.research import freeze as _freeze
@@ -74,7 +80,9 @@ from app.research.models import (
 from app.research.repository import ResearchRepository
 from app.research.synthesis.committee import CommitteeDisagreement, compute_disagreement
 
-__all__ = ["LiveModelError", "resume_live", "run_live"]
+if TYPE_CHECKING:
+    from app.research.service import MaterializedEvidenceSource
+
 
 
 # Tool-*reported* errors (a result dict carrying "error") are agent-visible by
@@ -1078,22 +1086,24 @@ class _LiveRun:
         query = _first_str(inner_args, ("query",))
         search_id = _first_str(raw, ("search_id",))
         known_at = _extract_known_at(raw)
+        materialized: MaterializedEvidenceSource | None = None
         provenance: dict[str, JSONValue] | None = None
         if is_evidence:
             # The archive, never the model or the tool payload, is authoritative for
             # the admitted text: reload the handle the document read returned and
             # slice the passage out of that. A result without a canonical handle, or
             # one the archive no longer reproduces, stays a navigation artifact.
-            provenance, kind, is_evidence, passage = self._materialize_document_handle(
+            materialized, kind, is_evidence, passage = self._materialize_document_handle(
                 sid, eid, raw.get("source_handle"), passage, known_at
             )
+            provenance = dict(materialized.provenance) if materialized is not None else None
         content = _record_content(raw, passage, is_evidence)
         if "\x00" in content:
             # NULs mean the bytes are not readable text, and POSIX argv cannot carry
             # them at all, so this can never ground a claim. Keep a stripped navigation
             # record and say why the evidence candidacy was dropped.
             content = content.replace("\x00", "")
-            kind, is_evidence, provenance = "discovery", False, None
+            kind, is_evidence, provenance, materialized = "discovery", False, None, None
             self._emit(
                 sid,
                 "evidence.rejected",
@@ -1130,12 +1140,11 @@ class _LiveRun:
             claim_text=claim_text,
             content=content,
             content_hash=evidence_content_hash(content),
-            retrieved_at=utcnow(),
-            source_uri=uri,
+            retrieved_at=materialized.retrieved_at if materialized is not None and materialized.retrieved_at else utcnow(),
+            source_uri=(materialized.source_url if materialized is not None else None) or uri,
             source_record_id=_record_ref(is_evidence, ref, search_id, accession),
-            published_at=None,
-            known_at=known_at,
-            effective_at=None,
+            published_at=materialized.filed_at if materialized is not None else None,
+            known_at=materialized.known_at if materialized is not None else known_at,
             job_id=src_job_id or None,
             agent_id="sec_scout",
             supports=(),
@@ -1167,13 +1176,13 @@ class _LiveRun:
         handle: object,
         locator: str,
         known_at: datetime | None,
-    ) -> tuple[dict[str, JSONValue] | None, str, bool, str]:
-        """(provenance, record kind, is_evidence, passage) for one document result.
+    ) -> tuple[MaterializedEvidenceSource | None, str, bool, str]:
+        """(materialized, record kind, is_evidence, passage) for one document result.
 
-        The kernel reloads the handle's window from the SEC archive and slices the
-        passage out of it; a missing, stale, or unreadable handle demotes the result
-        to a navigation record (journaled), so a claim can never ground on text the
-        archive does not reproduce.
+        The kernel reloads the handle's window from the SEC archive against the
+        session as_of and slices the passage out of it; a missing, stale, or
+        unreadable handle demotes the result to a navigation record (journaled),
+        so a claim can never ground on text the archive does not reproduce.
         """
         from app.research.service import materialize_sec_passage
 
@@ -1190,7 +1199,7 @@ class _LiveRun:
             )
             return None, "discovery", False, locator
         try:
-            provenance = materialize_sec_passage(handle, locator)
+            materialized = materialize_sec_passage(handle, locator, as_of=self.as_of)
         except ValueError as exc:
             self._emit(
                 sid,
@@ -1203,9 +1212,9 @@ class _LiveRun:
                 ),
             )
             return None, "discovery", False, locator
-        passage = provenance.get("passage")
+        passage = materialized.provenance.get("passage")
         return (
-            provenance,
+            materialized,
             "evidence",
             True,
             passage if isinstance(passage, str) else locator,
@@ -2332,6 +2341,180 @@ class _LiveRun:
             cur = _session.transition_session(cur, SessionStatus.COMPLETED)
             self.store.save_session(cur)
 
+    def _bundle_root(self) -> Path:
+        """Per-session bundle root under the data root; Path, never a warehouse DB."""
+        from pathlib import Path as _Path
+
+        from app.config import get_data_root as _gdr
+
+        try:
+            root = _gdr()
+        except Exception:
+            root = _Path("data")
+        return root / "bundles"
+
+    def _write_bundle_file(self, run_dir: Path, name: str, payload: object) -> None:
+        """Write one JSON bundle file; best-effort, never breaks the run."""
+        import json as _json
+
+        try:
+            path = run_dir / name
+            path.parent.mkdir(parents=True, exist_ok=True)
+            path.write_text(_json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n")
+        except Exception:
+            pass
+
+
+    def _bundle_evidence_entries(self, session_id: str) -> tuple[list[object], list[str]]:
+        """Bundle evidence entries + selective artifact names for substantive rows only."""
+        from app.research.evidence import evidence_bundle_entry as _entry
+        from app.research.evidence import evidence_from_dict as _from_dict
+
+        entries: list[object] = []
+        artifacts: list[str] = []
+        seen: set[str] = set()
+        rows: list[object] = []
+        try:
+            rows = list(self.store.list_evidence(session_id))
+        except Exception:
+            rows = []
+        ledger_rows = _ledger_evidence(self.ledger, session_id)
+        by_id = {rec.evidence_id: rec for rec in ledger_rows}
+        for row in rows:
+            if not isinstance(row, dict):
+                continue
+            eid = row.get("evidence_id")
+            if not isinstance(eid, str) or not eid or eid in seen:
+                continue
+            rec = by_id.get(eid)
+            if rec is None:
+                try:
+                    rec = _from_dict(row)
+                except Exception:
+                    continue
+            if rec.record_kind != "evidence":
+                continue
+            try:
+                entries.append(_entry(rec))
+            except Exception:
+                continue
+            seen.add(eid)
+            artifacts.append(f"sha256_{rec.content_hash}")
+            try:
+                from app.storage import raw_archive as _artifacts
+
+                _artifacts.store_evidence_artifact(
+                    rec.content.encode("utf-8"),
+                    url=rec.source_uri or "",
+                    metadata={"evidence_id": eid, "session_id": session_id},
+                )
+            except Exception:
+                pass
+        return entries, artifacts
+
+    def _bundle_tool_calls(self, session_id: str) -> list[object]:
+        """Tool-call rows for the bundle: tool-carrying journal events in sequence order."""
+        out: list[object] = []
+        try:
+            events = self.store.list_events(session_id)
+        except Exception:
+            return out
+        for event in events:
+            try:
+                row = event.to_dict()
+            except Exception:
+                continue
+            event_type = str(row.get("event_type", ""))
+            payload = row.get("payload")
+            text = f"{event_type} {payload}".lower()
+            if event_type.startswith(("tool.", "discovery.", "evidence.", "scout.", "job.")) or "tool" in text:
+                out.append(row)
+        return out
+
+    def _bundle_agents(self, session_id: str) -> dict[str, object]:
+        """Committee agent payloads for the bundle: completed trio job results keyed by role."""
+        agents: dict[str, object] = {}
+        try:
+            jobs = self.store.list_jobs(session_id)
+        except Exception:
+            return agents
+        for job in jobs:
+            if job.job_type not in ("stockbot", "bullbot", "bearbot") or job.status != "completed":
+                continue
+            if job.result is None:
+                continue
+            agents[job.job_type] = dict(job.result)
+        return agents
+
+    def write_bundle(self, session_id: str) -> Path:
+        """Per-session JSON evidence bundle: disposable export view, never a source of truth.
+
+        ResearchRepository/SQLite owns sessions, jobs, evidence, freezes,
+        dossiers, final results, and traces; raw_archive owns accepted source
+        artifacts. Bundles under ``<data_root>/bundles`` are assembled from
+        those two and nothing reads them back (no resume/verify path touches
+        ``bundles/``). Selective artifacts: substantive evidence rows only
+        (content-addressed sha256 names, no per-run copies); search lists,
+        unused opens, and PDFs stay trace-metadata-only.
+        """
+        import json as _json
+
+        run_dir = self._bundle_root() / str(session_id)
+        try:
+            session = self.store.get_session(session_id)
+            question = session.query
+            as_of = session.as_of.isoformat() if session.as_of is not None else None
+            final = dict(session.final_result) if session.final_result is not None else {}
+            policy = dict(session.policy)
+        except Exception:
+            question, as_of, final, policy = self.question, self.as_of_str or None, {}, {}
+        entries, artifacts = self._bundle_evidence_entries(session_id)
+        tool_calls = self._bundle_tool_calls(session_id)
+        agents = self._bundle_agents(session_id)
+        answer = final.get("answer", "") if isinstance(final, dict) else ""
+        self._write_bundle_file(run_dir, "request.json", {"question": question, "as_of": as_of})
+        self._write_bundle_file(run_dir, "config.json", policy)
+        try:
+            calls_path = run_dir / "tool_calls.jsonl"
+            calls_path.parent.mkdir(parents=True, exist_ok=True)
+            with calls_path.open("w", encoding="utf-8") as handle:
+                for row in tool_calls:
+                    handle.write(_json.dumps(row, sort_keys=True, default=str) + "\n")
+        except Exception:
+            pass
+        try:
+            evidence_dir = run_dir / "evidence"
+            evidence_dir.mkdir(parents=True, exist_ok=True)
+            for entry in entries:
+                if not isinstance(entry, dict):
+                    continue
+                eid = entry.get("evidence_id")
+                if not isinstance(eid, str) or not eid:
+                    continue
+                safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in eid)
+                (evidence_dir / f"{safe}.json").write_text(
+                    _json.dumps(entry, sort_keys=True, indent=2, default=str) + "\n"
+                )
+        except Exception:
+            pass
+        try:
+            (run_dir / "artifacts").mkdir(parents=True, exist_ok=True)
+        except Exception:
+            pass
+        try:
+            agents_dir = run_dir / "agents"
+            agents_dir.mkdir(parents=True, exist_ok=True)
+            for role, payload in agents.items():
+                safe = "".join(ch if ch.isalnum() or ch in "._-" else "_" for ch in role)
+                (agents_dir / f"{safe}.json").write_text(
+                    _json.dumps(payload, sort_keys=True, indent=2, default=str) + "\n"
+                )
+        except Exception:
+            pass
+        self._write_bundle_file(run_dir, "answer.json", {"answer": answer, "final_result": final})
+        self._write_bundle_file(run_dir, "eval.json", {"session_id": session_id, "artifacts": artifacts})
+        return run_dir
+
     def _store_empty_terminal(self, session_id: str) -> None:
         """Persist completed no-evidence result (limitations answer, empty claims)."""
         try:
@@ -2529,7 +2712,7 @@ class _LiveRun:
         gate: str,
         waves: Sequence[Mapping[str, object]],
     ) -> dict[str, object]:
-        """Synthesis tail for the final wave: persist over its freeze, stop, trace."""
+        """Synthesis tail for the final wave: persist over its freeze, stop, trace, bundle."""
         reason: str = f"complete:wave{result.wave_id}"
         self._advance_to_synthesizing(result.session_id)
         synth = synthesize_wave1(self.question, self.as_of_str or "unbounded", result)
@@ -2537,6 +2720,10 @@ class _LiveRun:
             self._store_final(result.session_id, synth.freeze_id, synth.answer, synth.claims)
         self._emit(result.session_id, "wave.stopped", {"reason": reason})
         self._close_trace(synth.answer if synth is not None else None, reason)
+        try:
+            bundle_dir = self.write_bundle(result.session_id)
+        except Exception:
+            bundle_dir = None
         return {
             "session_id": result.session_id,
             "wave_id": result.wave_id,
@@ -2551,6 +2738,7 @@ class _LiveRun:
             "wave_decision": gate,
             "novelty": dict(result.novelty),
             "waves": [_wave_summary(w) for w in waves],
+            "bundle_dir": str(bundle_dir) if bundle_dir is not None else None,
         }
 
     def _finish_completed(self, result: Wave1Result, did_out: str) -> dict[str, object]:
@@ -2593,6 +2781,10 @@ def _wave_summary(wave: Mapping[str, object]) -> dict[str, object]:
         "dossier_id": wave.get("dossier_id"),
         "disagreement": wave.get("disagreement"),
     }
+
+def write_session_bundle(run: _LiveRun, session_id: str) -> Path:
+    """Per-session bundle writer: delegates to the run's bundle writer (thin seam)."""
+    return run.write_bundle(session_id)
 
 
 def _empty_terminal_result(
@@ -2699,9 +2891,15 @@ def _close_wave1_result(
             "stop_reason": f"interrupted:{interrupt_after}",
         }
     run._store_empty_terminal(result.session_id)
-    return _empty_terminal_result(
+    try:
+        bundle_dir = run.write_bundle(result.session_id)
+    except Exception:
+        bundle_dir = None
+    out = _empty_terminal_result(
         result.session_id, result.wave_id, list(result.evidence_ids), did_out, "complete:empty-with-limitations"
     )
+    out["bundle_dir"] = str(bundle_dir) if bundle_dir is not None else None
+    return out
 
 
 def run_live(
@@ -3143,5 +3341,11 @@ def resume_live(
     if not eids:
         run._record_stop(session_id, "complete:empty-with-limitations")
         run._store_empty_terminal(session_id)
-        return _empty_terminal_result(session_id, wave, eids, _first_dossier_id(run), "complete:empty-with-limitations")
+        try:
+            bundle_dir = run.write_bundle(session_id)
+        except Exception:
+            bundle_dir = None
+        empty_out = _empty_terminal_result(session_id, wave, eids, _first_dossier_id(run), "complete:empty-with-limitations")
+        empty_out["bundle_dir"] = str(bundle_dir) if bundle_dir is not None else None
+        return empty_out
     return _close_resumed_wave(run, store, session_id, wave, eids)

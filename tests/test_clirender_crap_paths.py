@@ -2735,17 +2735,14 @@ def test_oblig_xbrl_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     def _f1717_115(t: object) -> object:
         raise RuntimeError("x")
 
-    monkeypatch.setattr(O, "_xbrl_store_facts", _f1717_115)
-    assert O._xbrl_load_store_facts("ZZZ") == []
+    monkeypatch.setattr(O, "_xbrl_gateway_facts", _f1717_115)
+    assert O._xbrl_load_gateway_facts("ZZZ") == []
     monkeypatch.undo()
 
-    def _f1720_116(t: object) -> object:
-        raise RuntimeError("x")
+    def _one_gateway_fact(t: object) -> list[O.FinancialFactRow]:
+        return [_fact(concept="LongTermDebt", value=1e9)]
 
-    monkeypatch.setattr(O.edgar_client, "get_company", _f1720_116)
-    facts_none, err_none = O._xbrl_live_facts("NOPE_TICKER_XYZ")
-    assert facts_none is None and err_none
-    monkeypatch.undo()
+    monkeypatch.setattr(O, "_xbrl_gateway_facts", _one_gateway_fact)
     fact = _fact(
         concept="us-gaap-LongTermDebt",
         value=1e9,
@@ -2761,69 +2758,47 @@ def test_oblig_xbrl_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
     seen: set[tuple[str, str]] = set()
     assert O._xbrl_store_rows({"debt": fact}, seen) != []
     assert O._xbrl_store_rows({"debt": fact}, seen) == []
-
-    def _f1731_117(t: object, form: object) -> object:
-        return None
-
-    monkeypatch.setattr(O, "_latest_report", _f1731_117)
-    assert O._xbrl_proxy_filing("NOPE_TICKER_XYZ") == (None, "XBRL", None)
-    live = O._xbrl_live_row("debt", "c", 1e9, "2026-01-01", "2026-01-02", "10-K")
-    assert live["provenance"] == "proxied"
+    monkeypatch.undo()
 
 
-def test_oblig_xbrl_live_concept(monkeypatch: pytest.MonkeyPatch) -> None:
-    import pandas as pd
-
-    facts = pd.DataFrame([{"concept": "us-gaap-LongTermDebt", "value": 1e9, "period_end": "2026-01-01"}])
-    assert O._xbrl_live_concept_kind("us-gaap-LongTermDebt", {}) == "debt"
-    assert O._xbrl_live_concept_kind("zzz-nope", {}) is None
-    assert O._xbrl_live_concept_kind("us-gaap-LongTermDebt", {"debt": _fact()}) is None
-    v, p = O._xbrl_live_latest(facts, "us-gaap-LongTermDebt")
-    assert v == 1e9 and p == "2026-01-01"
-    seen: set[tuple[str, str]] = set()
-    row = O._xbrl_live_concept_row(facts, "us-gaap-LongTermDebt", {}, seen, "2026-01-02", "10-K")
-    assert row is not None
-    assert O._xbrl_live_concept_row(facts, "us-gaap-LongTermDebt", {}, seen, "2026-01-02", "10-K") is None
-    assert O._xbrl_live_concept_row(facts, "zzz", {}, set[tuple[str, str]](), None, "10-K") is None
-    rows = O._xbrl_live_concept_rows(facts, {}, set[tuple[str, str]](), "2026-01-02", "10-K")
-    assert len(rows) == 1
+def test_oblig_xbrl_live_concept() -> None:
     assert O._xbrl_kind_pick([], "Debt") is None
     assert O._xbrl_kind_pick([_fact(concept="Debt", value=0.0)], "Debt") is None
-    O._xbrl_record_manifest(None, "XBRL", None, 0, False, {}, None)
+    pick = O._xbrl_kind_pick([_fact(concept="Debt", value=1e9)], "Debt")
+    assert pick is not None and pick["concept"] == "Debt"
+    best = O._xbrl_best_by_kind([_fact(concept="LongTermDebt", value=1e9)])
+    assert best.get("debt") is not None
+    assert O._xbrl_best_by_kind([_fact(concept="zzz-nope", value=1e9)]) == {}
+    O._xbrl_record_manifest(None, 0, {}, None)
     man: list[dict[str, object]] = []
-    O._xbrl_record_manifest(man, "XBRL", None, 0, False, {}, "err")
+    O._xbrl_record_manifest(man, 0, {}, "err")
     assert man and man[0]["status"] == "failed"
     man2: list[dict[str, object]] = []
-    O._xbrl_record_manifest(man2, "10-K", None, 2, True, {}, None)
-    assert man2[0]["status"] == "scanned"
+    O._xbrl_record_manifest(man2, 1, {"debt": _fact()}, None)
+    assert man2 and man2[0]["status"] == "scanned"
 
 
 def test_oblig_xbrl_obligations_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     def _f1764_118(t: object) -> list[O.FinancialFactRow]:
         return []
 
-    monkeypatch.setattr(O, "_xbrl_load_store_facts", _f1764_118)
-
-    def _f1765_119(t: object) -> tuple[object | None, str | None]:
-        return (None, "boom")
-
-    monkeypatch.setattr(O, "_xbrl_live_facts", _f1765_119)
+    monkeypatch.setattr(O, "_xbrl_gateway_facts", _f1764_118)
     man0: list[dict[str, object]] = []
     assert O._xbrl_obligations("AAA", manifest=man0) == []
-    assert man0 and man0[0]["warning"] == "boom"
-    import pandas as pd
+    assert man0 and man0[0]["status"] == "failed"
 
-    facts = pd.DataFrame([{"concept": "us-gaap-LongTermDebt", "value": 2e9, "period_end": "2026-01-01"}])
+    def _boom_gateway(t: object) -> list[O.FinancialFactRow]:
+        raise RuntimeError("boom")
 
-    def _f1771_120(t: object) -> tuple[object | None, str | None]:
-        return (facts, None)
+    monkeypatch.setattr(O, "_xbrl_gateway_facts", _boom_gateway)
+    man1: list[dict[str, object]] = []
+    assert O._xbrl_obligations("AAA", manifest=man1) == []
+    assert man1 and man1[0]["status"] == "failed"
 
-    monkeypatch.setattr(O, "_xbrl_live_facts", _f1771_120)
+    def _debt_gateway(t: object) -> list[O.FinancialFactRow]:
+        return [_fact(concept="LongTermDebt", value=2e9)]
 
-    def _f1772_121(t: object, form: object) -> tuple[Filing, object] | None:
-        return None
-
-    monkeypatch.setattr(O, "_latest_report", _f1772_121)
+    monkeypatch.setattr(O, "_xbrl_gateway_facts", _debt_gateway)
     rows = O._xbrl_obligations("AAA", manifest=[])
     assert rows and rows[0]["type"] == "debt"
 
@@ -3163,20 +3138,19 @@ def test_oblig_snapshot_helpers():
 
 
 def test_oblig_get_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert O._obligations_cached("AAA", False) in (None, O._obligations_cached("AAA", False))
+    assert O._obligations_cached("AAA") in (None, O._obligations_cached("AAA"))
 
     def _f2023_127(*a: object, **k: object) -> object:
         return {"cached": True}
 
     monkeypatch.setattr(O.cache, "get", _f2023_127)
-    assert O._obligations_cached("AAA", False) == {"cached": True}
-    assert O._obligations_cached("AAA", True) is None
+    assert O._obligations_cached("AAA") == {"cached": True}
 
-    def _f2026_128(t: object, manifest: object = None) -> object:
+    def _f2026_128(t: object, manifest: object) -> object:
         raise RuntimeError("x")
 
     monkeypatch.setattr(O, "_xbrl_obligations", _f2026_128)
-    assert O._obligations_fetch("AAA", False, []) is None
+    assert O._obligations_fetch("AAA", []) is None
     assert O._obligations_lifecycle_key({}) == (None, None, None, None)
     assert O._obligations_dedup_key({}, 1.234) is not None
     sink = O._ObligationsDedup()
@@ -3201,27 +3175,27 @@ def test_oblig_get_helpers(monkeypatch: pytest.MonkeyPatch) -> None:
 
 
 def test_oblig_get_obligations_paths(monkeypatch: pytest.MonkeyPatch) -> None:
-    assert O.get_obligations("", persist=False)["error"]
+    assert O.get_obligations("")["error"]
 
-    def _f2048_129(t: object, p: object) -> object:
+    def _f2048_129(t: object) -> object:
         return {"cached": True}
 
     monkeypatch.setattr(O, "_obligations_cached", _f2048_129)
     assert O.get_obligations("AAA") == {"cached": True}
 
-    def _f2050_130(t: object, p: object) -> object:
+    def _f2050_130(t: object) -> object:
         return None
 
     monkeypatch.setattr(O, "_obligations_cached", _f2050_130)
 
-    def _f2051_131(t: object, p: object, m: object) -> object:
+    def _f2051_131(t: object, m: object) -> object:
         return None
 
     monkeypatch.setattr(O, "_obligations_fetch", _f2051_131)
     assert "error" in O.get_obligations("AAA")
 
     def _f2053_132(
-        t: object, p: object, m: object
+        t: object, m: object
     ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]] | None:
         return ([], [], [])
 
@@ -3232,120 +3206,17 @@ def test_oblig_get_obligations_paths(monkeypatch: pytest.MonkeyPatch) -> None:
     ]
 
     def _f2056_133(
-        t: object, p: object, m: object
+        t: object, m: object
     ) -> tuple[list[dict[str, object]], list[dict[str, object]], list[dict[str, object]]] | None:
         return (rows, [], [])
 
     monkeypatch.setattr(O, "_obligations_fetch", _f2056_133)
     out = O.get_obligations("AAA")
     assert out["ticker"] == "AAA"
-    out2 = O.get_obligations("AAA", persist=True)
-    assert out2["ticker"] == "AAA"
 
 
-def test_oblig_persist_helpers(tmp_path: Path) -> None:
-    sink = O._PersistBuild(tmp_path)
-    assert (
-        O._persist_normalize_exposure({"filed": "2026-01-01", "trigger": "counterparty_default"})["default_triggered"]
-        is True
-    )
-    w, cw = O._persist_work_lists([], [{"filed": "2026-01-01"}], [{"content_hash": ""}])
-    assert w and cw
-    sj, tj = O._persist_timing_jsons({"schedule": [{"fiscal_year": "2027", "amount_billions": 1.0}]})
-    assert sj == tj and sj is not None
-    _sj2, tj2 = O._persist_timing_jsons(
-        {
-            "payment_horizon": {
-                "paid_in_remainder_of_fy": "2027",
-                "paid_in_remainder_billions": 1.0,
-                "paid_after_remainder_billions": 0.0,
-            }
-        }
-    )
-    assert tj2 is not None
-    _sj3, tj3 = O._persist_timing_jsons({})
-    assert tj3 is None
-    eid, tick, ch = O._persist_event_parts({"ticker": "aaa", "content_hash": "c"}, "2026-01-01")
-    assert tick == "AAA"
-    assert O._persist_entity_id({"_accession": "0000123456-26-1"}, "AAA", "2026-01-01", tmp_path) is not None
-    assert O._persist_entity_id({}, "", "2026-01-01", tmp_path) is None
-    row = {
-        "ticker": "NVDA",
-        "type": "supply",
-        "amount_billions": 1.0,
-        "filed": "2026-01-01",
-        "content_hash": "c",
-        "known_at": "k",
-    }
-    O._persist_build_event(row, "2026-01-01", [], sink)
-    O._persist_build_evidence(row, eid, ch, sink)
-    assert O._persist_evidence_span(row, "nope", sink) == (None, None, None)
-    assert O._persist_build_row({"provenance": "proxied"}, sink, []) is None
-    assert O._persist_build_row({}, sink, []) is None
-    _skipped = O._persist_write_sink(sink)["skipped_no_filing_date"]
-    assert isinstance(_skipped, int) and _skipped >= 1
-    s = O.persist_obligation_events([], data_root=str(tmp_path))
-    assert s["events_written"] == 0
-    s2 = O.persist_obligation_events([dict(row)], data_root=str(tmp_path))
-    _written = s2["events_written"]
-    assert isinstance(_written, int) and _written >= 1
 
-
-def test_oblig_asof_helpers(tmp_path: Path) -> None:
-    assert O.get_obligations_as_of("", "2026-01-01")["error"]
-    assert "error" in O.get_obligations_as_of("AAA", "2026-01-01", data_root=str(tmp_path))
-    row = {
-        "ticker": "AAA",
-        "type": "supply",
-        "amount_billions": 1.0,
-        "filed": "2026-01-01",
-        "content_hash": "h1",
-        "known_at": "k",
-    }
-    O.persist_obligation_events([row], data_root=str(tmp_path))
-    out = O.get_obligations_as_of("AAA", "2026-06-01", data_root=str(tmp_path))
-    assert out["ticker"] == "AAA"
-    assert O._asof_evidence_index([{"event_id": "e"}, {"event_id": "e"}]) == {"e": {"event_id": "e"}}
-    assert (
-        O._asof_keep_ticker(
-            [
-                {"ticker": "AAA", "filed_at": "2026-01-01"},
-                {"ticker": "BBB", "filed_at": "2026-01-01"},
-                {"ticker": "AAA", "filed_at": "2099-01-01"},
-            ],
-            "AAA",
-            "2026-06-01",
-        )
-        != []
-    )
-    assert O._rebuild_schedule({"schedule_json": json.dumps([1])}) == [1]
-    assert O._rebuild_schedule({"schedule_json": "bad{"}) is None
-    assert O._rebuild_schedule({}) is None
-    assert O._rebuild_horizon({}) is None
-    assert O._rebuild_horizon({"payment_timing_json": "bad{"}) is None
-    assert O._rebuild_horizon({"payment_timing_json": json.dumps([1])}) == {"schedule": [1]}
-    assert O._rebuild_horizon({"payment_timing_json": json.dumps({"a": 1})}) == {"a": 1}
-    assert O._rebuild_horizon({"payment_timing_json": json.dumps(5)}) is None
-    assert O._rebuild_evidence({"content_hash": "h", "event_id": ""}, "AAA", {}) is None
-    assert (
-        O._rebuild_event_row(
-            {"event_type": "supply", "content_hash": "h", "schedule_json": None, "payment_timing_json": None}, "AAA", {}
-        )["type"]
-        == "supply"
-    )
-    assert O._asof_is_unquantified({"amount_billions": None}) is True
-    assert O._asof_is_unquantified({"amount_billions": 1.0}) is False
-    r, b = O._asof_split_rows([{"event_type": "s", "amount_billions": None, "content_hash": "h"}], "AAA", {})
-    assert b and not r
-    assert (
-        O._asof_rebuild_capital([{"event_type": "s", "content_hash": "h"}], "AAA", {})[0]["trigger"]
-        == "board_discretion"
-    )
-    assert O._asof_event_ids([], [], "AAA") == set()
-    assert O._asof_provenance([], [], []) == ([], [])
-    snap_rows: list[dict[str, object]] = [{"type": "s", "filed": "2026-01-01", "amount_billions": 1.0, "source": "n"}]
-    asm = O._asof_assemble("AAA", "2026-01-01", snap_rows, [], [], snap_rows, [])
-    assert asm["ticker"] == "AAA"
+def test_oblig_asof_helpers() -> None:
     assert O._archive_filing_text("AAA", _f(), "", archive=True) is None
     O._annotate_archive([], "AAA", _f(), "text", archive=False)
     assert O._no_data("A", "x")["error"]
@@ -4044,10 +3915,10 @@ def test_norm_ticker_helpers():
     assert norm._ticker_cik({"ticker": "ko", "cik_str": "x"}) == ("", None)
     assert norm._ticker_cik({"ticker": "ko", "cik_str": 320193}) == ("KO", 320193)
     assert norm._ticker_cik({"ticker": "  ", "cik_str": 1}) == ("", None)
-    e, a = norm._ticker_rows({"title": "  Acme "}, "KO", 320193, "r", "h")
+    e, a = norm._ticker_rows({"title": "  Acme "}, "KO", 320193, "2026-08-10T12:00:00Z", "h")
     assert e["name"] == "Acme" and a["alias_value"] == "KO"
     out = norm.normalize_sec_tickers(
-        {"0": {"ticker": "ko", "cik_str": 1, "title": "K"}}, retrieved_at="r", content_hash="h"
+        {"0": {"ticker": "ko", "cik_str": 1, "title": "K"}}, retrieved_at="2026-08-10T12:00:00Z", content_hash="h"
     )
     assert len(out["entities"]) == 1
     out2 = norm.normalize_sec_tickers(
@@ -4263,10 +4134,10 @@ def test_norm_finra_helpers():
     assert norm._finra_short_position({"currentShortPositionQuantity": -5}) is None
     assert norm._finra_short_position({"currentShortPositionQuantity": 5}) == 5.0
     assert norm._finra_short_position({}) is None
-    row = norm._finra_row("2026-08-14", "r", None, "h" * 20, "u", "sr", {"issueName": " Alpha "}, "AAA")
-    assert row["known_at"] == "r" and row["issue_name"] == "Alpha"
-    row2 = norm._finra_row("2026-08-14", "r", "k", "h" * 20, "u", "sr", {}, "AAA")
-    assert row2["known_at"] == "k" and row2["issue_name"] is None
+    row = norm._finra_row("2026-08-14", "2026-08-10T12:00:00Z", None, "h" * 20, "u", "sr", {"issueName": " Alpha "}, "AAA")
+    assert row["known_at"] == "2026-08-10T12:00:00Z" and row["issue_name"] == "Alpha"
+    row2 = norm._finra_row("2026-08-14", "2026-08-10T12:00:00Z", "2026-08-10T12:00:00Z", "h" * 20, "u", "sr", {}, "AAA")
+    assert row2["known_at"] == "2026-08-10T12:00:00Z" and row2["issue_name"] is None
     with pytest.raises(ValueError, match="not a parseable date"):
         norm._check_finra_known_at("xx", "r", "k")
     with pytest.raises(ValueError, match="precedes settlement_date"):
@@ -4282,26 +4153,13 @@ def test_norm_finra_helpers():
     out = norm.normalize_finra_short_interest(
         [{"symbolCode": ""}, {"symbolCode": "AAA", "currentShortPositionQuantity": -3}],
         settlement_date="2026-08-14",
-        retrieved_at="r",
+        retrieved_at="2026-08-10T12:00:00Z",
         content_hash="h",
         source_url="u",
         source_record_id="r",
     )
     assert len(out["short_interest"]) == 1 and out["short_interest"][0]["short_position"] is None
 
-
-def test_cli_enrichment_failures_arms(capsys: pytest.CaptureFixture[str]) -> None:
-    cli._print_enrichment_failures(
-        {
-            "unresolved_tickers": ["AAA"],
-            "failed_enrichments": [{"ticker": "T", "cik": "1", "error": "boom"}, "notadict"],
-        }
-    )
-    out = capsys.readouterr().out
-    assert "AAA" in out and "boom" in out
-    cli._print_enrichment_failures({"unresolved_tickers": [], "failed_enrichments": "x"})
-    assert capsys.readouterr().out == ""
-    cli._print_enrichment_failures({"unresolved_tickers": None, "failed_enrichments": []})
 
 
 def test_cli_format_mandate_value_and_breaches(capsys: pytest.CaptureFixture[str]) -> None:

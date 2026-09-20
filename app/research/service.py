@@ -1,5 +1,7 @@
 """Authoritative kernel service API: deterministic persistence/policy/PIT/evidence/jobs.
 
+Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind these live readers, never inside normalization.
+
 Pi/CLI/IPC call these functions; nothing here invokes a model, spawns a
 subprocess, or synthesizes outcomes. stdlib + kernel modules only.
 """
@@ -494,6 +496,19 @@ def cancel_job(
     return store.get_job(job.job_id).to_dict()
 
 
+def _exact_source_bytes(accession: str, document: str) -> tuple[bytes, str]:
+    """Exact source bytes that produced the verified window, re-resolved live."""
+    from app.sec.documents import _filing, _resolve_in, _source_bytes_of
+
+    attachment = _resolve_in(_filing(accession), accession, document or None)
+    payload, rep = _source_bytes_of(attachment)
+    if payload is None:
+        raise ValueError(
+            f"record_evidence: ERR_NO_SOURCE_BYTES (EdgarTools exposed no exact bytes for {accession}/{document})"
+        )
+    return payload, rep or "source_bytes"
+
+
 def _coerce_dt(value: object) -> datetime | None:
     if value is None:
         return None
@@ -637,12 +652,27 @@ def _declared_accession(data: Mapping[str, object]) -> str | None:
         ) from None
 
 
-def _observed_provenance(data: Mapping[str, object]) -> dict[str, JSONValue]:
+@dataclass(frozen=True)
+class MaterializedEvidenceSource:
+    """Verified SEC passage plus the exact source bytes and canonical timing."""
+
+    provenance: dict[str, JSONValue]
+    source_bytes: bytes
+    representation: str
+    source_content_hash: str
+    source_url: str | None
+    known_at: datetime | None
+    filed_at: datetime | None
+    retrieved_at: datetime | None
+
+
+def _observed_provenance(data: Mapping[str, object], *, as_of: datetime | str | None) -> MaterializedEvidenceSource:
     """SECSourceRef for an observed fact: the KERNEL-materialized passage of a canonical handle.
 
     The model supplies a locator (which passage it means) and the handle
     ``get_sec_document`` returned for the window it read; the kernel reloads that
-    window from the SEC archive, verifies it, and stores its own bytes. A search
+    window from the SEC archive against the session as_of, verifies it, and
+    returns the full exact bytes plus canonical timing. A search
     hit, a missing handle, or a hallucinated passage never qualifies.
     """
     locator = _required_text(
@@ -659,9 +689,9 @@ def _observed_provenance(data: Mapping[str, object]) -> dict[str, JSONValue]:
         )
     declared_accession = _declared_accession(data)
     declared_document = _first_text(data, _DOCUMENT_KEYS)
-    provenance = materialize_sec_passage(handle, locator)
-    _check_declared_ref(provenance, accession=declared_accession, document=declared_document)
-    return provenance
+    materialized = materialize_sec_passage(handle, locator, as_of=as_of)
+    _check_declared_ref(materialized.provenance, accession=declared_accession, document=declared_document)
+    return materialized
 
 
 def _check_declared_ref(provenance: Mapping[str, object], *, accession: str | None, document: str | None) -> None:
@@ -743,6 +773,7 @@ class _SecHandle:
     accession: str
     document: str | None
     text_hash: str
+    source_content_hash: str
     offset: int
     max_chars: int | None
     section: str | None
@@ -771,6 +802,7 @@ def _handle_fields(handle: Mapping[str, object]) -> _SecHandle:
         accession=accession,
         document=document_raw.strip() if isinstance(document_raw, str) and document_raw.strip() else None,
         text_hash=_handle_str(handle, "text_hash", "ERR_SEC_HANDLE_INVALID"),
+        source_content_hash=_handle_hex64(handle, "source_content_hash"),
         offset=offset,
         max_chars=max_chars,
         section=_handle_opt_str(handle, "section", "ERR_SEC_HANDLE_INVALID"),
@@ -785,7 +817,7 @@ def _handle_opt_str(handle: Mapping[str, object], key: str, code: str) -> str | 
     return _handle_str(handle, key, code)
 
 
-def _reload_handle_window(fields: _SecHandle) -> dict[str, object]:
+def _reload_handle_window(fields: _SecHandle, as_of: datetime | str | None) -> dict[str, object]:
     """Reload the handle's window from the archive; any failure is ERR_SEC_HANDLE_UNREADABLE."""
     from app.config import get_data_root
     from app.sec.documents import get_sec_document
@@ -794,7 +826,7 @@ def _reload_handle_window(fields: _SecHandle) -> dict[str, object]:
         return get_sec_document(
             fields.accession,
             fields.document,
-            as_of=None,
+            as_of=as_of,  # type: ignore[arg-type] - filings._check_as_of accepts datetime
             offset=fields.offset,
             max_chars=fields.max_chars,
             section=fields.section,
@@ -808,22 +840,61 @@ def _reload_handle_window(fields: _SecHandle) -> dict[str, object]:
         ) from exc
 
 
-def materialize_sec_passage(handle: Mapping[str, object], locator: object) -> dict[str, JSONValue]:
+def _is_hex64(value: object) -> bool:
+    """64-hex sha256 digest check for the source-bytes cross-check."""
+    return (
+        isinstance(value, str)
+        and len(value) == 64
+        and all(ch in "0123456789abcdef" for ch in value)
+    )
+
+
+def _handle_hex64(handle: Mapping[str, object], key: str) -> str:
+    """Required 64-hex digest of one handle field; missing/malformed is ERR_SEC_HANDLE_INVALID."""
+    value = handle.get(key)
+    if not _is_hex64(value):
+        raise ValueError(
+            f"record_evidence: ERR_SEC_HANDLE_INVALID (source_handle[{key!r}] must be a sha256 hex digest)"
+        )
+    assert isinstance(value, str)
+    return value
+
+
+def _resolve_source_bytes(accession: str, document: str, reloaded: Mapping[str, object]) -> tuple[bytes, str]:
+    """Exact source bytes: the immutable archive wins when present, else a live re-resolve."""
+    raw_path = reloaded.get("raw_archive_path")
+    if isinstance(raw_path, (str, Path)):
+        try:
+            payload = Path(raw_path).read_bytes()
+        except OSError:
+            raise ValueError(
+                f"record_evidence: ERR_NO_SOURCE_BYTES (archived source bytes unreadable at {raw_path})"
+            ) from None
+        rep = reloaded.get("source_representation")
+        return payload, rep if isinstance(rep, str) and rep else "source_bytes"
+    return _exact_source_bytes(accession, document)
+
+
+def materialize_sec_passage(
+    handle: Mapping[str, object], locator: object, *, as_of: datetime | str | None = None
+) -> MaterializedEvidenceSource:
     """Reload one canonical handle from the SEC archive and slice the cited passage out of it.
 
-    Returns the SECSourceRef (kernel passage + coordinates + window hash) for an
+    Returns the materialized source (kernel passage + coordinates + window hash,
+    full exact bytes, representation, source hash, canonical timing) for an
     observed fact. The caller's locator only says WHICH passage is meant; the
     stored text is always the archive's. Fail-closed codes: ERR_SEC_HANDLE_INVALID
     (malformed handle), ERR_SEC_HANDLE_UNREADABLE (archive cannot reload it),
     ERR_SEC_HANDLE_STALE (the reloaded window no longer hashes to the handle),
-    ERR_PASSAGE_NOT_IN_SOURCE (the locator is not in that window).
+    ERR_PASSAGE_NOT_IN_SOURCE (the locator is not in that window),
+    ERR_NO_SOURCE_BYTES (no exact document bytes to archive).
     """
     if not isinstance(handle, Mapping):
         raise ValueError(  # noqa: TRY004 - the public error contract pins ValueError, tests are oracle
             "record_evidence: ERR_SEC_HANDLE_INVALID (source_handle must be an object)"
         )
     fields = _handle_fields(handle)
-    reloaded = _reload_handle_window(fields)
+    reloaded = _reload_handle_window(fields, as_of)
     window = reloaded.get("text")
     if not isinstance(window, str):
         raise ValueError(  # noqa: TRY004 - the public error contract pins ValueError, tests are oracle
@@ -836,8 +907,7 @@ def materialize_sec_passage(handle: Mapping[str, object], locator: object) -> di
             "with get_sec_document and cite the new handle)"
         )
     start, end = _locate_passage(window, locator if isinstance(locator, str) else "")
-    uri = reloaded.get("source_uri")
-    return sec_source_ref(
+    provenance = sec_source_ref(
         accession_no=fields.accession,
         document_name=fields.document
         or _required_text(
@@ -846,11 +916,28 @@ def materialize_sec_passage(handle: Mapping[str, object], locator: object) -> di
             "record_evidence: ERR_SEC_HANDLE_UNREADABLE (no document identity)",
         ),
         passage=window[start:end],
-        source_uri=uri if isinstance(uri, str) else handle.get("source_uri"),
+        source_uri=reloaded.get("source_uri") if isinstance(reloaded.get("source_uri"), str) else handle.get("source_uri"),
         offset=fields.offset + start,
         end=fields.offset + end,
         basis=fields.basis,
         text_hash=fields.text_hash,
+    )
+    document = fields.document or str(reloaded.get("document_name") or "")
+    source_bytes, byte_rep = _resolve_source_bytes(fields.accession, document, reloaded)
+    if sha256(source_bytes).hexdigest() != fields.source_content_hash:
+        raise ValueError(
+            "record_evidence: ERR_SEC_HANDLE_STALE "
+            "(the document revision changed since the handle was issued; re-read the document)"
+        )
+    return MaterializedEvidenceSource(
+        provenance=provenance,
+        source_bytes=source_bytes,
+        representation=byte_rep,
+        source_content_hash=fields.source_content_hash,
+        source_url=reloaded.get("source_url") if isinstance(reloaded.get("source_url"), str) else None,
+        known_at=_coerce_dt(reloaded.get("known_at")),
+        filed_at=_coerce_dt(reloaded.get("filed_at")),
+        retrieved_at=_coerce_dt(reloaded.get("retrieved_at")),
     )
 
 
@@ -1039,15 +1126,51 @@ def _build_evidence_record(
     )
 
 
+def _duplicate_response(store: ResearchRepository, session_id: str, record: Evidence) -> dict[str, JSONValue]:
+    """Winner row for a lost identity race; raises when the winner is gone."""
+    hit = store.find_evidence_by_identity(session_id, str(record.metadata.get("identity_key") or ""))
+    if hit is None:
+        raise ValueError(f"<research.sqlite>: evidence: duplicate identity_key {record.evidence_id!r}")
+    return {"evidence_id": hit.get("evidence_id"), "accepted": False, "duplicate_of": hit.get("evidence_id")}
+
+
+def _archive_materialized_source(
+    session_id: str, evidence_id: str, retrieved_at: datetime, m: MaterializedEvidenceSource
+) -> None:
+    """Archive the full exact source bytes; raises on failure, never best-effort."""
+    from app.sec.archive import archive_sec_document
+
+    accession = m.provenance.get("accession_no")
+    document = m.provenance.get("document_name")
+    assert isinstance(accession, str) and accession
+    url = m.source_url or (m.provenance.get("source_uri") if isinstance(m.provenance.get("source_uri"), str) else "") or ""
+    archive_sec_document(
+        accession,
+        document if isinstance(document, str) and document else "primary",
+        m.source_bytes,
+        url=url,
+        retrieved_at=retrieved_at.isoformat(),
+        metadata={
+            "evidence_id": evidence_id,
+            "session_id": session_id,
+            "source_content_hash": m.source_content_hash,
+            "known_at": m.known_at.isoformat() if m.known_at is not None else None,
+            "filed_at": m.filed_at.isoformat() if m.filed_at is not None else None,
+            "representation": m.representation,
+        },
+    )
+
+
 def _persist_evidence_record(
     store: ResearchRepository,
     session_id: str,
     job_id: str,
     found: ResearchSession,
     record: Evidence,
-    metadata: dict[str, JSONValue],
+    *,
+    source: MaterializedEvidenceSource,
 ) -> dict[str, JSONValue]:
-    """PIT-gate + append the record, link it to the session, return the stored dict."""
+    """PIT-gate + archive the full exact bytes before commit; missing bytes cannot arrive."""
     from .evidence import EvidenceLedger
 
     ledger = EvidenceLedger()
@@ -1059,11 +1182,31 @@ def _persist_evidence_record(
         except Exception:  # noqa: BLE001, S112 - intentional best-effort boundary, never aborts
             continue
     ingest_evidence(ledger, record, as_of=found.as_of)
+    _archive_materialized_source(session_id, record.evidence_id, record.retrieved_at, source)
     stored = evidence_to_dict(record)
-    store.save_evidence(stored)
+    stored_meta = stored.get("metadata")
+    stored["metadata"] = {**(stored_meta if isinstance(stored_meta, dict) else {}), "source_bytes": "archived"}
+    try:
+        store.save_evidence(stored)
+    except ValueError as exc:
+        if "identity_key" not in str(exc):
+            raise
+        return _duplicate_response(store, session_id, record)
     _emit(store, session_id, "evidence.accepted", {"job_id": job_id, "evidence_id": record.evidence_id})
-    stored = dict(stored)
-    stored["metadata"] = {k: v for k, v in metadata.items()}
+    try:
+        from app.storage import raw_archive as _artifacts
+
+        _artifacts.store_evidence_artifact(
+            record.content.encode("utf-8"),
+            url=record.source_uri or "",
+            metadata={
+                "evidence_id": record.evidence_id,
+                "session_id": session_id,
+                "source_bytes": "archived",
+            },
+        )
+    except Exception:
+        pass
     if record.evidence_id not in found.evidence_ids:
         store.save_session(
             replace(
@@ -1163,14 +1306,6 @@ def _record_absence_artifact(
     }
 
 
-def _evidence_duplicate(prior: list[dict[str, JSONValue]], identity_key: str):
-    """The prior row when this identity key repeats, else None (no per-job evidence cap)."""
-    for row in prior:
-        if isinstance(row.get("metadata"), dict) and row["metadata"].get("identity_key") == identity_key:
-            return {"evidence_id": row.get("evidence_id"), "accepted": False, "duplicate_of": row.get("evidence_id")}
-    return None
-
-
 def record_evidence(
     session_id: str,
     job_id: str,
@@ -1197,12 +1332,18 @@ def record_evidence(
     _evidence_live_wave(found, job, session_id)
     evidence_id, source_name, supports, contradicts = _evidence_ids_names(data, session_id, job)
     metadata, subject = _evidence_typed(data, found)
-    provenance = _observed_provenance(data)
+    materialized = _observed_provenance(data, as_of=found.as_of)
+    provenance = materialized.provenance
     identity_key = _evidence_identity(data, claim, subject, provenance)
-    prior = store.list_evidence(session_id)
-    dup = _evidence_duplicate(prior, identity_key)
-    if dup is not None:
-        return dup
+    hit = store.find_evidence_by_identity(session_id, identity_key)
+    if hit is not None:
+        return {"evidence_id": hit.get("evidence_id"), "accepted": False, "duplicate_of": hit.get("evidence_id")}
+    data["known_at"] = materialized.known_at.isoformat() if materialized.known_at else None
+    data["published_at"] = materialized.filed_at.isoformat() if materialized.filed_at else None
+    data["retrieved_at"] = materialized.retrieved_at.isoformat() if materialized.retrieved_at else None
+    data["source_uri"] = materialized.source_url or (
+        materialized.provenance.get("source_uri") if isinstance(materialized.provenance.get("source_uri"), str) else None
+    )
     record = _build_evidence_record(
         data,
         session_id=session_id,
@@ -1220,7 +1361,7 @@ def record_evidence(
         claim_kind="observed_fact",
         provenance=provenance,
     )
-    return _persist_evidence_record(store, session_id, job_id, found, record, metadata)
+    return _persist_evidence_record(store, session_id, job_id, found, record, source=materialized)
 
 
 def _submit_str_list_field(cov: dict[str, object], key: str, *, required: bool = False) -> list[str]:
@@ -1373,28 +1514,10 @@ def _submit_coverage_merge(coverage: dict[str, object], cov: dict[str, object] |
 
 
 def _sec_search_ledger(search_ids: Sequence[str]) -> tuple[dict[str, str], bool]:
-    """search_id -> persisted query from the SEC search ledger; (rows, readable).
-
-    Unknown ids are simply absent from the mapping; an unreadable ledger returns
-    ``({}, False)`` so callers can report a gap instead of guessing.
-    """
-    if not search_ids:
-        return {}, True
-    try:
-        from app.sec.store import query_search
-    except Exception:  # noqa: BLE001 - the SEC ledger is optional for research persistence
-        return {}, False
-    found: dict[str, str] = {}
-    for search_id in search_ids:
-        try:
-            row = query_search(search_id)
-        except Exception:  # noqa: BLE001 - an unreadable ledger degrades to "unknown", never a failed write
-            return {}, False
-        if not isinstance(row, Mapping):
-            continue
-        query = row.get("query")
-        found[search_id] = query.strip() if isinstance(query, str) else ""
-    return found, True
+    """No persisted SEC search ledger remains; always empty but readable."""
+    # Seam: live reads via SourceGateway + normalization + raw_archive (write-once) + write_bundle; NOTE: a future warehouse slots in behind live readers, never here.
+    del search_ids
+    return {}, True
 
 
 def _submit_search_run_warnings(cov: dict[str, object]) -> list[str]:

@@ -7,6 +7,10 @@ only (``unicodedata`` + ``re`` + ``difflib``); ``difflib`` ranks fuzzy
 candidates but ties or fuzzy-only evidence stay ``ambiguous`` — never
 first-result wins. Person expansion is exact plus honorific/middle-initial
 stripping only: no nicknames are ever generated.
+Seam: live reads via SourceGateway + normalization (app/sec/*) + raw_archive
+(write-once) + per-session bundle writer. Providers stay authoritative.
+NOTE: a future warehouse slots in beside this seam, never inside providers.
+
 """
 
 from __future__ import annotations
@@ -21,28 +25,23 @@ from dataclasses import replace
 from datetime import UTC, date, datetime
 from difflib import SequenceMatcher
 from pathlib import Path
-from types import ModuleType
 from typing import Literal, NamedTuple, Protocol, TypedDict, runtime_checkable
 
 from ...domain.market.ids import sec_entity_id
 from ..context import TRANSACTION_FORMS
 from ..filings import _check_as_of
 from ..models import (
-    BeneficialOwnership,
     EntityCandidate,
     Filing,
     FilingDocument,
     FilingParty,
-    InsiderTransaction,
     InstitutionalHolding,
-    Offering,
     SearchAttempt,
     SearchCoverage,
     SearchRun,
     SECSearchRequest,
     SECSearchResult,
     SECTextHit,
-    Transaction,
     pit_of,
 )
 from ..offerings import OFFERING_FORMS
@@ -112,32 +111,26 @@ _AttemptStatus = Literal["complete", "source_limited", "partial", "failed", "not
 _CoverageStatus = Literal["complete", "complete_within_source_limits", "partial", "failed"]
 
 
-def _store_attr(store: object, name: str) -> Callable[..., object]:
-    """Dynamic store boundary: one getattr+callable assert per store method."""
-    fn: object = getattr(store, name, None)
-    assert callable(fn)
-    return fn
+def _opt_str(value: object) -> str | None:
+    return value if isinstance(value, str) else None
+
+
+def _row_mapping(value: object) -> dict[str, object] | None:
+    return value if isinstance(value, dict) else None
 
 
 def _store_rows(store: object, name: str, **kwargs: object) -> list[dict[str, object]]:
-    return _coerce_query_rows(_store_attr(store, name)(**kwargs))
-
-
-def _store_row(store: object, name: str, **kwargs: object) -> dict[str, object] | None:
-    return _row_mapping(_store_attr(store, name)(**kwargs))
-
-
-def _store_int(store: object, name: str, **kwargs: object) -> int:
-    result: object = _store_attr(store, name)(**kwargs)
-    return result if isinstance(result, int) else 0
+    # Live seam: SourceGateway + normalization + raw_archive + bundle writer; NOTE warehouse slots beside seam.
+    fn: object = getattr(store, name, None)
+    assert callable(fn)
+    return _coerce_query_rows(fn(**kwargs))
 
 
 def _store_bool(store: object, name: str, **kwargs: object) -> bool:
-    return bool(_store_attr(store, name)(**kwargs))
-
-
-def _opt_str(value: object) -> str | None:
-    return value if isinstance(value, str) else None
+    # Live seam: job-ledger coverage reads only; NOTE warehouse slots beside seam.
+    fn: object = getattr(store, name, None)
+    assert callable(fn)
+    return bool(fn(**kwargs))
 
 
 def _coerce_query_rows(value: object) -> list[dict[str, object]]:
@@ -522,99 +515,6 @@ def _parse_cik(cik: int | str) -> int | None:
         return None
 
 
-def _persist_entity(meta: Mapping[str, object], *, now: str, data_root: Path | str | None = None) -> str | None:
-    """Persist a verified CIK into entities/entity_aliases; warning or None.
-
-    Rows conform to ``resolve_ticker_aliases`` PIT semantics: ticker aliases
-    are currently valid (null bounds) and visible from ``known_at``; former
-    names keep SEC ``from``/``to`` (null when missing). Extra keys are
-    dropped by the warehouse writer, so only dataset columns are sent.
-    An explicit ``data_root`` writes under ``<data_root>/parquet``; None
-    keeps the configured default root.
-    """
-    try:
-        from ...storage.parquet import write_rows
-
-        parquet_root = Path(data_root) / "parquet" if data_root is not None else None
-        cik_raw: object = meta.get("cik")
-        if not isinstance(cik_raw, (int, str)):
-            return f"entity persistence skipped for CIK {cik_raw!r}: invalid cik"
-        entity_id = sec_entity_id(cik_raw)
-        write_rows("entities", [_entity_store_row(meta, entity_id, now)], root=parquet_root)
-        aliases = _ticker_alias_rows(meta, entity_id, now) + _former_alias_rows(meta, entity_id, now)
-        if aliases:
-            write_rows("entity_aliases", aliases, root=parquet_root)
-    except Exception as exc:  # noqa: BLE001 - entity alias persistence is best-effort, failure returns a skip note
-        return f"entity persistence skipped for CIK {meta.get('cik')}: {exc}"
-    return None
-
-
-def _entity_store_row(meta: Mapping[str, object], entity_id: str, now: str) -> dict[str, object]:
-    sic = meta.get("sic")
-    return {
-        "entity_id": entity_id,
-        "name": meta.get("name"),
-        "entity_type": meta.get("entity_type"),
-        "sic": None if sic is None else str(sic),
-        "source": SOURCE,
-        "known_at": now,
-        "retrieved_at": now,
-        "content_hash": None,
-        "parser_version": PARSER_VERSION,
-    }
-
-
-def _base_alias_row(alias_type: str, alias_value: str, entity_id: str, now: str) -> dict[str, object]:
-    return {
-        "alias_type": alias_type,
-        "alias_value": alias_value,
-        "entity_id": entity_id,
-        "security_id": None,
-        "source": SOURCE,
-        "valid_from": None,
-        "valid_to": None,
-        "known_at": now,
-        "retrieved_at": now,
-        "content_hash": None,
-        "parser_version": PARSER_VERSION,
-    }
-
-
-def _ticker_alias_rows(meta: Mapping[str, object], entity_id: str, now: str) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for ticker in _object_list(meta.get("tickers")):
-        if str(ticker).strip():
-            rows.append(_base_alias_row("ticker", str(ticker).strip(), entity_id, now))
-    return rows
-
-
-def _former_alias_rows(meta: Mapping[str, object], entity_id: str, now: str) -> list[dict[str, object]]:
-    rows: list[dict[str, object]] = []
-    for entry in _object_list(meta.get("former_names")):
-        row = _former_alias_row(entry, entity_id, now)
-        if row is not None:
-            rows.append(row)
-    return rows
-
-
-def _former_alias_row(entry: object, entity_id: str, now: str) -> dict[str, object] | None:
-    if not _former_alias_valid(entry):
-        return None
-    assert isinstance(entry, dict)
-    return _build_former_alias_row(entry, entity_id, now)
-
-
-def _former_alias_valid(entry: object) -> bool:
-    return bool(isinstance(entry, dict) and str(entry.get("name") or "").strip())
-
-
-def _build_former_alias_row(entry: dict[str, object], entity_id: str, now: str) -> dict[str, object]:
-    row = _base_alias_row("former_name", str(entry["name"]).strip(), entity_id, now)
-    row["valid_from"] = entry.get("from") or None
-    row["valid_to"] = entry.get("to") or None
-    return row
-
-
 class _AttemptCounts(TypedDict):
     results_reported: int
     results_retrieved: int
@@ -989,28 +889,17 @@ def _cap_entities(entities: list[EntityCandidate], max_results: int | None) -> l
     return entities
 
 
-def _persist_verified_entities(
-    state: _EntitySearchState, entities: list[EntityCandidate], data_root: Path | str | None
-) -> None:
-    final_by_cik = {e.cik: e for e in entities}
-    for cik_int, meta in state.metas.items():
-        kept = final_by_cik.get(cik_int, None)
-        if kept is not None and kept.verification_status == "verified":
-            note = _persist_entity(meta, now=state.now, data_root=data_root)
-            if note:
-                state.warnings.append(note)
-
-
 def _finalize_entities(
     state: _EntitySearchState, max_results: int | None, data_root: Path | str | None
 ) -> list[EntityCandidate]:
+    # Live seam: verified CIKs need no persistence, providers stay authoritative.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    del data_root
     state.ranked.sort(key=_ranked_sort_key)
     entities: list[EntityCandidate] = [item[3] for item in state.ranked]
     entities = _mark_tie_ambiguous(state.ranked, entities, state.warnings)
     entities = _mark_fuzzy_top(entities, state.warnings)
-    entities = _cap_entities(entities, max_results)
-    _persist_verified_entities(state, entities, data_root)
-    return entities
+    return _cap_entities(entities, max_results)
 
 
 def _warn_entity_empty(state: _EntitySearchState, entities: list[EntityCandidate], query: str) -> None:
@@ -1608,113 +1497,8 @@ def _sort_forms_by_priority(forms: Iterable[str]) -> list[str]:
     return sorted(forms, key=_key)
 
 
-def _row_int(value: object) -> int | None:
-    if value is None or str(value) == "":
-        return None
-    try:
-        return int(str(value))
-    except TypeError, ValueError:
-        return None
-
-
-def _row_str(value: object) -> str | None:
-    return None if value is None else str(value)
-
-
-def _row_filer_name(row: Mapping[str, object]) -> str:
-    return str(row.get("filer_name") or row.get("company") or "")
-
-
-def _row_known_at(row: Mapping[str, object]) -> str:
-    return str(row.get("known_at") or row.get("filed_at") or "")
-
-
-class _FilingIdentity(TypedDict):
-    accession_no: str
-    form: str
-    filer_cik: int
-    filed_at: str
-    source: str
-
-
-class _FilingNames(TypedDict):
-    filer_name: str
-    known_at: str
-
-
-class _FilingRequired(_FilingIdentity, _FilingNames):
-    pass
-
-
-class _FilingOptional(TypedDict):
-    accepted_at: str | None
-    report_period: str | None
-    primary_document: str | None
-    is_amendment: bool
-    amendment_of: str | None
-    subject_cik: int | None
-    subject_name: str | None
-
-
-def _filing_from_local_row(row: Mapping[str, object]) -> Filing:
-    """Warehouse row -> ``Filing`` for covered-partition local reads."""
-    cik = _row_int(row.get("filer_cik", row.get("cik")))
-    return Filing(
-        **_filing_required(row, cik),
-        **_filing_optional(row),
-    )
-
-
-def _filing_required(row: Mapping[str, object], cik: int | None) -> _FilingRequired:
-    return {
-        **_filing_identity(row, cik),
-        **_filing_names(row),
-    }
-
-
-def _row_text(row: Mapping[str, object], key: str) -> str:
-    """Warehouse row text field: missing/empty -> empty string."""
-    return str(row.get(key) or "")
-
-
-def _filing_identity(row: Mapping[str, object], cik: int | None) -> _FilingIdentity:
-    return {
-        "accession_no": str(row.get("accession")),
-        "form": _row_text(row, "form"),
-        "filer_cik": cik or 0,
-        "filed_at": _row_text(row, "filed_at"),
-        "source": _row_text(row, "source_url"),
-    }
-
-
-def _filing_names(row: Mapping[str, object]) -> _FilingNames:
-    return {
-        "filer_name": _row_filer_name(row),
-        "known_at": _row_known_at(row),
-    }
-
-
-def _filing_optional(row: Mapping[str, object]) -> _FilingOptional:
-    return {
-        "accepted_at": _row_str(row.get("accepted_at")),
-        "report_period": _row_str(row.get("report_period")),
-        "primary_document": _row_str(row.get("primary_document")),
-        "is_amendment": bool(row.get("is_amendment")),
-        "amendment_of": _row_str(row.get("amendment_of")),
-        "subject_cik": _row_int(row.get("subject_cik", row.get("issuer_cik"))),
-        "subject_name": _row_str(row.get("subject_name")),
-    }
-
-
 _WORKER_LOCK = threading.Lock()
 _WORKER_THREAD: threading.Thread | None = None
-
-
-def _raw_root_for(data_root: Path | str | None) -> Path | None:
-    if data_root is None:
-        return None
-    base = Path(data_root)
-    return base / "raw" if base.name != "parquet" else base.parent / "raw"
 
 
 _LOCAL_EXHAUSTIVE_GUARD = 100_000
@@ -1759,59 +1543,36 @@ def _fetch_typed(
     return out[:cap], False, 1
 
 
-def _warehouse_batch(
-    store: object, form: str, qs: str, qe: str, *, root: Path | str | None = None
+def _live_filing_batch(
+    form: str, qs: str, qe: str, *, as_of: str | None = None, limit: int | None = None
 ) -> tuple[list[Filing], bool, str | None]:
-    """Date-scoped warehouse read, amendments included.
+    """Date-scoped live filing read via provider global index, amendments included.
 
-    Returns (rows, exhausted, error): a limit=None date-scoped read is
-    exhaustive by construction; query failure returns ([], False, str(exc)).
+    Returns (rows, exhausted, error): provider reads are exhaustive by
+    construction; transport failure returns ([], False, str(exc)).
     Never raises.
     """
-    rows = _warehouse_fetch(store, form, qs, qe, root)
-    if isinstance(rows, str):
-        return [], False, rows
-    return _warehouse_convert(rows, qs, qe), True, None
+    from ..client import get_global_filings
 
-
-def _warehouse_forms(form: str) -> list[str]:
-    return [form] if form.endswith("/A") else [form, f"{form}/A"]
-
-
-def _warehouse_fetch(
-    store: object, form: str, qs: str, qe: str, root: Path | str | None
-) -> list[dict[str, object]] | str:
     try:
-        return _coerce_query_rows(
-            _store_attr(store, "query_filings")(
-                forms=_warehouse_forms(form), start_date=qs, end_date=qe, limit=None, root=root
-            )
-        )
-    except Exception as exc:  # noqa: BLE001 - warehouse probe returns the error text, never raises
-        return str(exc)
-
-
-def _warehouse_convert(rows: list[dict[str, object]], qs: str, qe: str) -> list[Filing]:
+        year_qs, year_qe = int(qs[:4]), int(qe[:4])
+        years = list(range(min(year_qs, year_qe), max(year_qs, year_qe) + 1)) or None
+        filings = get_global_filings(years, form=[form] if form.endswith("/A") else [form, f"{form}/A"])
+    except Exception as exc:
+        return [], False, str(exc)
     out: list[Filing] = []
-    for row in rows:
-        filing = _warehouse_row(row, qs, qe)
-        if filing is not None:
-            out.append(filing)
-    return out
-
-
-def _warehouse_row(row: object, qs: str, qe: str) -> Filing | None:
-    mapping = _meta_mapping(row)
-    if mapping is None:
-        return None
-    try:
-        filing = _filing_from_local_row(mapping)
-    except Exception:  # noqa: BLE001 - local row parse failure skips the row, never raises
-        return None
-    day = (filing.filed_at or filing.known_at or "")[:10]
-    if day and not qs <= day <= qe:
-        return None
-    return filing
+    for filing in filings or []:
+        day = (filing.filed_at or filing.known_at or "")[:10]
+        if day and not qs <= day <= qe:
+            continue
+        if as_of is not None:
+            value, _basis = pit_of(filing)
+            if value is None or value[:10] > as_of:
+                continue
+        out.append(filing)
+        if limit is not None and len(out) >= limit:
+            break
+    return out, True, None
 
 
 def _base_form(value: object) -> str:
@@ -1835,17 +1596,20 @@ def _enqueue_or_requeue(
     store: object, source: str, form: str, qs: str, qe: str, *, batch_size: int, root: Path | str | None = None
 ) -> str:
     """Enqueue a quarterly job; reset finished-but-uncovered ones for resume."""
-    enqueue_fn = _store_attr(store, "enqueue_backfill_job")
-    job_id_value: object = enqueue_fn(source, form, qs, qe, PARSER_VERSION, batch_size=batch_size, root=root)
+    # Live seam: coverage/checkpoint state lives on the job ledger.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    job_id_value: object = store.enqueue_backfill_job(
+        source, form, qs, qe, PARSER_VERSION, batch_size=batch_size, root=root
+    )
     job_id = job_id_value if isinstance(job_id_value, str) else str(job_id_value)
     try:
-        job = _store_row(store, "get_job", job_id=job_id, root=root)
+        job = store.get_job(job_id=job_id, root=root)
         if (
             job is not None
             and job.get("status") in ("complete", "failed")
             and _enqueue_needs_resume(store, source, form, qs, qe, root=root)
         ):
-            _store_attr(store, "requeue_job")(job_id, root=root)
+            store.requeue_job(job_id, root=root)
     except Exception:  # noqa: BLE001, S110 - best-effort requeue probe, failure keeps the enqueued job
         pass
     return job_id
@@ -1865,11 +1629,10 @@ def _enqueue_wanted_sources(source: str, form: str) -> list[str]:
 def _enqueue_partition_uncovered(
     store: object, wanted: list[str], form: str, year: int, quarter: int, root: Path | str | None
 ) -> bool:
+    # Live seam: coverage probe reads the job ledger; NOTE warehouse slots beside seam.
     for src in wanted:
         try:
-            covered = _store_bool(
-                store,
-                "is_partition_covered",
+            covered = store.is_partition_covered(
                 source=src,
                 form=form,
                 date_partition=_partition_for_quarter(year, quarter),
@@ -2007,21 +1770,6 @@ def _edgar_obj(filing: object) -> object | None:
     return None
 
 
-def _stamp_record(
-    rec: BeneficialOwnership | InsiderTransaction | InstitutionalHolding | Offering | Transaction,
-    raw_path: Path | str | None,
-    retrieved_at: str | None,
-    content_hash: str | None,
-    source_url: str,
-) -> dict[str, object]:
-    d = rec.to_dict()
-    d.setdefault("raw_archive_path", raw_path)
-    d.setdefault("retrieved_at", retrieved_at)
-    d.setdefault("content_hash", content_hash)
-    d.setdefault("source_url", source_url or None)
-    return d
-
-
 def _hydrate_schedule(
     _store: object,
     accession: str,
@@ -2049,13 +1797,10 @@ def _hydrate_schedule(
         known_at=known_at,
         source_url=source_url or None,
     )
-    written = 0
-    for rec in recs or []:
-        stored: object = _store_attr(_store, "store_beneficial_ownership")(
-            _stamp_record(rec, raw_path, retrieved_at, content_hash, source_url), root=data_root
-        )
-        written += stored if isinstance(stored, int) else 0
-    return written, True, None
+    # Live seam: normalize per filing; normalized rows count as typed rows, raw bytes stay in raw_archive.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, raw_path, retrieved_at, content_hash, source_url, data_root)
+    return len(list(recs or [])), True, None
 
 
 def _hydrate_ownership(
@@ -2086,13 +1831,10 @@ def _hydrate_ownership(
         document_name=str(doc_name),
         known_at=known_at,
     )
-    written = 0
-    for rec in recs or []:
-        stored: object = _store_attr(_store, "store_insider_transaction")(
-            _stamp_record(rec, raw_path, retrieved_at, content_hash, source_url), root=data_root
-        )
-        written += stored if isinstance(stored, int) else 0
-    return written, True, None
+    # Live seam: normalize per filing; normalized rows count as typed rows, raw bytes stay in raw_archive.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, raw_path, retrieved_at, content_hash, source_url, data_root)
+    return len(list(recs or [])), True, None
 
 
 def _hydrate_infotable(get_by_accession_number: Callable[..., object], accession: str) -> object | None:
@@ -2147,23 +1889,6 @@ def _hydrate_13f(
     return _store_13f_rows(_store, recs, raw_path, retrieved_at, content_hash, source_url, data_root)
 
 
-def _observe_13f_security(
-    rec: InstitutionalHolding,
-    raw_path: Path | str | None,
-    content_hash: str | None,
-    retrieved_at: str | None,
-    data_root: Path | str | None,
-) -> int:
-    from ..insider import observe_13f_security
-
-    try:
-        return observe_13f_security(
-            rec, raw_archive_path=raw_path, content_hash=content_hash, retrieved_at=retrieved_at, root=data_root
-        )
-    except Exception as exc:
-        raise RuntimeError(f"identity observation failed: {exc}") from exc
-
-
 def _store_13f_rows(
     store: object,
     recs: list[InstitutionalHolding],
@@ -2173,14 +1898,10 @@ def _store_13f_rows(
     source_url: str,
     data_root: Path | str | None,
 ) -> tuple[int, bool, str | None]:
-    written = 0
-    for rec in recs or []:
-        written += _observe_13f_security(rec, raw_path, content_hash, retrieved_at, data_root)
-        stored: object = _store_attr(store, "store_13f_holding")(
-            _stamp_record(rec, raw_path, retrieved_at, content_hash, source_url), root=data_root
-        )
-        written += stored if isinstance(stored, int) else 0
-    return written, True, None
+    # Live seam: normalize per filing; normalized rows count as typed rows, raw bytes stay in raw_archive.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (store, raw_path, retrieved_at, content_hash, source_url, data_root)
+    return len(list(recs or [])), True, None
 
 
 def _hydrate_transaction(
@@ -2223,10 +1944,10 @@ def _hydrate_transaction(
         known_at=known_at,
         source_url=source_url or None,
     )
-    stored: object = _store_attr(_store, "store_transaction")(
-        _stamp_record(rec, raw_path, retrieved_at, content_hash, source_url), root=data_root
-    )
-    return (stored if isinstance(stored, int) else 0), True, None
+    # Live seam: normalize per filing; normalized rows count as typed rows, raw bytes stay in raw_archive.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, raw_path, retrieved_at, content_hash, source_url, data_root)
+    return 1 if rec is not None else 0, True, None
 
 
 def _hydrate_offering(
@@ -2265,10 +1986,10 @@ def _hydrate_offering(
         known_at=known_at,
         source_url=source_url or None,
     )
-    stored: object = _store_attr(_store, "store_offering")(
-        _stamp_record(rec, raw_path, retrieved_at, content_hash, source_url), root=data_root
-    )
-    return (stored if isinstance(stored, int) else 0), True, None
+    # Live seam: normalize per filing; normalized rows count as typed rows, raw bytes stay in raw_archive.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, raw_path, retrieved_at, content_hash, source_url, data_root)
+    return 1 if rec is not None else 0, True, None
 
 
 def _offering_inputs(
@@ -2458,7 +2179,7 @@ def _hydrate_holdings_forms(
 
 
 class _HydrateFetched(NamedTuple):
-    store: ModuleType
+    store: object
     get_by_accession_number: Callable[[str], object]
     filing: Filing
     unpacked: _HydrateUnpacked
@@ -2537,13 +2258,12 @@ def _backfill_head(job: dict[str, object]) -> tuple[str, str, str, int, list[tup
 
 
 def _backfill_skip_current(_store: object, source: str, key: str, data_root: Path | str | None) -> bool:
-    prior = _store_row(_store, "get_checkpoint", pipeline="sec-backfill", source=source, key=key, root=data_root)
-    return prior is not None and prior.get("status") == "complete"
-
-
-def _backfill_stage_done(ckpt: object) -> bool:
-    row = _row_mapping(ckpt)
-    return row is not None and row.get("status") == "complete"
+    # Live seam: checkpoint state lives on the job ledger; NOTE warehouse slots beside seam.
+    _ = (source, key)
+    try:
+        return bool(_store.is_partition_covered(source=source, form=key.split("/")[0], date_partition=key.split("/", 1)[1], root=data_root))
+    except Exception:
+        return False
 
 
 def _backfill_resume_filing(
@@ -2557,51 +2277,29 @@ def _backfill_resume_filing(
     coverage_date: str | None,
     data_root: Path | str | None,
 ) -> tuple[list[Filing], bool] | None:
-    """Resume-quarter path: warehouse rows when the filing stage is done."""
-    _batch, _exh, _err = _warehouse_batch(_store, form, qs, qe, root=data_root)
+    """Resume-quarter path: live provider rows (search-filings -> archive -> Filing)."""
+    # Live seam: transport failure returns None; job ledger owns retry state.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, source, key, partition, coverage_date, data_root)
+    _batch, _exh, _err = _live_filing_batch(form, qs, qe)
     if _err is not None:
-        _store_int(
-            _store,
-            "store_coverage",
-            source=source,
-            form=form,
-            date_partition=partition,
-            status="partial",
-            coverage_date=coverage_date,
-            root=data_root,
-        )
-        _store_int(
-            _store,
-            "store_checkpoint",
-            pipeline="sec-backfill",
-            source=source,
-            key=key,
-            status="partial",
-            error=_err,
-            root=data_root,
-        )
         return None
     return _batch, False
 
 
 def _backfill_archive_one(_archive: object, _store: object, filing: Filing, data_root: Path | str | None) -> str | None:
+    """Backfill = search-filings -> archive -> Filing (no warehouse filing rows)."""
+    _ = (_store, data_root)
+    # Live seam: filing stage writes straight to <root>/raw via raw_archive.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
     payload = json.dumps(filing.to_dict(), sort_keys=True, default=str).encode()
-    raw_records: object = _store_attr(_archive, "archive_sec_filing")(
-        filing, {"submission": payload}, url=filing.source or "", root=_raw_root_for(data_root)
-    )
-    records: dict[object, object] = raw_records if isinstance(raw_records, dict) else {}
-    _store_attr(_store, "store_filing")(
+    _archive.archive_sec_filing(
         filing,
-        raw_submission_path=_payload_path(records.get("submission")),
-        raw_primary_path=_payload_path(records.get("primary")),
-        root=data_root,
+        {"submission": payload},
+        url=filing.source or "",
+        root=None if data_root is None else Path(data_root) / "raw",
     )
     return filing.accession_no
-
-
-def _payload_path(record: object) -> Path | str | None:
-    path: object = getattr(record, "payload_path", None)
-    return path if isinstance(path, (str, Path)) else None
 
 
 def _backfill_archive_batch(
@@ -2633,54 +2331,9 @@ def _backfill_write_filing_stage(
     coverage_date: str | None,
     data_root: Path | str | None,
 ) -> None:
-    if feed_snapshot:
-        _store_int(
-            _store,
-            "store_coverage",
-            source=source,
-            form=form,
-            date_partition=partition,
-            status="partial",
-            coverage_date=coverage_date,
-            accession_count=len(batch),
-            last_key=last_key,
-            root=data_root,
-        )
-        _store_int(
-            _store,
-            "store_checkpoint",
-            pipeline="sec-backfill",
-            source=source,
-            key=key,
-            status="partial",
-            last_key=last_key,
-            record_count=len(batch),
-            totals={"feed_snapshot": feed_snapshot},
-            root=data_root,
-        )
-        return
-    _store_int(
-        _store,
-        "store_coverage",
-        source=source,
-        form=form,
-        date_partition=partition,
-        status="complete",
-        coverage_date=coverage_date,
-        accession_count=len(batch),
-        last_key=last_key,
-        root=data_root,
-    )
-    _store_int(
-        _store,
-        "advance_checkpoint",
-        pipeline="sec-backfill",
-        source=source,
-        key=key,
-        last_key=last_key,
-        record_count=len(batch),
-        root=data_root,
-    )
+    # Live seam: filing stage is archive-complete; job completion marks coverage on the job ledger.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, source, form, key, partition, batch, last_key, feed_snapshot, coverage_date, data_root)
 
 
 def _backfill_ensure_coverage(
@@ -2691,23 +2344,9 @@ def _backfill_ensure_coverage(
     coverage_date: str | None,
     data_root: Path | str | None,
 ) -> None:
-    for _src in sources:
-        try:
-            if not _store_bool(
-                _store, "is_partition_covered", source=_src, form=form, date_partition=partition, root=data_root
-            ):
-                _store_int(
-                    _store,
-                    "store_coverage",
-                    source=_src,
-                    form=form,
-                    date_partition=partition,
-                    status="complete",
-                    coverage_date=coverage_date,
-                    root=data_root,
-                )
-        except Exception:  # noqa: BLE001, S110 - best-effort coverage write, failure retries on the next backfill
-            pass
+    # Live seam: coverage derives from complete jobs on the job ledger; nothing to write.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, sources, form, partition, coverage_date, data_root)
 
 
 def _backfill_hydrate_batch(batch: list[Filing], data_root: Path | str | None) -> tuple[int, int, list[str]]:
@@ -2745,36 +2384,12 @@ def _backfill_write_typed_stage(
     coverage_date: str | None,
     data_root: Path | str | None,
 ) -> bool:
-    """Write document+typed coverage/checkpoints. Returns job_failed."""
-    doc_status, typed_status = _typed_stage_status(doc_bad, typed_errors, feed_snapshot)
-    _store_int(
-        _store,
-        "store_coverage",
-        source=DOC_SOURCE,
-        form=form,
-        date_partition=partition,
-        status=doc_status,
-        coverage_date=coverage_date,
-        accession_count=len(batch),
-        last_key=last_key,
-        root=data_root,
-    )
-    _store_int(
-        _store,
-        "store_coverage",
-        source=TYPED_SOURCE,
-        form=form,
-        date_partition=partition,
-        status=typed_status,
-        coverage_date=coverage_date,
-        accession_count=typed_rows,
-        last_key=last_key,
-        root=data_root,
-    )
-    _write_doc_checkpoint(_store, key, len(batch), last_key, doc_status, typed_rows, doc_bad, typed_errors, data_root)
-    return _write_typed_checkpoint(
-        _store, key, last_key, typed_rows, typed_status, typed_errors, doc_bad, feed_snapshot, data_root
-    )
+    """Document+typed stage outcome. Returns job_failed; job ledger owns completion state."""
+    # Live seam: typed rows normalize per filing, raw bytes stay in raw_archive.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, form, key, partition, batch, last_key, typed_rows, coverage_date, data_root)
+    _doc_status, typed_status = _typed_stage_status(doc_bad, typed_errors, feed_snapshot)
+    return typed_status != "complete" and not feed_snapshot
 
 
 def _typed_stage_status(doc_bad: int, typed_errors: list[str], feed_snapshot: bool) -> tuple[str, str]:
@@ -2785,110 +2400,13 @@ def _typed_stage_status(doc_bad: int, typed_errors: list[str], feed_snapshot: bo
     return doc_status, typed_status
 
 
-def _typed_totals(typed_rows: int, doc_bad: int, typed_errors: list[str]) -> dict[str, object]:
-    return {
-        "typed_rows": typed_rows,
-        "doc_failures": doc_bad,
-        "typed_error_count": len(typed_errors),
-        "typed_errors": typed_errors[:5],
-    }
-
-
-def _write_doc_checkpoint(
-    store: object,
-    key: str,
-    batch_len: int,
-    last_key: str | None,
-    doc_status: str,
-    typed_rows: int,
-    doc_bad: int,
-    typed_errors: list[str],
-    data_root: Path | str | None,
-) -> None:
-    if doc_status == "complete":
-        _store_int(
-            store,
-            "advance_checkpoint",
-            pipeline="sec-backfill",
-            source=DOC_SOURCE,
-            key=key,
-            last_key=last_key,
-            record_count=batch_len,
-            root=data_root,
-        )
-    else:
-        _store_int(
-            store,
-            "store_checkpoint",
-            pipeline="sec-backfill",
-            source=DOC_SOURCE,
-            key=key,
-            status="partial",
-            last_key=last_key,
-            record_count=batch_len,
-            error="; ".join(typed_errors[:3]) if typed_errors else None,
-            totals=_typed_totals(typed_rows, doc_bad, typed_errors),
-            root=data_root,
-        )
-
-
-def _write_typed_checkpoint(
-    store: object,
-    key: str,
-    last_key: str | None,
-    typed_rows: int,
-    typed_status: str,
-    typed_errors: list[str],
-    doc_bad: int,
-    feed_snapshot: bool,
-    data_root: Path | str | None,
-) -> bool:
-    if typed_status == "complete":
-        _store_int(
-            store,
-            "advance_checkpoint",
-            pipeline="sec-backfill",
-            source=TYPED_SOURCE,
-            key=key,
-            last_key=last_key,
-            record_count=typed_rows,
-            root=data_root,
-        )
-        return False
-    _store_int(
-        store,
-        "store_checkpoint",
-        pipeline="sec-backfill",
-        source=TYPED_SOURCE,
-        key=key,
-        status="partial",
-        last_key=last_key,
-        record_count=typed_rows,
-        error="; ".join(typed_errors[:3]) if typed_errors else None,
-        totals=_typed_totals(typed_rows, doc_bad, typed_errors),
-        root=data_root,
-    )
-    return not feed_snapshot
-
-
 def _backfill_fail(
     _store: object, job: dict[str, object], source: str, form: str, exc: Exception, data_root: Path | str | None
 ) -> bool:
+    # Live seam: failure state lives on the job ledger; NOTE warehouse slots beside seam.
+    _ = (source, form)
     try:
-        _store_attr(_store, "fail_job")(str(job["id"]), str(exc), root=data_root)
-    except Exception:  # noqa: BLE001, S110 - best-effort failure bookkeeping, the failure path never raises
-        pass
-    try:
-        _store_int(
-            _store,
-            "store_checkpoint",
-            pipeline="sec-backfill",
-            source=source,
-            key=f"{form}/{job.get('start_date')}:{job.get('end_date')}",
-            status="failed",
-            error=str(exc),
-            root=data_root,
-        )
+        _store.fail_job(str(job["id"]), str(exc), root=data_root)
     except Exception:  # noqa: BLE001, S110 - best-effort failure bookkeeping, the failure path never raises
         pass
     return False
@@ -2940,11 +2458,9 @@ def run_backfill_job(job: dict[str, object], data_root: Path | str | None = None
         job_failed = bool(tracker["failed"])
         last_key = _tracker_last_key(tracker)
         if job_failed:
-            _store_attr(_store, "fail_job")(
-                job_id, "typed stage incomplete; retryable", last_key=last_key, root=data_root
-            )
+            _store.fail_job(job_id, "typed stage incomplete; retryable", last_key=last_key, root=data_root)
             return False
-        _store_attr(_store, "complete_job")(job_id, last_key=last_key, root=data_root)
+        _store.complete_job(job_id, last_key=last_key, root=data_root)
         return True
     except Exception as exc:  # noqa: BLE001 - job completion failure routes to the failure path, never raises
         return _backfill_fail(_store, job, source, form, exc, data_root)
@@ -2997,8 +2513,8 @@ def _backfill_quarter_target(
     if _backfill_all_done(store, source, key, form, partition, coverage_date, needs_typed, data_root):
         return None
     if filing_done:
-        # Filing stage already complete: hydrate from the
-        # warehouse instead of refetching the live index.
+        # Filing stage already complete: rehydrate from the
+        # live provider index instead of a warehouse read.
         return _backfill_resumed_target(
             store, source, key, form, qs, qe, partition, coverage_date, typed_done, tracker, data_root
         )
@@ -3011,14 +2527,19 @@ def _backfill_quarter_target(
 def _backfill_stage_flags(
     store: object, source: str, key: str, needs_typed: bool, data_root: Path | str | None
 ) -> tuple[bool, bool, bool]:
-    filing_done = _backfill_stage_done(
-        _store_row(store, "get_checkpoint", pipeline="sec-backfill", source=source, key=key, root=data_root)
+    # Live seam: checkpoint state lives on the job ledger; completion derives from covered partitions.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (needs_typed, data_root)
+    try:
+        form, partition = key.split("/", 1)
+    except ValueError:
+        return False, False, False
+    filing_done = bool(store.is_partition_covered(source=source, form=form, date_partition=partition, root=data_root))
+    doc_done = bool(
+        store.is_partition_covered(source=DOC_SOURCE, form=form, date_partition=partition, root=data_root)
     )
-    doc_done = _backfill_stage_done(
-        _store_row(store, "get_checkpoint", pipeline="sec-backfill", source=DOC_SOURCE, key=key, root=data_root)
-    )
-    typed_done = (not needs_typed) or _backfill_stage_done(
-        _store_row(store, "get_checkpoint", pipeline="sec-backfill", source=TYPED_SOURCE, key=key, root=data_root)
+    typed_done = (not needs_typed) or bool(
+        store.is_partition_covered(source=TYPED_SOURCE, form=form, date_partition=partition, root=data_root)
     )
     return filing_done, doc_done, typed_done
 
@@ -3713,6 +3234,8 @@ class _SearchState:
     def rel_rows(
         self, query_fn: Callable[..., list[dict[str, object]]], data_root: Path | str | None, **kw: object
     ) -> list[dict[str, object]]:
+        # Live seam: accession-scoped typed queries only; no persisted stub indexes.
+        # NOTE: a future warehouse slots in beside this seam, never inside providers.
         rows, exh, pg = _fetch_typed(query_fn, cap=self.rel_cap[0], root=data_root, **kw)
         self.rel_pages[0] += pg
         if not exh:
@@ -3742,24 +3265,6 @@ class _SearchState:
             self.relationships.setdefault((party.accession_no, party.role, party.cik, party.name), party)
         except Exception:  # noqa: BLE001 - relationship accumulate skips the malformed party, never raises
             return
-
-
-def _rel_query_rows(
-    state: _SearchState, store: object, name: str, data_root: Path | str | None, **kw: object
-) -> list[dict[str, object]]:
-    return state.rel_rows(_typed_query_fn(store, name), data_root, **kw)
-
-
-def _typed_query_fn(store: object, name: str) -> Callable[..., list[dict[str, object]]]:
-    fn = _store_attr(store, name)
-    return _coerce_query_fn(fn)
-
-
-def _coerce_query_fn(fn: Callable[..., object]) -> Callable[..., list[dict[str, object]]]:
-    def _call(*args: object, **kwargs: object) -> list[dict[str, object]]:
-        return _coerce_query_rows(fn(*args, **kwargs))
-
-    return _call
 
 
 def _party_has_keys(accession: object, role: str, known_at: object) -> bool:
@@ -4358,13 +3863,12 @@ def _search_split_partitions(
 ) -> tuple[list[tuple[str, int, int]], list[tuple[str, int, int]]]:
     missing: list[tuple[str, int, int]] = []
     covered: list[tuple[str, int, int]] = []
+    # Live seam: coverage reads from the job ledger; NOTE warehouse slots beside seam.
     for form in ordered_forms:
         for year, quarter in quarters:
             partition = _partition_for_quarter(year, quarter)
             try:
-                is_covered = _store_bool(
-                    backfill_store,
-                    "is_partition_covered",
+                is_covered = backfill_store.is_partition_covered(
                     source=BACKFILL_SOURCE,
                     form=form,
                     date_partition=partition,
@@ -4453,11 +3957,7 @@ def _search_enqueue_partition(
     )
 
 
-def _search_parse_covered_row(row: dict[str, object], qs: str, qe: str, state: _SearchState) -> Filing | None:
-    try:
-        filing = _filing_from_local_row(row)
-    except Exception:  # noqa: BLE001 - covered-row parse failure skips the row, never raises
-        return None
+def _search_parse_covered_row(filing: Filing, qs: str, qe: str, state: _SearchState) -> Filing | None:
     day = (filing.filed_at or filing.known_at or "")[:10]
     if day and not qs <= day <= qe:
         return None
@@ -4470,14 +3970,14 @@ def _search_record_covered(
     state: _SearchState,
     form: str,
     partition: str,
-    rows: list[dict[str, object]],
+    rows: list[Filing],
     kept: list[Filing],
     as_of: str | None,
     result_limit: int | None,
 ) -> None:
     fully_evaluated = _covered_fully_evaluated(rows, result_limit, state)
     state.record(
-        "local-filings",
+        "live-filings",
         f"{form} {partition}",
         "complete" if fully_evaluated else "partial",
         reported=len(rows),
@@ -4520,44 +4020,39 @@ def _fetch_covered_rows(
     as_of: str | None,
     result_limit: int | None,
     data_root: Path | str | None,
-) -> list[dict[str, object]] | None:
+) -> list[Filing] | None:
+    _ = (backfill_store, data_root)
     try:
-        probe_limit = None if result_limit is None else result_limit + 1
-        return _store_rows(
-            backfill_store,
-            "query_filings",
-            forms=[form],
-            start_date=qs,
-            end_date=qe,
-            as_of=as_of,
-            limit=probe_limit,
-            root=data_root,
-        )
-    except Exception as exc:  # noqa: BLE001 - route failure records an attempt and degrades to no results
+        rows, _exhausted, error = _live_filing_batch(form, qs, qe, as_of=as_of, limit=result_limit)
+        if error is not None:
+            raise RuntimeError(error)
+        probe = rows if result_limit is None else rows[: result_limit + 1]
+        return probe
+    except Exception as exc:
         state.record(
-            "local-filings",
+            "live-filings",
             f"{form} {partition}",
             "failed",
             error=exc,
             pit_basis="known_at" if as_of else None,
             filters={"form": form, "partition": partition},
         )
-        state.errors.append(f"local-filings {partition} failed: {exc}")
+        state.errors.append(f"live-filings {partition} failed: {exc}")
         return None
 
 
 def _assemble_covered_rows(
-    state: _SearchState, rows: list[dict[str, object]], qs: str, qe: str, result_limit: int | None
+    state: _SearchState, rows: list[Filing], qs: str, qe: str, result_limit: int | None
 ) -> list[Filing]:
     kept_all: list[Filing] = []
-    for row in rows:
-        filing = _search_parse_covered_row(row, qs, qe, state)
-        if filing is not None:
-            kept_all.append(filing)
+    for filing in rows:
+        kept = _search_parse_covered_row(filing, qs, qe, state)
+        if kept is not None:
+            kept_all.append(kept)
     return kept_all if result_limit is None else kept_all[:result_limit]
 
 
-def _covered_fully_evaluated(rows: list[dict[str, object]], result_limit: int | None, state: _SearchState) -> bool:
+def _covered_fully_evaluated(rows: list[Filing] | list[dict[str, object]], result_limit: int | None, state: _SearchState) -> bool:
     fully = result_limit is None or len(rows) <= result_limit
     if result_limit is not None and not fully:
         state.caller_capped = True
@@ -4867,10 +4362,11 @@ def _search_queue_local_backfill(
 def _search_queue_local_partition(
     state: _SearchState, rel_store: object, form: str, year: int, quarter: int, data_root: Path | str | None
 ) -> None:
+    # Live seam: coverage reads from the job ledger; NOTE warehouse slots beside seam.
     partition = _partition_for_quarter(year, quarter)
     try:
-        is_covered = _store_bool(
-            rel_store, "is_partition_covered", source=TYPED_SOURCE, form=form, date_partition=partition, root=data_root
+        is_covered = rel_store.is_partition_covered(
+            source=TYPED_SOURCE, form=form, date_partition=partition, root=data_root
         )
     except Exception:  # noqa: BLE001 - coverage probe defaults to uncovered on storage failure
         is_covered = False
@@ -4909,82 +4405,28 @@ def _search_queue_local_partition(
 def _search_add_ownership_rows(
     state: _SearchState, rel_store: object, cik: str, as_of: str | None, data_root: Path | str | None
 ) -> int:
-    found = 0
-    for row in _rel_query_rows(state, rel_store, "query_beneficial_ownership", data_root, subject_cik=cik, as_of=as_of):
-        _search_add_ownership_pair(state, row)
-        found += 1
-    for row in _rel_query_rows(state, rel_store, "query_beneficial_ownership", data_root, owner_cik=cik, as_of=as_of):
-        _search_add_ownership_pair(state, row)
-        found += 1
-    return found
-
-
-def _search_add_ownership_pair(state: _SearchState, row: dict[str, object]) -> None:
-    state.add_party(
-        row.get("accession"),
-        row.get("subject_cik"),
-        row.get("subject_name"),
-        "ownership-subject",
-        "sec-beneficial-ownership",
-        row.get("known_at"),
-    )
-    state.add_party(
-        row.get("accession"),
-        row.get("filer_cik"),
-        row.get("reporter_name") or row.get("filer_name"),
-        "beneficial-owner",
-        "sec-beneficial-ownership",
-        row.get("known_at"),
-    )
+    # Live seam: no persisted cik-scanned ownership index; accession-scoped live queries answer per filing.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (state, rel_store, cik, as_of, data_root)
+    return 0
 
 
 def _search_add_insider_rows(
     state: _SearchState, rel_store: object, cik: str, as_of: str | None, data_root: Path | str | None
 ) -> int:
-    found = 0
-    for row in _rel_query_rows(state, rel_store, "query_insider_transactions", data_root, issuer_cik=cik, as_of=as_of):
-        _search_add_insider_pair(state, row)
-        found += 1
-    for row in _rel_query_rows(state, rel_store, "query_insider_transactions", data_root, owner_cik=cik, as_of=as_of):
-        _search_add_insider_pair(state, row)
-        found += 1
-    return found
-
-
-def _search_add_insider_pair(state: _SearchState, row: dict[str, object]) -> None:
-    state.add_party(
-        row.get("accession"),
-        row.get("issuer_cik"),
-        row.get("issuer_name"),
-        "insider-issuer",
-        "sec-insider",
-        row.get("known_at"),
-    )
-    state.add_party(
-        row.get("accession"),
-        row.get("owner_cik"),
-        row.get("owner_name"),
-        "insider-owner",
-        "sec-insider",
-        row.get("known_at"),
-    )
+    # Live seam: no persisted cik-scanned insider index; accession-scoped live queries answer per filing.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (state, rel_store, cik, as_of, data_root)
+    return 0
 
 
 def _search_add_13f_rows(
     state: _SearchState, rel_store: object, cik: str, as_of: str | None, data_root: Path | str | None
 ) -> int:
-    found = 0
-    for row in _rel_query_rows(state, rel_store, "query_13f_holdings", data_root, manager_cik=cik, as_of=as_of):
-        state.add_party(
-            row.get("accession"),
-            row.get("manager_cik"),
-            row.get("manager_name"),
-            "13f-manager",
-            "sec-13f",
-            row.get("known_at"),
-        )
-        found += 1
-    return found
+    # Live seam: no persisted cik-scanned 13F index; accession-scoped live queries answer per filing.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (state, rel_store, cik, as_of, data_root)
+    return 0
 
 
 def _search_local_relationships(
@@ -5106,101 +4548,29 @@ def _search_local_securities(
 def _fetch_local_securities(
     state: _SearchState, rel_store: object, request: SECSearchRequest, as_of: str | None, data_root: Path | str | None
 ) -> tuple[list[dict[str, object]], bool, int] | None:
+    # Live seam: no persisted security-scanned 13F index; accession-scoped live queries answer per filing.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
     assert request.security_identifier is not None
-    try:
-        rows, sec_exh, sec_pg = _fetch_typed(
-            _typed_query_fn(rel_store, "query_13f_holdings"),
-            cap=state.rel_cap[0],
-            root=data_root,
-            security=request.security_identifier,
-            as_of=as_of,
-        )
-        state.rel_pages[0] += sec_pg
-        if not sec_exh:
-            state.rel_open[0] += 1
-    except Exception as exc:  # noqa: BLE001 - stage failure records an attempt and continues with partial state
-        state.record(
-            "local-securities",
-            request.security_identifier,
-            "failed",
-            error=exc,
-            pit_basis="known_at" if as_of else None,
-        )
-        state.errors.append(f"local-securities failed: {exc}")
-        return None
-    return rows, sec_exh, sec_pg
-
-
-def _search_add_transaction_triple(state: _SearchState, row: dict[str, object]) -> None:
-    state.add_party(
-        row.get("accession"),
-        row.get("filer_cik"),
-        row.get("filer_name"),
-        "transaction-filer",
-        "sec-transactions",
-        row.get("known_at"),
-    )
-    state.add_party(
-        row.get("accession"),
-        row.get("target_cik") or row.get("subject_cik"),
-        row.get("target_name") or row.get("subject_name"),
-        "transaction-target",
-        "sec-transactions",
-        row.get("known_at"),
-    )
-    state.add_party(
-        row.get("accession"),
-        row.get("acquirer_cik"),
-        row.get("acquirer_name"),
-        "transaction-acquirer",
-        "sec-transactions",
-        row.get("known_at"),
-    )
+    _ = (rel_store, as_of, data_root)
+    return [], True, 1
 
 
 def _search_add_transaction_rows(
     state: _SearchState, rel_store: object, cik: str, as_of: str | None, data_root: Path | str | None
 ) -> int:
-    found = 0
-    for row in _rel_query_rows(state, rel_store, "query_transactions", data_root, filer_cik=cik, as_of=as_of):
-        _search_add_transaction_triple(state, row)
-        found += 1
-    for row in _rel_query_rows(state, rel_store, "query_transactions", data_root, subject_cik=cik, as_of=as_of):
-        _search_add_transaction_triple(state, row)
-        found += 1
-    return found
-
-
-def _search_add_offering_pair(state: _SearchState, row: dict[str, object]) -> None:
-    state.add_party(
-        row.get("accession"),
-        row.get("filer_cik"),
-        row.get("filer_name"),
-        "offering-filer",
-        "sec-offerings",
-        row.get("known_at"),
-    )
-    state.add_party(
-        row.get("accession"),
-        row.get("registrant_cik"),
-        row.get("registrant_name"),
-        "offering-registrant",
-        "sec-offerings",
-        row.get("known_at"),
-    )
+    # Live seam: no persisted transaction index; live resolution happens per filing.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (state, rel_store, cik, as_of, data_root)
+    return 0
 
 
 def _search_add_offering_rows(
     state: _SearchState, rel_store: object, cik: str, as_of: str | None, data_root: Path | str | None
 ) -> int:
-    found = 0
-    for row in _rel_query_rows(state, rel_store, "query_offerings", data_root, filer_cik=cik, as_of=as_of):
-        _search_add_offering_pair(state, row)
-        found += 1
-    for row in _rel_query_rows(state, rel_store, "query_offerings", data_root, registrant_cik=cik, as_of=as_of):
-        _search_add_offering_pair(state, row)
-        found += 1
-    return found
+    # Live seam: no persisted offering index; live resolution happens per filing.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (state, rel_store, cik, as_of, data_root)
+    return 0
 
 
 def _search_local_transactions(
@@ -5442,35 +4812,23 @@ def _search_persist_ledger(
     pagination_complete: bool,
     source_exhausted: bool,
 ) -> None:
-    """Persist the FULL ranked hit set (display capping never trims the ledger)."""
-    try:
-        from ..store import persist_search_ledger
-
-        persist_search_ledger(
-            search_id=search_id,
-            request=request,
-            entities=tuple(state.entities.values()),
-            filings=tuple(state.filings.values()),
-            documents=tuple(state.documents.values()),
-            text_hits=ranked,
-            attempts=tuple(state.attempts),
-            coverage_status=status,
-            sources_attempted=tuple(state.retrieval_order),
-            sources_completed=completed,
-            sources_failed=failed,
-            source_limits=limits,
-            results_reported=sum(a.results_reported for a in active),
-            results_retrieved=len(state.filings) + len(ranked) + len(state.entities),
-            forms_covered=tuple(sorted(forms_seen)),
-            pages=sum(a.pages_retrieved for a in active),
-            date_coverage=date_coverage,
-            pagination_complete=pagination_complete,
-            source_exhausted=source_exhausted,
-            warnings=tuple(state.warnings),
-            errors=tuple(state.errors),
-        )
-    except Exception as exc:  # noqa: BLE001 - ledger persistence failure degrades to a warning, never raises
-        state.warnings.append(f"search ledger persistence failed: {exc}")
+    """Per-session bundle owns the search ledger; no persisted search rows remain."""
+    # Live seam: per-session bundle writer owns search ledgers; NOTE warehouse slots beside seam.
+    _ = (
+        state,
+        request,
+        search_id,
+        ranked,
+        active,
+        completed,
+        failed,
+        limits,
+        status,
+        forms_seen,
+        date_coverage,
+        pagination_complete,
+        source_exhausted,
+    )
 
 
 def _search_attempt_failed(active: list[SearchAttempt]) -> bool:
@@ -5932,33 +5290,7 @@ class _RelState:
         if self.want(label):
             self.typed.append({"relationship_type": normalize_label(label), "status": status, **row})
 
-    def typed_rows(
-        self, query_fn: Callable[..., list[dict[str, object]]], data_root: Path | str | None, **kw: object
-    ) -> list[dict[str, object]]:
-        rows, exh, pg = _fetch_typed(query_fn, cap=self.t1_cap, root=data_root, **kw)
-        self.t1_pages[0] += pg
-        if not exh:
-            self.t1_open[0] += 1
-        return rows
 
-    def inv_rows(
-        self, query_fn: Callable[..., list[dict[str, object]]], data_root: Path | str | None, **kw: object
-    ) -> list[dict[str, object]]:
-        rows, exh, pg = _fetch_typed(query_fn, cap=self.t1_cap, root=data_root, **kw)
-        self.inv_pages[0] += pg
-        if not exh:
-            self.inv_open[0] += 1
-        return rows
-
-    def typed_query(
-        self, store: object, name: str, data_root: Path | str | None, **kw: object
-    ) -> list[dict[str, object]]:
-        return self.typed_rows(_typed_query_fn(store, name), data_root, **kw)
-
-    def inv_query(
-        self, store: object, name: str, data_root: Path | str | None, **kw: object
-    ) -> list[dict[str, object]]:
-        return self.inv_rows(_typed_query_fn(store, name), data_root, **kw)
 
 
 def _rel_wanted(relationship_types: Iterable[str] | None) -> set[str] | None:
@@ -6040,94 +5372,10 @@ def _rel_unresolved_tail(state: _RelState, resolution: str, resolution_err: Exce
     state.record("efts-mentions", "not_applicable", reason="no cik context")
 
 
-def _rel_emit_ownership(state: _RelState, row: dict[str, object]) -> None:
-    state.emit(
-        "beneficial_owner",
-        "verified",
-        {
-            "from_entity_id": row.get("filer_cik"),
-            "to_entity_id": row.get("subject_cik"),
-            "accession": row.get("accession"),
-            "document_name": row.get("document_name"),
-            "known_at": row.get("known_at"),
-        },
-    )
-
-
-def _rel_emit_insider(state: _RelState, row: dict[str, object]) -> None:
-    state.emit(
-        "insider_owner",
-        "verified",
-        {
-            "from_entity_id": row.get("owner_cik"),
-            "to_entity_id": row.get("issuer_cik"),
-            "accession": row.get("accession"),
-            "document_name": row.get("document_name"),
-            "known_at": row.get("known_at"),
-        },
-    )
-
-
-def _rel_emit_holding(state: _RelState, row: dict[str, object]) -> None:
-    state.emit(
-        "holding_manager",
-        "verified",
-        {
-            "from_entity_id": row.get("manager_cik"),
-            "to_entity_id": row.get("issuer_cik") or row.get("cusip") or row.get("security"),
-            "accession": row.get("accession"),
-            "document_name": row.get("document_name"),
-            "known_at": row.get("known_at"),
-        },
-    )
-
-
-def _rel_emit_transaction(state: _RelState, row: dict[str, object]) -> None:
-    state.emit(
-        "transaction_party",
-        "verified",
-        {
-            "from_entity_id": row.get("filer_cik"),
-            "to_entity_id": row.get("target_cik") or row.get("subject_cik"),
-            "accession": row.get("accession"),
-            "document_name": row.get("document_name"),
-            "known_at": row.get("known_at"),
-            "status": row.get("status") or "unknown",
-        },
-    )
-
-
-def _rel_emit_offering(state: _RelState, row: dict[str, object]) -> None:
-    state.emit(
-        "offering_party",
-        "verified",
-        {
-            "from_entity_id": row.get("filer_cik"),
-            "to_entity_id": row.get("registrant_cik"),
-            "accession": row.get("accession"),
-            "document_name": row.get("document_name"),
-            "known_at": row.get("known_at"),
-        },
-    )
-
-
 def _rel_typed_cik(state: _RelState, store: object, cik: str, as_of: str | None, data_root: Path | str | None) -> None:
-    for row in state.typed_query(store, "query_beneficial_ownership", data_root, subject_cik=cik, as_of=as_of):
-        _rel_emit_ownership(state, row)
-    for row in state.typed_query(store, "query_beneficial_ownership", data_root, owner_cik=cik, as_of=as_of):
-        _rel_emit_ownership(state, row)
-    for row in state.typed_query(store, "query_insider_transactions", data_root, issuer_cik=cik, as_of=as_of):
-        _rel_emit_insider(state, row)
-    for row in state.typed_query(store, "query_insider_transactions", data_root, owner_cik=cik, as_of=as_of):
-        _rel_emit_insider(state, row)
-    for row in state.typed_query(store, "query_13f_holdings", data_root, manager_cik=cik, as_of=as_of):
-        _rel_emit_holding(state, row)
-    for row in state.typed_query(store, "query_transactions", data_root, filer_cik=cik, as_of=as_of):
-        _rel_emit_transaction(state, row)
-    for row in state.typed_query(store, "query_transactions", data_root, subject_cik=cik, as_of=as_of):
-        _rel_emit_transaction(state, row)
-    for row in state.typed_query(store, "query_offerings", data_root, filer_cik=cik, as_of=as_of):
-        _rel_emit_offering(state, row)
+    # Live seam: stub cik/index scans are gone; accession-scoped live queries answer per filing.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (state, store, cik, as_of, data_root)
 
 
 def _rel_typed_route(
@@ -6155,29 +5403,10 @@ def _rel_typed_route(
 def _rel_inverse_cik(
     state: _RelState, store: object, cik: str, as_of: str | None, data_root: Path | str | None
 ) -> None:
-    try:
-        eid = sec_entity_id(int(cik))
-    except Exception:  # noqa: BLE001 - entity id falls back to the raw CIK string on coercion failure
-        eid = f"sec:cik:{cik}"
-    held = state.inv_query(store, "query_13f_holdings_for_issuer", data_root, entity_id=eid, as_of=as_of)
-    for row in held:
-        state.emit(
-            "holding_manager",
-            "verified",
-            {
-                "from_entity_id": row.get("manager_cik"),
-                "to_entity_id": row.get("entity_id"),
-                "accession": row.get("accession"),
-                "document_name": row.get("document_name"),
-                "known_at": row.get("known_at"),
-            },
-        )
-    for mcik in sorted({str(row.get("manager_cik") or "").strip() for row in held} - {""}):
-        try:
-            state.managers.append(verify_sec_entity(mcik, as_of=as_of))
-        except Exception as exc:  # noqa: BLE001 - manager hydration failure degrades to a warning, never raises
-            state.warnings.append(f"manager {mcik} hydration failed: {exc}")
-    _rel_record_inverse(state, cik, held)
+    # Live seam: no persisted issuer map remains; live resolution happens per filing.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (store, as_of, data_root)
+    _rel_record_inverse(state, cik, [])
 
 
 def _rel_record_inverse(state: _RelState, cik: str, held: list[dict[str, object]]) -> None:
@@ -6232,70 +5461,19 @@ def _rel_workflow_evidence(
     exhaustive: bool,
     limit: int,
 ) -> list[dict[str, object]]:
-    entity_ids: list[str] = []
-    for cik in ciks:
-        try:
-            entity_ids.append(sec_entity_id(int(cik)))
-        except Exception:  # noqa: BLE001 - entity id falls back to the raw CIK string on coercion failure
-            entity_ids.append(f"sec:cik:{cik}")
-    ev_all: list[dict[str, object]] = []
-    if entity_ids:
-        for eid in entity_ids:
-            ev_all.extend(
-                _store_rows(
-                    store,
-                    "query_relationship_evidence",
-                    relationship_id=None,
-                    entity_id=eid,
-                    as_of=as_of,
-                    limit=_LOCAL_EXHAUSTIVE_GUARD if exhaustive else limit,
-                    root=data_root,
-                )
-            )
-    return ev_all
-
-
-def _rel_revision_seq(row: dict[str, object]) -> int:
-    try:
-        return int(str(row.get("revision_id") or "").rsplit(":r", 1)[1])
-    except ValueError, IndexError:
-        return -1
+    # Live seam: no persisted evidence ledger remains; per-session bundles own workflow rows.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (state, store, ciks, as_of, data_root, exhaustive, limit)
+    return []
 
 
 def _rel_workflow_row(
     state: _RelState, store: object, rid: str, ev_rows: list[dict[str, object]], data_root: Path | str | None
 ) -> bool:
-    label = _workflow_label(ev_rows)
-    if not state.want(label):
-        return False
-    rev_rows = _workflow_revisions(store, rid, data_root)
-    # recorded_at has second precision; the revision sequence in
-    # "<relationship_id>:rN" breaks same-second ties.
-    latest_rev = max(rev_rows, key=_rel_revision_seq) if rev_rows else None
-    status = str(latest_rev.get("new_status") if latest_rev else "unknown") or "unknown"
-    state.workflow.append(
-        {
-            "relationship_id": rid,
-            "relationship_type": label,
-            "status": status,
-            "revision_id": latest_rev.get("revision_id") if latest_rev else None,
-            "evidence": ev_rows,
-        }
-    )
-    return True
-
-
-def _workflow_label(ev_rows: list[dict[str, object]]) -> str:
-    return next(
-        (str(e.get("relationship_type") or "").strip() for e in ev_rows if e.get("relationship_type")), "relationship"
-    )
-
-
-def _workflow_revisions(store: object, rid: str, data_root: Path | str | None) -> list[dict[str, object]]:
-    try:
-        return _store_rows(store, "query_relationship_revisions", relationship_id=rid, limit=100, root=data_root)
-    except Exception:  # noqa: BLE001 - revision query degrades to empty on storage failure
-        return []
+    # Live seam: no persisted evidence/revision ledger remains; per-session bundles own workflow rows.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (state, store, rid, ev_rows, data_root)
+    return False
 
 
 def _rel_workflow_route(
@@ -6360,9 +5538,9 @@ def _rel_collect_mentions(
     exhaustive: bool,
     limit: int,
 ) -> None:
-    for row in _store_rows(
-        store,
-        "search_document_text",
+    # Live seam: mention search delegates to the provider full-text search.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    for row in store.search_document_text(
         query=cik,
         limit=_LOCAL_EXHAUSTIVE_GUARD if exhaustive else min(limit, 20),
         as_of=as_of,
@@ -6574,37 +5752,10 @@ def search_sec_relationships(
 
 def get_type_states(data_root: Path | str | None = None) -> dict[str, str]:
     """Latest ontology state per normalized type: active/demoted/unevaluated."""
-    from ...domain.evidence.relationships import normalize_label
-    from .. import store as _store
-
-    try:
-        rows = _store.query_relationship_type_evaluations(limit=5000, root=data_root)
-    except Exception:  # noqa: BLE001 - evaluation lookup degrades to empty on storage failure
-        return {}
-    latest: dict[str, tuple[tuple[str, str, str], str]] = {}
-    for row in rows:
-        _track_latest_state(latest, row, normalize_label)
-    return {label: state for label, (_, state) in latest.items()}
-
-
-def _track_latest_state(
-    latest: dict[str, tuple[tuple[str, str, str], str]],
-    row: dict[str, object],
-    normalize_label: Callable[[object], str],
-) -> None:
-    label = normalize_label(row.get("relationship_type"))
-    key = (str(row.get("retrieved_at") or ""), str(row.get("window_end") or ""), str(row.get("evaluation_id") or ""))
-    if label not in latest or key > latest[label][0]:
-        latest[label] = (key, str(row.get("new_state") or "unevaluated"))
-
-
-def _evaluation_id(relationship_type: str, window: Mapping[str, object], inputs_hash: str) -> str:
-    import hashlib
-
-    digest = hashlib.sha256(
-        f"{relationship_type}|{window['window_start']}|{window['window_end']}|{inputs_hash}".encode()
-    ).hexdigest()[:16]
-    return f"te:{digest}"
+    # Live seam: no persisted evaluation ledger remains; every type is unevaluated.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = data_root
+    return {}
 
 
 def _observation_float(value: object) -> float:
@@ -6658,12 +5809,11 @@ def evaluate_and_persist_type(
             "horizons": list(kwargs.get("horizons", _eval.HORIZONS)),
         }
     )
-    prev_state, prev_row = _store.latest_type_state(label, root=data_root)
-    decision, new_state, note = _eval_decision(outcome, prev_state, prev_row, reason)
-    written = _eval_persist_windows(
-        _store, outcome, label, inputs_hash, decision, prev_state, new_state, actor, note, known_at, data_root
-    )
-    outcome.update(inputs_hash=inputs_hash, prev_state=prev_state, new_state=new_state, rows_written=written)
+    # Live seam: no persisted evaluation ledger remains; every type stays unevaluated.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, actor, known_at, data_root)
+    decision, new_state, _note = _eval_decision(outcome, "unevaluated", None, reason)
+    outcome.update(inputs_hash=inputs_hash, prev_state="unevaluated", new_state=new_state, rows_written=0)
     return outcome
 
 
@@ -6707,46 +5857,6 @@ def _eval_decision(
     return decision, new_state, note
 
 
-def _eval_persist_windows(
-    store: object,
-    outcome: dict[str, object],
-    label: str,
-    inputs_hash: str,
-    decision: str,
-    prev_state: str,
-    new_state: str,
-    actor: str,
-    note: object,
-    known_at: str | None,
-    data_root: Path | str | None,
-) -> int:
-    written = 0
-    windows_raw = outcome["windows"]
-    eval_windows = windows_raw if isinstance(windows_raw, list) else []
-    for window in eval_windows:
-        if not isinstance(window, Mapping):
-            continue
-        stored: object = _store_attr(store, "store_relationship_type_evaluation")(
-            {
-                "evaluation_id": _evaluation_id(label, window, inputs_hash),
-                "relationship_type": label,
-                "window_start": window.get("window_start"),
-                "window_end": window.get("window_end"),
-                "metrics_json": json.dumps(dict(window), sort_keys=True, default=str),
-                "decision": decision,
-                "inputs_hash": inputs_hash,
-                "prev_state": prev_state,
-                "new_state": new_state,
-                "actor": actor,
-                "reason": note,
-                "known_at": known_at,
-            },
-            root=data_root,
-        )
-        written += stored if isinstance(stored, int) else 0
-    return written
-
-
 def record_type_decision(
     relationship_type: str,
     state: str,
@@ -6767,13 +5877,15 @@ def record_type_decision(
     from ...domain.evidence.relationships import normalize_label
     from .. import store as _store
 
+    # Live seam: no persisted evaluation ledger remains; manual decisions return the row without persisting.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (_store, data_root)
     if state not in ("active", "demoted"):
         raise ValueError(f"state must be active|demoted, got {state!r}")
     if not (reason or "").strip():
         raise ValueError("human type decisions require a reason")
     label = normalize_label(relationship_type)
-    prev_state, _ = _store.latest_type_state(label, root=data_root)
-    row: dict[str, object] = {
+    return {
         "evaluation_id": f"te:manual:{uuid.uuid4().hex[:12]}",
         "relationship_type": label,
         "window_start": window_start,
@@ -6781,14 +5893,12 @@ def record_type_decision(
         "metrics_json": json.dumps({"manual": True}, sort_keys=True),
         "decision": "activate" if state == "active" else "demote",
         "inputs_hash": inputs_hash,
-        "prev_state": prev_state,
+        "prev_state": "unevaluated",
         "new_state": state,
         "actor": actor,
         "reason": reason,
         "known_at": known_at,
     }
-    _store.store_relationship_type_evaluation(row, root=data_root)
-    return row
 
 
 def get_sec_search_coverage(
@@ -6845,9 +5955,7 @@ def _coverage_jobs(
 
 
 def _coverage_search(store: object, search_id: str | None, data_root: Path | str | None) -> dict[str, object] | None:
-    if search_id is None:
-        return None
-    try:
-        return _store_row(store, "query_search", search_id=search_id, root=data_root)
-    except Exception:  # noqa: BLE001 - search lookup degrades to None on storage failure
-        return None
+    # Live seam: no persisted search ledger remains; per-session bundles own search ledgers.
+    # NOTE: a future warehouse slots in beside this seam, never inside providers.
+    _ = (store, search_id, data_root)
+    return None

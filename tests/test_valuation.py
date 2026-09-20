@@ -4,8 +4,6 @@ Deterministic and offline: price, consensus, EPS, and obligations inputs
 are injected via monkeypatch; nothing touches the network or cache.db.
 """
 
-from pathlib import Path
-
 import pytest
 
 from app import valuation
@@ -128,24 +126,6 @@ def _obligations() -> dict[str, object]:
     return {"obligations": _obligation_rows()}
 
 
-@pytest.fixture(autouse=True)
-def _isolated_warehouse(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Keep every warehouse open inside this test's tmp root.
-
-    The module is offline and injects its own inputs, so it must never take the
-    shared ``data/warehouse.duckdb`` lock: another process holding it (a research
-    run, a parallel suite) turned 12 of these tests into lock failures.
-    """
-    from app.services import sec_facts
-    from app.storage import duckdb as duckdb_layer
-
-    root = tmp_path / "data"
-    monkeypatch.setenv("STOCKBOT_DATA_DIR", str(root))
-    monkeypatch.setattr(duckdb_layer, "DEFAULT_DATA_ROOT", root)
-    # sec_facts captured the path by value at import; keep its default in the tmp root too.
-    monkeypatch.setattr(sec_facts, "DEFAULT_DATA_ROOT", root)
-
-
 @pytest.fixture
 def fake_deps(monkeypatch: pytest.MonkeyPatch) -> None:
     def _fake_price(ticker: str) -> float:
@@ -167,6 +147,7 @@ def fake_deps(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(valuation, "get_live_price", _fake_price)
     monkeypatch.setattr(valuation.analyst_client, "get_analyst_estimates", _fake_estimates)
     monkeypatch.setattr(valuation.edgar_client, "get_fundamentals", _fake_fundamentals)
+    monkeypatch.setattr(valuation.sec_facts, "get_fundamentals", _fake_fundamentals)
     monkeypatch.setattr(valuation.obligations, "get_obligations", _fake_obligations)
     monkeypatch.setattr(valuation, "_revenue_matched_margin", _fake_margin)
 
@@ -346,13 +327,17 @@ def test_fy_schedule_separation_no_blended_fallback(monkeypatch: pytest.MonkeyPa
         def _run_obligations(ticker: str) -> dict[str, object]:
             return {"obligations": rows}
 
+        def _run_margin(ticker: str) -> tuple[float | None, str]:
+            return (0.75, "company_facts")
+
         monkeypatch.setattr(valuation, "cache", FakeCache())
         monkeypatch.setattr(valuation, "get_live_price", _run_price)
         monkeypatch.setattr(valuation.analyst_client, "get_analyst_estimates", _run_estimates)
         monkeypatch.setattr(valuation.edgar_client, "get_fundamentals", _run_fundamentals)
+        monkeypatch.setattr(valuation.sec_facts, "get_fundamentals", _run_fundamentals)
         monkeypatch.setattr(valuation.obligations, "get_obligations", _run_obligations)
+        monkeypatch.setattr(valuation, "_revenue_matched_margin", _run_margin)
         return valuation.get_valuation_metrics("NVDA")
-
     shares = 24.221  # 24_221_000_000 from _estimates
     result = _run([scheduled])
     fe = result["forward_eps"]
