@@ -174,6 +174,7 @@ export class NeedleRouter {
 
   // confidence stays on the record for observability but never gates: tuned
   // weights report None, so any floor only pretends to protect.
+  // Legacy non-kernel path: kernel path uses generateArguments only; JEV owns transitions (kept until loop.ts cutover).
   async start(prompt: string): Promise<NeedleDecision> {
     const result = await this.call({ action: "start", prompt });
     return { ...result, escalate: result.tool === null };

@@ -105,6 +105,7 @@ except ImportError:  # ponytail: contract stub until ToolSelect lands reasoner
 # ponytail: fixed round cap, policy-driven budgets when the kernel adds them.
 _MAX_TOOL_ROUNDS = 10
 
+# Amendment: JEV sees the whole canonical RESEARCH registry every selection.
 # Meta/ranking-layer tools: never in front of JEV (no search_tools, no ranking
 # layer). JEV sees every canonical tool directly; these five are the discovery
 # mechanism itself, not research actions.
@@ -343,9 +344,10 @@ def build_registry() -> list[dict[str, Any]]:
 
     JEV sees this whole registry on EVERY selection including post-tool
     transitions. Fields match decision/jev.ts ToolManifestEntry: name +
-    description required; domain/keyInputs/outputKind/prerequisites/pitSupport
-    are budget aids, never a filter — every canonical tool stays visible.
-    ``parameters`` rides along for Needle (single selected tool schema in).
+    description required; purpose/evidence/domain/keyInputs/outputKind/
+    prerequisites/pitSupport are budget aids, never a filter — every
+    canonical tool stays visible. ``parameters`` rides along for Needle
+    (single selected tool schema in).
     """
     from app.policy import Capability
     from app.security.action_policy import TOOL_DOMAINS
@@ -364,14 +366,15 @@ def build_registry() -> list[dict[str, Any]]:
         params, required = _manifest_params(fn)
         meta = TOOL_DISCOVERY_REGISTRY.get(name)
         domain = TOOL_DOMAINS.get(name, "unknown")
-        output_kind = meta.output_kind if meta is not None else ""
         manifests.append(
             {
                 "name": name,
                 "domain": domain,
                 "description": fn.get("description") if isinstance(fn.get("description"), str) else "",
+                "purpose": meta.summary if meta is not None else "",
                 "keyInputs": f"req({', '.join(required)})" if required else "req()",
-                "outputKind": output_kind,
+                "outputKind": meta.output_kind if meta is not None else "",
+                "evidence": meta.output_kind if meta is not None else "",
                 "prerequisites": _manifest_prerequisites(required),
                 # ponytail: default true; only confirmed-blind session-local tools opt out.
                 "pitSupport": "PIT-blind: current state only" if name in _PIT_BLIND_TOOLS else "PIT-scoped",

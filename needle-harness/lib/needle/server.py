@@ -48,9 +48,8 @@ kwargs = {
     "tools": TOOLS,
     "system": (
         f"date: {now} UTC; locale: en-US; "
-        "Route retrieval only: call a tool only with entities/terms from the request or prior results. "
-        "SEC questions: prefer find_sec_entities then search_sec_filings then get_sec_document chains. "
-        "Return no call when evidence suffices."
+        "Args-only execution worker: the caller names exactly one tool; call it once "
+        "with grounded arguments or return an error. Never select, chain, or judge sufficiency."
     ),
     "buffer_size": 65536,
 }
@@ -95,9 +94,10 @@ def _arguments_prompt(tool, schema, objective, node, context):
     return json.dumps(
         {
             "instruction": (
-                f"Call exactly the tool {tool!r} once with valid grounded arguments, "
-                "or return no call. Never call another tool, never chain tools, "
-                "never judge sufficiency or completion."
+                f"You must call exactly the tool {tool!r} once with valid grounded arguments, "
+                "or return an error (must-call-or-error). Never call another tool, never chain "
+                "tools, never judge sufficiency or completion. On insufficient grounding "
+                "raise/return an error, never stay silent."
             ),
             "tool": tool,
             "schema": schema,
@@ -118,6 +118,7 @@ def handle(line):
     except Exception:
         return {"id": "?", "error": "bad_request"}
     try:
+        # Legacy non-kernel path: kernel path uses arguments.generate only; JEV owns transitions (start/step stay until loop.ts cutover).
         if action == "start":
             prompt = req["prompt"]
             if not isinstance(prompt, str):

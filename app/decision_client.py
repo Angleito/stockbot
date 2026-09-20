@@ -276,6 +276,40 @@ def _evidence_ids(evidence: Any) -> list[str]:
     return ids
 
 
+def _manifest_line(entry: dict[str, Any]) -> str:
+    """One compact option line per registry entry (mirrors decision/jev.ts manifestLine)."""
+
+    def opt(value: Any) -> str | None:
+        if not isinstance(value, str) or not value.strip():
+            return None
+        return " ".join(value.split())
+
+    desc = entry.get("description")
+    line = " ".join(desc.split()) if isinstance(desc, str) and desc else entry.get("name", "")
+    purpose = opt(entry.get("purpose"))
+    if purpose and purpose != line:
+        line += f" Purpose: {purpose}."
+    inputs = opt(entry.get("keyInputs"))
+    if inputs:
+        line += f" Inputs: {inputs}."
+    output = opt(entry.get("outputKind"))
+    if output:
+        line += f" Output: {output}."
+    evidence = opt(entry.get("evidence"))
+    if evidence:
+        line += f" Evidence: {evidence}."
+    prereq = opt(entry.get("prerequisites"))
+    if prereq:
+        line += f" Needs: {prereq}."
+    pit = opt(entry.get("pitSupport"))
+    if pit:
+        line += f" PIT: {pit}."
+    domain = opt(entry.get("domain"))
+    if domain:
+        line = f"[{domain}] {line}"
+    return line
+
+
 def _tool_options_prompt(
     registry: list[dict[str, Any]],
     node: dict[str, Any],
@@ -295,13 +329,12 @@ def _tool_options_prompt(
             raise ValueError("tool_selection: registry entry needs a name")
         if name in options:
             raise ValueError(f"tool_selection: duplicate tool {name}")
-        desc = entry.get("description") if isinstance(entry, dict) else None
-        options[name] = desc if isinstance(desc, str) and desc else name
+        options[name] = _manifest_line(entry) if isinstance(entry, dict) else name
     for key, desc in _SENTINEL_DESCRIPTIONS.items():
         if key in options:
             raise ValueError(f"tool_selection: registry collides with sentinel {key}")
         options[key] = desc
-    prompt = f"Which single tool runs next for research node {node_id}? Question: {question}"
+    prompt = f"Which single tool runs next for research node {node_id}? Question: {question} JEV owns this selection and every transition over the whole canonical registry; Needle runs args only and never selects, chains, or judges. Choose exactly one winner."
     why = node.get("why_it_matters")
     if isinstance(why, str) and why:
         prompt += f" Why it matters: {why}"
@@ -329,7 +362,7 @@ def _auto_registry() -> list[dict[str, Any]]:
     except Exception:
         pass
     from app.policy import Capability
-    from app.tools import tools_for_capabilities
+    from app.tools import TOOL_DISCOVERY_REGISTRY, tools_for_capabilities
 
     out: list[dict[str, Any]] = []
     for tool in tools_for_capabilities(frozenset({Capability.RESEARCH})):
@@ -340,7 +373,16 @@ def _auto_registry() -> list[dict[str, Any]]:
         if not isinstance(name, str) or not name:
             continue
         desc = fn.get("description")
-        out.append({"name": name, "description": desc if isinstance(desc, str) else ""})
+        meta = TOOL_DISCOVERY_REGISTRY.get(name)
+        out.append(
+            {
+                "name": name,
+                "description": desc if isinstance(desc, str) else "",
+                "purpose": meta.summary if meta is not None else "",
+                "outputKind": meta.output_kind if meta is not None else "",
+                "evidence": meta.output_kind if meta is not None else "",
+            }
+        )
     return out
 
 
@@ -583,7 +625,7 @@ class JevClient:
         session_id: str,
         job_id: str | None = None,
     ) -> ToolDecision:
-        """Whole-registry tool select -> ToolDecision (invoke with tool_names set, reason, resolved)."""
+        """JEV owns ALL tool selection/transitions over the whole canonical registry every round; Needle is args-only (never selects/chains/judges). Caller assembles the whole registry; single-winner choice + 2 sentinels."""
         reg = list(registry) if registry else _auto_registry()
         node_d = _node_dict(node)
         nid = node_d.get("node_id") or node_d.get("id")
@@ -612,7 +654,7 @@ class JevClient:
         job_id: str | None = None,
         registry: list[dict[str, Any]] | None = None,
     ) -> ToolDecision:
-        """Reasoner-proposal adjudication -> ToolDecision (same select shape, proposal in state)."""
+        """JEV adjudicates a reasoner proposal over the same whole-registry options as select_tool; proposal lives in state only, never filters the registry. Needle never selects/chains/judges."""
         reg = list(registry) if registry else _auto_registry()
         node_d = _node_dict(node)
         nid = node_d.get("node_id") or node_d.get("id")

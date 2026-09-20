@@ -219,15 +219,15 @@ export async function askDecisions(
   await writeFile(join(dir, `policy-${name}.json`), JSON.stringify(decisions, null, 2) + "\n");
   return { raw, decisions };
 }
-// Whole-registry tool selection: JEV owns tool selection; Needle never selects.
-// Every tool-selection decision receives the ENTIRE canonical registry — no
-// search_tools, no semantic prefilter, no model preselection layer. The caller
-// (kernel scheduler) assembles one ToolManifestEntry per canonical research
-// tool; this builder maps entries 1:1 to choice options plus the two sentinel
-// outcomes below. choice is exclusive (exactly one winner per round), so
-// parallel execution = successive JEV rounds, one winner per round; every
-// transition returns to JEV with the full registry again (Needle must NOT
-// chain tools: search_sec_filings result -> JEV -> get_sec_document).
+// Whole-registry tool selection (binding): JEV owns ALL tool selection and
+// every transition — including post-tool — over the full canonical registry,
+// every decision. Needle is args-only execution: never selects, chains, or
+// judges sufficiency. The caller assembles the whole registry every round
+// (one entry per canonical research tool, no prefilter); this builder maps
+// entries 1:1 to choice options plus the two sentinels below. Choice is
+// exclusive (exactly one winner per round); parallel coverage = successive
+// JEV rounds, each returning to JEV with the full registry again (Needle must
+// NOT chain tools: search_sec_filings result -> JEV -> get_sec_document).
 // Winner parsing reuses parseChoiceAnswer; no new parser lives here.
 export const TOOL_SELECTION_SENTINELS = {
   reasoning_required: "Escalate to the reasoner (decompose/analyze proposals); no tool call fits this node.",
@@ -313,7 +313,7 @@ export function buildToolSelectionQuestion(
     if (k in options) throw new Error(`tool_selection: registry collides with sentinel ${k}`);
     options[k] = v;
   }
-  let prompt = `Which single tool runs next for research node ${node.nodeId}? Question: ${node.question}`;
+  let prompt = `Which single tool runs next for research node ${node.nodeId}? Question: ${node.question} JEV owns this selection and every transition over the whole canonical registry; Needle runs args only and never selects, chains, or judges. Choose exactly one winner.`;
   if (typeof node.whyItMatters === "string" && node.whyItMatters) prompt += ` Why it matters: ${node.whyItMatters}`;
   const ids = evidenceIds(evidence);
   prompt += ` Evidence on hand: ${Array.isArray(evidence) ? evidence.length : 0} item(s)${ids.length ? ` [${ids.join(", ")}]` : ""}.`;
