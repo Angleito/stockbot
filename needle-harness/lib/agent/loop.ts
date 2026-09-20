@@ -1,11 +1,11 @@
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
-import { acquireNeedle, needleRouter, type NeedleDecision } from "../needle/client";
+import { acquireNeedle, needleRouter, type NeedleDecision, type NeedleRouter } from "../needle/client";
 import { reason, type MuseUsage } from "../muse/client";
 import { tools } from "../tools/index";
 import { groundingError } from "./grounding";
 import { redactArgs } from "./types";
-import type { AgentEvent, Evidence, FailureCategory, Metrics } from "./types";
+import type { AgentEvent, Evidence, FailureCategory, Metrics, Tool } from "./types";
 import { endSession, newSessionId } from "../tools/stockbot";
 
 export type NeedleDecisionRecord = {
@@ -19,8 +19,8 @@ export type NeedleDecisionRecord = {
 export type ToolCallRecord = { tool: string; ok: boolean; evidenceId?: string };
 
 const MUSE_MODEL = "muse-spark-1.3-contributor";
-// INTERIM (Phase5 removal): TS worker loop until kernel-owned scheduler lands (plan §18/Phase5). Holds step IDs/refs + display buffer only, never kernel truth. Stops on escalate/unknown-tool/duplicate/2-strike/provider-down/abort/muse-result only — no research-depth caps. Needle now conforms to future kernel contracts but does not execute inside the kernel; next milestone is ResearchSession → Job → runtime-executed Needle worker carrying research_session_id/job_id/as_of, at which point TS Evidence[]/seen/counters disappear.
-// ponytail: operational guards are per-request timeouts (TOOL_TIMEOUT_MS/bridge 120s) + opts.signal abort + WORKER_DEADLINE_MS worker deadman (§4), not caps. evidence[] is interim display buffer (Muse formatEvidence truncates oldest-first to 24k); DISPLAY_CHAR_LIMIT is evidenceText() view slice only (§23 retrieval vs display), never loop exit.
+// INTERIM (Phase5 removal): TS worker loop until kernel-owned scheduler lands (plan §18/Phase5). Holds step IDs/refs + display buffer only, never kernel truth. Stops on escalate/terminal-failure/needle-down/abort/muse-result only — no research-depth caps. Needle now conforms to future kernel contracts but does not execute inside the kernel; next milestone is ResearchSession → Job → runtime-executed Needle worker carrying research_session_id/job_id/as_of, at which point TS Evidence[]/seen/counters disappear.
+// ponytail: operational guards are per-request timeouts (TOOL_TIMEOUT_MS/bridge 120s) + opts.signal abort + WORKER_DEADLINE_MS worker deadman (§4), not caps. Terminal runtime/kernel failures (deadline, non-retryable tool outcome, loop, provider down) skip Muse synthesis and end at done — normal retrieval exhaustion/escalation still synthesizes. evidence[] is interim display buffer (Muse formatEvidence truncates oldest-first to 24k); DISPLAY_CHAR_LIMIT is evidenceText() view slice only (§23 retrieval vs display), never loop exit.
 const DISPLAY_CHAR_LIMIT = 24000;
 const WORKER_DEADLINE_MS = 10 * 60 * 1000;
 
@@ -35,10 +35,19 @@ function isConversational(prompt: string): boolean {
   return /^(hi|hello|hey|yo|sup|hiya|howdy|good morning|good afternoon|good evening|how are you|how's it going|what's up|whats up|thanks|thank you|thx|bye|goodbye|see you|see ya)$/.test(n);
 }
 
+export type RunAgentDeps = {
+  acquireNeedle?: () => Promise<() => void>;
+  router?: Pick<NeedleRouter, "start" | "step">;
+  toolSet?: Record<string, Tool>;
+  newSessionId?: () => string;
+  endSession?: (sessionId: string) => Promise<void>;
+  reason?: typeof reason;
+};
+
 export async function runAgent(
   prompt: string,
   emit: (e: AgentEvent) => void,
-  opts?: { signal?: AbortSignal; workerDeadlineMs?: number },
+  opts?: { signal?: AbortSignal; workerDeadlineMs?: number; deps?: RunAgentDeps },
 ): Promise<void> {
   const t0 = performance.now();
   const deadlineMs = opts?.workerDeadlineMs ?? WORKER_DEADLINE_MS;
@@ -53,6 +62,15 @@ export async function runAgent(
   let escalations = 0;
   let escalated = false;
   let directFallback = false;
+  // ponytail: terminal runtime/kernel failures (deadline, non-retryable tool outcome, loop, provider down) end the run — Muse synthesis after a terminal refusal would answer from general knowledge.
+  let terminalFailure: { category: FailureCategory; message: string } | null = null;
+  const deps = opts?.deps ?? {};
+  const acquire = deps.acquireNeedle ?? acquireNeedle;
+  const router = deps.router ?? needleRouter;
+  const toolSet = deps.toolSet ?? tools;
+  const newSid = deps.newSessionId ?? newSessionId;
+  const endSess = deps.endSession ?? endSession;
+  const reasonFn = deps.reason ?? reason;
 
   const countFailure = (c: FailureCategory): void => {
     failures[c] = (failures[c] ?? 0) + 1;
@@ -67,15 +85,17 @@ export async function runAgent(
     const msg = err instanceof Error ? err.message : String(err);
     countFailure("provider_error");
     emit({ type: "tool_failed", tool: "needle", category: "provider_error", preview: msg.slice(0, 160) });
+    emit({ type: "failed", category: "provider_error", message: msg.slice(0, 160) });
+    if (!terminalFailure) terminalFailure = { category: "provider_error", message: msg.slice(0, 500) };
     escalations += 1;
     if (evidence.length === 0) escalated = true;
-    directFallback = evidence.length === 0;
   };
 
   const loopDetected = (tool: string, msg: string): void => {
     countFailure("research_loop_detected");
     emit({ type: "tool_failed", tool, category: "research_loop_detected", preview: msg.slice(0, 160) });
     emit({ type: "failed", category: "research_loop_detected", message: msg.slice(0, 160) });
+    if (!terminalFailure) terminalFailure = { category: "research_loop_detected", message: msg.slice(0, 500) };
     escalations += 1;
     if (evidence.length === 0) escalated = true;
   };
@@ -107,15 +127,15 @@ export async function runAgent(
     return;
   }
   // ponytail: transport UUID only; kernel research.session.create deferred until job/evidence/finalize wiring lands (else every run orphans a kernel session+job).
-  const sessionId = newSessionId();
-  const releaseNeedle = await acquireNeedle();
+  const sessionId = newSid();
+  const releaseNeedle = await acquire();
   try {
     const seen = new Set<string>();
     let consecutiveFailures = 0;
     let decision: NeedleDecision | null = null;
     try {
       const tn = performance.now();
-      decision = await needleRouter.start(prompt);
+      decision = await router.start(prompt);
       needleMs += performance.now() - tn;
     } catch (err) {
       noteNeedleDown(err);
@@ -124,9 +144,11 @@ export async function runAgent(
     for (let step = 0; decision; step++) {
       if (opts?.signal?.aborted) break;
       if (performance.now() - t0 > deadlineMs) {
+        // ponytail: checked between actions only — an outstanding 120s call isn't preempted; runtime AbortSignals own that once the kernel schedules the worker.
         countFailure("deadline_exceeded");
         emit({ type: "tool_failed", tool: "worker", category: "deadline_exceeded", preview: "worker runtime deadline exceeded" });
         emit({ type: "failed", category: "deadline_exceeded", message: "worker runtime deadline exceeded" });
+        if (!terminalFailure) terminalFailure = { category: "deadline_exceeded", message: "worker runtime deadline exceeded" };
         escalations += 1;
         if (evidence.length === 0) escalated = true;
         break;
@@ -155,7 +177,7 @@ export async function runAgent(
         directFallback = evidence.length === 0;
         break;
       }
-      const tool = tools[current.tool];
+      const tool = toolSet[current.tool];
       if (!tool) {
         escalations += 1;
         if (evidence.length === 0) escalated = true;
@@ -173,7 +195,7 @@ export async function runAgent(
         }
         try {
           const tn = performance.now();
-          decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: "duplicate_research_action: this exact action already ran with no new evidence; choose another action or escalate" });
+          decision = await router.step({ tool: current.tool, arguments: current.arguments, ok: false, error: "duplicate_research_action: this exact action already ran with no new evidence; choose another action or escalate" });
           needleMs += performance.now() - tn;
         } catch (err) {
           noteNeedleDown(err);
@@ -198,7 +220,7 @@ export async function runAgent(
         }
         try {
           const tn = performance.now();
-          decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: rejection });
+          decision = await router.step({ tool: current.tool, arguments: current.arguments, ok: false, error: rejection });
           needleMs += performance.now() - tn;
         } catch (err) {
           noteNeedleDown(err);
@@ -218,11 +240,9 @@ export async function runAgent(
           emit({ type: "tool_result", tool: current.tool, preview: result.error.slice(0, 160) });
           emit({ type: "tool_failed", tool: current.tool, category: result.category, preview: result.error.slice(0, 160) });
           emit({ type: "failed", category: result.category, message: result.error.slice(0, 500) });
+          if (!terminalFailure) terminalFailure = { category: result.category, message: result.error.slice(0, 500) };
           escalations += 1;
-          if (evidence.length === 0) {
-            escalated = true;
-            directFallback = true;
-          }
+          if (evidence.length === 0) escalated = true;
           break;
         }
         countFailure(result.category);
@@ -235,7 +255,7 @@ export async function runAgent(
         }
         try {
           const tn = performance.now();
-          decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: false, error: result.error });
+          decision = await router.step({ tool: current.tool, arguments: current.arguments, ok: false, error: result.error });
           needleMs += performance.now() - tn;
         } catch (err) {
           noteNeedleDown(err);
@@ -246,10 +266,10 @@ export async function runAgent(
       consecutiveFailures = 0;
       evidence.push(result.evidence);
       emit({ type: "tool_result", tool: current.tool, evidenceId: result.evidence.id, preview: result.evidence.content.slice(0, 160) });
-      // ponytail: no count termination; loop stops on escalate/duplicate/2-strike/needle-down/muse result.
+      // ponytail: no count termination; loop stops on escalate/terminal/needle-down/muse result.
       try {
         const tn = performance.now();
-        decision = await needleRouter.step({ tool: current.tool, arguments: current.arguments, ok: true, evidence: result.evidence });
+        decision = await router.step({ tool: current.tool, arguments: current.arguments, ok: true, evidence: result.evidence });
         needleMs += performance.now() - tn;
       } catch (err) {
         noteNeedleDown(err);
@@ -258,32 +278,41 @@ export async function runAgent(
     }
   } finally {
     releaseNeedle();
-    await endSession(sessionId);
+    await endSess(sessionId);
   }
 
-  emit({ type: "reasoning_start", model: MUSE_MODEL });
   const tm = performance.now();
   let answer: string;
   let usage: MuseUsage;
-  try {
-    const r = await reason({ prompt, evidence, escalated: escalated && !directFallback, direct: directFallback && evidence.length === 0, onDelta: (text) => emit({ type: "answer_delta", text }) });
-    answer = r.text;
-    usage = r.usage;
-  } catch (err) {
-    const msg = err instanceof Error ? err.message : String(err);
-    countFailure("provider_error");
-    emit({ type: "tool_failed", tool: "muse", category: "provider_error", preview: msg.slice(0, 160) });
-    emit({ type: "failed", category: "provider_error", message: msg.slice(0, 160) });
-    emit({ type: "error", message: msg });
-    return;
+  let museCalls = 1;
+  let museMs: number;
+  if (terminalFailure) {
+    answer = "";
+    usage = {};
+    museMs = 0;
+    museCalls = 0;
+  } else {
+    emit({ type: "reasoning_start", model: MUSE_MODEL });
+    try {
+      const r = await reasonFn({ prompt, evidence, escalated: escalated && !directFallback, direct: directFallback && evidence.length === 0, onDelta: (text) => emit({ type: "answer_delta", text }) });
+      answer = r.text;
+      usage = r.usage;
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      countFailure("provider_error");
+      emit({ type: "tool_failed", tool: "muse", category: "provider_error", preview: msg.slice(0, 160) });
+      emit({ type: "failed", category: "provider_error", message: msg.slice(0, 160) });
+      emit({ type: "error", message: msg });
+      return;
+    }
+    museMs = performance.now() - tm;
   }
-  const museMs = performance.now() - tm;
   const metrics: Metrics = {
     totalMs: performance.now() - t0,
     needle: { calls: needleDecisions.length, totalMs: needleMs, escalations },
     tools: { calls: toolCalls.length, totalMs: toolMs },
     muse: {
-      calls: 1,
+      calls: museCalls,
       inputTokens: usage.inputTokens,
       outputTokens: usage.outputTokens,
       cachedTokens: usage.cachedTokens,
