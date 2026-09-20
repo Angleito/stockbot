@@ -1,32 +1,44 @@
 // decision/run.ts — minimal sequential caller for the API-only prompt-graph experiment.
 //
-// Owns: OpenCode Responses calls, TypeSafe/JEV relevance + adjudication, strict
-// contract validation, per-run artifacts under decision/results.
-// Consumes sibling-owned decision/scenarios.ts + decision/prompts.ts; evaluationCriteria
-// is never sent to any provider.
+// Owns: OpenCode Responses calls, TypeSafe/JEV typed relevance + adjudication,
+// strict contract validation, per-run artifacts under decision/results.
+// Consumes sibling-owned decision/scenarios.ts + decision/prompts.ts +
+// decision/jev.ts; evaluationCriteria is never sent to any provider.
+//
+// Governing rule: USER objective / REASONER thinks / RESEARCH observes / CODE
+// calculates / JEV decides / GRAPH remembers. OpenCode proposes and interprets
+// only; JEV answers the actual DecisionNode via noul/choice/score.
 import { mkdir, writeFile } from "node:fs/promises";
 import { join } from "node:path";
 import { getTypeSafeClient } from "../.stockbot/omp/lib/typesafe/client.ts";
-import { TypeSafeClient, noul } from "@typesafe-ai/sdk";
+import { TypeSafeClient, choice, noul, score } from "@typesafe-ai/sdk";
 import { scenarios } from "./scenarios.ts";
 import { analyzePrompt, decomposePrompt, expandPrompt } from "./prompts.ts";
 import type { Analysis, EvidenceRequest, Proposal } from "./prompts.ts";
+import {
+  EVIDENCE_STATE_OPTIONS,
+  MATERIALITY_LEVELS,
+  askDecisions,
+  assertAcyclic,
+  classifyProbability,
+  scopeNodeState,
+  DISPOSITION_OPTIONS,
+} from "./jev.ts";
+import type {
+  ChoiceDecision,
+  Decision,
+  DecisionResult,
+  NoulDecision,
+  ScoreDecision,
+  SystemOneFn,
+} from "./jev.ts";
+
+export { classifyProbability };
+export type { ChoiceDecision, Decision, DecisionResult, NoulDecision, ScoreDecision, SystemOneFn };
 
 const OPENCODE_URL = "https://opencode.ai/zen/v1/responses";
 const DEFAULT_MODEL = "muse-spark-1.3-contributor";
 const RESULTS_ROOT = "decision/results";
-
-export type Decision = "yes" | "unsure" | "no";
-
-// Approved policy: >=.70 yes; >=.50 and <.70 unsure; <.50 no.
-export function classifyProbability(p: number): Decision {
-  if (!Number.isFinite(p) || p < 0 || p > 1) throw new Error("invalid_probability");
-  if (p >= 0.7) return "yes";
-  if (p >= 0.5) return "unsure";
-  return "no";
-}
-
-type SystemOneFn = (req: { state: unknown; questions: Record<string, unknown> }) => Promise<unknown>;
 
 export function createSystemOne(fetchImpl?: typeof fetch): SystemOneFn {
   return (req) => {
@@ -178,43 +190,25 @@ async function postOpenCode(
   return raw;
 }
 
-// ponytail: raw here is the SDK-resolved JSON saved before our policy validation;
-// the SDK owns transport bytes, so byte-level capture would need a wrapping fetch.
-async function askSystemOne(
-  dir: string,
-  name: string,
-  req: { state: unknown; questions: Record<string, unknown> },
-  systemOne: SystemOneFn,
-): Promise<{ raw: unknown; policy: Record<string, { probability: number; decision: Decision }> }> {
-  await writeFile(join(dir, `request-${name}.json`), JSON.stringify(req, null, 2) + "\n");
-  let raw: unknown;
-  try {
-    raw = await systemOne(req);
-  } catch (e) {
-    throw new Error(`${name}: typesafe_request_failed: ${e instanceof Error ? e.message : String(e)}`);
-  }
-  await writeFile(join(dir, `raw-${name}.json`), JSON.stringify(raw, null, 2) + "\n");
-  const ids = Object.keys(req.questions).sort();
-  if (!isObj(raw) || !isObj(raw.answers)) throw new Error(`${name}: malformed_typesafe_response`);
-  const got = Object.keys(raw.answers).sort();
-  if (got.length !== ids.length || got.some((k, i) => k !== ids[i]))
-    throw new Error(`${name}: typesafe answers do not match questions`);
-  const policy: Record<string, { probability: number; decision: Decision }> = {};
-  for (const id of ids) {
-    const ans = (raw.answers as Record<string, unknown>)[id];
-    if (!isObj(ans) || ans.type !== "noul" || typeof ans.noul !== "number")
-      throw new Error(`${name}: malformed_typesafe_answer for ${id}`);
-    const probability = ans.noul as number;
-    policy[id] = { probability, decision: classifyProbability(probability) };
-  }
-  await writeFile(join(dir, `policy-${name}.json`), JSON.stringify(policy, null, 2) + "\n");
-  return { raw, policy };
-}
-
 function promptText(stage: string, build: (ctx: unknown) => string, ctx: unknown): string {
   const text = build(ctx);
   if (typeof text !== "string" || text.length === 0) throw new Error(`${stage}: malformed_prompt_builder`);
   return text;
+}
+
+function slug(id: string): string {
+  return id.replace(/[^A-Za-z0-9]+/g, "_").slice(0, 80);
+}
+
+type Disposition = "analyze" | "gather_evidence" | "reject";
+
+function dispositionOf(decisions: Record<string, DecisionResult>, id: string): Disposition {
+  const d = decisions[id];
+  if (!d || d.kind !== "choice") throw new Error(`relevance: missing disposition for ${id}`);
+  const c = (d as ChoiceDecision).choice;
+  if (c !== "analyze" && c !== "gather_evidence" && c !== "reject")
+    throw new Error(`relevance: unknown disposition ${c} for ${id}`);
+  return c;
 }
 
 export async function runScenario(
@@ -233,37 +227,46 @@ export async function runScenario(
 
   const objectiveId = scenario.objective.id;
   const evidenceIds = new Set(scenario.evidence.map((e) => e.id));
+  const evidenceById = new Map(scenario.evidence.map((e) => [e.id, e]));
   const base = { objective: scenario.objective, fictional: scenario.fictional, evidence: scenario.evidence };
 
-  // 1. decompose
+  // 1. decompose (reasoner proposes, never decides)
   const decomposeRaw = await postOpenCode(
     dir, "decompose", promptText("decompose", decomposePrompt, base), model, apiKey, fetchFn,
   );
   const proposals = checkProposals(
     "decompose", parseOpenCodeOutput("decompose", decomposeRaw, ["proposals"]).proposals, objectiveId, new Set(),
   );
+  assertAcyclic("decompose", proposals, () => undefined);
 
-  // 2. relevance of initial proposals (yes -> analysis; unsure -> evidence needs, not
-  // admitted; no -> retained artifact only)
+  // 2. disposition of initial proposals via JEV choice (mutually exclusive routing)
   const relevanceQuestions: Record<string, unknown> = {};
   for (const p of proposals)
-    relevanceQuestions[p.id] = noul(`Is proposal ${p.id} relevant to objective ${objectiveId} and worth analyzing?`);
+    relevanceQuestions[p.id] = choice(
+      `What should happen to this proposed question relative to the user's objective? Question: ${p.question}`,
+      DISPOSITION_OPTIONS,
+    );
   const relevance = proposals.length
-    ? await askSystemOne(dir, "relevance", { state: { ...base, proposals }, questions: relevanceQuestions }, systemOne)
-    : { raw: null, policy: {} as Record<string, { probability: number; decision: Decision }> };
-  const decideOf = (id: string): Decision => relevance.policy[id]?.decision ?? "no";
-  const probOf = (policy: Record<string, { probability: number; decision: Decision }>, id: string): number | null =>
-    policy[id]?.probability ?? null;
-  const yesOnly = proposals.filter((p) => decideOf(p.id) === "yes");
-  const unsureIds = new Set(proposals.filter((p) => decideOf(p.id) === "unsure").map((p) => p.id));
-  const relevanceList = proposals.map((p) => ({
-    proposalId: p.id, probability: probOf(relevance.policy, p.id), decision: decideOf(p.id),
-  }));
+    ? await askDecisions(
+      dir, "relevance",
+      { state: { objective: scenario.objective, fictional: scenario.fictional, proposals }, questions: relevanceQuestions },
+      systemOne,
+      Object.fromEntries(proposals.map((p) => [p.id, DISPOSITION_OPTIONS])),
+    )
+    : { raw: null, decisions: {} as Record<string, DecisionResult> };
+  const dispOf = (id: string): Disposition => dispositionOf(relevance.decisions, id);
+  const analyzeOnly = proposals.filter((p) => dispOf(p.id) === "analyze");
+  const gatherIds = new Set(proposals.filter((p) => dispOf(p.id) === "gather_evidence").map((p) => p.id));
+  const relevanceList = proposals.map((p) => {
+    const d = relevance.decisions[p.id] as ChoiceDecision;
+    return { proposalId: p.id, disposition: dispOf(p.id), probabilities: d.probabilities, confidence: d.confidence };
+  });
 
-  // 3. analyze yes-only; unsure gets missing-evidence requests only
-  const yesIds = new Set(yesOnly.map((p) => p.id));
+  // 3. analyze admitted nodes; gather_evidence gets requests only; reject is artifact-only.
+  // Accounting invariant: analyze => Analysis XOR EvidenceRequest; gather => request only; reject => neither.
+  const analyzeIds = new Set(analyzeOnly.map((p) => p.id));
   const analyzeCtx = {
-    ...base, proposals: yesOnly, unsureProposalIds: [...unsureIds], relevance: relevanceList, jev: relevance.raw,
+    ...base, proposals: analyzeOnly, gatherProposalIds: [...gatherIds], relevance: relevanceList, jev: relevance.raw,
     jevResults: relevance.raw, policyResults: relevanceList,
     priorRefs: { evidenceIds: [...evidenceIds], proposalIds: proposals.map((p) => p.id) },
   };
@@ -271,58 +274,123 @@ export async function runScenario(
     dir, "analyze", promptText("analyze", analyzePrompt, analyzeCtx), model, apiKey, fetchFn,
   );
   const analyzeOut = parseOpenCodeOutput("analyze", analyzeRaw, ["analyses", "evidenceRequests"]);
-  const analyzableIds = new Set([...yesIds, ...unsureIds]);
+  const analyzableIds = new Set([...analyzeIds, ...gatherIds]);
   const analyses = checkAnalyses("analyze", analyzeOut.analyses, objectiveId, analyzableIds, evidenceIds);
-  const analyzeRequests = checkEvidenceRequests("analyze", analyzeOut.evidenceRequests, objectiveId, new Set([...yesIds, ...unsureIds]));
+  const analyzeRequests = checkEvidenceRequests("analyze", analyzeOut.evidenceRequests, objectiveId, analyzableIds);
+  const analysisIds = new Set(analyses.map((a) => a.nodeId));
+  const requestIds = new Set(analyzeRequests.map((r) => r.nodeId));
   for (const a of analyses)
-    if (unsureIds.has(a.nodeId))
-      throw new Error(`analyze: unsure proposal ${a.nodeId} must not be analyzed`);
-  for (const id of unsureIds)
-    if (!analyzeRequests.some((r) => r.nodeId === id))
-      throw new Error(`analyze: missing evidence request for unsure proposal ${id}`);
-  // 4. adjudicate yes-only analyses
-  const decideQuestions: Record<string, unknown> = {};
-  for (const a of analyses)
-    decideQuestions[a.nodeId] = noul(`Should analysis of ${a.nodeId} for objective ${objectiveId} be accepted on the cited evidence?`);
-  const decide = analyses.length
-    ? await askSystemOne(
-      dir, "decide", { state: { ...base, proposals: yesOnly, analyses }, questions: decideQuestions }, systemOne,
-    )
-    : { raw: null, policy: {} as Record<string, { probability: number; decision: Decision }> };
-  const analysisDecisions = analyses.map((a) => ({
-    nodeId: a.nodeId, probability: probOf(decide.policy, a.nodeId), decision: decide.policy[a.nodeId]?.decision ?? "no",
-  }));
-  // Missing evidence becomes requests/artifacts only.
-  const priorIds = new Set(proposals.map((p) => p.id));
-  const unresolved = [...new Set([
-    ...relevanceList.filter((r) => r.decision === "unsure").map((r) => r.proposalId),
-    ...analysisDecisions.filter((d) => d.decision === "unsure").map((d) => d.nodeId),
-  ])];
+    if (gatherIds.has(a.nodeId))
+      throw new Error(`analyze: gather_evidence proposal ${a.nodeId} must not be analyzed`);
+  for (const p of analyzeOnly) {
+    const hasA = analysisIds.has(p.id);
+    const hasR = requestIds.has(p.id);
+    if (hasA === hasR)
+      throw new Error(`analyze: proposal ${p.id} with disposition analyze requires exactly one of Analysis or EvidenceRequest`);
+  }
+  for (const id of gatherIds)
+    if (!requestIds.has(id)) throw new Error(`analyze: missing evidence request for gather_evidence proposal ${id}`);
+
+  // 4. adjudicate each analyzed node against its own scoped evidence only:
+  // truth noul (actual proposition) + evidence-state choice + materiality score.
+  const proposalById = new Map(proposals.map((p) => [p.id, p]));
+  const decideRaw: Record<string, unknown> = {};
+  const decideAll: Record<string, Record<string, DecisionResult>> = {};
+  const nodeResults: {
+    nodeId: string;
+    truth: NoulDecision;
+    truthPolicy: Decision;
+    evidenceState: ChoiceDecision;
+    materiality: ScoreDecision;
+  }[] = [];
+  for (const a of analyses) {
+    const p = proposalById.get(a.nodeId);
+    if (!p) throw new Error(`decide: unknown proposal ${a.nodeId}`);
+    const subset = a.evidenceRefs.map((id) => {
+      const e = evidenceById.get(id);
+      if (!e) throw new Error(`decide: unknown evidence ${id} for ${a.nodeId}`);
+      return e;
+    });
+    const dependencyDecisions = p.dependsOn.map((d) => ({
+      proposalId: d,
+      disposition: relevance.decisions[d]?.kind === "choice" ? (relevance.decisions[d] as ChoiceDecision).choice : "unknown",
+    }));
+    const state = scopeNodeState({
+      objective: scenario.objective, proposal: p, analysis: a, evidence: subset, dependencyDecisions,
+    });
+    const questions: Record<string, unknown> = {
+      truth: noul(`Do the available facts support that ${p.question}`),
+      evidence_state: choice("What best characterizes the evidence state for this node?", EVIDENCE_STATE_OPTIONS),
+      materiality: score("How material is resolving this uncertainty to answering the user's objective?", MATERIALITY_LEVELS),
+    };
+    const name = `decide-${slug(a.nodeId)}`;
+    const r = await askDecisions(dir, name, { state, questions }, systemOne, {
+      evidence_state: EVIDENCE_STATE_OPTIONS,
+    });
+    const truth = r.decisions.truth;
+    const evidenceState = r.decisions.evidence_state;
+    const materiality = r.decisions.materiality;
+    if (!truth || truth.kind !== "noul") throw new Error(`decide: missing truth noul for ${a.nodeId}`);
+    if (!evidenceState || evidenceState.kind !== "choice") throw new Error(`decide: missing evidence_state choice for ${a.nodeId}`);
+    if (!materiality || materiality.kind !== "score") throw new Error(`decide: missing materiality score for ${a.nodeId}`);
+    decideRaw[a.nodeId] = r.raw;
+    decideAll[a.nodeId] = r.decisions;
+    nodeResults.push({
+      nodeId: a.nodeId, truth, truthPolicy: classifyProbability(truth.probability), evidenceState, materiality,
+    });
+  }
+  const unresolved: { nodeId: string; reason: string }[] = [
+    ...[...gatherIds].map((nodeId) => ({ nodeId, reason: "gather_evidence" as const })),
+    ...analyzeOnly.filter((p) => !analysisIds.has(p.id)).map((p) => ({ nodeId: p.id, reason: "awaiting_evidence" as const })),
+    ...nodeResults
+      .filter((n) => n.evidenceState.choice === "insufficient" || n.evidenceState.choice === "conflicted")
+      .map((n) => ({ nodeId: n.nodeId, reason: n.evidenceState.choice })),
+  ];
   const expandCtx = {
-    ...base, proposals, relevance: relevanceList, analyses, analysisDecisions,
-    evidenceRequests: analyzeRequests, unresolved, jev: { relevance: relevance.raw, decide: decide.raw },
-    adjudication: { relevance: relevanceList, analysisDecisions },
-    priorIds: [...priorIds], priorRefs: { proposalIds: [...priorIds] },
+    ...base, proposals, relevance: relevanceList, analyses,
+    analysisDecisions: nodeResults.map((n) => ({
+      nodeId: n.nodeId, truthProbability: n.truth.probability, truthPolicy: n.truthPolicy,
+      evidenceState: n.evidenceState.choice, evidenceProbabilities: n.evidenceState.probabilities,
+      materialityScore: n.materiality.score,
+    })),
+    evidenceRequests: analyzeRequests, unresolved, jev: { relevance: relevance.raw, decide: decideRaw },
+    adjudication: { relevance: relevanceList, analysisDecisions: nodeResults.map((n) => n.nodeId) },
+    priorIds: [...proposalById.keys()], priorRefs: { proposalIds: [...proposalById.keys()] },
   };
   const expandRaw = await postOpenCode(
     dir, "expand", promptText("expand", expandPrompt, expandCtx), model, apiKey, fetchFn,
   );
   const expandOut = parseOpenCodeOutput("expand", expandRaw, ["evidenceRequests", "proposals"]);
+  const priorIds = new Set(proposals.map((p) => p.id));
   const expanded = checkProposals("expand", expandOut.proposals, objectiveId, priorIds);
+  const priorDeps = new Map(proposals.map((p) => [p.id, p.dependsOn]));
+  assertAcyclic("expand", expanded, (id) => priorDeps.get(id));
   const allNodeIds = new Set([...priorIds, ...expanded.map((p) => p.id)]);
   const expandRequests = checkEvidenceRequests("expand", expandOut.evidenceRequests, objectiveId, allNodeIds);
 
-  // 6. relevance of expanded proposals
+  // 6. disposition of expanded proposals (non-authoritative until JEV admits)
   const expandedQuestions: Record<string, unknown> = {};
   for (const p of expanded)
-    expandedQuestions[p.id] = noul(`Is expanded proposal ${p.id} relevant to objective ${objectiveId}?`);
+    expandedQuestions[p.id] = choice(
+      `What should happen to this expanded question relative to the user's objective? Question: ${p.question}`,
+      DISPOSITION_OPTIONS,
+    );
   const expandedRelevance = expanded.length
-    ? await askSystemOne(
-      dir, "relevance-expanded", { state: { ...base, proposals: expanded }, questions: expandedQuestions }, systemOne,
+    ? await askDecisions(
+      dir, "relevance-expanded",
+      { state: { objective: scenario.objective, fictional: scenario.fictional, proposals: expanded }, questions: expandedQuestions },
+      systemOne,
+      Object.fromEntries(expanded.map((p) => [p.id, DISPOSITION_OPTIONS])),
     )
-    : { raw: null, policy: {} as Record<string, { probability: number; decision: Decision }> };
-  const expDecideOf = (id: string): Decision => expandedRelevance.policy[id]?.decision ?? "no";
+    : { raw: null, decisions: {} as Record<string, DecisionResult> };
 
+  const withDisposition = (p: Proposal, stage: string, decisions: Record<string, DecisionResult>) => {
+    const disposition = dispositionOf(decisions, p.id);
+    const d = decisions[p.id] as ChoiceDecision;
+    return {
+      ...p, stage, disposition, probabilities: d.probabilities, confidence: d.confidence,
+    };
+  };
   const final = {
     scenarioId: scenario.id,
     model,
@@ -330,14 +398,20 @@ export async function runScenario(
     fictional: scenario.fictional,
     evidence: scenario.evidence,
     proposals: [
-      ...proposals.map((p) => ({ ...p, stage: "initial", probability: probOf(relevance.policy, p.id), decision: decideOf(p.id) })),
-      ...expanded.map((p) => ({ ...p, stage: "expanded", probability: probOf(expandedRelevance.policy, p.id), decision: expDecideOf(p.id) })),
+      ...proposals.map((p) => withDisposition(p, "initial", relevance.decisions)),
+      ...expanded.map((p) => withDisposition(p, "expanded", expandedRelevance.decisions)),
     ],
-    reasoning: analyses.map((a) => ({
-      ...a, probability: probOf(decide.policy, a.nodeId), decision: decide.policy[a.nodeId]?.decision ?? "no",
-    })),
-    jev: { relevance: relevance.raw, decide: decide.raw, expandedRelevance: expandedRelevance.raw },
-    policy: { relevance: relevance.policy, decide: decide.policy, expandedRelevance: expandedRelevance.policy },
+    reasoning: analyses.map((a) => {
+      const n = nodeResults.find((r) => r.nodeId === a.nodeId);
+      if (!n) throw new Error(`final: missing adjudication for ${a.nodeId}`);
+      return {
+        ...a, truthProbability: n.truth.probability, truthPolicy: n.truthPolicy,
+        evidenceState: n.evidenceState.choice, evidenceProbabilities: n.evidenceState.probabilities,
+        evidenceConfidence: n.evidenceState.confidence, materialityScore: n.materiality.score,
+      };
+    }),
+    jev: { relevance: relevance.raw, decide: decideRaw, expandedRelevance: expandedRelevance.raw },
+    decisions: { relevance: relevance.decisions, decide: decideAll, expandedRelevance: expandedRelevance.decisions },
     evidenceRequests: [
       ...analyzeRequests.map((r) => ({ ...r, stage: "analyze" })),
       ...expandRequests.map((r) => ({ ...r, stage: "expand" })),

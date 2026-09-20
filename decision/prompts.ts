@@ -1,6 +1,13 @@
 // Prompt builders for the API-only prompt-graph experiment. No runtime imports.
 // Each builder takes an opaque context (serialized as JSON) and returns the
 // full prompt string. The model must return exactly one JSON object, no prose.
+// JEV routing: exclusive routing/category/explanation => choice; independent
+// propositions => noul; ordinal judgments => score (never deterministic calcs).
+// Reasoner (OpenCode) thinks non-authoritatively; JEV decides; graph remembers.
+// Reasoner over-generates alternatives as separate candidates; JEV collapses
+// them via choice/noul/score. conflicted (evidence cuts both ways) vs
+// insufficient (nothing to judge on) stay distinct; gather/conflicted is never
+// resolved by guessing — it becomes an evidence request, never an analysis.
 
 export type Proposal = {
   id: string;
@@ -40,9 +47,9 @@ const ID_RULES =
 // evaluationCriteria is never sent; do not ask for it.
 // Output: { proposals: Proposal[] }.
 export function decomposePrompt(context: unknown): string {
-  return `Decompose a fictional research objective into follow-up questions. Preserve the objective as stated; questions serve it, never restate or change it.
+  return `Decompose a fictional research objective into follow-up questions. Preserve the objective as stated; questions serve it, never restate or change it. Over-generate alternatives as separate questions: candidate explanations, missing deps, and next actions.
 
-Output shape: {"proposals": Proposal[]} where Proposal = {id: string; objectiveId: string; question: string; dependsOn: string[]; whyItMatters: string}. objectiveId must equal the context objective id.
+Output shape: {"proposals": Proposal[]} where Proposal = {id: string; objectiveId: string; question: string; dependsOn: string[]; whyItMatters: string}. objectiveId must equal the context objective id. Proposals are non-authoritative candidates requiring JEV admission, never final.
 ${ID_RULES}
 ${EVIDENCE_RULES}
 ${NO_DECISIONS}
@@ -51,11 +58,12 @@ ${JSON_ONLY}
 CONTEXT: ${ctx(context)}`;
 }
 
-// Context: { objective, proposals: Proposal[] (yes-only), unsureProposalIds: string[], jevResults, policyResults, priorRefs }.
+// Context: { objective, proposals: Proposal[] (yes-only, JEV-admitted), unsureProposalIds: string[], jevResults (raw + distributions preserved), policyResults, priorRefs }.
+// Evidence-state model: yes items get analyses citing a subset of context evidence; unsure/conflicted items get evidenceRequests only, never analysis.
 // Output: { analyses: Analysis[], evidenceRequests: EvidenceRequest[] }.
 export function analyzePrompt(context: unknown): string {
-  return `Analyze ONLY yes (approved) questions against the provided evidence; unsure questions get missing-evidence requests, never analysis or admission; rejected (no) ones are retained as artifacts only. Analyses for unsure or rejected ids are policy violations.
-Output shape: {"analyses": Analysis[], "evidenceRequests": EvidenceRequest[]} where Analysis = {nodeId: string; objectiveId: string; interpretation: string; evidenceRefs: string[]} and EvidenceRequest = {nodeId: string; objectiveId: string; missingEvidence: string}. nodeId must be a yes proposal id; evidenceRequests must cover every unsure id in context; evidenceRefs must be a subset of evidence ids in context; every uncertainty becomes an EvidenceRequest — never resolve by guessing.
+  return `Analyze ONLY yes (JEV-admitted) questions against the provided evidence; unsure/conflicted questions get missing-evidence requests, never analysis or admission; rejected (no) ones are retained as artifacts only. Analyses for unsure or rejected ids are policy violations. Over-generate alternative readings (candidate explanations Q/A/B/mixed/insufficient) inside interpretation text, but NEVER emit decision fields.
+Output shape: {"analyses": Analysis[], "evidenceRequests": EvidenceRequest[]} where Analysis = {nodeId: string; objectiveId: string; interpretation: string; evidenceRefs: string[]} and EvidenceRequest = {nodeId: string; objectiveId: string; missingEvidence: string}. nodeId must be a yes proposal id; evidenceRequests must cover every unsure id in context; evidenceRefs must be a subset of evidence ids in context; every uncertainty becomes an EvidenceRequest — unsure/conflicted is never resolved by guessing.
 ${EVIDENCE_RULES}
 ${NO_DECISIONS}
 ${JSON_ONLY}
@@ -64,14 +72,15 @@ CONTEXT: ${ctx(context)}`;
 }
 
 // Context: { objective, prior proposals with ids, analyses, evidenceRequests, adjudication (policy results) }.
+// Proposals here are non-authoritative candidates requiring JEV admission, never final.
 // Output: { proposals: Proposal[], evidenceRequests: EvidenceRequest[] }.
 export function expandPrompt(context: unknown): string {
-  return `Expand the graph from the adjudication: follow up only genuinely unresolved / unsure items and surface dependencies missed earlier(e.g.indirect exposures).New proposal ids must not reuse any prior id listed in context.
-    ${ID_RULES }
-Output shape: { "proposals": Proposal[], "evidenceRequests": EvidenceRequest[] } with the same Proposal / EvidenceRequest shapes as above.If no genuine follow - up exists, return { "proposals": [], "evidenceRequests": [] } — never invent novelty.
-    ${EVIDENCE_RULES }
-${NO_DECISIONS }
-${JSON_ONLY }
+  return `Expand the graph from the adjudication: follow up only genuinely unresolved / unsure items and surface dependencies missed earlier (e.g. indirect exposures). Over-generate alternatives: missing deps and next actions as separate proposals. New proposal ids must not reuse any prior id listed in context. Proposals are non-authoritative candidates requiring JEV admission, never final.
+${ID_RULES}
+Output shape: {"proposals": Proposal[], "evidenceRequests": EvidenceRequest[]} with the same Proposal / EvidenceRequest shapes as above. If no genuine follow-up exists, return {"proposals": [], "evidenceRequests": []} — never invent novelty. Unsure/conflicted is never resolved by guessing.
+${EVIDENCE_RULES}
+${NO_DECISIONS}
+${JSON_ONLY}
 
-  CONTEXT: ${ctx(context)}`;
+CONTEXT: ${ctx(context)}`;
 }
