@@ -21,9 +21,7 @@ COPY requirements.txt package.json bun.lock ./
 RUN python -m venv /app/venv \
  && /app/venv/bin/pip install --upgrade pip \
  && /app/venv/bin/pip install --no-cache-dir -r requirements.txt \
- && bun install \
- && printf '#!/bin/sh\nexec /usr/local/bin/bun /app/node_modules/.bin/omp "$@"\n' > /usr/local/bin/omp \
- && chmod +x /usr/local/bin/omp
+ && bun install
 COPY . .
 RUN id -u agent >/dev/null 2>&1 || useradd -m -u 1000 -d /home/agent -s /bin/bash agent \
  && mkdir -p /home/agent /data \
@@ -34,4 +32,3 @@ RUN id -u agent >/dev/null 2>&1 || useradd -m -u 1000 -d /home/agent -s /bin/bas
 USER agent
 ENV STOCKBOT_DATA_DIR=/data
 ENV PATH="/app/venv/bin:$PATH"
-RUN omp --help | grep -q -- "--tools"

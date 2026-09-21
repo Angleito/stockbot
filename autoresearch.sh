@@ -11,4 +11,3 @@ export RUNS_DB_PATH="$TMPDIR_HARNESS/runs.sqlite"
 if [[ -x venv/bin/python ]]; then PYBIN="venv/bin/python"; else PYBIN="python3"; fi
 "$PYBIN" scripts/verify_tool_registry.py
 "$PYBIN" scripts/strict_routing_harness.py
-PYTHONHASHSEED=0 FINRA_USE_MOCK=1 BROKER_ENABLED=0 "$PYBIN" scripts/verify_pi_tools.py --confusion

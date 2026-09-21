@@ -10,9 +10,6 @@ export type NeedleRouteResult = {
   reasoning: string;
 };
 
-export type NeedleDecision = NeedleRouteResult & {
-  escalate: boolean;
-};
 
 export const TOOL_TIMEOUT_MS = 120_000;
 // Runtime gate mirroring server.py validate_needle_tool: Needle output must
@@ -170,19 +167,6 @@ export class NeedleRouter {
         }
       });
     });
-  }
-
-  // confidence stays on the record for observability but never gates: tuned
-  // weights report None, so any floor only pretends to protect.
-  // Legacy non-kernel path: kernel path uses generateArguments only; JEV owns transitions (kept until loop.ts cutover).
-  async start(prompt: string): Promise<NeedleDecision> {
-    const result = await this.call({ action: "start", prompt });
-    return { ...result, escalate: result.tool === null };
-  }
-
-  async step(result: unknown): Promise<NeedleDecision> {
-    const r = await this.call({ action: "step", result });
-    return { ...r, escalate: r.tool === null };
   }
 
   // Narrow execution worker op: generate arguments for the exact JEV-selected

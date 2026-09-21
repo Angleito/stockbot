@@ -84,7 +84,7 @@ from scripts.verify_tool_registry import (
 )
 
 MODEL = "verify-tool-health"
-# Per-tool-call cliff, mirrors scripts/verify_pi_tools.py (handlers land in
+# Per-tool-call cliff (handlers land in
 # seconds; anything beyond this is hung, not slow).
 LIVE_CALL_TIMEOUT_S = 120
 THESIS_ID_TOOLS = frozenset({"thesis_show", "thesis_refine", "thesis_watch", "thesis_journal"})

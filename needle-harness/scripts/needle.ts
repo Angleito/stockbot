@@ -121,52 +121,7 @@ async function fetchCatalog(): Promise<void> {
   process.stdout.write(`needle [ai]: catalog ok ${CATALOG} (${catalog.map((c) => c.name).join(",")})\n`);
 }
 
-async function warmup(): Promise<void> {
-  process.stdout.write("needle [ai]: warmup start (loading Needle 3 weights, first load can take ~60s)…\n");
-  const child = spawn(VENV_PYTHON, [SERVER], { cwd: HARNESS_DIR, stdio: ["pipe", "pipe", "pipe"] });
-  const { promise, resolve, reject } = Promise.withResolvers<string>();
-  let buf = "";
-  let errTail = "";
-  const timer = setTimeout(() => reject(new Error("timeout")), WARMUP_TIMEOUT_MS);
-  child.stdout?.on("data", (d: Buffer) => {
-    buf += d.toString();
-    const i = buf.indexOf("\n");
-    if (i >= 0) {
-      clearTimeout(timer);
-      resolve(buf.slice(0, i));
-    }
-  });
-  child.on("error", reject);
-  child.on("close", (code) => {
-    clearTimeout(timer);
-    reject(new Error(`bridge exited ${code ?? "unknown"} before warmup reply`));
-  });
-  child.stderr?.on("data", (d: Buffer) => {
-    const s = d.toString();
-    process.stderr.write(s);
-    errTail = (errTail + s).slice(-2000);
-  });
-  child.stdin?.write('{"id":"warmup","action":"start","prompt":"What time is it?"}\n');
-  const line = await promise.catch((e: Error) => {
-    child.kill();
-    fail(`needle warmup failed: ${e.message}\nneedle warmup stderr tail: ${errTail || "(empty)"}`);
-  });
-  child.kill();
-  let id: unknown;
-  let tool: unknown;
-  try {
-    ({ id, tool } = JSON.parse(line) as { id?: unknown; tool?: unknown });
-  } catch {
-    fail(`needle warmup failed: bad JSON ${line}\nneedle warmup stderr tail: ${errTail || "(empty)"}`);
-  }
-  if (id !== "warmup" || tool !== "get_current_time") {
-    fail(`needle warmup failed: unexpected ${line}\nneedle warmup stderr tail: ${errTail || "(empty)"}`);
-  }
-  process.stdout.write("needle [ai]: warmup ok (get_current_time)\n");
-}
-
 await fetchCatalog();
-await warmup();
 
 process.stdout.write(`needle [web]: starting next dev (cwd ${HARNESS_DIR}, PORT=${PORT})…\n`);
 process.stdout.write("needle [web]: next dev output follows — wait for Ready…\n");

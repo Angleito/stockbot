@@ -1,8 +1,7 @@
 """Runtime-neutral JSONL bridge for Stockbot tool consumers.
 
 The bridge is transport only. It exposes canonical tool schemas and executes
-tools through app.tool_runtime. Model-specific lifecycle/event protocols belong
-in their own bridges (for example scripts/pi_bridge.py).
+tools through app.tool_runtime.
 
 Protocol, one JSON object per line:
   {"id": str, "op": "describe"}

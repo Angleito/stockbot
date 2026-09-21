@@ -2,10 +2,10 @@
   "$schema": "./node_modules/@stryker-mutator/core/schema/stryker-schema.json",
   "_comment": "README: mutate covers production TS only (tests excluded; viewer has no bun test command yet). Scope a run to changed files with: bunx stryker run --mutate <changed production files>. Command runner (the default testRunner) reuses the existing bun test command. inPlace is required: tests spawn venv/bin/python via repo-relative paths, so a sandbox copy would lack venv. KNOWN ISSUE: checkers/typescript crashes at init with typescript@7 native (ts.sys undefined in the version-stub entry); default checkers is [] so `bunx stryker run` works; add --checkers typescript only once the checker supports TS7.",
   "commandRunner": {
-    "command": "bun test tests/pi_extension.test.ts"
+    "command": "bun test decision/"
   },
   "mutate": [
-    ".stockbot/omp/**/*.ts"
+    "decision/**/*.ts"
   ],
   "checkers": [],
   "coverageAnalysis": "off",

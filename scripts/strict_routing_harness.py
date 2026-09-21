@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Strict offline routing harness: 23-query deterministic workload.
 
-Pattern reuse: evals/pi_harness.py check_case semantics (required_tools =
+Pattern reuse: retired evals harness check_case semantics (required_tools =
 all present exact match, required_tool_sequence = ordered subsequence).
 Each query drives REAL traces through the mapped offline path
-scripts/pi_bridge.py _run_tool_call -> app/tool_runtime.py execute_agent_tool
+scripts/tool_bridge.py tool.invoke -> app/tool_runtime.py execute_agent_tool
 ("call_tool" outer wrapper) -> app/tools.py execute_tool (TracePathMapper
 report): fixed per-tool args, no model, no RNG, no recorder. A unittest.mock
 spy on the gateway's execute_tool records exactly the inner tools whose
@@ -68,7 +68,7 @@ WORKLOAD: list[tuple[int, list[str], list[str]]] = [
     (18, ["query_finra", "get_finra_datapoints"], ["list_finra_datasets", "describe_finra_dataset"]),
 ]
 
-# Fixed offline args mirroring scripts/verify_pi_tools.py VERIFY_CASES.
+# Fixed offline args (per-tool static args, see _TOOL_ARGS below).
 # query_finra/get_finra_datapoints omit ticker/symbol/isin per the Q15/18
 # forbidden_tool_args fixtures (ticker is optional for both).
 _TOOL_ARGS: dict[str, dict[str, object]] = {
@@ -143,7 +143,7 @@ def _trace_rows(inner_names: list[str]) -> list[dict[str, str]]:
 def _decode_inner(raw: object) -> str | None:
     try:
         payload = json.loads(raw) if isinstance(raw, str) else None
-    except json.JSONDecodeError, TypeError:
+    except (json.JSONDecodeError, TypeError):
         return None
     inner = payload.get("name") if isinstance(payload, dict) else None
     return inner if isinstance(inner, str) and inner else None

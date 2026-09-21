@@ -40,5 +40,5 @@ next-env.d.ts
 
 # local benchmark output (never committed)
 /benchmarks/
-# generated at warmup via pi_bridge describe (never committed)
+# generated at warmup via tool_bridge describe (never committed)
 /.needle-catalog.json
