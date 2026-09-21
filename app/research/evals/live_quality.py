@@ -194,8 +194,7 @@ def _post_one_case(
 def _evaluate_gates(case: object, answer: str, trace: Mapping[str, object]) -> dict[str, object]:
     from app.research.evals.hard_gates import evaluate_hard_gates  # type: ignore[import-not-found]
 
-    gate_case = case if isinstance(case, Mapping) else {"id": _case_id(case), "question": _case_question(case)}
-    out: object = evaluate_hard_gates(gate_case, answer, trace)  # type: ignore[arg-type]
+    out: object = evaluate_hard_gates(case, answer, trace)  # type: ignore[arg-type]
     if not isinstance(out, Mapping):
         raise LiveEvalInfraError("hard-gate result must be a mapping")
     return dict(out)
