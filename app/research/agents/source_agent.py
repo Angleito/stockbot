@@ -108,6 +108,16 @@ def is_web_tool(name: str) -> bool:
     """Infra guard: Exa web search only."""
     return name in WEB_TOOLS
 
+
+def source_domain_for_tool(name: str) -> str:
+    """Job source_domain owning one canonical tool: WEB, FINRA, else SEC default."""
+    if is_web_tool(name):
+        return "WEB"
+    if is_finra_tool(name):
+        return "FINRA"
+    return "SEC"
+
+
 def _coerce_wave(wave_id: int | str) -> int:
     """Accept int>=1 or numeric str; reject bool/non-numeric/<1."""
     if isinstance(wave_id, bool):
