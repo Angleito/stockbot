@@ -543,7 +543,6 @@ def ensure_finra_fixture(durable: Path, tool_names: list[str]) -> int:
 def seed_finra_fixture(store: Path, durable: Path) -> None:
     """No-op: the leaderboard reads live providers per invocation (nothing to seed)."""
     del store, durable
-    return None
 
 
 class _VerifyCase(TypedDict):
@@ -1068,7 +1067,7 @@ def _rejected_tools(conn: sqlite3.Connection) -> list[str]:
 def _unexpected_tools(conn: sqlite3.Connection, required_tool: str) -> list[str]:
     """Dispatched Stockbot tools other than the discovery set and the required target.
 
-    tool_calls rows are written only by execute_pi_tool (app/pi_gateway.py:399),
+    tool_calls rows are written only by execute_agent_tool (app/tool_runtime.py),
     so every name here is a Stockbot-dispatched call; Pi built-ins never appear.
     """
     names = get_registry_sets()["schemas"]

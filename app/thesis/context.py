@@ -19,7 +19,7 @@ from app.thesis.models import (
 from app.thesis.repository import ThesisRepository
 from app.thesis.yaml import load_raw_yaml, load_yaml
 
-# ponytail: token estimate is len(text)//4, no tokenizer dependency (pi_gateway uses same).
+# ponytail: token estimate is len(text)//4, no tokenizer dependency (tool_runtime uses same).
 
 _JOURNAL_HEAD_LINES = 40
 

@@ -17,8 +17,8 @@ from typing import override
 import pytest
 
 import tests.research_source_seam as seam
-from app.pi_gateway import PiSessionContext
 from app.storage.runs import RunRecorder
+from app.tool_runtime import RuntimeToolSession
 from scripts import pi_bridge
 
 
@@ -93,7 +93,7 @@ def _capture_writes(monkeypatch: pytest.MonkeyPatch) -> list[dict[str, object]]:
 
 
 def _start_session(run_id: str) -> None:
-    pi_bridge._sessions[run_id] = PiSessionContext(session_id=run_id)
+    pi_bridge._sessions[run_id] = RuntimeToolSession(session_id=run_id)
 
 
 def _teardown_run(run_id: str) -> None:
@@ -142,7 +142,7 @@ def test_four_tool_calls_overlap(monkeypatch: pytest.MonkeyPatch):
     live_lock = threading.Lock()
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: str | float | Path | None
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kwargs: str | float | Path | None
     ) -> dict[str, str]:
         nonlocal live, max_live
         with live_lock:
@@ -155,7 +155,7 @@ def test_four_tool_calls_overlap(monkeypatch: pytest.MonkeyPatch):
                 live -= 1
         return {"content": "ok"}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         payloads = [_tool_payload(run_id) for _ in range(4)]
         for payload in payloads:
@@ -174,14 +174,14 @@ def test_out_of_order_completions_keep_ids(monkeypatch: pytest.MonkeyPatch):
     release = threading.Event()
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: str | float | Path | None
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kwargs: str | float | Path | None
     ) -> dict[str, str]:
         if arguments.get("query") == "slow":
             assert release.wait(timeout=30)
             return {"content": "slow-result"}
         return {"content": "fast-result"}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         slow = _tool_payload(run_id, "call-slow")
         slow["arguments"] = {"query": "slow"}
@@ -212,12 +212,12 @@ def test_tool_call_forwards_tracing_ids(monkeypatch: pytest.MonkeyPatch):
     seen: dict[str, object] = {}
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: str | float | Path | None
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kwargs: str | float | Path | None
     ) -> dict[str, str]:
         seen.update(kwargs)
         return {"content": "ok"}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         payload = _tool_payload(run_id, "call-7")
         assert pi_bridge._handle(json.dumps(payload)) is None
@@ -240,12 +240,12 @@ def test_agent_end_waits_for_run_calls(monkeypatch: pytest.MonkeyPatch):
     pi_bridge._recorders[run_id] = stub
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: str | float | Path | None
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kwargs: str | float | Path | None
     ) -> dict[str, str]:
         assert release.wait(timeout=30)
         return {"content": "late"}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         assert pi_bridge._handle(json.dumps(_tool_payload(run_id))) is None
         finished: list[dict[str, object] | None] = []
@@ -270,16 +270,16 @@ def test_agent_end_waits_for_run_calls(monkeypatch: pytest.MonkeyPatch):
 
 def test_eof_drains_submitted_work(monkeypatch: pytest.MonkeyPatch):
     run_id = _run_id("eof")
-    pi_bridge._sessions[run_id] = PiSessionContext(session_id=run_id)
+    pi_bridge._sessions[run_id] = RuntimeToolSession(session_id=run_id)
     responses = _capture_writes(monkeypatch)
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: str | float | Path | None
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kwargs: str | float | Path | None
     ) -> dict[str, str]:
         time.sleep(0.2)
         return {"content": "ok"}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     worker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=4)
     monkeypatch.setattr(pi_bridge, "_executor", worker_pool)
     payloads = [_tool_payload(run_id) for _ in range(2)]
@@ -306,12 +306,12 @@ def test_agent_end_drain_timeout(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pi_bridge, "TOOL_DRAIN_TIMEOUT_SECONDS", 0.05)
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: str | float | Path | None
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kwargs: str | float | Path | None
     ) -> dict[str, str]:
         release.wait(timeout=30)
         return {"content": "late"}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         assert pi_bridge._handle(json.dumps(_tool_payload(run_id))) is None
         assert pi_bridge._handle(json.dumps(_tool_payload(run_id))) is None
@@ -344,17 +344,17 @@ def test_agent_end_drain_timeout(monkeypatch: pytest.MonkeyPatch):
 
 def test_eof_drain_timeout(monkeypatch: pytest.MonkeyPatch):
     run_id = _run_id("eof-timeout")
-    pi_bridge._sessions[run_id] = PiSessionContext(session_id=run_id)
+    pi_bridge._sessions[run_id] = RuntimeToolSession(session_id=run_id)
     _capture_writes(monkeypatch)
     release = threading.Event()
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: str | float | Path | None
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kwargs: str | float | Path | None
     ) -> dict[str, str]:
         release.wait(timeout=30)
         return {"content": "late"}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     worker_pool = concurrent.futures.ThreadPoolExecutor(max_workers=1)
     monkeypatch.setattr(pi_bridge, "_executor", worker_pool)
     monkeypatch.setattr(pi_bridge, "TOOL_DRAIN_TIMEOUT_SECONDS", 0.05)
@@ -391,12 +391,12 @@ def test_abort_run_fails_live_run(monkeypatch: pytest.MonkeyPatch):
     monkeypatch.setattr(pi_bridge, "TOOL_DRAIN_TIMEOUT_SECONDS", 0.05)
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: str | float | Path | None
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kwargs: str | float | Path | None
     ) -> dict[str, str]:
         release.wait(timeout=30)
         return {"content": "late"}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         assert pi_bridge._handle(json.dumps({"id": "bad-1", "op": "abort_run", "run_id": run_id})) == {
             "id": "bad-1",
@@ -704,7 +704,7 @@ def test_staged_context_no_crosstalk(monkeypatch: pytest.MonkeyPatch) -> None:
     seen_lock = threading.Lock()
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kwargs: object
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kwargs: object
     ) -> dict[str, str]:
         barrier.wait(timeout=30)
         snapshot = dict(arguments)
@@ -714,7 +714,7 @@ def test_staged_context_no_crosstalk(monkeypatch: pytest.MonkeyPatch) -> None:
             seen[tool_id] = (kwargs.get("active_research_session_id"), kwargs.get("active_research_job_id"), snapshot)
         return {"content": "ok"}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         p1 = _tool_payload(run_id, "call-1")
         p1["active_research_session_id"] = "sess-A"
@@ -760,7 +760,7 @@ def test_tool_call_dispatch_consumes_data_root_db(tmp_path: Path, monkeypatch: p
     import dataclasses
     import json
 
-    import app.pi_gateway as _gw
+    import app.tool_runtime as _gw
     from app.research import service as _svc
     from app.research.repository import ResearchRepository
 
@@ -809,7 +809,7 @@ def test_call_tool_research_finalize_completes_trio_session(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     """Canonical research_finalize via call_tool completes a trio-complete session."""
-    import app.pi_gateway as _gw
+    import app.tool_runtime as _gw
     from app.research import service as _svc
     from app.research.repository import ResearchRepository
 
@@ -859,8 +859,8 @@ def test_call_tool_research_finalize_completes_trio_session(
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
         _svc.record_committee_analysis(sid, jid, role, analysis, repo=repo)
     assert not [j for j in repo.list_jobs(sid) if j.status in ("queued", "running")]
-    bound = PiSessionContext(session_id="pi-finalize", active_research_session_id=sid)
-    out = _gw.execute_pi_tool(
+    bound = RuntimeToolSession(session_id="pi-finalize", active_research_session_id=sid)
+    out = _gw.execute_agent_tool(
         "call_tool",
         {
             "name": "research_finalize",

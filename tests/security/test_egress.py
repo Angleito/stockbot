@@ -113,7 +113,7 @@ def test_malformed_payload_blocked():
 
 
 def test_thesis_lifecycle_tools_exempt_from_private_scan() -> None:
-    from app.pi_gateway import _THESIS_LOCAL_TOOLS
+    from app.tool_runtime import _THESIS_LOCAL_TOOLS
 
     assert _THESIS_LOCAL_TOOLS == {
         "thesis_create",
@@ -127,13 +127,13 @@ def test_thesis_lifecycle_tools_exempt_from_private_scan() -> None:
 def test_thesis_refine_with_private_text_not_denied(tmp_path: Path) -> None:
     import uuid
 
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
     from app.security.action_policy import private_pattern_hit
+    from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
     text = "User owns 2843 AMD shares"
     assert private_pattern_hit(f'{{"clarification": "{text}"}}') is not None
-    session = PiSessionContext(session_id="thesis-gate-" + uuid.uuid4().hex[:8])
-    result = execute_pi_tool(
+    session = RuntimeToolSession(session_id="thesis-gate-" + uuid.uuid4().hex[:8])
+    result = execute_agent_tool(
         "thesis_refine",
         {"id": "thesis:none", "clarification": text},
         session,

@@ -58,7 +58,6 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
-from app.pi_gateway import PiSessionContext, _override_context, execute_pi_tool
 from app.policy import Capability, RequestContext
 from app.prompts import PI_RESEARCH_PROMPT, PROMPT_VERSION
 from app.research import (
@@ -73,6 +72,7 @@ from app.storage.runs import (
     reset_current_recorder,
     set_current_recorder,
 )
+from app.tool_runtime import RuntimeToolSession, _override_context, execute_agent_tool
 from app.tools import (
     TOOL_REGISTRY_VERSION,
     dynamically_activatable_tool_names,
@@ -92,8 +92,8 @@ def _bridge_ctx(request: Mapping[str, object]) -> RequestContext:
     )
 
 
-_sessions: dict[str, PiSessionContext] = {}
-_invoke_sessions: dict[str, PiSessionContext] = {}
+_sessions: dict[str, RuntimeToolSession] = {}
+_invoke_sessions: dict[str, RuntimeToolSession] = {}
 _recorders: dict[str, RunRecorder] = {}
 _inflight: dict[str, set[concurrent.futures.Future[None]]] = {}
 
@@ -301,13 +301,13 @@ def _tool_call_wire(request: Mapping[str, object]) -> tuple[str | None, str | No
     return (tool_call_id, data_root, as_of, queue_ms)
 
 
-def _lookup_tool_session(raw_run_id: str) -> tuple[PiSessionContext | None, RunRecorder | None]:
+def _lookup_tool_session(raw_run_id: str) -> tuple[RuntimeToolSession | None, RunRecorder | None]:
     """Session + recorder snapshot under the state lock."""
     with _state_lock:
         return (_sessions.get(raw_run_id), _recorders.get(raw_run_id))
 
 
-def _stage_tool_session(session: PiSessionContext, raw_sid: object, raw_jid: object) -> tuple[str | None, str | None]:
+def _stage_tool_session(session: RuntimeToolSession, raw_sid: object, raw_jid: object) -> tuple[str | None, str | None]:
     """Apply staged research ids; return the captured pair for this call."""
     with session._lock:
         if raw_sid is not None:
@@ -322,7 +322,7 @@ def _stage_tool_session(session: PiSessionContext, raw_sid: object, raw_jid: obj
 
 
 def _invoke_tool_call(
-    session: PiSessionContext,
+    session: RuntimeToolSession,
     recorder: RunRecorder | None,
     name: str,
     arguments: dict[str, object],
@@ -337,7 +337,7 @@ def _invoke_tool_call(
     """Run one tool under its recorder scope; return the gateway result."""
     token = set_current_recorder(recorder) if recorder is not None else None
     try:
-        return execute_pi_tool(
+        return execute_agent_tool(
             name,
             arguments,
             session,
@@ -670,7 +670,7 @@ def _ensure_observe_session(run_id: str, event: str) -> None:
     if event != "agent_start":
         return
     with _state_lock:
-        _sessions[run_id] = PiSessionContext(session_id=run_id)
+        _sessions[run_id] = RuntimeToolSession(session_id=run_id)
 
 
 def _observe_recorder(run_id: str, request: Mapping[str, object]) -> RunRecorder | None:
@@ -1206,12 +1206,12 @@ def _invoke_sid(request: Mapping[str, object], protocol_id: object) -> str:
     return f"bridge:{protocol_id}"
 
 
-def _get_invoke_session(sid: str) -> PiSessionContext:
+def _get_invoke_session(sid: str) -> RuntimeToolSession:
     """Session-cached context for explicit harness ids; get-or-create under lock."""
     with _state_lock:
         session = _invoke_sessions.get(sid)
         if session is None:
-            session = PiSessionContext(session_id=sid)
+            session = RuntimeToolSession(session_id=sid)
             _invoke_sessions[sid] = session
         return session
 
@@ -1227,10 +1227,10 @@ def _call_tool_invoke(
     as_of: str | None,
     cache: bool,
 ) -> object:
-    """execute_pi_tool with a session-cached (explicit) or ephemeral (fallback) session; routing fields coerced."""
+    """execute_agent_tool with a session-cached (explicit) or ephemeral (fallback) session; routing fields coerced."""
     tool_call_id = _coerce_opt_str(request.get("tool_call_id"))
-    session = _get_invoke_session(sid) if cache else PiSessionContext(session_id=sid)
-    return execute_pi_tool(
+    session = _get_invoke_session(sid) if cache else RuntimeToolSession(session_id=sid)
+    return execute_agent_tool(
         name,
         arguments,
         session,

@@ -4,7 +4,7 @@
 Pattern reuse: evals/pi_harness.py check_case semantics (required_tools =
 all present exact match, required_tool_sequence = ordered subsequence).
 Each query drives REAL traces through the mapped offline path
-scripts/pi_bridge.py _run_tool_call -> app/pi_gateway.py execute_pi_tool
+scripts/pi_bridge.py _run_tool_call -> app/tool_runtime.py execute_agent_tool
 ("call_tool" outer wrapper) -> app/tools.py execute_tool (TracePathMapper
 report): fixed per-tool args, no model, no RNG, no recorder. A unittest.mock
 spy on the gateway's execute_tool records exactly the inner tools whose
@@ -29,9 +29,9 @@ from unittest import mock
 ROOT = os.path.dirname(os.path.dirname(os.path.abspath(__file__)))
 sys.path.insert(0, ROOT)
 
-import app.pi_gateway as _gw
-from app.pi_gateway import PiSessionContext, execute_pi_tool
+import app.tool_runtime as _gw
 from app.policy import RequestContext
+from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
 # Narrow infra excuse: ratelimit | 429 | timeout | latency | deadline/drain only.
 _INFRA_RE = re.compile(
@@ -117,10 +117,10 @@ def _dispatch_real(cid: int, ordered: list[str]) -> list[str]:
         reached.append(name)
         return real_execute(name, arguments, model, context=context)
 
-    session = PiSessionContext(session_id=f"strict-q{cid}")
+    session = RuntimeToolSession(session_id=f"strict-q{cid}")
     with mock.patch.object(_gw, "execute_tool", _spy):
         for name in ordered:
-            execute_pi_tool("call_tool", {"name": name, "arguments": dict(_TOOL_ARGS.get(name, {}))}, session)
+            execute_agent_tool("call_tool", {"name": name, "arguments": dict(_TOOL_ARGS.get(name, {}))}, session)
     return reached
 
 

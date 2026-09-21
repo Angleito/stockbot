@@ -218,9 +218,9 @@ def test_tool_call_telemetry_columns_migrated_and_recorded(tmp_path: Path, monke
         conn.close()
 
 
-def test_execute_pi_tool_ids_and_telemetry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
+def test_execute_agent_tool_ids_and_telemetry(tmp_path: Path, monkeypatch: pytest.MonkeyPatch):
     """Pi-supplied call IDs become run-scoped rows; handler/queue/cache persist."""
-    import app.pi_gateway as gateway
+    import app.tool_runtime as gateway
 
     monkeypatch.setenv("RUNS_DB_PATH", str(tmp_path / "runs.sqlite"))
 
@@ -230,13 +230,13 @@ def test_execute_pi_tool_ids_and_telemetry(tmp_path: Path, monkeypatch: pytest.M
         return {"ok": True, "cache_hit": True, "cache_type": "unit_test"}
 
     monkeypatch.setattr(gateway, "execute_tool", _fake_execute_tool)
-    session = gateway.PiSessionContext(session_id="s1")
+    session = gateway.RuntimeToolSession(session_id="s1")
     with _recorder("run-pi-1") as recorder:
         token = set_current_recorder(recorder)
         try:
-            fallback = gateway.execute_pi_tool("search_tools", {"query": "telemetry probe"}, session)
+            fallback = gateway.execute_agent_tool("search_tools", {"query": "telemetry probe"}, session)
             assert fallback.get("content")
-            correlated = gateway.execute_pi_tool(
+            correlated = gateway.execute_agent_tool(
                 "search_tools",
                 {"query": "telemetry probe"},
                 session,

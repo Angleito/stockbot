@@ -34,7 +34,6 @@ import scripts.update_tool_catalog as cat
 import scripts.verify_agent_scenarios as vas
 import scripts.verify_judge as J
 import scripts.verify_pi_tools as v
-from app.pi_gateway import PiSessionContext
 from app.policy import Capability, RequestContext
 from app.research.evals.scenarios import Scenario, ScenarioFamily
 from app.research.evals.traces import TraceHeader
@@ -42,6 +41,7 @@ from app.research.models import Failure, Job, JSONValue, ResearchSession
 from app.research.repository import ResearchRepository
 from app.robinhood.client import RobinhoodClient
 from app.storage.runs import _SCHEMA, RunRecorder
+from app.tool_runtime import RuntimeToolSession
 from scripts import pi_bridge
 from scripts import verify_tool_health as vth
 from scripts import verify_tool_registry as reg
@@ -1714,12 +1714,12 @@ def test_tool_invoke_shape_and_dispatch(monkeypatch: pytest.MonkeyPatch):
     seen: dict[str, object] = {}
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kw: object
     ) -> dict[str, object]:
         seen.update(name=name, sid=session.session_id, kw=kw)
         return {"ok": 1}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     pi_bridge._run_tool_invoke({"id": "i3", "name": "search_web", "arguments": {"q": "x"}, "session_id": "sess-1"})
     assert responses[-1] == {"id": "i3", "result": {"ok": 1}}
     assert seen["sid"] == "sess-1"
@@ -1734,22 +1734,22 @@ def test_tool_invoke_failure_writes_bridge_failed(monkeypatch: pytest.MonkeyPatc
     def boom(*a: object, **k: object) -> object:
         raise RuntimeError("gateway down")
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", boom)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", boom)
     pi_bridge._run_tool_invoke({"id": "i9", "name": "x", "arguments": {}})
     assert responses == [{"id": "i9", "error": "bridge_failed"}]
 
 
 def test_tool_invoke_reuses_session_context(monkeypatch: pytest.MonkeyPatch):
     responses = _capture(monkeypatch)
-    seen: list[PiSessionContext] = []
+    seen: list[RuntimeToolSession] = []
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kw: object
     ) -> dict[str, object]:
         seen.append(session)
         return {"ok": 1}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         pi_bridge._run_tool_invoke({"id": "c1", "name": "search_web", "arguments": {}, "session_id": "reuse-1"})
         pi_bridge._run_tool_invoke({"id": "c2", "name": "search_web", "arguments": {}, "session_id": "reuse-1"})
@@ -1761,15 +1761,15 @@ def test_tool_invoke_reuses_session_context(monkeypatch: pytest.MonkeyPatch):
 
 def test_tool_invoke_end_drops_session(monkeypatch: pytest.MonkeyPatch):
     _capture(monkeypatch)
-    seen: list[PiSessionContext] = []
+    seen: list[RuntimeToolSession] = []
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kw: object
     ) -> dict[str, object]:
         seen.append(session)
         return {"ok": 1}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         pi_bridge._run_tool_invoke({"id": "e1", "name": "search_web", "arguments": {}, "session_id": "end-1"})
         assert pi_bridge._op_tool_invoke_end({"session_id": "end-1"}, "end-op") == {
@@ -1792,13 +1792,13 @@ def test_tool_invoke_overlaps_barrier(monkeypatch: pytest.MonkeyPatch):
     barrier = threading.Barrier(2)
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kw: object
     ) -> dict[str, object]:
         barrier.wait(timeout=30)
         return {"ok": True}
 
     pool = concurrent.futures.ThreadPoolExecutor(max_workers=2)
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     monkeypatch.setattr(pi_bridge, "_executor", pool)
     try:
         assert pi_bridge._handle(json.dumps({"id": "t1", "op": "tool.invoke", "name": "a", "arguments": {}})) is None
@@ -2145,17 +2145,17 @@ def test_tool_call_worker_validates_shape(monkeypatch: pytest.MonkeyPatch):
 
 def test_staged_context_applies_per_call(monkeypatch: pytest.MonkeyPatch):
     run_id = _rid("invoke-stage")
-    pi_bridge._sessions[run_id] = PiSessionContext(session_id=run_id)
+    pi_bridge._sessions[run_id] = RuntimeToolSession(session_id=run_id)
     responses = _capture(monkeypatch)
     seen = {}
 
     def fake_execute(
-        name: str, arguments: dict[str, object], session: PiSessionContext, **kw: object
+        name: str, arguments: dict[str, object], session: RuntimeToolSession, **kw: object
     ) -> dict[str, object]:
         seen.update(sid=kw.get("active_research_session_id"), jid=kw.get("active_research_job_id"))
         return {"ok": True}
 
-    monkeypatch.setattr(pi_bridge, "execute_pi_tool", fake_execute)
+    monkeypatch.setattr(pi_bridge, "execute_agent_tool", fake_execute)
     try:
         pi_bridge._run_tool_call(
             {

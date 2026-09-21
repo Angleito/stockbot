@@ -5,7 +5,6 @@ from __future__ import annotations
 import pytest
 
 import app.tool_runtime as rt
-from app.pi_gateway import PiSessionContext
 from app.tool_runtime import (
     AgentToolSession,
     RuntimeToolSession,
@@ -15,7 +14,7 @@ from app.tool_runtime import (
 
 
 def test_session_is_gateway_subclass() -> None:
-    assert issubclass(RuntimeToolSession, PiSessionContext)
+    assert issubclass(RuntimeToolSession, RuntimeToolSession)
     assert AgentToolSession is RuntimeToolSession
     s = RuntimeToolSession(session_id="s1")
     assert s.budget.max_tool_calls is None

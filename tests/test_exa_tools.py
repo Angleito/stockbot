@@ -234,7 +234,7 @@ def test_pi_each_agent_run_gets_fresh_session() -> None:
 
 
 def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.pi_gateway import execute_pi_tool
+    from app.tool_runtime import execute_agent_tool
 
     calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
@@ -250,7 +250,7 @@ def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch: pytest.Mon
         for _ in range(3):
             assert first.budget.reserve_tool_call()
         assert first.budget.reserve_tool_call() is False
-        refused = execute_pi_tool("search_tools", {"query": "budget probe"}, first)
+        refused = execute_agent_tool("search_tools", {"query": "budget probe"}, first)
         # §3: Pi per-run count exhaustion is distinct from kernel budgets.
         assert refused.get("error_type") == "run_budget_exceeded"
         assert _end_run(run_one) == {"ok": True}
@@ -269,7 +269,6 @@ def test_pi_second_run_does_not_inherit_first_run_budget(monkeypatch: pytest.Mon
 
 
 def test_pi_model_receives_exact_security_checked_text(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.pi_gateway import PiSessionContext
     from app.security.context_gateway import (
         QuarantinedContext,
         envelope_for_tool,
@@ -277,6 +276,7 @@ def test_pi_model_receives_exact_security_checked_text(monkeypatch: pytest.Monke
     )
     from app.security.response_guard import guard_response
     from app.tool_render import render_tool_result
+    from app.tool_runtime import RuntimeToolSession
 
     evidence: list[dict[str, object]] = [
         {
@@ -315,7 +315,7 @@ def test_pi_model_receives_exact_security_checked_text(monkeypatch: pytest.Monke
         envelope = envelope_for_tool("search_web", raw)
         outcome = prepare_context(envelope, rendered)
         assert not isinstance(outcome, QuarantinedContext)
-        expected = guard_response(outcome.text, PiSessionContext(session_id="expected").run_security, "expected")
+        expected = guard_response(outcome.text, RuntimeToolSession(session_id="expected").run_security, "expected")
         assert text == expected
         assert "12345678" not in text
         assert "revenue grew" in text
@@ -371,15 +371,15 @@ def test_pi_agent_end_closes_recorder_and_removes_session(monkeypatch: pytest.Mo
 
 
 def test_pi_search_web_cap_configured_per_run(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
+    from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
     calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
-    session = PiSessionContext(session_id=_new_run_id("cap"))
+    session = RuntimeToolSession(session_id=_new_run_id("cap"))
     # Unlimited by default; the cap enforces only when explicitly configured.
     assert session.budget.max_search_calls is None
     session.budget.max_search_calls = 25
-    results = [execute_pi_tool("search_web", {"query": f"probe {i}"}, session) for i in range(26)]
+    results = [execute_agent_tool("search_web", {"query": f"probe {i}"}, session) for i in range(26)]
     assert len(calls) == 25
     for result in results[:25]:
         assert "content" in result
@@ -425,13 +425,13 @@ def test_pi_search_web_resets_cap_for_next_run(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_pi_search_web_respects_runtime_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
+    from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
     calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls))
-    session = PiSessionContext(session_id=_new_run_id("runtime"))
+    session = RuntimeToolSession(session_id=_new_run_id("runtime"))
     session.budget.max_runtime = 0.0
-    result = execute_pi_tool("search_web", {"query": "probe"}, session)
+    result = execute_agent_tool("search_web", {"query": "probe"}, session)
     # §3: Pi per-run runtime exhaustion surfaces as deadline_exceeded.
     assert result.get("error_type") == "deadline_exceeded"
     assert "error" in result
@@ -439,7 +439,7 @@ def test_pi_search_web_respects_runtime_budget(monkeypatch: pytest.MonkeyPatch) 
 
 
 def test_pi_search_evidence_tokens_enforce_budget(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
+    from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
     evidence: list[dict[str, object]] = [
         {
@@ -451,9 +451,9 @@ def test_pi_search_evidence_tokens_enforce_budget(monkeypatch: pytest.MonkeyPatc
     ]
     calls: list[str] = []
     monkeypatch.setattr(tools.exa_client, "search", _fake_exa_search(calls, evidence=evidence))
-    session = PiSessionContext(session_id=_new_run_id("evidence-budget"))
+    session = RuntimeToolSession(session_id=_new_run_id("evidence-budget"))
     session.budget.max_evidence_tokens = 5
-    result = execute_pi_tool("search_web", {"query": "AMD revenue"}, session)
+    result = execute_agent_tool("search_web", {"query": "AMD revenue"}, session)
     # §3: Pi evidence-token exhaustion is distinct from kernel budgets.
     assert result.get("error_type") == "evidence_budget_exceeded"
     assert len(calls) == 1
@@ -583,9 +583,9 @@ def test_pi_abort_orphan_run_finalized_failed_idempotent(monkeypatch: pytest.Mon
 
 def test_pi_run_budget_defaults_are_unlimited() -> None:
     """No default run-count caps: attached research control calls are never refused by count."""
-    from app.pi_gateway import PiSessionContext, _reserve_run_budget
+    from app.tool_runtime import RuntimeToolSession, _reserve_run_budget
 
-    session = PiSessionContext(session_id=_new_run_id("unbounded"))
+    session = RuntimeToolSession(session_id=_new_run_id("unbounded"))
     assert session.budget.max_tool_calls is None
     assert session.budget.max_search_calls is None
     assert session.budget.max_runtime is None

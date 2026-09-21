@@ -1,7 +1,7 @@
 """CRAP-path tests for the ResearchCoreFix slice (single assembled file).
 
 Covers decision paths (auth/budget/routing/parsing/error-fallback) for:
-app/pi_gateway.py, app/research/service.py, app/research/repository.py,
+app/tool_runtime.py, app/research/service.py, app/research/repository.py,
 app/research/jobs.py, app/research/director.py, app/research/agents/**,
 app/services/**, app/storage/runs.py,
 app/domain/**, app/analytics/**, app/tools.py, app/research/runner.py.
@@ -25,7 +25,7 @@ from typing import Self, override
 
 import pytest
 
-import app.pi_gateway as gw
+import app.tool_runtime as gw
 import tests.research_source_seam as seam
 from app import tools as tools_mod
 from app.analytics import options as opt
@@ -38,7 +38,6 @@ from app.domain.portfolio import PortfolioSnapshot, Position
 from app.domain.portfolio.snapshot import build_portfolio_snapshot
 from app.domain.risk.evaluation import UNKNOWN_SECTOR, evaluate_mandate
 from app.domain.risk.mandate import Mandate, RiskLimit, parse_mandate
-from app.pi_gateway import PiSessionContext, execute_pi_tool
 from app.policy import Capability, RequestContext
 from app.research import jobs as _jobs
 from app.research import service as svc
@@ -98,9 +97,10 @@ from app.storage import runs as runs_mod
 from app.storage.runs import RunRecorder, get_runs_db_path
 from app.thesis.models import Thesis
 from app.thesis.repository import ThesisRepository
+from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 from app.tools import execute_tool
 
-# --- gateway: pi_gateway gates (from /tmp/rc_coregateway.py) ---
+# --- gateway: tool_runtime gates (from /tmp/rc_coregateway.py) ---
 
 
 def _svc_sid(repo: ResearchRepository, q: str = "NVDA demand?") -> tuple[str, str]:
@@ -112,8 +112,8 @@ def _svc_sid(repo: ResearchRepository, q: str = "NVDA demand?") -> tuple[str, st
 
 
 def test_permit_deny_unknown_tool() -> None:
-    session = PiSessionContext(session_id="gw-permit-deny")
-    out = execute_pi_tool("definitely_not_a_tool", {}, session)
+    session = RuntimeToolSession(session_id="gw-permit-deny")
+    out = execute_agent_tool("definitely_not_a_tool", {}, session)
     assert "error" in out
     assert "not permitted" in str(out["error"])
 
@@ -123,9 +123,9 @@ def test_invalid_context_unknown_staged_session(tmp_path: Path, monkeypatch: pyt
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     ResearchRepository()  # ensure file exists
-    ctx = PiSessionContext(session_id="gw-unknown-sid")
+    ctx = RuntimeToolSession(session_id="gw-unknown-sid")
     ctx.active_research_session_id = "no-such-session"
-    out = execute_pi_tool("search_tools", {"query": "probe"}, ctx)
+    out = execute_agent_tool("search_tools", {"query": "probe"}, ctx)
     assert out.get("error_type") == "invalid_research_context"
     assert "Unknown research session" in str(out.get("error", ""))
 
@@ -136,9 +136,9 @@ def test_invalid_context_dispatch_missing_job(tmp_path: Path, monkeypatch: pytes
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, _jid = _svc_sid(repo)
-    ctx = PiSessionContext(session_id="gw-missing-jid")
+    ctx = RuntimeToolSession(session_id="gw-missing-jid")
     ctx.active_research_session_id = sid
-    out = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
+    out = execute_agent_tool("search_web", {"query": "NVDA demand"}, ctx)
     assert out.get("error_type") == "invalid_research_context"
     assert "Active research job is required" in str(out.get("error", ""))
 
@@ -150,7 +150,7 @@ def test_dispatch_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPat
     repo = ResearchRepository()
     sid, jid = _svc_sid(repo)
     repo.save_job(dataclasses.replace(repo.get_job(jid), tool_budget=1))
-    ctx = PiSessionContext(session_id="gw-budget")
+    ctx = RuntimeToolSession(session_id="gw-budget")
     ctx.active_research_session_id = sid
     ctx.active_research_job_id = jid
     calls: list[tuple[str, dict[str, object]]] = []
@@ -162,9 +162,9 @@ def test_dispatch_budget_exhausted(tmp_path: Path, monkeypatch: pytest.MonkeyPat
         return {"result_type": "web_search", "query": arguments.get("query"), "results": [], "source": "exa"}
 
     monkeypatch.setattr(gw, "execute_tool", _fake_execute)
-    first = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
+    first = execute_agent_tool("search_web", {"query": "NVDA demand"}, ctx)
     assert "error" not in first, first
-    second = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
+    second = execute_agent_tool("search_web", {"query": "NVDA demand"}, ctx)
     # §3: explicit per-job kernel exhaustion passes through verbatim (no budget_exhausted collapse).
     assert "tool_budget exhausted" in str(second.get("error", "")), second
     assert second.get("error_type") != "budget_exhausted", second
@@ -244,7 +244,7 @@ def test_failure_outcome_soft_and_denied() -> None:
 
 
 def test_success_meta_discovery_and_refs() -> None:
-    import app.pi_gateway as _g
+    import app.tool_runtime as _g
 
     meta = _g._tool_result_meta({"source": "s", "rows": [1]})
     env = type(
@@ -261,7 +261,7 @@ def test_success_meta_discovery_and_refs() -> None:
 
 
 def test_success_meta_source_handle_passthrough() -> None:
-    import app.pi_gateway as _g
+    import app.tool_runtime as _g
 
     meta = _g._tool_result_meta({"source": "s", "rows": [1]})
     env = type(
@@ -288,7 +288,7 @@ def test_success_meta_source_handle_passthrough() -> None:
 
 
 def test_company_name_fills_missing_ticker(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.pi_gateway as _g
+    import app.tool_runtime as _g
 
     def _ticker_aapl(name: str) -> str | None:
         return "AAPL"
@@ -299,7 +299,7 @@ def test_company_name_fills_missing_ticker(monkeypatch: pytest.MonkeyPatch) -> N
 
 
 def test_company_name_unresolved_keeps_args(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.pi_gateway as _g
+    import app.tool_runtime as _g
 
     def _ticker_none(name: str) -> str | None:
         return None
@@ -310,7 +310,7 @@ def test_company_name_unresolved_keeps_args(monkeypatch: pytest.MonkeyPatch) -> 
 
 
 def test_try_company_to_ticker_swallows_error(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.pi_gateway as _g
+    import app.tool_runtime as _g
 
     def _boom(name: str) -> str | None:
         raise RuntimeError("lookup down")
@@ -320,7 +320,7 @@ def test_try_company_to_ticker_swallows_error(monkeypatch: pytest.MonkeyPatch) -
 
 
 def test_call_tool_dispatch_success_no_budget_slot(monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.pi_gateway as _g
+    import app.tool_runtime as _g
 
     def _fake_execute(
         name: str, arguments: dict[str, object], model: str, context: RequestContext | None = None
@@ -329,16 +329,16 @@ def test_call_tool_dispatch_success_no_budget_slot(monkeypatch: pytest.MonkeyPat
         return {"result_type": "fundamentals", "ticker": "AAPL", "source": "test"}
 
     monkeypatch.setattr(_g, "execute_tool", _fake_execute)
-    session = PiSessionContext(session_id="gw-call-tool-ok")
-    out = execute_pi_tool(
+    session = RuntimeToolSession(session_id="gw-call-tool-ok")
+    out = execute_agent_tool(
         "call_tool", {"name": "get_fundamentals", "arguments": {"ticker": "AAPL", "metric": "overview"}}, session
     )
     assert "content" in out, out
 
 
 def test_call_tool_dispatch_error_passthrough() -> None:
-    session = PiSessionContext(session_id="gw-call-tool-err")
-    out = execute_pi_tool("call_tool", {"name": "", "arguments": {}}, session)
+    session = RuntimeToolSession(session_id="gw-call-tool-err")
+    out = execute_agent_tool("call_tool", {"name": "", "arguments": {}}, session)
     assert "error" in out
 
 

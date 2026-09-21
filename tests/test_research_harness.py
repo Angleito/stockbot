@@ -1223,8 +1223,8 @@ def _svc_trio(repo: ResearchRepository, sid: str, eid: str) -> None:
 
 
 def test_committee_cannot_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
     from app.research import service as _svc
+    from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
@@ -1233,7 +1233,7 @@ def test_committee_cannot_search(tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     _svc.record_evidence(sid, src, _svc_item(eid), repo=repo)
     _svc.complete_job(src, {}, repo=repo)
     _svc.freeze_session(sid, 1, repo=repo)
-    out = execute_pi_tool("search_web", {"query": "x", "session_id": sid}, PiSessionContext(session_id="t1"))
+    out = execute_agent_tool("search_web", {"query": "x", "session_id": sid}, RuntimeToolSession(session_id="t1"))
     assert "forbids" in str(out.get("error", ""))
 
 
@@ -1337,14 +1337,14 @@ def test_source_terminal_before_freeze(tmp_path: Path, monkeypatch: pytest.Monke
 
 
 def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    import app.pi_gateway as _gw
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
+    import app.tool_runtime as _gw
+    from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, jid = _svc_sid(repo)
     repo.save_job(dataclasses.replace(repo.get_job(jid), tool_budget=1))
-    ctx = PiSessionContext(session_id="t-budget")
+    ctx = RuntimeToolSession(session_id="t-budget")
     ctx.active_research_session_id = sid
     ctx.active_research_job_id = jid
     calls: list[tuple[str, dict[str, object]]] = []
@@ -1354,9 +1354,9 @@ def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
         return {"result_type": "web_search", "query": arguments.get("query"), "results": [], "source": "exa"}
 
     monkeypatch.setattr(_gw, "execute_tool", _fake_execute)
-    first = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
+    first = execute_agent_tool("search_web", {"query": "NVDA demand"}, ctx)
     assert "error" not in first, first
-    second = execute_pi_tool("search_web", {"query": "NVDA demand"}, ctx)
+    second = execute_agent_tool("search_web", {"query": "NVDA demand"}, ctx)
     # §3: explicit per-job kernel exhaustion passes through verbatim (no budget_exhausted collapse).
     assert "tool_budget exhausted" in str(second.get("error", "")), second
     assert second.get("error_type") != "budget_exhausted", second
@@ -1364,7 +1364,7 @@ def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
     assert calls[0][0] == "search_web" and calls[0][1] == {"query": "NVDA demand"}
     assert repo.get_job(jid).tool_budget == 0
     assert repo.get_session(sid).budget.get("tool_calls_used") == 1
-    kept = execute_pi_tool(
+    kept = execute_agent_tool(
         "research_add_evidence", {"session_id": sid, "job_id": jid, "item": _svc_item(f"{sid}:ev:1")}, ctx
     )
     assert "error" not in kept, kept
@@ -1374,8 +1374,8 @@ def test_budget_stops_dispatch(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) 
 
 def test_research_bound_dispatch_carries_research_session_id(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """SEC discovery sees the attached research session (exhaustive default), None when unattached."""
-    import app.pi_gateway as _gw
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
+    import app.tool_runtime as _gw
+    from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
@@ -1387,18 +1387,18 @@ def test_research_bound_dispatch_carries_research_session_id(tmp_path: Path, mon
         return {"search_id": "s1", "count": 0, "source": "SEC EDGAR"}
 
     monkeypatch.setattr(_gw, "execute_tool", _fake_execute)
-    bound = PiSessionContext(
+    bound = RuntimeToolSession(
         session_id="pi-bound",
         active_research_session_id=sid,
         active_research_job_id=jid,
     )
-    out = execute_pi_tool("search_sec_filings", {"query": "Apple"}, bound)
+    out = execute_agent_tool("search_sec_filings", {"query": "Apple"}, bound)
     assert "error" not in out, out
     assert seen["context_session"] == sid
 
     seen.clear()
-    unbound = PiSessionContext(session_id="pi-unbound")
-    out = execute_pi_tool("search_sec_filings", {"query": "Apple"}, unbound)
+    unbound = RuntimeToolSession(session_id="pi-unbound")
+    out = execute_agent_tool("search_sec_filings", {"query": "Apple"}, unbound)
     assert "error" not in out, out
     assert seen["context_session"] is None
 
@@ -2751,13 +2751,13 @@ def test_dispatch_loop_gate_state_is_per_job(tmp_path: Path, monkeypatch: pytest
 
 def test_dispatch_loop_gate_gateway_repeat_blocked(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """The model path passes arguments through the gateway: the repeat is refused before the tool runs."""
-    import app.pi_gateway as _gw
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
+    import app.tool_runtime as _gw
+    from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, jid = _reg_svc_sid(repo)
-    ctx = PiSessionContext(session_id="t-loop")
+    ctx = RuntimeToolSession(session_id="t-loop")
     ctx.active_research_session_id = sid
     ctx.active_research_job_id = jid
     calls: list[tuple[str, dict[str, object]]] = []
@@ -2767,26 +2767,26 @@ def test_dispatch_loop_gate_gateway_repeat_blocked(tmp_path: Path, monkeypatch: 
         return {"result_type": "sec_search", "query": arguments.get("query"), "count": 1, "results": []}
 
     monkeypatch.setattr(_gw, "execute_tool", _fake_execute)
-    first = execute_pi_tool("search_sec_filings", {"query": "GS OpenAI exposure"}, ctx)
+    first = execute_agent_tool("search_sec_filings", {"query": "GS OpenAI exposure"}, ctx)
     assert "error" not in first, first
-    second = execute_pi_tool("search_sec_filings", {"query": "GS OpenAI exposure"}, ctx)
+    second = execute_agent_tool("search_sec_filings", {"query": "GS OpenAI exposure"}, ctx)
     assert "research_loop_detected" in str(second.get("error", "")), second
     assert len(calls) == 1  # the repeat never reached the tool
-    third = execute_pi_tool("search_sec_filings", {"query": "GS 10-Q risk factors"}, ctx)
+    third = execute_agent_tool("search_sec_filings", {"query": "GS 10-Q risk factors"}, ctx)
     assert "error" not in third, third
     assert len(calls) == 2
 
 
 def test_dispatch_loop_gate_no_staged_job_unchanged(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """A staged session with no active job keeps today's refusal verbatim; the loop gate never sees it."""
-    from app.pi_gateway import PiSessionContext, execute_pi_tool
+    from app.tool_runtime import RuntimeToolSession, execute_agent_tool
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, _src = _reg_svc_sid(repo)
-    ctx = PiSessionContext(session_id="t-nojob")
+    ctx = RuntimeToolSession(session_id="t-nojob")
     ctx.active_research_session_id = sid
-    out = execute_pi_tool("search_sec_filings", {"query": "GS OpenAI exposure"}, ctx)
+    out = execute_agent_tool("search_sec_filings", {"query": "GS OpenAI exposure"}, ctx)
     assert out.get("error_type") == "invalid_research_context"
     assert "Active research job is required" in str(out.get("error"))
     assert repo.get_session(sid).budget.get("tool_calls_used", 0) == 0
