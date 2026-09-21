@@ -128,14 +128,23 @@ export async function reason(opts: {
   evidence: Evidence[];
   escalated: boolean;
   direct?: boolean;
+  // Optional graph state (kernel.ts always sends these; direct callers omit them).
+  // incompleteGuard/unresolved force the missing-evidence line even with evidence present.
+  objective?: string;
+  nodes?: unknown[];
+  decisions?: unknown[];
+  unresolved?: string[];
+  incompleteGuard?: boolean;
   onDelta: (text: string) => void;
 }): Promise<{ text: string; usage: MuseUsage; missingEvidence?: string }> {
   const apiKey = process.env.OPENCODE_API_KEY;
   if (!apiKey) throw new Error("OPENCODE_API_KEY missing");
   const session = crypto.randomUUID();
+  const needsGapLine =
+    opts.escalated || opts.incompleteGuard === true || (opts.unresolved !== undefined && opts.unresolved.length > 0);
   const system = opts.direct
     ? "You are Needle, a helpful assistant. Answer the user directly and briefly. If the request is unclear, ask what they mean and say what you can look up: the time, SEC filings, a URL to fetch, or a web search."
-    : SYSTEM + (opts.escalated ? "\nRetrieval escalated with no usable evidence. End your answer with a line: Missing-Evidence: <what is needed>." : "");
+    : SYSTEM + (needsGapLine ? "\nRetrieval escalated with no usable evidence. End your answer with a line: Missing-Evidence: <what is needed>." : "");
   const user = opts.direct ? `USER REQUEST\n${opts.prompt}` : `USER REQUEST\n${opts.prompt}\n\nEVIDENCE\n${formatEvidence(opts.evidence)}`;
   const input = [
     { role: "system", content: system },

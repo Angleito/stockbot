@@ -1,27 +1,25 @@
-"""Bounded OMP runs over a thesis trigger (stdlib + PyYAML only).
+"""Bounded kernel research runs over a thesis trigger (stdlib + PyYAML only).
 
-Automated monitoring launches one OMP subprocess per pending trigger
-(see app.thesis.omp_runner); OMP persists its own findings through the
-canonical thesis tools. The runner only selects the trigger, builds a small
-bounded prompt, launches OMP without holding any lock across the subprocess,
-and acknowledges the stable trigger ID only once a durable trigger-linked
-journal entry exists. A failed launch (or a run with no such journal) leaves
-the trigger pending with valid partial tool writes intact (at-least-once
-retry; no rollback).
+Automated monitoring runs the shared graph fan-out per pending trigger
+(app/research/kernel_worker.py run_graph_prompt + scheduler.run): the runner
+only selects the trigger, builds a small bounded prompt, runs the shared
+helper in-process, and acknowledges the stable trigger ID only once a
+durable trigger-linked journal entry exists. A failed run (or a run with no
+such journal) leaves the trigger pending with valid partial tool writes
+intact (at-least-once retry; no rollback).
 """
 
 from __future__ import annotations
 
 import json
+from collections.abc import Callable
 from dataclasses import dataclass, field
 from datetime import UTC, datetime
 
-from app.config import get_data_root
 from app.policy import Capability
 from app.storage.ids import run_id as new_run_id
 from app.thesis.context import ResearchContext, build_live_context
 from app.thesis.models import JSONValue, Trigger
-from app.thesis.omp_runner import run_thesis_omp
 from app.thesis.repository import ThesisRepository
 
 _GRANTS: dict[str, Capability] = {
@@ -213,6 +211,32 @@ def _fail(run_id: str, exc: Exception) -> None:
         pass
 
 
+def _default_run_kernel(prompt: str, *, as_of: str | None) -> None:
+    """Run the shared graph fan-out for a trigger prompt (same path as the worker)."""
+    import asyncio
+
+    from app.research import scheduler
+    from app.research.kernel_worker import run_graph_prompt
+
+    sid = run_graph_prompt(prompt, as_of)
+    asyncio.run(scheduler.run(sid))
+
+
+_RUN_KERNEL: Callable[..., None] | None = None
+
+
+def _run_kernel(prompt: str, *, as_of: str | None, thesis_id: str, trigger_id: str, run_id: str) -> None:
+    """Injectable kernel seam (tests monkeypatch module _RUN_KERNEL)."""
+    if _RUN_KERNEL is not None:
+        fake = _RUN_KERNEL
+        try:
+            fake(prompt, thesis_id=thesis_id, trigger_id=trigger_id, run_id=run_id)
+        except TypeError:
+            fake(prompt)
+        return
+    _default_run_kernel(prompt, as_of=as_of)
+
+
 def run_trigger(
     repository: ThesisRepository,
     thesis_id: str,
@@ -220,12 +244,11 @@ def run_trigger(
     *,
     known_at: str | None = None,
 ) -> RunOutcome:
-    """Launch OMP for one pending trigger; ack that trigger ID only.
+    """Run the shared graph fan-out for one pending trigger; ack that trigger ID only.
 
-    Failure (bad state, over-budget context, OMP launch/timeout/nonzero, or no
-    durable trigger-linked journal) raises before acknowledgement, so the
-    trigger stays pending and valid partial tool writes are retained for the
-    retry.
+    Failure (bad state, over-budget context, kernel failure, or no durable
+    trigger-linked journal) raises before acknowledgement, so the trigger
+    stays pending and valid partial tool writes are retained for the retry.
     """
     known_at = known_at or _utcnow()
     thesis = repository.load_thesis(thesis_id)
@@ -235,19 +258,17 @@ def run_trigger(
         raise KeyError(f"unknown trigger: {trigger_id!r}")
     if trigger.status != "pending":
         raise ValueError(f"<runner>: trigger {trigger_id!r} is {trigger.status}, not pending")
-    # PIT/budget gate: raises before any OMP call when context is over budget.
+    # PIT/budget gate: raises before any kernel call when context is over budget.
     ctx = build_live_context(repository, tid, trigger, data_cutoff=known_at)
-    root = getattr(repository, "root", None)
-    data_root = root.parent if root is not None else get_data_root()
     rid = new_run_id()
     prompt = _build_prompt(thesis_id=tid, trigger=trigger, data_cutoff=known_at, ctx=ctx, run_id=rid)
     try:
-        run_thesis_omp(thesis_id=tid, trigger_id=trigger.trigger_id, prompt=prompt, data_root=data_root, run_id=rid)
+        _run_kernel(prompt, as_of=known_at, thesis_id=tid, trigger_id=trigger.trigger_id, run_id=rid)
         repository.load_triggers(tid)  # re-read: surface corrupt YAML instead of acking blind
         if not repository.has_journal_for_trigger(tid, trigger.trigger_id, run_id=rid):
             raise RuntimeError(
                 f"<runner>: no durable journal for trigger {trigger.trigger_id!r} (thesis {tid!r});"
-                f" OMP must write a material thesis_journal entry with trigger_id {trigger.trigger_id!r}"
+                f" the kernel run must write a material thesis_journal entry with trigger_id {trigger.trigger_id!r}"
                 f" and run_id {rid!r} before the trigger can be acknowledged;"
                 " leaving pending for retry"
             )

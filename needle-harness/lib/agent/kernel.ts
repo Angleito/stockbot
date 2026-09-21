@@ -42,9 +42,36 @@ export type KernelToolCall = {
   category?: FailureCategory;
 };
 
+export type KernelGraphNode = {
+  node_id: string;
+  question: string;
+  status: string;
+  depends_on: string[];
+};
+
+export type KernelReasonInput = {
+  prompt: string;
+  evidence: Evidence[];
+  escalated: boolean;
+  direct?: boolean;
+  objective: string;
+  nodes: KernelGraphNode[];
+  decisions: Record<string, unknown>[];
+  unresolved: string[];
+  incompleteGuard: boolean;
+  onDelta: (text: string) => void;
+};
+
 export type KernelResponse = {
   id?: string;
+  objective?: string;
   evidence: KernelEvidence[];
+  nodes?: KernelGraphNode[];
+  decisions?: Record<string, unknown>[];
+  unresolved?: string[];
+  incompleteGuard?: boolean;
+  incomplete_guard?: boolean;
+  toolExecutions?: KernelNeedleDecision[];
   needleDecisions: KernelNeedleDecision[];
   toolCalls: KernelToolCall[];
   failures: Record<string, number>;
@@ -65,9 +92,11 @@ export type KernelChild = {
 
 export type KernelSpawn = (cmd: string, args: string[], opts: { env: NodeJS.ProcessEnv }) => KernelChild;
 
+export type KernelReasonResult = { text: string; usage: MuseUsage; missingEvidence?: string };
+export type KernelReasonFn = (opts: KernelReasonInput) => Promise<KernelReasonResult>;
 export type RunKernelDeps = {
   spawnFn?: KernelSpawn;
-  reason?: typeof reason;
+  reason?: KernelReasonFn;
   python?: string;
   workerPath?: string;
   timeoutMs?: number;
@@ -167,6 +196,52 @@ function callWorker(
   });
 }
 
+function graphSection(title: string, lines: string[]): string {
+  if (lines.length === 0) return `${title}: (none)`;
+  return `${title}:\n${lines.map((l) => `- ${l}`).join("\n")}`;
+}
+
+// Graph projection for the final writer: Muse renders prose but cites only
+// graph nodes/decisions/evidence; unresolved + incomplete_guard are explicit
+// so the answer never masquerades a partial graph as complete.
+function graphProjection(input: {
+  objective: string;
+  nodes: KernelGraphNode[];
+  decisions: Record<string, unknown>[];
+  unresolved: string[];
+  incompleteGuard: boolean;
+  escalated: boolean;
+}): string {
+  const nodeById: Record<string, KernelGraphNode> = {};
+  for (const n of input.nodes) nodeById[n.node_id] = n;
+  const nodeLines = input.nodes.map(
+    (n) =>
+      `[${n.node_id}] (${n.status}) q=${JSON.stringify(n.question)} deps=${n.depends_on.length ? n.depends_on.join(",") : "none"}`,
+  );
+  const decisionLines = input.decisions.map((d, i) => {
+    const rec = d as Record<string, unknown>;
+    const dtype = typeof rec.decision_type === "string" ? rec.decision_type : typeof rec.type === "string" ? rec.type : "decision";
+    const dnode = typeof rec.node_id === "string" ? rec.node_id : typeof rec.nodeId === "string" ? rec.nodeId : "session";
+    const sel = rec.selected !== undefined ? JSON.stringify(rec.selected) : JSON.stringify(rec);
+    return `[D${i}] ${dtype} node=${dnode} selected=${sel.slice(0, 300)}`;
+  });
+  const unresolvedLines = input.unresolved.map((id) => {
+    const n = nodeById[id];
+    return n ? `[${id}] (${n.status}) ${n.question.slice(0, 200)}` : `[${id}] (unknown node)`;
+  });
+  const guard = input.incompleteGuard
+    ? "INCOMPLETE: the tool-round guard tripped — coverage is partial, say what is missing, never present this as converged."
+    : "Guard: not tripped — still, unresolved items below are open, never present them as answered.";
+  return [
+    `OBJECTIVE (verbatim user intent; never restate or change it): ${input.objective}`,
+    graphSection("NODES", nodeLines),
+    graphSection("JEV DECISIONS (persisted dispositions; the only authority)", decisionLines),
+    graphSection("UNRESOLVED (explicitly open; cite as gaps, never answer from memory)", unresolvedLines),
+    guard,
+    "AUTHORITY: project this graph into prose only. Cite only node ids, decision records, and evidence ids above. No invented conclusions, no buy/sell/hold/order/portfolio/committee verdicts — research never decides, the user does.",
+  ].join("\n\n");
+}
+
 export async function runKernelAgent(
   prompt: string,
   emit: (e: AgentEvent) => void,
@@ -213,8 +288,22 @@ export async function runKernelAgent(
     return;
   }
   const workerMs = performance.now() - workerStart;
-  const decisions = Array.isArray(res.needleDecisions) ? res.needleDecisions : [];
+  // Canonical toolExecutions; legacy needleDecisions alias kept one release for compat.
+  const rawExec = Array.isArray(res.toolExecutions) ? res.toolExecutions : res.needleDecisions;
+  const decisions = Array.isArray(rawExec) ? rawExec : [];
   const calls = Array.isArray(res.toolCalls) ? res.toolCalls : [];
+  const nodes: KernelGraphNode[] = (Array.isArray(res.nodes) ? res.nodes : [])
+    .filter((n) => n && typeof n.node_id === "string")
+    .map((n) => ({
+      node_id: String(n.node_id),
+      question: String(n.question ?? ""),
+      status: String(n.status ?? ""),
+      depends_on: Array.isArray(n.depends_on) ? n.depends_on.map(String) : [],
+    }));
+  const persisted: Record<string, unknown>[] = Array.isArray(res.decisions) ? res.decisions : [];
+  const unresolved: string[] = Array.isArray(res.unresolved) ? res.unresolved.map(String) : [];
+  const incompleteGuard = res.incompleteGuard ?? res.incomplete_guard ?? false;
+  const objective = typeof res.objective === "string" && res.objective ? res.objective : prompt;
   const evidence: Evidence[] = (Array.isArray(res.evidence) ? res.evidence : []).map((e) => ({
     id: String(e.id),
     source: e.source ?? "kernel",
@@ -278,11 +367,17 @@ export async function runKernelAgent(
   const tm = performance.now();
   let usage: MuseUsage;
   try {
+    const projection = graphProjection({ objective, nodes, decisions: persisted, unresolved, incompleteGuard, escalated: res.escalated ?? false });
     const r = await reasonFn({
-      prompt,
+      prompt: `${prompt}\n\n${projection}`,
       evidence,
       escalated: res.escalated ?? false,
       direct: (res.escalated ?? false) && evidence.length === 0,
+      objective,
+      nodes,
+      decisions: persisted,
+      unresolved,
+      incompleteGuard,
       onDelta: (text) => emit({ type: "answer_delta", text }),
     });
     usage = r.usage;
