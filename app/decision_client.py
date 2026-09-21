@@ -22,14 +22,15 @@ import threading
 import time
 import urllib.request
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping, Sequence
 from datetime import UTC, datetime
 from pathlib import Path
-from typing import Any
+from typing import Protocol, runtime_checkable
 
 from app.config import get_data_root
 from app.research.models import (
     DecisionRecord,
+    JSONValue,
     ToolDecision,
     new_decision_id,
     utcnow,
@@ -42,6 +43,12 @@ from app.storage.runs import get_current_recorder
 logger = logging.getLogger(__name__)
 
 __all__ = ["JevClient"]
+
+
+@runtime_checkable
+class _HasToDict(Protocol):
+    def to_dict(self) -> object: ...
+
 
 _PROVIDER = "typesafe"
 _DEFAULT_MODEL = "jev-latest"
@@ -85,7 +92,7 @@ def _is_prob(v: object) -> bool:
     return isinstance(v, (int, float)) and not isinstance(v, bool) and 0.0 <= float(v) <= 1.0
 
 
-def _parse_noul(name: str, qid: str, ans: object) -> dict[str, Any]:
+def _parse_noul(name: str, qid: str, ans: object) -> dict[str, JSONValue]:
     bad = ValueError(f"{name}: malformed_typesafe_answer for {qid}")
     if not isinstance(ans, dict) or ans.get("type") != "noul":
         raise bad
@@ -94,7 +101,7 @@ def _parse_noul(name: str, qid: str, ans: object) -> dict[str, Any]:
     return {"kind": "noul", "probability": float(ans["noul"])}
 
 
-def _parse_choice(name: str, qid: str, ans: object, options: Mapping[str, str]) -> dict[str, Any]:
+def _parse_choice(name: str, qid: str, ans: object, options: Mapping[str, str]) -> dict[str, JSONValue]:
     bad = ValueError(f"{name}: malformed_typesafe_answer for {qid}")
     if not isinstance(ans, dict) or ans.get("type") != "choice":
         raise bad
@@ -109,7 +116,7 @@ def _parse_choice(name: str, qid: str, ans: object, options: Mapping[str, str]) 
     got = sorted(probs)
     if got != want or not _is_prob(conf):
         raise bad
-    out: dict[str, Any] = {}
+    out: dict[str, JSONValue] = {}
     for k in want:
         if not _is_prob(probs[k]):
             raise bad
@@ -117,7 +124,7 @@ def _parse_choice(name: str, qid: str, ans: object, options: Mapping[str, str]) 
     return {"kind": "choice", "choice": choice, "probabilities": out, "confidence": float(conf)}
 
 
-def _parse_score(name: str, qid: str, ans: object, max_score: float | None) -> dict[str, Any]:
+def _parse_score(name: str, qid: str, ans: object, max_score: float | None) -> dict[str, JSONValue]:
     bad = ValueError(f"{name}: malformed_typesafe_answer for {qid}")
     if not isinstance(ans, dict) or ans.get("type") != "score":
         raise bad
@@ -126,7 +133,7 @@ def _parse_score(name: str, qid: str, ans: object, max_score: float | None) -> d
         raise bad
     if max_score is not None and not 0 <= float(score) <= max_score:
         raise bad
-    out: dict[str, Any] = {"kind": "score", "score": score}
+    out: dict[str, JSONValue] = {"kind": "score", "score": score}
     if ans.get("confidence") is not None:
         if not _is_prob(ans.get("confidence")):
             raise bad
@@ -135,7 +142,7 @@ def _parse_score(name: str, qid: str, ans: object, max_score: float | None) -> d
         probs = ans.get("probabilities")
         if not isinstance(probs, dict):
             raise bad
-        keep: dict[str, float] = {}
+        keep: dict[str, JSONValue] = {}
         for k, v in probs.items():
             if not _is_prob(v):
                 raise bad
@@ -163,18 +170,18 @@ def _options_from_question(q: object) -> dict[str, str]:
 
 
 def parse_decisions(
-    questions: Mapping[str, Any],
+    questions: Mapping[str, JSONValue],
     raw: object,
     choice_options: Mapping[str, Mapping[str, str]] | None = None,
     name: str = "decide",
-) -> dict[str, dict[str, Any]]:
+) -> dict[str, dict[str, JSONValue]]:
     """Validate a raw SystemOne payload into per-question decisions (mirrors askDecisions)."""
     if not isinstance(raw, dict) or not isinstance(raw.get("answers"), dict):
         raise ValueError(f"{name}: malformed_typesafe_response")
-    answers: dict[str, Any] = raw["answers"]
+    answers: dict[str, JSONValue] = raw["answers"]
     if sorted(answers) != sorted(questions):
         raise ValueError(f"{name}: typesafe answers do not match questions")
-    out: dict[str, dict[str, Any]] = {}
+    out: dict[str, dict[str, JSONValue]] = {}
     for qid in sorted(questions):
         q = questions[qid]
         ans = answers[qid]
@@ -191,22 +198,28 @@ def parse_decisions(
     return out
 
 
-def _field(obj: Any, *names: str, default: Any = None) -> Any:
+def _field(obj: object, *names: str, default: JSONValue | None = None) -> JSONValue | None:
     for name in names:
-        if isinstance(obj, dict) and name in obj and obj[name] is not None:
-            return obj[name]
-        value = getattr(obj, name, None)
-        if value is not None:
-            return value
+        candidate: object = (
+            obj.get(name) if isinstance(obj, dict) and obj.get(name) is not None else getattr(obj, name, None)
+        )
+        if candidate is None:
+            continue
+        try:
+            return validate_json_value(candidate, "<decision_client>: '_field'")
+        except ValueError:
+            continue
     return default
 
 
-def _node_dict(node: Any) -> dict[str, Any]:
+def _node_dict(node: object) -> dict[str, JSONValue]:
+    raw: dict[str, JSONValue]
     if isinstance(node, dict):
-        raw = dict(node)
-    elif hasattr(node, "to_dict"):
+        raw = validate_json_mapping(node, "<node_dict>")
+    elif isinstance(node, _HasToDict):
         try:
-            raw = dict(node.to_dict())
+            got = node.to_dict()
+            raw = validate_json_mapping(got, "<node_dict>") if isinstance(got, dict) else {}
         except Exception:
             raw = {}
     else:
@@ -214,8 +227,9 @@ def _node_dict(node: Any) -> dict[str, Any]:
         try:
             from dataclasses import asdict, is_dataclass
 
-            if is_dataclass(node):
-                raw = dict(asdict(node))
+            if is_dataclass(node) and not isinstance(node, type):
+                candidate = asdict(node)
+                raw = validate_json_mapping(candidate, "<node_dict>") if isinstance(candidate, dict) else {}
         except Exception:
             raw = {}
         if not raw:
@@ -230,10 +244,10 @@ def _node_dict(node: Any) -> dict[str, Any]:
                 "evidence_ids",
                 "missing_evidence",
             ):
-                value = getattr(node, key, None)
-                if value is not None:
-                    raw[key] = value
-    out: dict[str, Any] = {}
+                attr: object = getattr(node, key, None)
+                if attr is not None:
+                    raw[key] = validate_json_value(attr, "<node_dict>")
+    out: dict[str, JSONValue] = {}
     for key in (
         "node_id",
         "id",
@@ -245,15 +259,18 @@ def _node_dict(node: Any) -> dict[str, Any]:
         "evidence_ids",
         "missing_evidence",
     ):
-        value = raw.get(key)
+        value: object = raw.get(key)
         if value is None:
             continue
-        out[key] = list(value) if isinstance(value, tuple) else value
+        if isinstance(value, tuple):
+            out[key] = validate_json_value(list(value), "<decision_client>: '_node_dict'")
+        else:
+            out[key] = validate_json_value(value, "<decision_client>: '_node_dict'")
     return out
 
 
-def _outcome_dict(outcome: Any) -> dict[str, Any]:
-    def text(value: Any) -> str | None:
+def _outcome_dict(outcome: object) -> dict[str, JSONValue]:
+    def text(value: object) -> str | None:
         return value if isinstance(value, str) else (None if value is None else str(value))
 
     return {
@@ -264,7 +281,7 @@ def _outcome_dict(outcome: Any) -> dict[str, Any]:
     }
 
 
-def _evidence_ids(evidence: Any) -> list[str]:
+def _evidence_ids(evidence: Sequence[JSONValue] | Mapping[str, JSONValue] | None) -> list[str]:
     ids: list[str] = []
     if not isinstance(evidence, list):
         return ids
@@ -280,16 +297,17 @@ def _evidence_ids(evidence: Any) -> list[str]:
     return ids
 
 
-def _manifest_line(entry: dict[str, Any]) -> str:
+def _manifest_line(entry: Mapping[str, JSONValue]) -> str:
     """One compact option line per registry entry (mirrors decision/jev.ts manifestLine)."""
 
-    def opt(value: Any) -> str | None:
+    def opt(value: object) -> str | None:
         if not isinstance(value, str) or not value.strip():
             return None
         return " ".join(value.split())
 
     desc = entry.get("description")
-    line = " ".join(desc.split()) if isinstance(desc, str) and desc else entry.get("name", "")
+    raw_name = entry.get("name", "")
+    line = " ".join(desc.split()) if isinstance(desc, str) and desc else (raw_name if isinstance(raw_name, str) else "")
     purpose = opt(entry.get("purpose"))
     if purpose and purpose != line:
         line += f" Purpose: {purpose}."
@@ -315,10 +333,10 @@ def _manifest_line(entry: dict[str, Any]) -> str:
 
 
 def _tool_options_prompt(
-    registry: list[dict[str, Any]],
-    node: dict[str, Any],
-    evidence: Any,
-    attempts: Any,
+    registry: Sequence[Mapping[str, JSONValue]],
+    node: Mapping[str, JSONValue],
+    evidence: Sequence[JSONValue] | Mapping[str, JSONValue] | None,
+    attempts: Sequence[JSONValue] | Mapping[str, JSONValue] | None,
 ) -> tuple[dict[str, str], str]:
     if not registry:
         raise ValueError("tool_selection: empty registry")
@@ -356,7 +374,7 @@ def _tool_options_prompt(
     return options, prompt
 
 
-def _auto_registry() -> list[dict[str, Any]]:
+def _auto_registry() -> list[dict[str, JSONValue]]:
     try:
         from app.research.scheduler import build_registry
 
@@ -369,12 +387,14 @@ def _auto_registry() -> list[dict[str, Any]]:
     from app.security.action_policy import TOOL_DOMAINS
     from app.tools import TOOL_DISCOVERY_REGISTRY, tools_for_capabilities
 
-    try:  # scheduler import failed above; reuse its blind list when available
+    try:  # scheduler import failed above; reuse its handle/blind lists when available
+        from app.research.scheduler import _HANDLE_PARAMS as _HANDLES
         from app.research.scheduler import _PIT_BLIND_TOOLS as _BLIND
     except Exception:
+        _HANDLES = frozenset()
         _BLIND = frozenset()
 
-    out: list[dict[str, Any]] = []
+    out: list[dict[str, JSONValue]] = []
     for tool in tools_for_capabilities(frozenset({Capability.RESEARCH})):
         fn = tool.get("function") if isinstance(tool, dict) else None
         if not isinstance(fn, dict):
@@ -385,7 +405,8 @@ def _auto_registry() -> list[dict[str, Any]]:
         params = fn.get("parameters")
         params = dict(params) if isinstance(params, dict) else {}
         required = params.get("required")
-        required = [str(k) for k in required if isinstance(k, str)] if isinstance(required, list) else []
+        req_list: list[str] = [str(k) for k in required if isinstance(k, str)] if isinstance(required, list) else []
+        required = req_list
         meta = TOOL_DISCOVERY_REGISTRY.get(name)
         out.append(
             {
@@ -396,7 +417,9 @@ def _auto_registry() -> list[dict[str, Any]]:
                 "keyInputs": f"req({', '.join(required)})" if required else "req()",
                 "outputKind": meta.output_kind if meta is not None else "",
                 "evidence": meta.output_kind if meta is not None else "",
-                "prerequisites": "",
+                "prerequisites": f"needs {', '.join(needs)}"
+                if (needs := [k for k in required if k in _HANDLES])
+                else "",
                 # ponytail: degraded path (scheduler unimportable); blind list best-effort.
                 "pitSupport": "PIT-blind: current state only" if name in _BLIND else "PIT-scoped",
                 "parameters": params,
@@ -431,7 +454,7 @@ class JevClient:
     def __init__(
         self,
         *,
-        transport: Any | None = None,
+        transport: Callable[..., object] | None = None,
         runtime_path: Path | str | None = None,
         timeout_s: float = 60.0,
         data_root: Path | None = None,
@@ -485,7 +508,7 @@ class JevClient:
         self._proc = proc
         return proc
 
-    def _sidecar_roundtrip(self, payload: dict[str, Any]) -> dict[str, Any]:
+    def _sidecar_roundtrip(self, payload: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
         with self._lock:
             try:
                 proc = self._ensure_proc()
@@ -523,14 +546,14 @@ class JevClient:
                 raise RuntimeError(f"decide: malformed sidecar response: {exc}") from exc
             if not isinstance(response, dict):
                 raise RuntimeError("decide: malformed sidecar response")
-            return response
+            return validate_json_mapping(response, "<decision_client>: 'sidecar'")
 
-    def _http_system_one(self, state: Any, questions: Mapping[str, Any]) -> dict[str, Any]:
+    def _http_system_one(self, state: object, questions: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
         key = (os.environ.get("TYPESAFE_API_KEY") or "").strip()
         if not key:
             raise RuntimeError("decide: jev unavailable (no sidecar, no TYPESAFE_API_KEY for direct call)")
         base = (os.environ.get("TYPESAFE_BASE_URL") or "https://api.typesafe.ai").rstrip("/")
-        body: dict[str, Any] = {"state": state, "questions": dict(questions)}
+        body: dict[str, JSONValue] = {"state": validate_json_value(state, "<state>"), "questions": dict(questions)}
         model = (os.environ.get("TYPESAFE_DEFAULT_MODEL") or "").strip()
         if model:
             body["model"] = model
@@ -551,23 +574,23 @@ class JevClient:
             raise RuntimeError(f"decide: typesafe_request_failed: {exc}") from exc
         if not isinstance(raw, dict):
             raise ValueError("decide: malformed_typesafe_response")
-        return raw
+        return validate_json_mapping(raw, "<decision_client>: 'http'")
 
     async def _invoke(
         self,
-        state: Any,
-        questions: Mapping[str, Any],
+        state: object,
+        questions: Mapping[str, JSONValue],
         choice_options: Mapping[str, Mapping[str, str]] | None,
-    ) -> tuple[dict[str, dict[str, Any]], Any, str]:
+    ) -> tuple[dict[str, dict[str, JSONValue]], JSONValue, str]:
         if self._transport is not None:
             raw = self._transport(state, dict(questions))
             if inspect.isawaitable(raw):
                 raw = await raw
-            return parse_decisions(questions, raw, choice_options), raw, "stub"
-        payload: dict[str, Any] = {
+            return parse_decisions(questions, raw, choice_options), validate_json_value(raw, "<raw>"), "stub"
+        payload: dict[str, JSONValue] = {
             "id": f"jev:{uuid.uuid4().hex[:12]}",
             "op": "decide",
-            "state": state,
+            "state": validate_json_value(state, "<state>"),
             "questions": dict(questions),
         }
         if choice_options:
@@ -589,19 +612,25 @@ class JevClient:
         decisions = response.get("decisions")
         if not isinstance(decisions, dict) or not decisions:
             raise RuntimeError("decide: malformed sidecar response")
-        return decisions, response.get("raw"), "sidecar"
+        typed: dict[str, dict[str, JSONValue]] = {}
+        for qid, val in validate_json_mapping(decisions, "<decision_client>: 'decisions'").items():
+            if not isinstance(val, dict):
+                raise RuntimeError("decide: malformed sidecar response")
+            typed[qid] = validate_json_mapping(val, "<decision_client>: 'decision'")
+        raw_out: object = response.get("raw")
+        return typed, validate_json_value(raw_out, "<raw>"), "sidecar"
 
     async def decide(
         self,
-        state: Any,
-        questions: Mapping[str, Any],
+        state: object,
+        questions: Mapping[str, JSONValue],
         *,
         decision_type: str,
         session_id: str,
         node_id: str | None = None,
         job_id: str | None = None,
         choice_options: Mapping[str, Mapping[str, str]] | None = None,
-    ) -> dict[str, dict[str, Any]]:
+    ) -> dict[str, dict[str, JSONValue]]:
         """Typed JEV decide; persists the round best-effort, raises on any defect."""
         if not decision_type or not isinstance(decision_type, str):
             raise ValueError("decide: decision_type required")
@@ -636,10 +665,10 @@ class JevClient:
     async def select_tool(
         self,
         objective: str,
-        node: Any,
-        registry: list[dict[str, Any]] | None = None,
-        evidence: Any = None,
-        attempts: Any = None,
+        node: object,
+        registry: Sequence[Mapping[str, JSONValue]] | None = None,
+        evidence: Sequence[JSONValue] | Mapping[str, JSONValue] | None = None,
+        attempts: Sequence[JSONValue] | Mapping[str, JSONValue] | None = None,
         *,
         session_id: str,
         job_id: str | None = None,
@@ -649,7 +678,13 @@ class JevClient:
         node_d = _node_dict(node)
         nid = node_d.get("node_id") or node_d.get("id")
         options, prompt = _tool_options_prompt(reg, node_d, evidence, attempts)
-        questions = {"tool_selection": {"type": "choice", "instructions": prompt, "criteria": options}}
+        questions: dict[str, JSONValue] = {
+            "tool_selection": {
+                "type": "choice",
+                "instructions": prompt,
+                "criteria": validate_json_mapping(options, "<decision_client>: 'criteria'"),
+            }
+        }
         state = {"objective": objective, "node": node_d, "evidence": evidence or [], "attempts": attempts or []}
         decisions = await self.decide(
             state,
@@ -666,19 +701,25 @@ class JevClient:
 
     async def adjudicate(
         self,
-        proposal: Any,
-        node: Any,
+        proposal: object,
+        node: object,
         *,
         session_id: str,
         job_id: str | None = None,
-        registry: list[dict[str, Any]] | None = None,
+        registry: Sequence[Mapping[str, JSONValue]] | None = None,
     ) -> ToolDecision:
         """JEV adjudicates a reasoner proposal over the same whole-registry options as select_tool; proposal lives in state only, never filters the registry. Needle never selects/chains/judges."""
         reg = list(registry) if registry else _auto_registry()
         node_d = _node_dict(node)
         nid = node_d.get("node_id") or node_d.get("id")
         options, prompt = _tool_options_prompt(reg, node_d, None, None)
-        questions = {"tool_selection": {"type": "choice", "instructions": prompt, "criteria": options}}
+        questions: dict[str, JSONValue] = {
+            "tool_selection": {
+                "type": "choice",
+                "instructions": prompt,
+                "criteria": validate_json_mapping(options, "<decision_client>: 'criteria'"),
+            }
+        }
         state = {"proposal": proposal, "node": node_d, "objective": node_d.get("question")}
         decisions = await self.decide(
             state,
@@ -695,18 +736,18 @@ class JevClient:
 
     async def assess_result(
         self,
-        node: Any,
-        outcome: Any,
-        evidence: Any = None,
+        node: object,
+        outcome: object,
+        evidence: Sequence[JSONValue] | Mapping[str, JSONValue] | None = None,
         *,
         session_id: str,
         job_id: str | None = None,
-    ) -> dict[str, Any]:
+    ) -> dict[str, JSONValue]:
         """Post-tool assessment: relevance noul + evidence-state choice + continue choice."""
         node_d = _node_dict(node)
         nid = node_d.get("node_id") or node_d.get("id")
         question = node_d.get("question") or ""
-        questions = {
+        questions: dict[str, JSONValue] = {
             "relevance": {"type": "noul", "instructions": f"Do the available facts support resolving: {question}"},
             "evidence_state": {
                 "type": "choice",
@@ -732,7 +773,7 @@ class JevClient:
         relevance = decisions.get("relevance") or {}
         ev_state = decisions.get("evidence_state") or {}
         cont = decisions.get("continue") or {}
-        probs: dict[str, Any] = {}
+        probs: dict[str, JSONValue] = {}
         if isinstance(relevance.get("probability"), (int, float)):
             probs["relevance"] = relevance["probability"]
         if isinstance(ev_state.get("probabilities"), dict):
@@ -756,7 +797,7 @@ class JevClient:
         }
 
     @staticmethod
-    def _to_tool_decision(decision: Any, options: Mapping[str, str], set_of_registry: set[str]) -> ToolDecision:
+    def _to_tool_decision(decision: object, options: Mapping[str, str], set_of_registry: set[str]) -> ToolDecision:
         if not isinstance(decision, dict) or decision.get("kind") != "choice":
             raise ValueError("decide: malformed tool_selection decision")
         winner = decision.get("choice")
@@ -764,7 +805,8 @@ class JevClient:
         conf = decision.get("confidence")
         if not isinstance(winner, str) or not isinstance(probs, dict):
             raise ValueError("decide: malformed tool_selection decision")
-        probabilities = {str(k): float(v) for k, v in probs.items()}
+        floats: dict[str, float] = {str(k): float(v) for k, v in probs.items()}
+        probabilities = validate_json_mapping(floats, "<decision_client>: 'probabilities'")
         confidence = float(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else None
         if winner == REASON_SENTINEL:
             out = ToolDecision(action="reason", probabilities=probabilities, confidence=confidence)
@@ -773,15 +815,18 @@ class JevClient:
         else:
             if winner not in set_of_registry:
                 raise ValueError(f"decide: tool_selection winner {winner!r} not in registry")
-            winner_prob = probabilities.get(winner, 0.0)
+            winner_prob = floats.get(winner, 0.0)
+
+            def _rank_key(t: str) -> float:
+                return floats.get(t, 0.0)
+
             ranked = sorted(
                 (
                     t
                     for t in set_of_registry
-                    if probabilities.get(t, 0.0) >= _PARALLEL_MIN_PROB
-                    and probabilities.get(t, 0.0) >= winner_prob - _PARALLEL_WINDOW
+                    if floats.get(t, 0.0) >= _PARALLEL_MIN_PROB and floats.get(t, 0.0) >= winner_prob - _PARALLEL_WINDOW
                 ),
-                key=lambda t: probabilities.get(t, 0.0),
+                key=_rank_key,
                 reverse=True,
             )[:_PARALLEL_CAP]
             names = (winner, *(t for t in ranked if t != winner))[:_PARALLEL_CAP]
@@ -802,16 +847,16 @@ class JevClient:
         session_id: str,
         node_id: str | None,
         job_id: str | None,
-        questions: dict[str, Any],
-        decisions: dict[str, dict[str, Any]],
-        raw: Any,
+        questions: dict[str, JSONValue],
+        decisions: dict[str, dict[str, JSONValue]],
+        raw: object,
         via: str,
         latency_ms: float,
         started_at: str,
         completed_at: str,
     ) -> None:
         try:
-            probabilities: dict[str, Any] = {}
+            probabilities: dict[str, JSONValue] = {}
             for qid, decision in decisions.items():
                 if not isinstance(decision, dict):
                     continue
@@ -821,7 +866,7 @@ class JevClient:
                 elif kind == "choice" and isinstance(decision.get("probabilities"), dict):
                     probabilities[qid] = dict(decision["probabilities"])
                 elif kind == "score":
-                    entry: dict[str, Any] = {"score": decision.get("score")}
+                    entry: dict[str, JSONValue] = {"score": decision.get("score")}
                     if isinstance(decision.get("probabilities"), dict):
                         entry.update(decision["probabilities"])
                     if decision.get("confidence") is not None:
@@ -855,7 +900,7 @@ class JevClient:
         except Exception as exc:  # noqa: BLE001 - persistence never breaks a decision
             logger.debug("jev persist: skipping record build (%s: %s)", type(exc).__name__, exc)
             return
-        request = {"state": None, "questions": questions}
+        request: dict[str, JSONValue] = {"state": None, "questions": questions}
         try:
             self._persist_domain(record, request=request, response=raw, latency_ms=latency_ms)
         except Exception as exc:  # noqa: BLE001 - persistence never breaks a decision
@@ -875,7 +920,7 @@ class JevClient:
             logger.debug("jev persist: runs skipped (%s: %s)", type(exc).__name__, exc)
 
     def _persist_domain(
-        self, record: DecisionRecord, *, request: dict[str, Any], response: Any, latency_ms: float
+        self, record: DecisionRecord, *, request: dict[str, JSONValue], response: object, latency_ms: float
     ) -> None:
         try:
             repo = ResearchRepository(data_root=self._data_root)
@@ -935,13 +980,13 @@ class JevClient:
         self,
         record: DecisionRecord,
         *,
-        request: dict[str, Any],
-        response: Any,
+        request: dict[str, JSONValue],
+        response: object,
         via: str,
         latency_ms: float,
         started_at: str,
         completed_at: str,
-        decisions: dict[str, dict[str, Any]],
+        decisions: dict[str, dict[str, JSONValue]],
     ) -> None:
         recorder = get_current_recorder()
         if recorder is None or not getattr(recorder, "enabled", True):
