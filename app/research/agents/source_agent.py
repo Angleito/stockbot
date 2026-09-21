@@ -110,12 +110,14 @@ def is_web_tool(name: str) -> bool:
 
 
 def source_domain_for_tool(name: str) -> str:
-    """Job source_domain owning one canonical tool: WEB, FINRA, else SEC default."""
+    """Job source_domain owning one canonical tool: WEB, FINRA, SEC, else OTHER."""
     if is_web_tool(name):
         return "WEB"
     if is_finra_tool(name):
         return "FINRA"
-    return "SEC"
+    if is_sec_tool(name):
+        return "SEC"
+    return "OTHER"
 
 
 def _coerce_wave(wave_id: int | str) -> int:

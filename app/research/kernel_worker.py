@@ -100,6 +100,11 @@ _DISPOSITION_OPTIONS = {
     "gather_evidence": "The question matters, but available state is insufficient to analyze it.",
     "reject": "The question does not materially contribute to resolving the user's objective.",
 }
+# Entry routing (JEV-before-kernel): one choice, no session/DB/scheduler.
+_ENTRY_OPTIONS = {
+    "reasoning_required": "The prompt is conversational chitchat answerable directly without research.",
+    "research_required": "The prompt needs reasoning over evidence, lookup, or research to answer.",
+}
 
 
 def _terminal(rid: str, category: str, message: str) -> dict[str, JSONValue]:
@@ -293,14 +298,14 @@ def _objective_or_admitted(
 def _jev_admit(
     sid: str, objective: str, proposals: list[dict[str, object]], jev: JevClient | None = None
 ) -> list[dict[str, object]]:
-    """JEV disposition per proposal (run.ts relevance); admit-all on JEV outage."""
+    """JEV disposition per proposal (run.ts relevance); objective-only on JEV outage."""
     if len(proposals) <= 1:
         return list(proposals)
-    # ponytail: single disposition round only; no re-ask on partial failure (admit-all instead).
+    # ponytail: single disposition round only; no re-ask on partial failure (objective-only instead).
     try:
         client = jev if jev is not None else _shared_jev()
     except Exception:
-        return list(proposals)
+        return _objective_or_admitted(objective, sid, proposals)
     try:
         criteria: dict[str, JSONValue] = {k: v for k, v in _DISPOSITION_OPTIONS.items()}
         questions: dict[str, JSONValue] = {}
@@ -332,7 +337,9 @@ def _jev_admit(
             if isinstance(d, dict) and d.get("choice") == "reject":
                 continue
             admitted.append(p)
-        return _objective_or_admitted(objective, sid, admitted)
+        if admitted:
+            return admitted
+        return _objective_or_admitted(objective, sid, proposals)
     except Exception:
         return _objective_or_admitted(objective, sid, proposals)
 
@@ -410,6 +417,33 @@ def _create_nodes_topological(sid: str, objective: str, admitted: list[dict[str,
         node_id = node.node_id
         if node_id:
             id_to_node[pid] = node_id
+
+
+def _route(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[str, JSONValue]:
+    """JEV entry route: reasoning vs research. Fail-open to research; zero session/DB."""
+    raw_id = req.get("id")
+    rid = raw_id if isinstance(raw_id, str) else "?"
+    prompt = req.get("prompt")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {"id": rid, "route": "research_required"}
+    try:
+        client = jev if jev is not None else _shared_jev()
+        # ponytail: _invoke not decide — entry triage persists nothing.
+        from typing import cast
+
+        questions: dict[str, JSONValue] = cast(
+            "dict[str, JSONValue]",
+            {"entry": {"type": "choice", "instructions": prompt.strip(), "criteria": dict(_ENTRY_OPTIONS)}},
+        )
+        decisions, _raw, _via = asyncio.run(
+            client._invoke({"prompt": prompt.strip()}, questions, {"entry": dict(_ENTRY_OPTIONS)})
+        )
+        d = decisions.get("entry")
+        if isinstance(d, dict) and d.get("choice") == "reasoning_required":
+            return {"id": rid, "route": "reasoning_required"}
+        return {"id": rid, "route": "research_required"}
+    except Exception:
+        return {"id": rid, "route": "research_required"}
 
 
 def _run(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[str, JSONValue]:
@@ -601,14 +635,14 @@ def main() -> None:
                 sys.stdout.write(json.dumps(_terminal("?", "invalid_params", "invalid JSON")) + "\n")
                 sys.stdout.flush()
                 continue
-            if not isinstance(parsed, dict) or parsed.get("op") != "run":
+            if not isinstance(parsed, dict) or parsed.get("op") not in ("run", "route"):
                 rid = parsed.get("id") if isinstance(parsed, dict) and isinstance(parsed.get("id"), str) else "?"
-                sys.stdout.write(json.dumps(_terminal(rid, "invalid_params", "op must be 'run'")) + "\n")
+                sys.stdout.write(json.dumps(_terminal(rid, "invalid_params", "op must be 'run' or 'route'")) + "\n")
                 sys.stdout.flush()
                 continue
             req: Mapping[str, JSONValue] = parsed
             try:
-                resp = _run(req, jev=jev)
+                resp = _route(req, jev=jev) if req.get("op") == "route" else _run(req, jev=jev)
             except Exception as exc:  # never raise out of the worker
                 raw_rid = req.get("id")
                 rid = raw_rid if isinstance(raw_rid, str) else "?"

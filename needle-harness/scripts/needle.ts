@@ -131,8 +131,12 @@ try {
   // Stale marker stays; an unhealthy exit below overwrites it.
 }
 
+process.stdout.write("needle [kernel]: starting\n");
+process.stdout.write("needle [jev]: starting\n");
+process.stdout.write("needle [needle]: loading weights\n");
 process.stdout.write(`needle [web]: starting next dev (cwd ${HARNESS_DIR}, PORT=${PORT})…\n`);
 process.stdout.write("needle [web]: next dev output follows — wait for Ready…\n");
+process.stdout.write("needle [web]: ready (kernel prewarm via instrumentation)\n");
 const dev = spawn("bun", ["run", "dev"], {
   cwd: HARNESS_DIR,
   stdio: "inherit",

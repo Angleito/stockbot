@@ -77,6 +77,7 @@ export type KernelResponse = {
   failures: Record<string, number>;
   escalations: number;
   escalated: boolean;
+  route?: string;
   error?: string;
   terminal?: { category: FailureCategory; message: string };
 };
@@ -160,7 +161,8 @@ export class KernelRouter {
     return child;
   }
 
-  private ensure(): KernelChild {
+  ensure(): KernelChild {
+    // Public for prewarm(); call() also routes through here.
     const running = this.child;
     if (running && !this.exited && running.exitCode === null) return running;
     try {
@@ -277,9 +279,27 @@ export class KernelRouter {
       // Already gone; failAll above carries the error.
     }
   }
+
+  prewarm(): void {
+    try {
+      this.ensure();
+    } catch (e) {
+      console.error(`[ai] kernel worker prewarm failed: ${e instanceof Error ? e.message : String(e)}`);
+    }
+  }
 }
 
 const kernelRouter = new KernelRouter();
+
+export { kernelRouter };
+
+export function prewarmKernel(): void {
+  try {
+    kernelRouter.prewarm();
+  } catch {
+    // prewarm() never throws; belt-and-suspenders for the startup path.
+  }
+}
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => kernelRouter.close());
@@ -369,6 +389,8 @@ export async function runKernelAgent(
 
   emit({ type: "agent_start", prompt });
 
+  // ponytail: entry routing lives in route.ts (op:route fast-path there);
+  // runKernelAgent stays research-only so agent_start emits exactly once.
   let res: KernelResponse;
   const workerStart = performance.now();
   try {
@@ -454,6 +476,23 @@ export async function runKernelAgent(
     }
     emit({ type: "failed", category, message: message.slice(0, 160) });
     emit({ type: "done", metrics: buildMetrics(decisions.length, calls.length, evidence, workerMs, (res.escalations ?? 0) + 1, failures, { calls: 0, totalMs: 0 }) });
+    return;
+  }
+
+  if (evidence.length === 0 && decisions.length === 0 && calls.length === 0 && unresolved.length === 0 && !incompleteGuard) {
+    // ponytail: empty graph never closes silent — answer direct via Muse.
+    emit({ type: "reasoning_start", model: MUSE_MODEL });
+    const tm0 = performance.now();
+    try {
+      const r0 = await reasonFn({ prompt, evidence, escalated: false, direct: true, objective, nodes, decisions: persisted, unresolved, incompleteGuard, onDelta: (text) => emit({ type: "answer_delta", text }) });
+      emit({ type: "done", metrics: buildMetrics(0, 0, evidence, workerMs, res.escalations ?? 0, failures, { calls: 1, totalMs: performance.now() - tm0, ...r0.usage }) });
+    } catch (err) {
+      const msg = err instanceof Error ? err.message : String(err);
+      countFailure("provider_error");
+      emit({ type: "tool_failed", tool: "muse", category: "provider_error", preview: msg.slice(0, 160) });
+      emit({ type: "failed", category: "provider_error", message: msg.slice(0, 160) });
+      emit({ type: "error", message: msg });
+    }
     return;
   }
 

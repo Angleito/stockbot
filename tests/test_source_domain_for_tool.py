@@ -14,6 +14,11 @@ def test_every_finra_evidence_tool_maps_finra() -> None:
         assert source_domain_for_tool(tool) == "FINRA"
 
 
-def test_sec_and_unknown_default_sec() -> None:
+def test_sec_tool_maps_sec() -> None:
     assert source_domain_for_tool("get_sec_document") == "SEC"
-    assert source_domain_for_tool("not_a_tool") == "SEC"
+
+
+def test_unknown_maps_other_not_sec() -> None:
+    assert source_domain_for_tool("not_a_tool") == "OTHER"
+    assert source_domain_for_tool("draft_thesis") == "OTHER"
+    assert source_domain_for_tool("run_macro_analysis") == "OTHER"

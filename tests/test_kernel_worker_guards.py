@@ -1,8 +1,8 @@
 """Fail-closed authority guards: registry abort + JEV-outage objective-only.
 
-Pinned to HEAD ``_jev_admit(sid, objective, proposals)`` (no jev kwarg):
-outage is simulated by monkeypatching ``JevClient`` in
-``app.decision_client``. If a jev-injection param ever lands, extend — do not
+Pinned to HEAD ``_jev_admit(sid, objective, proposals, jev=None)``: outage is simulated by
+monkeypatching ``JevClient`` in ``app.decision_client`` or by passing a
+failing ``jev`` directly. If further injection params land, extend — do not
 replace — these tests.
 """
 
@@ -52,6 +52,21 @@ def test_jev_outage_synthesizes_single_objective_node() -> None:
     assert isinstance(first, dict) and first["question"] == "Missing objective?"
 
 
+class _JevAdmitTwoOfThree:
+    async def decide(self, *a: object, **k: object) -> dict[str, dict[str, str]]:
+        return {"s-q1": {"choice": "analyze"}, "s-q2": {"choice": "gather_evidence"}, "s-q3": {"choice": "reject"}}
+
+
+def test_jev_success_preserves_all_admitted_proposals() -> None:
+    props: list[dict[str, object]] = [
+        {"id": "s-q1", "objectiveId": "s", "question": "Other angle?", "dependsOn": [], "whyItMatters": "w"},
+        {"id": "s-q2", "objectiveId": "s", "question": "Exact user objective?", "dependsOn": [], "whyItMatters": "w"},
+        {"id": "s-q3", "objectiveId": "s", "question": "Tangent?", "dependsOn": [], "whyItMatters": "w"},
+    ]
+    out = kw._jev_admit("s", "Exact user objective?", props, jev=_JevAdmitTwoOfThree())  # type: ignore[arg-type]
+    assert out == props[:2]
+
+
 def test_single_proposal_passthrough() -> None:
     props = _props()[:1]
     assert kw._jev_admit("s", "q", props) == props
@@ -63,3 +78,33 @@ def test_graph_prompt_registry_failure_is_terminal() -> None:
     assert resp["id"] == "r1"
     terminal = resp.get("terminal")
     assert isinstance(terminal, dict) and "registry guard forbids" in str(terminal.get("message"))
+
+
+class _JevRoute:
+    def __init__(self, choice: str | None = None, fail: bool = False) -> None:
+        self.choice = choice
+        self.fail = fail
+        self.seen: list[object] = []
+
+    async def _invoke(
+        self, state: object, questions: object, choice_options: object | None = None
+    ) -> tuple[object, object, str]:
+        if self.fail:
+            raise RuntimeError("jev down")
+        self.seen.append((state, questions, choice_options))
+        return ({"entry": {"kind": "choice", "choice": self.choice or "research_required"}}, {}, "stub")
+
+
+def test_route_reasoning_choice_returns_fast_path() -> None:
+    out = kw._route({"id": "r1", "op": "route", "prompt": "hello"}, jev=_JevRoute("reasoning_required"))  # type: ignore[arg-type]
+    assert out == {"id": "r1", "route": "reasoning_required"}
+
+
+def test_route_outage_fails_open_to_research() -> None:
+    out = kw._route({"id": "r1", "op": "route", "prompt": "hello"}, jev=_JevRoute(fail=True))  # type: ignore[arg-type]
+    assert out == {"id": "r1", "route": "research_required"}
+
+
+def test_route_blank_prompt_needs_no_jev() -> None:
+    out = kw._route({"id": "r1", "op": "route", "prompt": "  "}, jev=_JevRoute("reasoning_required"))  # type: ignore[arg-type]
+    assert out == {"id": "r1", "route": "research_required"}

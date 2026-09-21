@@ -112,7 +112,7 @@ def test_start_ping_then_two_calls_reuse_one_process(worker: None) -> None:
     second = nc.generate_arguments(
         {"tool": "search_sec_filings", "schema": {}, "objective": "o", "node": "n", "context": {}}
     )
-    assert first == {"tool": "search_sec_filings", "arguments": {"q": 1}}
+    assert first == {"tool": "search_sec_filings", "arguments": {"q": 1}, "reasoning": "", "confidence": None}
     assert second == first
     assert len(_FakeProc.instances) == 1
     ids = [_request_id(w) for w in proc.written[1:]]
@@ -135,5 +135,5 @@ def test_malformed_response_fails_closed(worker: None) -> None:
 def test_broken_pipe_restarts_once(worker: None) -> None:
     _FakeProc.behavior = "broken-once"
     out = nc.generate_arguments(tool="search_sec_filings")
-    assert out == {"tool": "search_sec_filings", "arguments": {"q": 1}}
+    assert out == {"tool": "search_sec_filings", "arguments": {"q": 1}, "reasoning": "", "confidence": None}
     assert len(_FakeProc.instances) == 2

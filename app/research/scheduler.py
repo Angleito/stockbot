@@ -160,10 +160,10 @@ _PIT_BLIND_TOOLS = frozenset(
 
 
 # ponytail: allowlist-derived via source_agent (covers all 7 FINRA evidence
-# tools + search_web); catalog FINRA tools map FINRA but never call persist
-# (persist_tool_result fails closed on them), SEC is the default.
+# tools + search_web + SEC allowlist); unknown tools map OTHER and run with
+# source=None (no provenance lane until per-domain adapters land) so the default SEC-only policy never denies them.
 def _source_for_tool(tool_name: str) -> str:
-    """Job source_domain owning one canonical tool: WEB, FINRA, else SEC."""
+    """Job source_domain owning one canonical tool: WEB, FINRA, SEC, else OTHER."""
     try:
         from app.research.agents.source_agent import source_domain_for_tool
     except ImportError:
@@ -233,6 +233,8 @@ def _sec_locator(payload: dict[str, Any]) -> str | None:
 
 def _evidence_candidate(tool_name: str, domain: str, result: Any, outcome: Any) -> dict[str, Any] | None:
     """Kernel-side evidence candidate from persisted-shaped tool bytes; None when uncitable."""
+    if domain not in ("FINRA", "WEB", "SEC"):
+        return None
     if domain in ("FINRA", "WEB"):
         ref = _tool_result_ref(result, outcome)
         if ref is None:
@@ -716,8 +718,9 @@ async def _attempt_tool(
     session_id = str(session.get("session_id"))
     node_id = str(_f(node, "node_id", "id"))
     domain = _source_for_tool(tool_name)
+    job_source = None if domain == "OTHER" else domain
     try:
-        job = kernel.start_job(session_id, type="source_agent", owner="kernel-scheduler", source=domain)
+        job = kernel.start_job(session_id, type="source_agent", owner="kernel-scheduler", source=job_source)
         job_id = str(_f(job, "job_id", default=f"job:{uuid.uuid4()}"))
     except Exception:
         job_id = f"job:{uuid.uuid4()}"
@@ -1193,6 +1196,30 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                 job_id=attempt["job_id"],
                 confidence=_f(assessment, "confidence"),
             )
+            outcome_error = _f(outcome, "error")
+            if outcome_error is not None:
+                try:
+                    kernel.fail_job(attempt["job_id"], "tool_error", str(outcome_error)[:2000])
+                except Exception:  # noqa: BLE001, S110 - terminal already recorded; attempt log carries the error
+                    pass
+                attempts.append(
+                    {
+                        k: attempt.get(k)
+                        for k in (
+                            "tool",
+                            "arguments",
+                            "outcome_summary",
+                            "error",
+                            "error_type",
+                            "confidence",
+                            "reasoning",
+                            "job_id",
+                            "evidence_id",
+                            "tool_result_ref",
+                        )
+                    }
+                )
+                continue
             # Kernel builds the candidate from tool bytes; JEV gates relevance/state only.
             evidence_id = None
             ev_state = _f(assessment, "evidence_state", "decision", default=None)
@@ -1234,7 +1261,6 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                 kernel.complete_job(attempt["job_id"], {"tool": tool})
             except Exception:  # noqa: BLE001, S110 - terminal already recorded; attempt log carries the state
                 pass
-            outcome_error = _f(outcome, "error")
             attempts.append(
                 {
                     "tool": tool,

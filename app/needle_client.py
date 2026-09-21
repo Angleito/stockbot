@@ -226,7 +226,12 @@ def _exchange_locked(proc: subprocess.Popen[str], tool: str, payload: dict[str, 
     arguments = resp.get("arguments", {})
     if not isinstance(arguments, dict):
         raise TypeError(f"needle arguments for {tool!r} must be a mapping, got {type(arguments).__name__}")
-    return {"tool": tool, "arguments": validate_json_mapping(arguments, "<needle_client>: 'arguments'")}
+    return {
+        "tool": tool,
+        "arguments": validate_json_mapping(arguments, "<needle_client>: 'arguments'"),
+        "reasoning": str(resp.get("reasoning") or ""),
+        "confidence": resp.get("confidence"),
+    }
 
 
 def start() -> None:

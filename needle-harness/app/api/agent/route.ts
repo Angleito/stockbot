@@ -1,4 +1,6 @@
-import { runKernelAgent } from "@/lib/agent/kernel";
+import { isTrivialPrompt } from "@/lib/agent/entry-router";
+import { reason } from "@/lib/muse/client";
+import { kernelRouter, runKernelAgent } from "@/lib/agent/kernel";
 import type { AgentEvent } from "@/lib/agent/types";
 
 export async function POST(req: Request): Promise<Response> {
@@ -18,6 +20,35 @@ export async function POST(req: Request): Promise<Response> {
     async start(controller) {
       const enc = new TextEncoder();
       const send = (e: AgentEvent) => controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+      const answerDirect = async (): Promise<boolean> => {
+        const t0 = performance.now();
+        send({ type: "agent_start", prompt });
+        send({ type: "reasoning_start", model: "muse-spark-1.3-contributor" });
+        try {
+          const r = await reason({ prompt, evidence: [], escalated: false, direct: true, onDelta: (text) => send({ type: "answer_delta", text }) });
+          send({ type: "done", metrics: { totalMs: performance.now() - t0, needle: { calls: 0, totalMs: 0, escalations: 0 }, tools: { calls: 0, totalMs: 0 }, muse: { calls: 1, totalMs: performance.now() - t0, ...r.usage }, evidence: { count: 0, characters: 0 }, failures: {} } });
+        } catch (err) {
+          send({ type: "error", message: err instanceof Error ? err.message : String(err) });
+        }
+        return true;
+      };
+      // ponytail: trivial chitchat answers direct, never a worker round trip.
+      if (isTrivialPrompt(prompt)) {
+        await answerDirect();
+        controller.close();
+        return;
+      }
+      try {
+        // ponytail: JEV-before-kernel — one route round, zero session/DB on reasoning.
+        const routed = await kernelRouter.call({ op: "route", prompt }, { signal: req.signal });
+        if (routed.route === "reasoning_required") {
+          await answerDirect();
+          controller.close();
+          return;
+        }
+      } catch {
+        // Route unavailable — fail open to research below.
+      }
       try {
         await runKernelAgent(prompt, send, { signal: req.signal });
       } catch (err) {
