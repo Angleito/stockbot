@@ -13,6 +13,6 @@ types-PyYAML==6.0.12.20260906
 google-cloud-bigquery==3.45.0
 google-auth==2.57.1
 coverage==7.16.1
-ruff==0.16.7
+ruff==0.16.8
 mutmut==3.8.0
 hypothesis==6.168.0
