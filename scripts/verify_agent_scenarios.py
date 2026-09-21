@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Live broad-agent scenario verification through Pi (no static PASS, no fakes).
+"""Live broad-agent scenario verification through the kernel scheduler (no static PASS, no fakes).
 
 Usage:
     python scripts/verify_agent_scenarios.py [--scenario NAME] [--model LABEL]
@@ -7,13 +7,13 @@ Usage:
         [--fixtures-dir DIR] [--json]
     python scripts/verify_agent_scenarios.py --list
 
-Each scenario invokes the configured run_live/Pi path, captures the resulting
+Each scenario invokes the kernel scheduler path, captures the resulting
 ResearchSession and trace, extracts observable outcomes, and runs deterministic
 validators against those outputs. A scenario without executable prerequisites
-(Pi reachability) fails or is explicitly skipped with a non-zero clearly
+(kernel availability) fails or is explicitly skipped with a non-zero clearly
 reported prerequisite status; it never passes from static definitions.
 --model/--provider select/record the actual provider/model used; with neither
-set, Pi runs on its own CLI default and results record "pi default". Exit 0 when
+set, results record "kernel default". Exit 0 when
 every scenario passes, 1 otherwise.
 """
 
@@ -26,9 +26,8 @@ import subprocess
 import sys
 import tempfile
 import time
-from collections.abc import Callable, Iterable, Mapping
+from collections.abc import Iterable, Mapping
 from pathlib import Path
-from typing import TypedDict
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
@@ -46,52 +45,21 @@ def _clean(value: str | None) -> str:
     return (value or "").strip()
 
 
-# Pi accepts provider/model from its own configuration; with no flag at all the
-# CLI default is used. That path has no concrete names to record, so results
+# Provider/model labels are recorded only; with no flag at all the
+# kernel default is used. That path has no concrete names to record, so results
 # carry this label instead of an empty string.
-_DEFAULT_MODEL_LABEL = "pi default"
+_DEFAULT_MODEL_LABEL = "kernel default"
+
+# Default per-call model timeout seconds (flag/env override; must stay well
+# above the slowest expected source-scout completion).
+MODEL_TIMEOUT_DEFAULT_S = 300
 
 
 def _model_label(provider: str, model: str) -> str:
-    """Recorded label for the effective model; Pi's CLI default when neither is set."""
+    """Recorded label for the effective model; the kernel default when neither is set."""
     if not provider and not model:
         return _DEFAULT_MODEL_LABEL
     return f"{provider or _DEFAULT_MODEL_LABEL}/{model or _DEFAULT_MODEL_LABEL}"
-
-
-# Pure-completion OMP call: the runner owns the agent loop, so the model call must
-# not dispatch any tool (that would run a second agent loop inside every model
-# turn and blow the call timeout). Mirrors the role-spawn flags.
-_PI_ISOLATION_FLAGS: tuple[str, ...] = ("--no-tools",)
-# One completion, generous enough for a long source-scout prompt. A slow
-# provider must not silently kill runs: the budget is a flag/env knob.
-_PI_CALL_TIMEOUT_DEFAULT_S = 300
-
-
-def _pi_flags(provider: str, model: str) -> list[str]:
-    """Provider/model flags, omitted when unset so Pi falls back to its CLI default.
-
-    Mirrors app/thesis/omp_runner.py: an unset flag is absent, never empty.
-    """
-    return (["--provider", provider] if provider else []) + (["--model", model] if model else [])
-
-
-def _pi_completion_argv(provider: str, model: str, prompt: str) -> list[str]:
-    """Isolated one-shot argv for a plain model completion (no tools, no session).
-
-    The prompt travels on stdin, never in argv: a research prompt embedding
-    frozen evidence blows past the kernel's per-argument limit (``OSError:
-    [Errno 7] Argument list too long``) and NUL bytes cannot be passed at all.
-    ``prompt`` is accepted for call-site clarity and size checks.
-    """
-    del prompt  # delivered via stdin by the caller
-    return [
-        "omp",
-        "-p",
-        "--no-session",
-        *_PI_ISOLATION_FLAGS,
-        *_pi_flags(provider, model),
-    ]
 
 
 def _lookup_env_value(lookup: object, key: str) -> str | None:
@@ -107,7 +75,7 @@ def _lookup_env_value(lookup: object, key: str) -> str | None:
 
 
 def resolve_provider_model(provider_arg: str | None, model_arg: str | None, env: object = None) -> tuple[str, str]:
-    """Explicit flag, then env, then "" — meaning "let OMP use its CLI default"."""
+    """Explicit flag, then env, then "" — meaning the kernel default."""
     lookup: object = os.environ if env is None else env
     provider = _clean(provider_arg) or _clean(_lookup_env_value(lookup, "STOCKBOT_PROVIDER"))
     model = _clean(model_arg) or _clean(_lookup_env_value(lookup, "STOCKBOT_MODEL"))
@@ -123,7 +91,7 @@ def resolve_model_timeout(timeout_arg: str | None, env: object = None) -> int:
     lookup: object = os.environ if env is None else env
     raw = _clean(timeout_arg) or _clean(_lookup_env_value(lookup, "STOCKBOT_MODEL_TIMEOUT"))
     if not raw:
-        return _PI_CALL_TIMEOUT_DEFAULT_S
+        return MODEL_TIMEOUT_DEFAULT_S
     try:
         seconds = int(raw)
     except ValueError as exc:
@@ -135,56 +103,6 @@ def resolve_model_timeout(timeout_arg: str | None, env: object = None) -> int:
 
 def _resolve_model_timeout(args: argparse.Namespace) -> int:
     return resolve_model_timeout(args.model_timeout, os.environ)
-
-
-def _check_pi_ready(provider: str, model: str, timeout_s: int) -> None:
-    try:
-        probe = subprocess.run(
-            _pi_completion_argv(provider, model, "Reply with OK."),
-            input="Reply with OK.",
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-    except FileNotFoundError as exc:
-        raise RuntimeError("missing prerequisite: `omp` CLI not found") from exc
-    except subprocess.TimeoutExpired as exc:
-        raise RuntimeError(
-            f"missing prerequisite: Pi probe timed out after {timeout_s}s for {_model_label(provider, model)}"
-        ) from exc
-    if probe.returncode != 0:
-        err = (probe.stderr or probe.stdout or "").strip()[:500]
-        raise RuntimeError(f"missing prerequisite: Pi not ready for {_model_label(provider, model)}: {err}")
-
-
-def _clean_prompt(prompt: str) -> str:
-    """Prompt text for stdin: NUL is not representable in a POSIX pipe payload either."""
-    return prompt.replace("\x00", "")
-
-
-def _pi_model_callable(provider: str, model: str, timeout_s: int) -> Callable[[str], str]:
-    label = _model_label(provider, model)
-
-    def _call(prompt: str) -> str:
-        proc = subprocess.run(
-            _pi_completion_argv(provider, model, prompt),
-            input=_clean_prompt(prompt),
-            capture_output=True,
-            text=True,
-            timeout=timeout_s,
-            check=False,
-        )
-        if proc.returncode != 0:
-            err = (proc.stderr or proc.stdout or "").strip()[:2000]
-            raise RuntimeError(f"Pi model call failed ({label}): {err}")
-        text = (proc.stdout or "").strip()
-        if not text:
-            raise RuntimeError(f"Pi model returned blank output ({label})")
-        return text
-
-    _call.__name__ = f"pi_{provider}_{model}"
-    return _call
 
 
 _SEARCH_EXCLUDE = frozenset({"browse_tools", "search_tools", "describe_tool", "list_tool_domains", "call_tool"})
@@ -295,19 +213,6 @@ def _dispatch_call_tool(args: dict[str, object], provider: str, model: str) -> d
     if ctx is None:
         return {"error": err}
     return _run_tool_exec(harness[0], inner_name, inner_args, provider, model, ctx)
-
-
-def _pi_dispatch_callable(provider: str, model: str) -> Callable[[str, dict[str, object]], dict[str, object]]:
-    from app.research.agents.source_agent import SEC_TOOLS
-
-    def _dispatch(name: str, args: dict[str, object]) -> dict[str, object]:
-        if name in ("search_tools", "browse_tools"):
-            return _dispatch_search_tools(args, SEC_TOOLS)
-        if name == "call_tool":
-            return _dispatch_call_tool(args, provider, model)
-        return {"error": f"unknown dispatch {name!r}"}
-
-    return _dispatch
 
 
 _ENV_KEYS = ("RESEARCH_DB_PATH", "XDG_DATA_HOME")
@@ -593,121 +498,39 @@ def evaluate_and_record(
     )
 
 
-class _LiveKwargs(TypedDict):
-    question: str
-    objective: str
-    as_of: str | None
-    tickers: list[str]
-    dispatch: Callable[[str, dict[str, object]], dict[str, object]]
-    model: Callable[[str], str]
-    provider: str
-    model_name: str
+def _run_kernel_scenario(
+    scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int
+) -> EvalInput:
+    """Production-path live eval: kernel scheduler (create_research + node + run_node)."""
+    import asyncio
 
+    from app.research import scheduler, service
 
-def _live_kwargs(scenario: Scenario, provider: str, model: str, timeout_s: int) -> _LiveKwargs:
-    """Retired run_live shim: question/tickers/labels only; dispatch/model unused by OMP path."""
-    _ = timeout_s
-    tickers: list[str] = [scenario.ticker] if scenario.ticker else []
-    return {
-        "question": scenario.question,
-        "objective": scenario.notes or scenario.question,
-        "as_of": scenario.as_of,
-        "tickers": tickers,
-        "dispatch": _pi_dispatch_callable(provider, model),
-        "model": _pi_model_callable(provider, model, timeout_s),
-        "provider": provider or _DEFAULT_MODEL_LABEL,
-        "model_name": model or _DEFAULT_MODEL_LABEL,
-    }
-
-
-def _invoke_live(kwargs: _LiveKwargs) -> tuple[dict[str, object] | None, float, int]:
-    """Retired run_live shim (test helper only): crash-reporting contract preserved."""
-    from app.research.director import DirectorBudgets
-    from app.research.runner import run_live
-
-    t0 = time.monotonic()
-    try:
-        out = run_live(**kwargs, repo=ResearchRepository(), budgets=DirectorBudgets())
-    except Exception as exc:  # noqa: BLE001 - the verdict reports the crash, never hides it
-        print(f"CRASH {type(exc).__name__}: {exc}", file=sys.stderr)
-        return None, (time.monotonic() - t0) * 1000.0, 0
-    return out, (time.monotonic() - t0) * 1000.0, 0
-
-
-def _omp_env(provider: str, model: str, timeout_s: int) -> dict[str, str]:
-    """Model selectors for the OMP child env; empty means OMP CLI default."""
-    env: dict[str, str] = {}
-    if provider.strip():
-        env["STOCKBOT_PROVIDER"] = provider.strip()
-    if model.strip():
-        env["STOCKBOT_MODEL"] = model.strip()
-    env["STOCKBOT_MODEL_TIMEOUT"] = str(timeout_s)
-    return env
-
-
-def _run_omp_research(scenario: Scenario, provider: str, model: str, timeout_s: int, tmp: str) -> str:
-    """Launch production OMP Stockbot on one scenario; return the run id for state reads."""
-    from app.thesis.omp_runner import _await_omp, _prepare_launch, _spawn_omp, _verdict
-
-    run_id = f"eval-{scenario.name}"
-    data_root = str(Path(tmp) / "data")
-    old_model = {k: os.environ.get(k) for k in ("STOCKBOT_PROVIDER", "STOCKBOT_MODEL", "STOCKBOT_MODEL_TIMEOUT")}
-    os.environ.update(_omp_env(provider, model, timeout_s))
-    try:
-        launch = _prepare_launch(scenario.question, data_root, scenario.as_of, run_id)
-        proc = _spawn_omp(launch, scenario.name)
-        _await_omp(launch, proc, run_id, timeout_s)
-        _verdict(launch, proc, "eval", scenario.name, run_id, timeout_s)
-    finally:
-        for k, v in old_model.items():
-            if v is None:
-                os.environ.pop(k, None)
-            else:
-                os.environ[k] = v
-    return run_id
-
-
-def _read_omp_session_id(run_id: str, tmp: str) -> str:
-    """Newest persisted research session for one eval data root; "" when none."""
-    from app.research.repository import ResearchRepository
-
-    repo = ResearchRepository(data_root=Path(tmp) / "data")
-    sessions = repo.list_sessions(limit=1)
-    _ = run_id  # the run id isolates the data root; the session is the newest row in it
-    if not sessions:
-        return ""
-    sid = sessions[0].get("session_id")
-    return sid if isinstance(sid, str) else ""
-
-
-def _run_omp_scenario(scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int) -> EvalInput:
-    """Production-path live eval: OMP + extension + Director + task subagents + kernel."""
-    _ = prompt_version  # stamp recorded in the run summary only
+    _ = (provider, model, prompt_version, timeout_s)  # labels recorded on the summary only
     t0 = time.monotonic()
     with tempfile.TemporaryDirectory(prefix="agent-scenario-") as tmp:
         old = setup_env(tmp)
         try:
             try:
-                run_id = _run_omp_research(scenario, provider, model, timeout_s, tmp)
+                sid = service.create_research(
+                    scenario.question, scenario.notes or scenario.question, as_of=scenario.as_of
+                )
+                node = service.create_node(sid, scenario.question, "Route question.")
+                asyncio.run(scheduler.run_node(node, session_id=sid))
             except Exception as exc:  # noqa: BLE001 - the verdict reports the crash, never hides it
                 print(f"CRASH {type(exc).__name__}: {exc}", file=sys.stderr)
                 return _crash_eval_input(scenario, (time.monotonic() - t0) * 1000.0)
-            out: dict[str, object] = {
-                "session_id": _read_omp_session_id(run_id, tmp),
-                "evidence_ids": [],
-            }
+            out: dict[str, object] = {"session_id": sid, "evidence_ids": []}
             wall_ms = (time.monotonic() - t0) * 1000.0
-            if not out["session_id"]:
-                return _crash_eval_input(scenario, wall_ms)
-            # OMP research has no static tool-call cap: 0 = unlimited, judged on real limits only.
+            # Kernel research has no static tool-call cap: 0 = unlimited, judged on real limits only.
             return evaluate_and_record(scenario, out, wall_ms, 0)
         finally:
             restore_env(old)
 
 
 def _run_live_scenario(scenario: Scenario, provider: str, model: str, prompt_version: str, timeout_s: int) -> EvalInput:
-    """Live eval entrypoint: production OMP path only (run_live retired, see runner.py)."""
-    return _run_omp_scenario(scenario, provider, model, prompt_version, timeout_s)
+    """Live eval entrypoint: production kernel path only (run_live retired, see runner.py)."""
+    return _run_kernel_scenario(scenario, provider, model, prompt_version, timeout_s)
 
 
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
@@ -719,17 +542,17 @@ def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser.add_argument(
         "--model",
         default=None,
-        help="OMP model ID used for live execution (or STOCKBOT_MODEL; default: OMP's own CLI default)",
+        help="model ID recorded for live execution (or STOCKBOT_MODEL; default: kernel default)",
     )
     parser.add_argument(
         "--provider",
         default=None,
-        help="OMP provider used for live execution (or STOCKBOT_PROVIDER; default: OMP's own CLI default)",
+        help="provider recorded for live execution (or STOCKBOT_PROVIDER; default: kernel default)",
     )
     parser.add_argument(
         "--model-timeout",
         default=None,
-        help=f"per-call OMP model timeout seconds (or STOCKBOT_MODEL_TIMEOUT; default {_PI_CALL_TIMEOUT_DEFAULT_S})",
+        help="per-call model timeout seconds (or STOCKBOT_MODEL_TIMEOUT; default 300)",
     )
     parser.add_argument("--prompt-version", default="v1", help="prompt version stamp (default v1)")
     parser.add_argument(
@@ -746,10 +569,9 @@ def _list_scenarios() -> int:
 
 
 def _prepare_provider_model(args: argparse.Namespace) -> tuple[str, str, int]:
-    """Provider/model/timeout resolution plus the Pi reachability probe, before any live run."""
+    """Provider/model/timeout resolution before any live run."""
     provider, model = _resolve_provider_model(args)
     timeout_s = _resolve_model_timeout(args)
-    _check_pi_ready(provider, model, timeout_s)
     return provider, model, timeout_s
 
 
@@ -797,9 +619,9 @@ def _print_results(results: list[ScenarioResult], provider: str, model: str) -> 
     label = _model_label(provider, model)
     for result in results:
         if result.passed:
-            print(f"PASS {result.scenario_name} (live via Pi {label})")
+            print(f"PASS {result.scenario_name} (live via kernel {label})")
         else:
-            print(f"FAIL {result.scenario_name} (live via Pi {label}): {', '.join(result.violations)}")
+            print(f"FAIL {result.scenario_name} (live via kernel {label}): {', '.join(result.violations)}")
 
 
 def _build_summary(provider: str, model: str, prompt_version: str, results: list[ScenarioResult]) -> dict[str, object]:
@@ -846,7 +668,7 @@ def _cli_prereqs(
     except RuntimeError as exc:
         print(f"SKIP live scenarios: {exc}", file=sys.stderr)
         print(
-            "Provide a reachable Pi CLI to evaluate live broad-agent scenarios.",
+            "No live prerequisites: the kernel scheduler runs in-process.",
             file=sys.stderr,
         )
         return 2

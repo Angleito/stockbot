@@ -61,7 +61,6 @@ from app.research.models import (
 )
 from app.research.synthesis.committee import compute_disagreement
 from app.research.synthesis.final import synthesize_final
-from evals.pi_harness import _is_ordered_subsequence, check_case
 
 ASOF = datetime(2025, 6, 30, tzinfo=UTC)
 
@@ -895,125 +894,9 @@ def test_final_branches():
     assert override.answer == "draft"
 
 
-# --- pi_harness: routing/decision branches ---
 
 
-def test_harness_checks():
-    assert _is_ordered_subsequence(["a", "c"], ["a", "b", "c"])
-    assert not _is_ordered_subsequence(["c", "a"], ["a", "b", "c"])
-    case = {
-        "expected_behavior": {
-            "expected_tools": ["t1"],
-            "required_tools": ["t1"],
-            "required_tool_sequence": ["t1", "t2"],
-            "forbidden_tools": ["bad"],
-            "forbidden_tool_args": {"t1": ["secret"]},
-            "must_contain": ["hello"],
-            "must_not_contain": ["bye"],
-        }
-    }
-    ok, _ = check_case(
-        case, [{"name": "t1", "arguments": {}}, {"name": "t2", "arguments": {}}], '{"out": "hello world"}'
-    )
-    assert ok
-    bad, msg = check_case(case, [{"name": "t1", "arguments": {"secret": 1}}], '{"out": "nope"}')
-    assert not bad and "forbidden_args" in msg
-    empty, msg2 = check_case({"expected_behavior": {}}, [], "{}")
-    assert not empty and "empty_assertions" in msg2
-    seq_bad, _ = check_case(
-        {"expected_behavior": {"required_tool_sequence": ["t2", "t1"]}},
-        [{"name": "t1", "arguments": {}}, {"name": "t2", "arguments": {}}],
-        "{}",
-    )
-    assert not seq_bad
 
-
-def test_harness_bridge_io(monkeypatch: pytest.MonkeyPatch) -> None:
-    import json as _json
-
-    import evals.pi_harness as _h
-
-    sent: list[str] = []
-
-    class _FakeStdout:
-        def readline(self) -> str:
-            payload = _json.loads(sent[-1])
-            return _json.dumps({"id": payload.get("id"), "result": {"ok": True}}) + "\n"
-
-    class _FakeStdin:
-        def write(self, text: str) -> None:
-            sent.append(text)
-
-        def flush(self) -> None:
-            # ponytail: no-op flush for the fake pipe; real Popen flushes.
-            return None
-
-        def close(self) -> None:
-            return None
-
-    class _FakeProc:
-        def __init__(self) -> None:
-            self.stdin: object = _FakeStdin()
-            self.stdout: object = _FakeStdout()
-
-        def terminate(self) -> None:
-            return None
-
-    class _FakeUuid:
-        hex: str = "deadbeef"
-
-    def _fake_popen(*a: object, **k: object) -> object:
-        return _FakeProc()
-
-    def _fake_uuid4() -> object:
-        return _FakeUuid()
-
-    monkeypatch.setattr(_h.subprocess, "Popen", _fake_popen)
-    monkeypatch.setattr(_h.uuid, "uuid4", _fake_uuid4)
-    bridge = _h.Bridge()
-    assert bridge._next_id("tc").startswith("tc-")
-    payload = {"id": "tc-1-x"}
-    assert bridge._roundtrip(payload) == {"id": "tc-1-x", "result": {"ok": True}}
-    assert bridge.call("t", {}, "run") == {"ok": True}
-    event_out = bridge.event("run", "agent_start")
-    assert event_out["id"] == _json.loads(sent[-1])["id"]
-    bridge.close()
-    assert len(sent) == 3
-
-
-def test_harness_main_pass(monkeypatch: pytest.MonkeyPatch, tmp_path: Path, capsys: pytest.CaptureFixture[str]) -> None:
-    import json as _json
-
-    import evals.pi_harness as _h
-
-    case = {
-        "id": 11,
-        "question": "q?",
-        "expected_behavior": {"expected_tools": ["get_short_interest"], "must_contain": ["ok"]},
-    }
-    evals_dir = tmp_path / "evals"
-    evals_dir.mkdir()
-    (evals_dir / "eval_set.json").write_text(_json.dumps([case]), encoding="utf-8")
-    monkeypatch.setattr(_h, "ROOT", str(tmp_path))
-    monkeypatch.setattr(_h, "PLAN", {11: [("get_short_interest", {"ticker": "AAPL"})]})
-
-    class _FakeBridge:
-        def event(self, *a: object, **k: object) -> object:
-            out: dict[str, object] = {}
-            return out
-
-        def call(self, *a: object, **k: object) -> object:
-            out2: dict[str, object] = {"out": "ok"}
-            return out2
-
-        def close(self) -> None:
-            return None
-
-    monkeypatch.setattr(_h, "Bridge", lambda: _FakeBridge())
-    with pytest.raises(SystemExit) as exc:
-        _h.main()
-    assert exc.value.code == 0
-    assert "PI-HARNESS EVALS: 1/1 passed" in capsys.readouterr().out
 
 
 def test_opt_telemetry_rejects_bad_int_type() -> None:

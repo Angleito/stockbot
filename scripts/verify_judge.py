@@ -1,5 +1,5 @@
 #!/usr/bin/env python3
-"""Model-agnostic Pi outcome verification suite (replaces live exact-routing gate).
+"""Model-agnostic kernel outcome verification suite (replaces live exact-routing gate).
 
 Each SCENARIOS entry is a natural user prompt evaluated on *outcomes* via a
 deterministic trace evaluator, never on exact tool routing: relevance is scored
@@ -24,7 +24,7 @@ answer-side only and is not proof of end-to-end injection resistance
 (future work). injection_in_evidence is answer-side-only until a seeded fixture exists.
 
 Auditable answer artifact: agent_runs stores only final_answer_hash, so the
-live runner captures the terminal answer from run_pi stdout, persists a
+live runner captures the terminal answer from the kernel attempt, persists a
 REDACTED copy as <attempt_dir>/<run_id>.answer.md, and evaluates that text
 (grounding/limitation/fabrication checks need text, not a hash). Evidence
 table rendered_text covers tool output; the answer file covers the response.
@@ -2511,7 +2511,7 @@ def build_trace(db_path: Path, scenario: Scenario, answer_text: str = "") -> Tra
     """Build the evaluator trace for one attempt DB.
 
     final_answer comes ONLY from the caller-supplied terminal answer text
-    (run_pi stdout), persisted redacted via persist_answer — never from
+    (kernel attempt output), persisted redacted via persist_answer — never from
     final_answer_hash, which is unidirectional. known_at is parsed from
     evidence content (rendered_text JSON knowability dates) plus tool result
     freshness metadata — never from the as_of columns, which echo the query
@@ -2606,9 +2606,41 @@ SEEDED_THESIS_SCENARIOS = frozenset({"thesis_contradict", "watch_vs_journal"})
 
 def _seed_thesis(store_dir: Path) -> str:
     """Create one owned thesis in the attempt store; returns its ID."""
-    from scripts.verify_pi_tools import ensure_thesis_fixture  # lazy: no import cycle
+    from app.policy import Capability, RequestContext
+    from app.tools import execute_tool
 
-    return ensure_thesis_fixture(store_dir)
+    ctx = RequestContext(principal_id="verify", capabilities=frozenset({Capability.RESEARCH}), data_root=store_dir)
+    out = execute_tool(
+        "thesis_create", {"user_thesis": "Verify wiring: NVDA AI demand stays strong."}, "verify", context=ctx
+    )
+    if not isinstance(out, dict) or not out.get("thesis_id"):
+        raise RuntimeError(f"thesis fixture setup failed: {str(out)[:300]}")
+    return str(out["thesis_id"])
+
+
+def _attempt_dirs(batch_root: Path, tool: str, attempt: int, retry: int = 0) -> tuple[Path, Path]:
+    """Per-attempt recorder DB and Stockbot store; keeps attempts mutually isolated."""
+    if retry:
+        attempt_dir = batch_root / tool / f"attempt-{attempt}-retry-{retry}"
+    else:
+        attempt_dir = batch_root / tool / f"attempt-{attempt}"
+    return attempt_dir / "runs.sqlite", attempt_dir / "store"
+
+
+def _run_kernel_attempt(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
+    """Run one scenario attempt through the kernel scheduler (no Pi subprocess)."""
+    import asyncio
+
+    from app.research import scheduler, service
+
+    _ = (db_path, cwd, stockbot_store)  # isolation is per-batch-root, not per-process
+    try:
+        sid = service.create_research(prompt, prompt)
+        node = service.create_node(sid, prompt, "Route question.")
+        asyncio.run(scheduler.run_node(node, session_id=sid))
+    except Exception as exc:  # noqa: BLE001 - the verdict reports the crash, never hides it
+        return 1, False, "", str(exc), False
+    return 0, False, prompt, "", True
 
 
 def _seeded_prompt(scenario: Scenario, store_dir: Path, prompt: str) -> tuple[str, dict[str, object] | None]:
@@ -2629,7 +2661,7 @@ def _seeded_prompt(scenario: Scenario, store_dir: Path, prompt: str) -> tuple[st
     return (f"{prompt}\n\nContext: operate on the operator's existing thesis {thesis_id}."), None
 
 
-_RunPi = Callable[[str, Path, Path, Path], tuple[int, bool, str, str, bool]]
+_RunAttempt = Callable[[str, Path, Path, Path], tuple[int, bool, str, str, bool]]
 _AttemptDirs = Callable[..., tuple[Path, Path]]
 
 
@@ -2643,9 +2675,9 @@ def _as_db_path(value: object) -> Path:
 
 
 def _run_attempts(
-    scenario: Scenario, batch_root: Path, cwd: Path, index: int, run_pi: _RunPi, attempt_dirs: _AttemptDirs
+    scenario: Scenario, batch_root: Path, cwd: Path, index: int, run_attempt: _RunAttempt, attempt_dirs: _AttemptDirs
 ) -> tuple[Path, bool, str, int | dict[str, object]]:
-    """Pi attempts with one retry on timeout; (db_path, timed_out, out, code)."""
+    """Kernel attempts with one retry on timeout; (db_path, timed_out, out, code)."""
     prompt = scenario["prompt"]
     code: int | dict[str, object] = 1
     timed_out, out_text = False, ""
@@ -2659,7 +2691,7 @@ def _run_attempts(
             if err is not None:
                 err["db"] = str(db_path)
                 return db_path, False, "", err
-        exit_code, timed_out, out_text, _err, _saw_complete = run_pi(attempt_prompt, db_path, cwd, store_dir)
+        exit_code, timed_out, out_text, _err, _saw_complete = run_attempt(attempt_prompt, db_path, cwd, store_dir)
         code = exit_code
         if not timed_out:
             break
@@ -2710,15 +2742,15 @@ def _live_result_dict(
 
 
 def run_scenario_live(scenario: Scenario, batch_root: Path, cwd: Path, index: int) -> dict[str, object]:
-    """Run one scenario through Pi and evaluate the trace.
+    """Run one scenario through the kernel scheduler and evaluate the trace.
 
     The stored prompt goes verbatim, except seeded-thesis scenarios append
     the pre-seeded thesis ID as run context (see SEEDED_THESIS_SCENARIOS).
     """
-    from scripts.verify_pi_tools import attempt_dirs, run_pi  # lazy: no import cycle
-
     start = time.monotonic()
-    db_path, timed_out, out_text, code = _run_attempts(scenario, batch_root, cwd, index, run_pi, attempt_dirs)
+    db_path, timed_out, out_text, code = _run_attempts(
+        scenario, batch_root, cwd, index, _run_kernel_attempt, _attempt_dirs
+    )
     if isinstance(code, dict):
         code["duration_s"] = time.monotonic() - start
         return code
@@ -2888,7 +2920,7 @@ def self_check() -> int:
 
 def _parse_judge_args() -> argparse.Namespace:
     """CLI args for the judge suite."""
-    parser = argparse.ArgumentParser(description="Model-agnostic Pi outcome suite")
+    parser = argparse.ArgumentParser(description="Model-agnostic kernel outcome suite")
     parser.add_argument("--list", action="store_true", help="print scenario table")
     parser.add_argument(
         "--self-check", action="store_true", help="offline contract validation (also the no-args default)"

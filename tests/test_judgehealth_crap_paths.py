@@ -279,7 +279,7 @@ def test_agent_scenario_helpers():
     assert (name, inner) == ("t", {"a": 1})
     assert vas._extract_call_tool_request({}) == ("", {})
     assert vas.resolve_provider_model("p", "m", {"STOCKBOT_PROVIDER": "x", "STOCKBOT_MODEL": "y"}) == ("p", "m")
-    # Re-pinned: an unset provider/model is the flag-less default (OMP's own CLI default), not a failure.
+    # Re-pinned: an unset provider/model is the flag-less default (the kernel default), not a failure.
     assert vas.resolve_provider_model(None, None, {}) == ("", "")
     assert vas._selected_names(argparse.Namespace(scenario="s")) == ["s"]
     assert vas._scenario_map() != {}
@@ -287,7 +287,6 @@ def test_agent_scenario_helpers():
     assert vas._failed_results([]) == []
     failed, code = vas.summarize_results([])
     assert (failed, code) == ([], 0)
-    assert vas._live_kwargs(_scenario(), "p", "m", 300)["question"] == "q"
     assert vas._eval_one_scenario.__name__ == "_eval_one_scenario"
     assert vas._cli_prereqs.__name__ == "_cli_prereqs"
     assert vas._extract_evidence_ids({"evidence_ids": ["a", 5]}) == ("a",)

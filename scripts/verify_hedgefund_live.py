@@ -1,10 +1,10 @@
 #!/usr/bin/env python3
 """Opt-in live golden scenario: real SEC + FINRA + Exa only (never CI).
 
-Runs one golden question through the production OMP path and exports the
+Runs one golden question through the production kernel path and exports the
 read-only harness-viewer projection. Requires reachable credentials:
 SEC_EDGAR_IDENTITY, FINRA_CLIENT_ID/SECRET, EXA_ENABLED=1 + EXA_API_KEY, and a
-reachable OMP/Pi CLI (same prerequisites as scripts/verify_agent_scenarios.py).
+reachable credentials (same prerequisites as scripts/verify_agent_scenarios.py).
 
 This script performs real network calls and is NEVER run by CI. Invoke only:
   HEDGEFUND_LIVE=1 venv/bin/python scripts/verify_hedgefund_live.py [--scenario NAME] [--json]
@@ -16,7 +16,6 @@ from __future__ import annotations
 import argparse
 import json
 import os
-import sqlite3
 import sys
 from pathlib import Path
 
@@ -62,6 +61,7 @@ def _evidence_domain(row: object) -> str:
     prov: dict[str, object] = raw_prov if isinstance(raw_prov, dict) else {}
     domain = evidence_domain(prov if isinstance(prov, dict) else None)
     return domain if domain != "SOURCE" else "SEC"
+
 
 def _freeze_domains(rows: object, freeze_ids: set[str]) -> set[str]:
     domains: set[str] = set()
@@ -208,6 +208,7 @@ def golden_structure(session_id: str, db_path: Path | None = None) -> tuple[bool
     }
     return (not failures, failures, summary)
 
+
 def _live_structural(scenario_name: str) -> list[str]:
     """Structural pass criteria for the golden session, read offline from the live DB."""
     from app.research.repository import ResearchRepository
@@ -232,9 +233,9 @@ def _live_structural(scenario_name: str) -> list[str]:
 def parse_args(argv: list[str] | None = None) -> argparse.Namespace:
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--scenario", default=GOLDEN_SCENARIO, help="live golden scenario name")
-    parser.add_argument("--model", default=None, help="OMP model ID (or STOCKBOT_MODEL)")
-    parser.add_argument("--provider", default=None, help="OMP provider (or STOCKBOT_PROVIDER)")
-    parser.add_argument("--model-timeout", default=None, help="per-call OMP model timeout seconds")
+    parser.add_argument("--model", default=None, help="model ID recorded (or STOCKBOT_MODEL)")
+    parser.add_argument("--provider", default=None, help="provider recorded (or STOCKBOT_PROVIDER)")
+    parser.add_argument("--model-timeout", default=None, help="per-call model timeout seconds")
     parser.add_argument("--prompt-version", default="v1", help="prompt version stamp")
     parser.add_argument("--json", action="store_true", help="print machine-readable summary")
     return parser.parse_args(argv)
@@ -253,11 +254,6 @@ def main(argv: list[str] | None = None) -> int:
 
     provider, model = live.resolve_provider_model(args.provider, args.model, os.environ)
     timeout_s = live.resolve_model_timeout(args.model_timeout, os.environ)
-    try:
-        live._check_pi_ready(provider, model, timeout_s)
-    except RuntimeError as exc:
-        print(f"SKIP hedgefund live golden: {exc}", file=sys.stderr)
-        return 2
     by_name = live._scenario_map()
     if args.scenario not in by_name:
         print(f"unknown scenario: {args.scenario!r}", file=sys.stderr)
