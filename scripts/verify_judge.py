@@ -607,7 +607,7 @@ DEFAULT_CONCURRENCY = 3
 def _parse_concurrency(raw: str | None) -> int:
     try:
         value = int(raw or "")
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         raise ValueError("STOCKBOT_VERIFY_CONCURRENCY must be an integer >= 1")
     if value < 1:
         raise ValueError("STOCKBOT_VERIFY_CONCURRENCY must be an integer >= 1")
@@ -779,7 +779,7 @@ def _call_arg_as_of(arguments: str) -> str:
     """as_of cutoff from tool arguments_json (YYYY-MM-DD or '')."""
     try:
         payload = json.loads(arguments or "")
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         return ""
     return _payload_as_of(payload)
 
@@ -889,7 +889,7 @@ def _evidence_known_at(text: str) -> str:
     found: list[str] = []
     try:
         packet = json.loads(text)
-    except ValueError, TypeError:
+    except (ValueError, TypeError):
         packet = None
     if isinstance(packet, (dict, list)):
         date = _extract_known_at(packet)
@@ -2627,17 +2627,19 @@ def _attempt_dirs(batch_root: Path, tool: str, attempt: int, retry: int = 0) -> 
     return attempt_dir / "runs.sqlite", attempt_dir / "store"
 
 
-def _run_kernel_attempt(prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None) -> tuple[int, bool, str, str, bool]:
-    """Run one scenario attempt through the kernel scheduler (no Pi subprocess)."""
+def _run_kernel_attempt(
+    prompt: str, db_path: Path, cwd: Path, stockbot_store: Path | None = None
+) -> tuple[int, bool, str, str, bool]:
+    """Run one scenario attempt through the shared graph fan-out (no Pi subprocess)."""
     import asyncio
 
-    from app.research import scheduler, service
+    from app.research import scheduler
+    from app.research.kernel_worker import run_graph_prompt
 
     _ = (db_path, cwd, stockbot_store)  # isolation is per-batch-root, not per-process
     try:
-        sid = service.create_research(prompt, prompt)
-        node = service.create_node(sid, prompt, "Route question.")
-        asyncio.run(scheduler.run_node(node, session_id=sid))
+        sid = run_graph_prompt(prompt, None)
+        asyncio.run(scheduler.run(sid))
     except Exception as exc:  # noqa: BLE001 - the verdict reports the crash, never hides it
         return 1, False, "", str(exc), False
     return 0, False, prompt, "", True
