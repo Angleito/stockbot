@@ -287,7 +287,7 @@ def _evidence_ids(evidence: Sequence[JSONValue] | Mapping[str, JSONValue] | None
         return ids
     for item in evidence:
         if isinstance(item, dict):
-            for key in ("evidence_id", "id"):
+            for key in ("evidence_id", "id", "job_id", "tool_result_ref"):
                 value = item.get(key)
                 if isinstance(value, str) and value:
                     ids.append(value)
@@ -295,6 +295,33 @@ def _evidence_ids(evidence: Sequence[JSONValue] | Mapping[str, JSONValue] | None
         if len(ids) >= 10:
             break
     return ids
+
+
+def _observation_lines(evidence: Sequence[JSONValue] | Mapping[str, JSONValue] | None) -> list[str]:
+    """Recent unadmitted tool observations (ctx evidence without an evidence id)."""
+    lines: list[str] = []
+    if not isinstance(evidence, list):
+        return lines
+    for item in evidence[-10:]:
+        if not isinstance(item, dict) or item.get("evidence_id") or item.get("id"):
+            continue
+        summary = item.get("outcome_summary")
+        if not isinstance(summary, str) or not summary.strip():
+            continue
+        tool = item.get("tool")
+        ref = item.get("tool_result_ref")
+        head = str(tool) if isinstance(tool, str) and tool else "tool"
+        if isinstance(ref, str) and ref.strip():
+            head += f" ref={ref.strip()[:60]}"
+        error = item.get("error")
+        if isinstance(error, str) and error.strip():
+            head += f" FAILED: {error.strip()[:200]}"
+        else:
+            head += f": {' '.join(summary.split())[:200]}"
+        lines.append(head)
+        if len(lines) >= 5:
+            break
+    return lines
 
 
 def _manifest_line(entry: Mapping[str, JSONValue]) -> str:
@@ -378,6 +405,8 @@ def _tool_options_prompt(
     ids = _evidence_ids(evidence)
     count = len(evidence) if isinstance(evidence, list) else 0
     prompt += f" Evidence on hand: {count} item(s){f' [{chr(44).join(ids)}]' if ids else ''}."
+    for line in _observation_lines(evidence):
+        prompt += f" Observed {line}."
     if isinstance(attempts, list):
         for attempt in attempts:
             if not isinstance(attempt, dict):

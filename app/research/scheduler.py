@@ -3,7 +3,7 @@
 Vertical slice loop (this module is the integration owner)::
 
     USER QUESTION -> ResearchSession -> Reasoner decompose -> JEV node disposition
-      -> one ResearchNode -> JEV whole-registry tool select -> Needle arguments
+      -> ResearchNodes (topo deps) -> JEV whole-registry tool select -> Needle arguments
       -> generic ToolRuntime -> JEV result eval -> kernel persist
 
 Amendment (binding): JEV sees the whole registry (compact manifests) on EVERY
@@ -103,7 +103,8 @@ except ImportError:  # ponytail: contract stub until ToolSelect lands reasoner
         async def expand(self, *args: Any, **kwargs: Any) -> Any: ...
 
 
-# ponytail: fixed round cap, policy-driven budgets when the kernel adds them.
+# ponytail: absolute emergency ceiling only; normal stop is the JEV
+# resolved/continue/reason verdicts. A trip blocks as visibly incomplete, never convergence.
 _MAX_TOOL_ROUNDS = 10
 
 # Amendment: JEV sees the whole canonical RESEARCH registry every selection.
@@ -436,6 +437,68 @@ def _to_outcome(tool_name: str, result: dict[str, Any]) -> Any:
         return {"tool_name": tool_name, "content": str(result), "error": error, "error_type": error_type}
 
 
+# Contract: outcome_summary <=2000 chars rides in every attempt; unadmitted
+# successful observations stay in working state via context evidence (no new storage).
+_OUTCOME_SUMMARY_MAX = 2000
+
+# ponytail: recent-only cap; full history stays in attempts.
+_OBSERVATION_TAIL = 10
+
+
+def _outcome_summary(outcome: Any) -> str:
+    text = _f(outcome, "content", default=None)
+    if text is None:
+        text = str(outcome)
+    if not isinstance(text, str):
+        text = str(text)
+    return text[:_OUTCOME_SUMMARY_MAX]
+
+
+def _tool_result_ref(result: Any, outcome: Any = None) -> str | None:
+    """Persisted FINRA/WEB tool_result_id where one exists; else None (inline summary covers it)."""
+    for obj in (result, outcome):
+        ref = _f(obj, "tool_result_id", "tool_result_ref", default=None)
+        if isinstance(ref, str) and ref.strip():
+            return ref.strip()
+    handle = _f(result, "source_handle", default=None)
+    if isinstance(handle, dict):
+        for key in ("tool_result_id", "source_handle_id", "result_id"):
+            value = handle.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    if isinstance(result, dict):
+        for key in ("source_handle_id", "result_id"):
+            value = result.get(key)
+            if isinstance(value, str) and value.strip():
+                return value.strip()
+    return None
+
+
+def _context_evidence(evidence: list[Any], attempts: list[dict[str, Any]]) -> list[Any]:
+    """Admitted evidence + recent unadmitted observation summaries (success or failure)."""
+    ctx = list(evidence)
+    for attempt in attempts[-_OBSERVATION_TAIL:]:
+        if not isinstance(attempt, dict):
+            continue
+        if attempt.get("evidence_id"):
+            continue  # admitted evidence already covers it
+        summary = attempt.get("outcome_summary")
+        if not isinstance(summary, str) or not summary:
+            continue
+        error = attempt.get("error")
+        ctx.append(
+            {
+                "tool": attempt.get("tool"),
+                "job_id": attempt.get("job_id"),
+                "outcome_summary": summary,
+                "error": error if isinstance(error, str) and error else None,
+                "error_type": attempt.get("error_type") if isinstance(attempt.get("error_type"), str) else None,
+                "tool_result_ref": attempt.get("tool_result_ref"),
+            }
+        )
+    return ctx
+
+
 def _load_session(session_id: str, kernel: Any, repo: Any) -> dict[str, Any]:
     get = getattr(kernel, "get_session", None)
     if get is not None:
@@ -532,6 +595,7 @@ async def _attempt_tool(
         job_id = str(_f(job, "job_id", default=f"job:{uuid.uuid4()}"))
     except Exception:
         job_id = f"job:{uuid.uuid4()}"
+    arguments: dict[str, Any] = {}
     try:
         try:
             kernel.heartbeat_job(job_id)
@@ -558,10 +622,11 @@ async def _attempt_tool(
                 }
             )
         )
-        needle_tool, arguments = _split_generated(tool_name, generated)
+        needle_tool, generated_args = _split_generated(tool_name, generated)
         _validate_needle_tool(tool_name, needle_tool)
-        if not isinstance(arguments, dict):
+        if not isinstance(generated_args, dict):
             raise ValueError(f"needle arguments for {tool_name!r} must be a mapping")
+        arguments = dict(generated_args)
         result = await _awaited(
             invoke(
                 tool_name,
@@ -580,13 +645,34 @@ async def _attempt_tool(
             kernel.complete_job(job_id, {"tool": tool_name})
         except Exception:
             pass
-        return {"tool": tool_name, "job_id": job_id, "outcome": outcome, "error": _f(outcome, "error")}
+        outcome_error = _f(outcome, "error")
+        return {
+            "tool": tool_name,
+            "arguments": arguments,
+            "outcome": outcome,
+            "outcome_summary": _outcome_summary(outcome),
+            "error": None if outcome_error is None else str(outcome_error)[:500],
+            "error_type": _f(outcome, "error_type"),
+            "job_id": job_id,
+            "evidence_id": None,
+            "tool_result_ref": _tool_result_ref(result, outcome),
+        }
     except Exception as exc:
         try:
             kernel.fail_job(job_id, "tool_error", str(exc)[:2000])
         except Exception:
             pass
-        return {"tool": tool_name, "job_id": job_id, "outcome": None, "error": str(exc)}
+        return {
+            "tool": tool_name,
+            "arguments": arguments,
+            "outcome": None,
+            "outcome_summary": "",
+            "error": str(exc)[:500],
+            "error_type": "tool_error",
+            "job_id": job_id,
+            "evidence_id": None,
+            "tool_result_ref": None,
+        }
 
 
 def _needle_takes_kwargs(fn: Any) -> bool:
@@ -721,12 +807,14 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
     admitted = 0
 
     for _ in range(_MAX_TOOL_ROUNDS):
+        # Working state: admitted evidence + recent unadmitted observations, never dropped.
+        ctx_evidence = _context_evidence(evidence, attempts)
         decision = await _awaited(
             jev.select_tool(
                 session.get("objective") or session.get("query") or "",
                 node,
                 registry,
-                evidence,
+                ctx_evidence,
                 attempts,
                 session_id=sid,
                 job_id=None,
@@ -747,11 +835,17 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
 
         if action == "resolved":
             _resolve(kernel, sid, nid)
-            return {"node_id": nid, "status": "resolved", "admitted": admitted, "attempts": attempts}
+            return {
+                "node_id": nid,
+                "status": "resolved",
+                "admitted": admitted,
+                "attempts": attempts,
+                "incomplete_guard": False,
+            }
 
         if action == "reason":
             active_reasoner = reasoner if reasoner is not None else _default_reasoner()
-            proposal = await _reasoner_propose(active_reasoner, session, node, evidence, attempts)
+            proposal = await _reasoner_propose(active_reasoner, session, node, ctx_evidence, attempts)
             verdict = await _awaited(jev.adjudicate(proposal, node, session_id=sid, job_id=None))
             _record(
                 kernel,
@@ -767,16 +861,42 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
             verdict_action = _selection_action(verdict)
             if verdict_action == "resolved":
                 _resolve(kernel, sid, nid)
-                return {"node_id": nid, "status": "resolved", "admitted": admitted, "attempts": attempts}
+                return {
+                    "node_id": nid,
+                    "status": "resolved",
+                    "admitted": admitted,
+                    "attempts": attempts,
+                    "incomplete_guard": False,
+                }
             tools = _selection_tools(verdict) or _selection_tools(decision)
             if not tools:
-                attempts.append({"tool": None, "error": "adjudication named no tool; re-selecting"})
+                attempts.append(
+                    {
+                        "tool": None,
+                        "arguments": {},
+                        "outcome_summary": "",
+                        "error": "adjudication named no tool; re-selecting",
+                        "job_id": None,
+                        "evidence_id": None,
+                        "tool_result_ref": None,
+                    }
+                )
                 continue
             decision = verdict  # JEV adjudication selects the actual tool action; fall through to invoke.
 
         tools = _selection_tools(decision)
         if not tools:
-            attempts.append({"tool": None, "error": "selection named no tool; re-selecting"})
+            attempts.append(
+                {
+                    "tool": None,
+                    "arguments": {},
+                    "outcome_summary": "",
+                    "error": "selection named no tool; re-selecting",
+                    "job_id": None,
+                    "evidence_id": None,
+                    "tool_result_ref": None,
+                }
+            )
             continue
 
         # Parallel multi-tool select: gather over the whole selected set.
@@ -787,7 +907,7 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                     node=node,
                     session=session,
                     registry=registry,
-                    evidence=evidence,
+                    evidence=ctx_evidence,
                     attempts=attempts,
                     kernel=kernel,
                     needle_generate=needle_generate,
@@ -803,11 +923,28 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
         for attempt in results:
             tool = attempt["tool"]
             if attempt["error"] is not None and attempt["outcome"] is None:
-                attempts.append({"tool": tool, "error": str(attempt["error"])[:500]})
+                attempts.append(
+                    {
+                        k: attempt.get(k)
+                        for k in (
+                            "tool",
+                            "arguments",
+                            "outcome_summary",
+                            "error",
+                            "error_type",
+                            "confidence",
+                            "job_id",
+                            "evidence_id",
+                            "tool_result_ref",
+                        )
+                    }
+                )
                 continue
             outcome = attempt["outcome"]
             assessment = await _awaited(
-                jev.assess_result(node, outcome, evidence, session_id=sid, job_id=attempt["job_id"])
+                jev.assess_result(
+                    node, outcome, _context_evidence(evidence, attempts), session_id=sid, job_id=attempt["job_id"]
+                )
             )
             _record(
                 kernel,
@@ -821,29 +958,71 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                 confidence=_f(assessment, "confidence"),
             )
             candidate = _f(assessment, "evidence", "candidate", "admit", default=None)
+            evidence_id = None
             if isinstance(candidate, dict) and candidate:
                 try:
-                    kernel.admit_evidence(sid, attempt["job_id"], candidate)
+                    admitted_ret = kernel.admit_evidence(sid, attempt["job_id"], candidate)
+                    eid = _f(admitted_ret, "evidence_id", default=None)
+                    evidence_id = eid if isinstance(eid, str) and eid else None
                     admitted += 1
                     progressed = True
                 except Exception as exc:
-                    attempts.append({"tool": tool, "error": f"admit failed: {exc}"[:500]})
+                    attempts.append(
+                        {
+                            "tool": tool,
+                            "arguments": attempt.get("arguments") if isinstance(attempt.get("arguments"), dict) else {},
+                            "outcome_summary": attempt.get("outcome_summary")
+                            if isinstance(attempt.get("outcome_summary"), str)
+                            else "",
+                            "error": f"admit failed: {exc}"[:500],
+                            "job_id": attempt.get("job_id"),
+                            "evidence_id": None,
+                            "tool_result_ref": attempt.get("tool_result_ref"),
+                        }
+                    )
                     continue
-            if _f(outcome, "error") is None:
-                progressed = True
-            attempts.append({"tool": tool, "error": str(_f(outcome, "error") or "")[:500]})
+            outcome_error = _f(outcome, "error")
+            attempts.append(
+                {
+                    "tool": tool,
+                    "arguments": attempt.get("arguments") if isinstance(attempt.get("arguments"), dict) else {},
+                    "outcome_summary": attempt.get("outcome_summary")
+                    if isinstance(attempt.get("outcome_summary"), str)
+                    else "",
+                    "error": None if outcome_error is None else str(outcome_error)[:500],
+                    "error_type": _f(outcome, "error_type"),
+                    "confidence": _f(decision, "confidence"),
+                    "job_id": attempt.get("job_id"),
+                    "evidence_id": evidence_id,
+                    "tool_result_ref": attempt.get("tool_result_ref"),
+                }
+            )
             continuation = str(_f(assessment, "continuation", "continue", "action", default="continue_research"))
             if continuation == "resolve_node":
                 _resolve(kernel, sid, nid)
-                return {"node_id": nid, "status": "resolved", "admitted": admitted, "attempts": attempts}
+                return {
+                    "node_id": nid,
+                    "status": "resolved",
+                    "admitted": admitted,
+                    "attempts": attempts,
+                    "incomplete_guard": False,
+                }
             if continuation == "reason_over_evidence":
                 break  # fresh select round; JEV re-escalates if reasoning is still needed.
         evidence = _load_evidence(sid, kernel, repo)
         if not progressed:
             continue
 
-    _block(kernel, sid, nid, f"round cap ({_MAX_TOOL_ROUNDS}) without resolution")
-    return {"node_id": nid, "status": "blocked", "admitted": admitted, "attempts": attempts}
+    reason = f"incomplete: runtime guard ({_MAX_TOOL_ROUNDS} rounds without resolution)"
+    _block(kernel, sid, nid, reason)
+    return {
+        "node_id": nid,
+        "status": "blocked",
+        "reason": reason,
+        "incomplete_guard": True,
+        "admitted": admitted,
+        "attempts": attempts,
+    }
 
 
 # ---------------------------------------------------------------------------
@@ -865,6 +1044,8 @@ async def run(session_id: str, **hooks: Any) -> dict[str, Any]:
         return {"session_id": session_id, "status": "failed", "error": "kernel ready_nodes unavailable"}
     node_results: list[dict[str, Any]] = []
     rounds = 0
+    incomplete_guard = False
+    guard_reason: str | None = None
     while True:
         try:
             nodes = await _awaited(ready(session_id))
@@ -874,16 +1055,30 @@ async def run(session_id: str, **hooks: Any) -> dict[str, Any]:
         if not nodes:
             break
         rounds += 1
-        # ponytail: round cap mirrors the per-node cap; a stalled session blocks instead of spinning.
+        # ponytail: absolute emergency ceiling only; a trip is visibly incomplete, never convergence.
         if rounds > _MAX_TOOL_ROUNDS:
+            incomplete_guard = True
+            guard_reason = f"incomplete: runtime guard ({_MAX_TOOL_ROUNDS} session rounds without convergence)"
             break
         round_results = await asyncio.gather(
             *(run_node(node, session_id, **{**hooks, "kernel": kernel}) for node in nodes)
         )
         node_results.extend(round_results)
+        if any(r.get("incomplete_guard") for r in round_results):
+            incomplete_guard = True
         if not any(r.get("status") == "resolved" or r.get("admitted") for r in round_results):
             break
-    return {"session_id": session_id, "status": "complete", "rounds": rounds, "nodes": node_results}
+    status = "complete" if not incomplete_guard else "incomplete_guard"
+    out: dict[str, Any] = {
+        "session_id": session_id,
+        "status": status,
+        "rounds": rounds,
+        "nodes": node_results,
+        "incomplete_guard": incomplete_guard,
+    }
+    if guard_reason is not None:
+        out["reason"] = guard_reason
+    return out
 
 
 __all__ = ["build_registry", "run", "run_node"]
