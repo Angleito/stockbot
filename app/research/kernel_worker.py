@@ -21,11 +21,13 @@ decides, the user does.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import importlib
 import json
 import os
 import signal
 import sys
+import threading
 from collections.abc import Callable, Mapping
 from pathlib import Path
 from typing import TYPE_CHECKING, cast
@@ -99,11 +101,6 @@ _DISPOSITION_OPTIONS = {
     "analyze": "The question materially contributes to resolving the objective and is ready to analyze.",
     "gather_evidence": "The question matters, but available state is insufficient to analyze it.",
     "reject": "The question does not materially contribute to resolving the user's objective.",
-}
-# Entry routing (JEV-before-kernel): one choice, no session/DB/scheduler.
-_ENTRY_OPTIONS = {
-    "reasoning_required": "The prompt is conversational chitchat answerable directly without research.",
-    "research_required": "The prompt needs reasoning over evidence, lookup, or research to answer.",
 }
 
 
@@ -182,7 +179,11 @@ def _fallback_single(objective: str, objective_id: str) -> list[dict[str, object
 
 
 def _propose_questions(objective: str, as_of: str | None, objective_id: str) -> list[dict[str, object]]:
-    """Reasoner decompose via the existing transport; single-node fallback on any outage."""
+    """Reasoner decompose via the existing transport; single-node fallback on any outage.
+
+    Entry never calls this (JEV-first single objective node); retained as the
+    scheduler-driven reason-path helper only, never ahead of first tool selection.
+    """
     # ponytail: no retry/backoff on model outage; single-node fallback keeps research live.
     try:
         from app.reasoner_client import ReasonerClient
@@ -298,7 +299,11 @@ def _objective_or_admitted(
 def _jev_admit(
     sid: str, objective: str, proposals: list[dict[str, object]], jev: JevClient | None = None
 ) -> list[dict[str, object]]:
-    """JEV disposition per proposal (run.ts relevance); objective-only on JEV outage."""
+    """JEV disposition per proposal (run.ts relevance); objective-only on JEV outage.
+
+    Entry never calls this ahead of first tool selection; the scheduler's
+    reason-path expansion owns JEV disposition inside scheduler flow.
+    """
     if len(proposals) <= 1:
         return list(proposals)
     # ponytail: single disposition round only; no re-ask on partial failure (objective-only instead).
@@ -369,13 +374,19 @@ def _registry_portfolio_hit() -> list[str]:
 
 
 def run_graph_prompt(prompt: str, as_of: str | None = None, jev: JevClient | None = None) -> str:
-    """Shared graph fan-out: session + decompose/admit/topo nodes. Returns sid.
+    """Shared graph entry: session + single objective node. Returns sid.
 
     Both the JSONL bridge (_run) and the thesis trigger runner import this so
     the two entry points cannot drift into separate single-node paths.
     Fail-closed: a forbidden registry raises before creating anything.
     Import has no startup side effects: a passed jev is reused, otherwise the
     process-lifetime shared client is used lazily (thesis callers never start it).
+
+    JEV-first: no Reasoner call happens here. Entry creates the session plus
+    one objective node, then hands to scheduler.run whose JEV select_tool loop
+    owns all expansion via the reason path (reasoner proposes only after a JEV
+    reason verdict, follow-ups admitted via JEV disposition). The jev arg is
+    kept for signature compatibility; first JEV decision happens in scheduler.
     """
     from app.research import service
 
@@ -384,12 +395,7 @@ def run_graph_prompt(prompt: str, as_of: str | None = None, jev: JevClient | Non
         raise RuntimeError(f"registry guard forbids portfolio tools: {hit}")
     objective = prompt.strip()
     sid = service.create_research(objective, objective, as_of=as_of)
-    try:
-        proposals = _propose_questions(objective, as_of, sid)
-        admitted = _jev_admit(sid, objective, proposals, jev=jev)
-        _create_nodes_topological(sid, objective, admitted)
-    except Exception:
-        service.create_node(sid, objective, "Route question.")
+    service.create_node(sid, objective, "Route question.")
     return sid
 
 
@@ -420,7 +426,7 @@ def _create_nodes_topological(sid: str, objective: str, admitted: list[dict[str,
 
 
 def _route(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[str, JSONValue]:
-    """JEV entry route: reasoning vs research. Fail-open to research; zero session/DB."""
+    """JEV-first entry route: winner over reasoning_required + every canonical tool + research_required. Fail-open to research; zero session/DB."""
     raw_id = req.get("id")
     rid = raw_id if isinstance(raw_id, str) else "?"
     prompt = req.get("prompt")
@@ -428,20 +434,8 @@ def _route(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[s
         return {"id": rid, "route": "research_required"}
     try:
         client = jev if jev is not None else _shared_jev()
-        # ponytail: _invoke not decide — entry triage persists nothing.
-        from typing import cast
-
-        questions: dict[str, JSONValue] = cast(
-            "dict[str, JSONValue]",
-            {"entry": {"type": "choice", "instructions": prompt.strip(), "criteria": dict(_ENTRY_OPTIONS)}},
-        )
-        decisions, _raw, _via = asyncio.run(
-            client._invoke({"prompt": prompt.strip()}, questions, {"entry": dict(_ENTRY_OPTIONS)})
-        )
-        d = decisions.get("entry")
-        if isinstance(d, dict) and d.get("choice") == "reasoning_required":
-            return {"id": rid, "route": "reasoning_required"}
-        return {"id": rid, "route": "research_required"}
+        winner = asyncio.run(client.route_entry(prompt.strip()))
+        return {"id": rid, "route": winner}
     except Exception:
         return {"id": rid, "route": "research_required"}
 
@@ -624,31 +618,50 @@ def main() -> None:
         signal.signal(signal.SIGTERM, _on_signal)
     except (OSError, ValueError):
         pass
-    try:
-        for line in sys.stdin:
-            line = line.strip()
-            if not line:
-                continue
-            try:
-                parsed: object = json.loads(line)
-            except ValueError:
-                sys.stdout.write(json.dumps(_terminal("?", "invalid_params", "invalid JSON")) + "\n")
-                sys.stdout.flush()
-                continue
-            if not isinstance(parsed, dict) or parsed.get("op") not in ("run", "route"):
-                rid = parsed.get("id") if isinstance(parsed, dict) and isinstance(parsed.get("id"), str) else "?"
-                sys.stdout.write(json.dumps(_terminal(rid, "invalid_params", "op must be 'run' or 'route'")) + "\n")
-                sys.stdout.flush()
-                continue
-            req: Mapping[str, JSONValue] = parsed
-            try:
-                resp = _route(req, jev=jev) if req.get("op") == "route" else _run(req, jev=jev)
-            except Exception as exc:  # never raise out of the worker
-                raw_rid = req.get("id")
-                rid = raw_rid if isinstance(raw_rid, str) else "?"
-                resp = _terminal(rid, "provider_error", f"worker failed: {exc}")
-            sys.stdout.write(json.dumps(resp) + "\n")
+    _write_lock = threading.Lock()
+
+    def _emit(resp: Mapping[str, JSONValue]) -> None:
+        line = json.dumps(resp)
+        with _write_lock:
+            sys.stdout.write(line + "\n")
             sys.stdout.flush()
+
+    def _do_run(req: Mapping[str, JSONValue], worker_jev: JevClient | None) -> None:
+        try:
+            resp = _run(req, jev=worker_jev)
+        except Exception as exc:  # never raise out of the worker
+            raw_rid = req.get("id")
+            rid = raw_rid if isinstance(raw_rid, str) else "?"
+            resp = _terminal(rid, "provider_error", f"worker failed: {exc}")
+        _emit(resp)
+
+    try:
+        # Single run worker: a second op:run queues behind the in-flight one
+        # while the main thread keeps reading stdin so op:route never waits.
+        with concurrent.futures.ThreadPoolExecutor(max_workers=1, thread_name_prefix="kernel-run") as pool:
+            for line in sys.stdin:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    parsed: object = json.loads(line)
+                except ValueError:
+                    _emit(_terminal("?", "invalid_params", "invalid JSON"))
+                    continue
+                if not isinstance(parsed, dict) or parsed.get("op") not in ("run", "route"):
+                    rid = parsed.get("id") if isinstance(parsed, dict) and isinstance(parsed.get("id"), str) else "?"
+                    _emit(_terminal(rid, "invalid_params", "op must be 'run' or 'route'"))
+                    continue
+                req: Mapping[str, JSONValue] = parsed
+                if req.get("op") == "route":
+                    try:
+                        _emit(_route(req, jev=jev))
+                    except Exception as exc:  # never raise out of the worker
+                        raw_rid = req.get("id")
+                        rid = raw_rid if isinstance(raw_rid, str) else "?"
+                        _emit(_terminal(rid, "provider_error", f"worker failed: {exc}"))
+                else:
+                    pool.submit(_do_run, req, jev)
     finally:
         _shutdown()
 

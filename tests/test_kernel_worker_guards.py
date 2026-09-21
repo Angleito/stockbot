@@ -86,13 +86,11 @@ class _JevRoute:
         self.fail = fail
         self.seen: list[object] = []
 
-    async def _invoke(
-        self, state: object, questions: object, choice_options: object | None = None
-    ) -> tuple[object, object, str]:
+    async def route_entry(self, prompt: str, registry: object | None = None) -> str:
         if self.fail:
             raise RuntimeError("jev down")
-        self.seen.append((state, questions, choice_options))
-        return ({"entry": {"kind": "choice", "choice": self.choice or "research_required"}}, {}, "stub")
+        self.seen.append((prompt, registry))
+        return self.choice or "research_required"
 
 
 def test_route_reasoning_choice_returns_fast_path() -> None:
@@ -108,3 +106,8 @@ def test_route_outage_fails_open_to_research() -> None:
 def test_route_blank_prompt_needs_no_jev() -> None:
     out = kw._route({"id": "r1", "op": "route", "prompt": "  "}, jev=_JevRoute("reasoning_required"))  # type: ignore[arg-type]
     assert out == {"id": "r1", "route": "research_required"}
+
+
+def test_route_tool_winner_returns_exact_tool() -> None:
+    out = kw._route({"id": "r1", "op": "route", "prompt": "what time is it?"}, jev=_JevRoute("get_current_time"))  # type: ignore[arg-type]
+    assert out == {"id": "r1", "route": "get_current_time"}

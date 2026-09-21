@@ -155,6 +155,7 @@ _PIT_BLIND_TOOLS = frozenset(
         "research_submit_source_result",
         "research_add_analysis",
         "research_finalize",
+        "get_current_time",
     }
 )
 

@@ -128,6 +128,7 @@ TOOL_ENVELOPES: dict[str, ContextEnvelope] = {
     "search_company_patents": _envelope(
         "google", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.EXTERNAL, external=True
     ),
+    "get_current_time": _envelope("system", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     # Bounded local thesis operations (locally derived, never canonical market data).
     "thesis_create": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),
     "thesis_show": _envelope("thesis", SourceType.TOOL_RESULT, Sensitivity.PUBLIC, Integrity.DERIVED),

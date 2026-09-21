@@ -60,6 +60,12 @@ _SENTINEL_DESCRIPTIONS = {
     REASON_SENTINEL: "Escalate to the reasoner (decompose/analyze proposals); no tool call fits this node.",
     RESOLVED_SENTINEL: "Existing evidence resolves the node; no further tool call needed.",
 }
+
+# Entry routing (JEV-before-kernel): fast-path + research sentinels framing the whole canonical registry.
+_ENTRY_OPTIONS = {
+    REASON_SENTINEL: "The prompt is conversational chitchat answerable directly without research.",
+    "research_required": "The prompt needs reasoning over evidence, lookup, or research to answer.",
+}
 # Opt-in parallel fan-out: runner-up joins only when close to the winner and above floor (cap keeps blast radius small).
 _PARALLEL_MIN_PROB = 0.35
 _PARALLEL_WINDOW = 0.15
@@ -754,6 +760,40 @@ class JevClient:
         return self._to_tool_decision(
             decisions.get("tool_selection"), options, set_of_registry={o for o in options} - set(_SENTINEL_DESCRIPTIONS)
         )
+
+    async def route_entry(
+        self,
+        prompt: str,
+        registry: Sequence[Mapping[str, JSONValue]] | None = None,
+    ) -> str:
+        """JEV-first entry route: one choice over reasoning_required + whole canonical registry + research_required. Uses _invoke directly so nothing persists (never decide); raises on blank prompt, empty registry, or any JEV outage — the caller fail-opens to research_required."""
+        text = prompt.strip() if isinstance(prompt, str) else ""
+        if not text:
+            raise ValueError("route_entry: blank prompt")
+        reg = list(registry) if registry else _auto_registry()
+        if not reg:
+            raise ValueError("route_entry: empty registry")
+        options: dict[str, str] = dict(_ENTRY_OPTIONS)
+        for entry in reg:
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if not isinstance(name, str) or not name:
+                raise ValueError("route_entry: registry entry needs a name")
+            if name in options:
+                raise ValueError(f"route_entry: duplicate tool {name}")
+            options[name] = _manifest_line(entry)
+        questions: dict[str, JSONValue] = {
+            "entry": {
+                "type": "choice",
+                "instructions": f"Route this entry prompt with exactly one winner: {text} reasoning_required answers directly with no tool; a registry tool runs single-shot first when it fits; otherwise research_required.",
+                "criteria": validate_json_mapping(options, "<decision_client>: 'criteria'"),
+            }
+        }
+        decisions, _raw, _via = await self._invoke({"prompt": text}, questions, {"entry": options})
+        d = decisions.get("entry")
+        winner = d.get("choice") if isinstance(d, dict) else None
+        if not isinstance(winner, str) or winner not in options:
+            raise ValueError(f"route_entry: winner {winner!r} not in options")
+        return winner
 
     async def adjudicate(
         self,

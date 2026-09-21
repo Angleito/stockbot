@@ -99,6 +99,11 @@ domains:
     families:
       - lifecycle:
         path: "/thesis/lifecycle"
+  time:
+    description: "Current time from the system clock."
+    families:
+      - clock:
+        path: "/time/clock"
   transactions:
     description: "Transaction status and mandate evaluation for deals."
     families:
@@ -775,6 +780,18 @@ tools:
     summary: "List existing watch rules, or add a validated monitoring rule that alerts when a thesis condition triggers."
     version: 2
     keywords: [add, alert, am, condition, existing, invalidator, list, listing, monitoring, rule, setting, thesi, trigger, validated, watch, watched, watching]
+  - name: get_current_time
+    domain: time
+    family: clock
+    path: "/time/clock/get_current_time"
+    intent: retrieve_current_time
+    output_kind: current_snapshot
+    source: system
+    entity_scope: global
+    time_mode: current
+    summary: "Current UTC date and time from the system clock."
+    version: 2
+    keywords: [clock, current, date, get, now, retrieve, system, time, utc]
   - name: get_transaction_status
     domain: transactions
     family: deals

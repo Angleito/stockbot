@@ -12,6 +12,7 @@
   "find_sec_entities",
   "get_analyst_estimates",
   "get_beneficial_ownership",
+  "get_current_time",
   "get_dilution_profile",
   "get_financial_statements",
   "get_finra_datapoints",

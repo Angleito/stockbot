@@ -74,6 +74,7 @@ TOOL_DOMAINS: dict[str, str] = {
     "investigate_social_arbitrage_candidate": "financial_research",
     "get_macro_context": "financial_research",
     "search_company_patents": "financial_research",
+    "get_current_time": "financial_research",
     # Bounded local thesis operations (RESEARCH-scoped, never broker data).
     "thesis_create": "financial_research",
     "thesis_show": "financial_research",

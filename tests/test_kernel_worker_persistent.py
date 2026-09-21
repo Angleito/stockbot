@@ -5,6 +5,8 @@ from __future__ import annotations
 import io
 import json
 import sys
+import threading
+import time
 import types
 from collections.abc import Callable, Mapping
 
@@ -92,6 +94,9 @@ def test_two_requests_share_one_jev_identity(monkeypatch: pytest.MonkeyPatch) ->
     def _no_nodes(sid: str, objective: str, admitted: object) -> None:
         return None
 
+    def _noop_node(*args: object, **kwargs: object) -> None:
+        return None
+
     def _two_proposals(*args: object, **kwargs: object) -> list[dict[str, object]]:
         return _proposals(2)
 
@@ -109,12 +114,13 @@ def test_two_requests_share_one_jev_identity(monkeypatch: pytest.MonkeyPatch) ->
     from app.research import service
 
     monkeypatch.setattr(service, "create_research", _research)
+    monkeypatch.setattr(service, "create_node", _noop_node)
 
     out1 = kw._run({"id": "r1", "op": "run", "prompt": "alpha?"})
     out2 = kw._run({"id": "r2", "op": "run", "prompt": "beta?"})
     assert out1["id"] == "r1" and out2["id"] == "r2"
-    assert seen == [fake, fake]  # same injected identity across both requests
-    assert fake.decide_calls == 2  # admit path reused the same client, no per-request construct
+    assert seen == [fake, fake]  # same scheduler-run identity across both requests
+    assert fake.decide_calls == 0  # JEV-first entry admits nothing; first decision is in scheduler.run
 
 
 def test_stalled_run_reports_escalated_without_guard(monkeypatch: pytest.MonkeyPatch) -> None:
@@ -253,3 +259,55 @@ def test_main_ready_precedes_responses_and_closes_once(monkeypatch: pytest.Monke
         ids.append(row.get("id"))
     assert ids == ["a", "b"]  # request IDs preserved
     assert fake.closed == 1 and started["needle"] == 1001  # EOF closed once
+
+
+def test_route_served_while_run_in_flight(monkeypatch: pytest.MonkeyPatch) -> None:
+    fake = _FakeJev()
+    entered = threading.Event()
+    release = threading.Event()
+
+    def _blocked_run(req: object, **kwargs: object) -> dict[str, object]:
+        assert isinstance(req, dict) and req.get("id") == "run1"
+        entered.set()
+        assert release.wait(timeout=10)
+        return _response_row("run1", "R")
+
+    def _fast_route(req: object, **kwargs: object) -> dict[str, object]:
+        assert isinstance(req, dict)
+        raw = req.get("id")
+        return {"id": raw if isinstance(raw, str) else "?", "route": "research_required"}
+
+    monkeypatch.setattr(kw, "_startup", lambda: fake)
+    monkeypatch.setattr(kw, "_run", _blocked_run)
+    monkeypatch.setattr(kw, "_route", _fast_route)
+    monkeypatch.setattr(kw, "_shutdown", lambda: None)
+
+    def _no_signal(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr("signal.signal", _no_signal)
+    body = (
+        json.dumps({"id": "run1", "op": "run", "prompt": "x"})
+        + "\n"
+        + json.dumps({"id": "r1", "op": "route", "prompt": "hi"})
+        + "\n"
+    )
+    monkeypatch.setattr(sys, "stdin", io.StringIO(body))
+    buf = io.StringIO()
+    real_stdout = sys.stdout
+    monkeypatch.setattr(sys, "stdout", buf)
+    worker = threading.Thread(target=kw.main, daemon=True)
+    worker.start()
+    try:
+        assert entered.wait(timeout=5)
+        deadline = time.monotonic() + 5
+        while '"r1"' not in buf.getvalue() and time.monotonic() < deadline:
+            time.sleep(0.01)
+        assert '"r1"' in buf.getvalue()  # route answered while run still blocked (not 60s)
+    finally:
+        release.set()
+        worker.join(timeout=10)
+    monkeypatch.setattr(sys, "stdout", real_stdout)
+    rows = [json.loads(line) for line in buf.getvalue().splitlines() if line.strip()]
+    by_id = {row.get("id") for row in rows if isinstance(row, dict) and "id" in row}
+    assert {"run1", "r1"} <= by_id  # ids still correlate under concurrency

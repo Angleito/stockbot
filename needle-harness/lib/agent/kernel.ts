@@ -280,12 +280,9 @@ export class KernelRouter {
     }
   }
 
-  prewarm(): void {
-    try {
-      this.ensure();
-    } catch (e) {
-      console.error(`[ai] kernel worker prewarm failed: ${e instanceof Error ? e.message : String(e)}`);
-    }
+  async prewarm(): Promise<void> {
+    this.ensure();
+    await this.ready;
   }
 }
 
@@ -293,12 +290,8 @@ const kernelRouter = new KernelRouter();
 
 export { kernelRouter };
 
-export function prewarmKernel(): void {
-  try {
-    kernelRouter.prewarm();
-  } catch {
-    // prewarm() never throws; belt-and-suspenders for the startup path.
-  }
+export async function prewarmKernel(): Promise<void> {
+  await kernelRouter.prewarm();
 }
 
 for (const sig of ["SIGINT", "SIGTERM"] as const) {

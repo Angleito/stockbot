@@ -134,4 +134,35 @@ describe("KernelRouter", () => {
       router.close();
     }
   });
+
+  test("prewarm resolves only after the worker ready message is observed", async () => {
+    const children: FakeChild[] = [];
+    const router = new KernelRouter({
+      python: "py",
+      workerPath: "w",
+      spawnFn: (): KernelChild => {
+        const c = new FakeChild();
+        children.push(c);
+        return c;
+      },
+    });
+    try {
+      let settled = false;
+      const pending = router.prewarm().then(() => {
+        settled = true;
+      });
+      // Microtask flush only: prewarm awaits the unresolved ready gate, so it
+      // cannot settle until the worker hello arrives — no wall-clock wait.
+      await Promise.resolve();
+      await Promise.resolve();
+      expect(settled).toBe(false);
+      const first = children[0];
+      if (!first) throw new Error("expected one spawned child");
+      first.emitStdout('{"type":"ready"}\n');
+      await pending;
+      expect(settled).toBe(true);
+    } finally {
+      router.close();
+    }
+  });
 });

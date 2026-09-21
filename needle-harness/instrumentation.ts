@@ -6,9 +6,9 @@ export async function register(): Promise<void> {
     // worker on ensure) out of this module's graph so a kernel load failure
     // can't break startup; failure is caught below.
     const m = await import("@/lib/agent/kernel");
-    m.prewarmKernel?.();
+    await m.prewarmKernel?.();
     process.env.KERNEL_PREWARMED = "1";
-    console.log("[web] prewarm kernel requested");
+    console.log("[web] prewarm kernel ready");
   } catch (e) {
     console.error(`[web] kernel prewarm failed: ${e instanceof Error ? e.message : String(e)}`);
   }

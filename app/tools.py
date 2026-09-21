@@ -2094,6 +2094,14 @@ TOOLS: list[dict[str, object]] = [
             },
         },
     },
+    {
+        "type": "function",
+        "function": {
+            "name": "get_current_time",
+            "description": "Current UTC date and time from the system clock. Call for 'what time is it' questions; never for market data, filings, or historical point-in-time facts.",
+            "parameters": {"type": "object", "properties": {}, "required": []},
+        },
+    },
 ]
 # TOOL_REGISTRY_VERSION moved below TOOL_DISCOVERY_REGISTRY (hashes schemas + routing metadata).
 
@@ -3160,6 +3168,11 @@ def _search_company_patents(args: dict[str, object], model: str) -> dict[str, ob
         return {"error": f"Tool 'search_company_patents' failed: {exc}", "soft": True, "source": "patents"}
 
 
+def _get_current_time(args: dict[str, object], model: str) -> dict[str, object]:
+    del args, model
+    return {"utc_now": datetime.now(UTC).isoformat(), "source": "system-clock"}
+
+
 def _wrap_one(record: object) -> object:
     """One SEC list item: to_dict when available, else a plain copy."""
     if hasattr(record, "to_dict"):
@@ -3221,6 +3234,7 @@ DOMAIN_DESCRIPTIONS: dict[str, str] = {
     "patents": "Patent records and innovation activity.",
     "research": "Live research sessions: questions, jobs, evidence, freezes, and dossiers.",
     "thesis": "Thesis tracking, refinement, obligations, and operator notes.",
+    "time": "Current time from the system clock.",
     "transactions": "Transaction status and mandate evaluation for deals.",
     "valuation": "Valuation multiples and financial-statement analysis.",
     "web": "General web search for facts outside structured financial sources.",
@@ -4476,6 +4490,21 @@ TOOL_DISCOVERY_REGISTRY: dict[str, ToolDiscovery] = {
         related_tools=("research_status",),
         prerequisites=(),
         direct_activation=False,
+    ),
+    "get_current_time": ToolDiscovery(
+        domain="time",
+        family="clock",
+        intent="retrieve_current_time",
+        output_kind="current_snapshot",
+        source="system",
+        entity_scope="global",
+        time_mode="current",
+        summary="Current UTC date and time from the system clock.",
+        choose_when=("What time is it now; the current UTC date and time.",),
+        reject_when=("Not for market data, filings, or historical point-in-time facts.",),
+        conflicts_with=(),
+        related_tools=(),
+        prerequisites=(),
     ),
 }
 
@@ -5892,6 +5921,7 @@ _MODEL_HANDLERS: dict[str, ModelHandler] = {
     "investigate_social_arbitrage_candidate": _investigate_social_arbitrage_candidate,
     "get_macro_context": _get_macro_context,
     "search_company_patents": _search_company_patents,
+    "get_current_time": _get_current_time,
 }
 
 # FINRA dispatch registry — kept next to the FINRA tool schemas above so the
@@ -6019,6 +6049,7 @@ TOOL_CAPABILITIES: dict[str, Capability] = {
     "investigate_social_arbitrage_candidate": Capability.RESEARCH,
     "get_macro_context": Capability.RESEARCH,
     "search_company_patents": Capability.RESEARCH,
+    "get_current_time": Capability.RESEARCH,
     "list_finra_datasets": Capability.RESEARCH,
     "describe_finra_dataset": Capability.RESEARCH,
     "get_finra_datapoints": Capability.RESEARCH,
@@ -6696,6 +6727,7 @@ def _start_as_of(arguments: dict[str, object]) -> str | None:
     as_of = arguments.get("as_of")
     return as_of if isinstance(as_of, str) and as_of else None
 
+
 def _start_policy(arguments: dict[str, object]) -> object:
     """Optional session policy passthrough; None stays the SEC-only default."""
     policy = arguments.get("policy")
@@ -6706,8 +6738,11 @@ def _start_policy(arguments: dict[str, object]) -> object:
     if isinstance(research_sources, dict):
         return {"research_sources": dict(research_sources)}
     if isinstance(sources, list) and all(isinstance(s, str) and s.strip() for s in sources):
-        return {"research_sources": {"mode": "allowlist", "sources": [s.strip() for s in sources if isinstance(s, str)]}}
+        return {
+            "research_sources": {"mode": "allowlist", "sources": [s.strip() for s in sources if isinstance(s, str)]}
+        }
     return None
+
 
 def _inspect_research_snapshot(research_service: object, session_id: str, repo: object) -> dict[str, object]:
     """inspect_research without static service typing."""
