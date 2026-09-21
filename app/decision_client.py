@@ -522,6 +522,13 @@ class JevClient:
         self._runtime_ts = Path(runtime_path) if runtime_path is not None else root / "decision" / "runtime.ts"
         self._repo_root = root
 
+    def start(self) -> None:
+        """Zero-arg ping handshake: ensure the sidecar is alive, reuse the proc."""
+        payload: dict[str, JSONValue] = {"id": f"jev:ping:{uuid.uuid4().hex[:12]}", "op": "ping"}
+        response = self._sidecar_roundtrip(payload)
+        if response.get("id") != payload["id"] or response.get("ready") is not True:
+            raise RuntimeError(f"jev ping failed: unexpected sidecar ack for {payload['id']!r}")
+
     def close(self) -> None:
         with self._lock:
             proc, self._proc = self._proc, None

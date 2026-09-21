@@ -21,15 +21,77 @@ decides, the user does.
 from __future__ import annotations
 
 import asyncio
+import importlib
 import json
 import os
+import signal
 import sys
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from pathlib import Path
+from typing import TYPE_CHECKING, cast
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
 from app.research.models import JSONValue
+
+if TYPE_CHECKING:
+    from app.decision_client import JevClient
+    from app.research.models import DecisionRecord, ResearchNode
+
+# Process-lifetime shared runtime: one JevClient + one Needle worker per kernel
+# process. Lazily created so import has no side effects (thesis/script callers
+# use run_graph_prompt without starting anything).
+_JEV: JevClient | None = None
+_SHUTDOWN_DONE = False
+
+
+def _shared_jev() -> JevClient:
+    """Return the process-lifetime JevClient, creating it once."""
+    global _JEV
+    if _JEV is None:
+        from app.decision_client import JevClient
+
+        _JEV = JevClient()
+    return _JEV
+
+
+def _shared_needle_generate() -> Callable[..., object]:
+    """Return the shared Needle arguments hook (no spawn here; start() owns it)."""
+    needle_mod = importlib.import_module("app.needle_client")
+    generate = needle_mod.generate_arguments
+    return cast(Callable[..., object], generate)
+
+
+def _startup() -> JevClient:
+    """Start shared JEV + Needle. Caller emits readiness only after this returns."""
+    global _SHUTDOWN_DONE
+    _SHUTDOWN_DONE = False
+    jev = _shared_jev()
+    jev.start()
+    needle_mod = importlib.import_module("app.needle_client")
+    start_fn = needle_mod.start
+    start_fn()
+    return jev
+
+
+def _shutdown() -> None:
+    """Close shared JEV + Needle once (EOF/signal); best-effort, idempotent."""
+    global _SHUTDOWN_DONE
+    if _SHUTDOWN_DONE:
+        return
+    _SHUTDOWN_DONE = True
+    if _JEV is not None:
+        try:
+            _JEV.close()
+        except OSError:
+            pass
+    try:
+        needle_mod = importlib.import_module("app.needle_client")
+        close_fn = needle_mod.close
+        close_fn()
+    except (ImportError, AttributeError, OSError):
+        pass
+
 
 # Mirror of decision/jev.ts DISPOSITION_OPTIONS (choice labels are the contract).
 # run.ts relevance semantics: analyze/gather_evidence admit a node, reject is artifact-only.
@@ -210,13 +272,33 @@ def _topo_sort(proposals: list[dict[str, object]]) -> list[dict[str, object]]:
     return order
 
 
-def _jev_admit(sid: str, objective: str, proposals: list[dict[str, object]]) -> list[dict[str, object]]:
+def _objective_or_admitted(
+    objective: str, objective_id: str, proposals: list[dict[str, object]]
+) -> list[dict[str, object]]:
+    """JEV-outage fallback: the exact-objective proposal wins, else a synthesized one."""
+    for p in proposals:
+        if str(p.get("question")) == objective:
+            return [p]
+    return [
+        {
+            "id": f"{objective_id}-q1",
+            "objectiveId": objective_id,
+            "question": objective,
+            "dependsOn": [],
+            "whyItMatters": "Route question.",
+        }
+    ]
+
+
+def _jev_admit(
+    sid: str, objective: str, proposals: list[dict[str, object]], jev: JevClient | None = None
+) -> list[dict[str, object]]:
     """JEV disposition per proposal (run.ts relevance); admit-all on JEV outage."""
     if len(proposals) <= 1:
         return list(proposals)
     # ponytail: single disposition round only; no re-ask on partial failure (admit-all instead).
     try:
-        from app.decision_client import JevClient
+        client = jev if jev is not None else _shared_jev()
     except Exception:
         return list(proposals)
     try:
@@ -235,9 +317,8 @@ def _jev_admit(sid: str, objective: str, proposals: list[dict[str, object]]) -> 
             }
             choice_options[pid] = dict(_DISPOSITION_OPTIONS)
         state = {"objective": {"prompt": objective}, "proposals": proposals}
-        jev = JevClient()
         decisions = asyncio.run(
-            jev.decide(
+            client.decide(
                 state,
                 questions,
                 decision_type="proposal_disposition",
@@ -251,9 +332,9 @@ def _jev_admit(sid: str, objective: str, proposals: list[dict[str, object]]) -> 
             if isinstance(d, dict) and d.get("choice") == "reject":
                 continue
             admitted.append(p)
-        return admitted
+        return _objective_or_admitted(objective, sid, admitted)
     except Exception:
-        return list(proposals)
+        return _objective_or_admitted(objective, sid, proposals)
 
 
 def _registry_portfolio_hit() -> list[str]:
@@ -262,8 +343,8 @@ def _registry_portfolio_hit() -> list[str]:
 
     try:
         reg = scheduler.build_registry()
-    except Exception:
-        return []
+    except Exception as exc:
+        raise RuntimeError(f"registry guard forbids portfolio tools: registry unavailable ({exc})") from exc
     try:
         from app.tools import PORTFOLIO_AUTHORIZED_TOOLS as _PORT
 
@@ -280,12 +361,14 @@ def _registry_portfolio_hit() -> list[str]:
     return sorted(n for n in names if n in forbidden)
 
 
-def run_graph_prompt(prompt: str, as_of: str | None = None) -> str:
+def run_graph_prompt(prompt: str, as_of: str | None = None, jev: JevClient | None = None) -> str:
     """Shared graph fan-out: session + decompose/admit/topo nodes. Returns sid.
 
     Both the JSONL bridge (_run) and the thesis trigger runner import this so
     the two entry points cannot drift into separate single-node paths.
     Fail-closed: a forbidden registry raises before creating anything.
+    Import has no startup side effects: a passed jev is reused, otherwise the
+    process-lifetime shared client is used lazily (thesis callers never start it).
     """
     from app.research import service
 
@@ -296,7 +379,7 @@ def run_graph_prompt(prompt: str, as_of: str | None = None) -> str:
     sid = service.create_research(objective, objective, as_of=as_of)
     try:
         proposals = _propose_questions(objective, as_of, sid)
-        admitted = _jev_admit(sid, objective, proposals)
+        admitted = _jev_admit(sid, objective, proposals, jev=jev)
         _create_nodes_topological(sid, objective, admitted)
     except Exception:
         service.create_node(sid, objective, "Route question.")
@@ -329,7 +412,7 @@ def _create_nodes_topological(sid: str, objective: str, admitted: list[dict[str,
             id_to_node[pid] = node_id
 
 
-def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
+def _run(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[str, JSONValue]:
     from app.research import scheduler
     from app.research.repository import ResearchRepository
 
@@ -341,8 +424,9 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
     raw_as_of = req.get("asOf")
     as_of = raw_as_of if isinstance(raw_as_of, str) else None
     objective = prompt.strip()
+    client = jev if jev is not None else _shared_jev()
     try:
-        sid = run_graph_prompt(objective, as_of)
+        sid = run_graph_prompt(objective, as_of, jev=client)
     except RuntimeError as exc:
         if "registry guard forbids" in str(exc):
             return _terminal(rid, "provider_error", str(exc))
@@ -350,7 +434,9 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
     except Exception as exc:
         return _terminal(rid, "provider_error", f"session setup failed: {exc}")
     try:
-        run_result: dict[str, JSONValue] = asyncio.run(scheduler.run(sid))
+        run_result: dict[str, JSONValue] = asyncio.run(
+            scheduler.run(sid, jev=client, needle_generate=_shared_needle_generate())
+        )
     except Exception as exc:
         return _terminal(rid, "provider_error", f"kernel run failed: {exc}")
     if not isinstance(run_result, dict):
@@ -358,6 +444,11 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
     if run_result.get("status") == "failed":
         err = run_result.get("error")
         return _terminal(rid, "provider_error", f"kernel failed: {err}")
+    stalled = run_result.get("status") == "stalled"
+    stalled_reason: str | None = None
+    if stalled:
+        raw_reason = run_result.get("reason")
+        stalled_reason = str(raw_reason)[:500] if isinstance(raw_reason, str) and raw_reason else "stalled: no progress"
     raw_node_results = run_result.get("nodes")
     node_results: list[Mapping[str, JSONValue]] = (
         [r for r in raw_node_results if isinstance(r, Mapping)] if isinstance(raw_node_results, list) else []
@@ -373,12 +464,12 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
     try:
         store = ResearchRepository()
         records: list[dict[str, JSONValue]] = store.list_evidence(sid)
-        node_rows = store.list_nodes(sid)
-        decision_rows = store.list_decisions(sid)
+        node_rows: list[ResearchNode] = store.list_nodes(sid)
+        decision_rows: list[DecisionRecord] = store.list_decisions(sid)
     except Exception:
-        records = []
-        node_rows = []
-        decision_rows = []
+        records: list[dict[str, JSONValue]] = []
+        node_rows: list[ResearchNode] = []
+        decision_rows: list[DecisionRecord] = []
     evidence: list[JSONValue] = []
     # ponytail: success linkage is FIFO over unclaimed admitted ids (scheduler
     # admits sequentially in attempt order); an explicit attempt evidence_id wins.
@@ -459,8 +550,11 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
     unresolved: list[JSONValue] = [
         str(n["node_id"]) for n in nodes_payload if isinstance(n, dict) and n.get("status") != "resolved"
     ]
-    escalated = bool(unresolved) or incomplete_guard
+    escalated = bool(unresolved) or incomplete_guard or stalled
+    if stalled:
+        failures["stalled"] = failures.get("stalled", 0) + 1
     failures_json: dict[str, JSONValue] = {k: v for k, v in failures.items()}
+    escalations = 1 if escalated else 0
     out: dict[str, JSONValue] = {
         "id": rid,
         "objective": objective,
@@ -473,37 +567,56 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
         "needleDecisions": tool_executions,
         "toolCalls": tool_calls,
         "failures": failures_json,
-        "escalations": 0,
+        "escalations": escalations,
         "escalated": escalated,
+        "stalled": stalled,
     }
+    if stalled and stalled_reason is not None:
+        out["stalled_reason"] = stalled_reason
     return out
 
 
 def main() -> None:
-    for line in sys.stdin:
-        line = line.strip()
-        if not line:
-            continue
-        try:
-            parsed: object = json.loads(line)
-        except ValueError:
-            sys.stdout.write(json.dumps(_terminal("?", "invalid_params", "invalid JSON")) + "\n")
+    jev = _startup()
+    sys.stdout.write(json.dumps({"type": "ready"}) + "\n")
+    sys.stdout.flush()
+
+    def _on_signal(signum: int, _frame: object) -> None:
+        _shutdown()
+        sys.exit(128 + signum)
+
+    try:
+        signal.signal(signal.SIGINT, _on_signal)
+        signal.signal(signal.SIGTERM, _on_signal)
+    except (OSError, ValueError):
+        pass
+    try:
+        for line in sys.stdin:
+            line = line.strip()
+            if not line:
+                continue
+            try:
+                parsed: object = json.loads(line)
+            except ValueError:
+                sys.stdout.write(json.dumps(_terminal("?", "invalid_params", "invalid JSON")) + "\n")
+                sys.stdout.flush()
+                continue
+            if not isinstance(parsed, dict) or parsed.get("op") != "run":
+                rid = parsed.get("id") if isinstance(parsed, dict) and isinstance(parsed.get("id"), str) else "?"
+                sys.stdout.write(json.dumps(_terminal(rid, "invalid_params", "op must be 'run'")) + "\n")
+                sys.stdout.flush()
+                continue
+            req: Mapping[str, JSONValue] = parsed
+            try:
+                resp = _run(req, jev=jev)
+            except Exception as exc:  # never raise out of the worker
+                raw_rid = req.get("id")
+                rid = raw_rid if isinstance(raw_rid, str) else "?"
+                resp = _terminal(rid, "provider_error", f"worker failed: {exc}")
+            sys.stdout.write(json.dumps(resp) + "\n")
             sys.stdout.flush()
-            continue
-        if not isinstance(parsed, dict) or parsed.get("op") != "run":
-            rid = parsed.get("id") if isinstance(parsed, dict) and isinstance(parsed.get("id"), str) else "?"
-            sys.stdout.write(json.dumps(_terminal(rid, "invalid_params", "op must be 'run'")) + "\n")
-            sys.stdout.flush()
-            continue
-        req: Mapping[str, JSONValue] = parsed
-        try:
-            resp = _run(req)
-        except Exception as exc:  # never raise out of the worker
-            raw_rid = req.get("id")
-            rid = raw_rid if isinstance(raw_rid, str) else "?"
-            resp = _terminal(rid, "provider_error", f"worker failed: {exc}")
-        sys.stdout.write(json.dumps(resp) + "\n")
-        sys.stdout.flush()
+    finally:
+        _shutdown()
 
 
 if __name__ == "__main__":

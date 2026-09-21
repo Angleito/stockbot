@@ -6,7 +6,7 @@ import { reason, type MuseUsage } from "../muse/client";
 import { redactArgs } from "./types";
 import type { AgentEvent, Evidence, FailureCategory, Metrics } from "./types";
 
-// ponytail: one-shot worker per request (no persistent bridge); spawn/exit/stderr handling mirrors lib/needle/client.ts.
+// ponytail: persistent worker bridge (spawn-once, ready-gated); spawn/exit/stderr handling mirrors lib/needle/client.ts.
 const MUSE_MODEL = "muse-spark-1.3-contributor";
 const WORKER_TIMEOUT_MS = 10 * 60 * 1000;
 
@@ -106,94 +106,183 @@ function defaultSpawn(cmd: string, args: string[], opts: { env: NodeJS.ProcessEn
   return spawn(cmd, args, { stdio: ["pipe", "pipe", "pipe"], env: opts.env }) as unknown as KernelChild;
 }
 
-function callWorker(
-  body: Record<string, unknown>,
-  opts: { signal?: AbortSignal; timeoutMs: number; python: string; workerPath: string; spawnFn: KernelSpawn },
-): Promise<KernelResponse> {
-  return new Promise<KernelResponse>((resolve, reject) => {
-    let child: KernelChild;
+type KernelPending = {
+  resolve: (v: KernelResponse) => void;
+  reject: (e: Error) => void;
+  cancel: () => void;
+};
+
+export class KernelRouter {
+  private child: KernelChild | null = null;
+  private pending: Record<string, KernelPending> = {};
+  private buf = "";
+  private nextId = 0;
+  private exited = false;
+  private workerStderrTail = "";
+  private ready: Promise<void> = Promise.resolve();
+  private resolveReady!: () => void;
+  private readonly python: string;
+  private readonly workerPath: string;
+  private readonly spawnFn: KernelSpawn;
+
+  constructor(opts?: { python?: string; workerPath?: string; spawnFn?: KernelSpawn }) {
+    this.python = opts?.python ?? (existsSync(REPO_PYTHON) ? REPO_PYTHON : existsSync(VENV_PYTHON) ? VENV_PYTHON : "python3");
+    this.workerPath = opts?.workerPath ?? WORKER;
+    this.spawnFn = opts?.spawnFn ?? defaultSpawn;
+  }
+
+  private spawn(): KernelChild {
+    this.exited = false;
+    this.buf = "";
+    this.workerStderrTail = "";
+    const child = this.spawnFn(this.python, [this.workerPath], {
+      env: { ...process.env, NEEDLE_TELEMETRY: "0", DO_NOT_TRACK: "1" },
+    });
+    this.child = child;
+    const { promise, resolve } = Promise.withResolvers<void>();
+    this.ready = promise;
+    this.resolveReady = resolve;
+    child.stdout?.on("data", (d: Buffer) => this.onData(d.toString()));
+    child.stderr?.on("data", (d: Buffer) => {
+      const s = d.toString();
+      this.workerStderrTail = (this.workerStderrTail + s).slice(-2000);
+      process.stderr.write(s.startsWith("[kernel-worker]") ? s : `[kernel-worker] ${s}`);
+    });
+    child.on("error", (err) => this.failAll(err instanceof Error ? err : new Error(String(err))));
+    child.on("exit", () => {
+      this.exited = true;
+      if (Object.keys(this.pending).length > 0) {
+        this.failAll(new Error(`kernel worker exited; stderr tail: ${this.workerStderrTail || "(empty)"}`));
+      }
+      if (this.child === child) this.child = null;
+    });
+    console.error(`[ai] kernel worker spawn ${this.python} (${this.workerPath})`);
+    return child;
+  }
+
+  private ensure(): KernelChild {
+    const running = this.child;
+    if (running && !this.exited && running.exitCode === null) return running;
     try {
-      child = opts.spawnFn(opts.python, [opts.workerPath], {
-        env: { ...process.env, NEEDLE_TELEMETRY: "0", DO_NOT_TRACK: "1" },
-      });
-    } catch (err) {
-      reject(err);
+      running?.kill();
+    } catch {
+      // Already gone; fresh spawn below replaces it.
+    }
+    const fresh = this.spawn();
+    if (!fresh.stdin || !fresh.stdout) {
+      this.child = null;
+      throw new Error("kernel worker spawn failed");
+    }
+    return fresh;
+  }
+
+  private onLine(line: string): void {
+    let msg: unknown;
+    try {
+      msg = JSON.parse(line);
+    } catch {
+      // Non-JSON bridge noise; keep scanning.
+    }
+    if (typeof msg !== "object" || msg === null) return;
+    const rec = msg as Record<string, unknown>;
+    if (typeof rec.id !== "string") {
+      // Ready gate: worker hello, never a response.
+      if (rec.type === "ready") this.resolveReady();
       return;
     }
-    console.error(`[ai] kernel worker spawn ${opts.python} (${opts.workerPath})`);
-    let timer: ReturnType<typeof setTimeout> | undefined;
-    let stderrTail = "";
-    let buf = "";
-    let settled = false;
-    const done = (fn: () => void): void => {
-      if (settled) return;
-      settled = true;
-      clearTimeout(timer);
-      opts.signal?.removeEventListener("abort", onAbort);
-      fn();
-    };
-    const fail = (err: Error): void => {
-      done(() => {
+    const p = this.pending[rec.id];
+    if (!p) return;
+    delete this.pending[rec.id];
+    p.cancel();
+    // boundary: JSONL line from our own worker; every field is defaulted where read below.
+    p.resolve(msg as KernelResponse);
+  }
+
+  private onData(chunk: string): void {
+    this.buf += chunk;
+    let i = this.buf.indexOf("\n");
+    while (i >= 0) {
+      const line = this.buf.slice(0, i).trim();
+      this.buf = this.buf.slice(i + 1);
+      if (line.length > 0) this.onLine(line);
+      i = this.buf.indexOf("\n");
+    }
+  }
+
+  private failAll(err: Error): void {
+    for (const id of Object.keys(this.pending)) {
+      const p = this.pending[id];
+      if (p) {
+        delete this.pending[id];
+        p.cancel();
+        p.reject(err);
+      }
+    }
+  }
+
+  call(body: Record<string, unknown>, opts?: { signal?: AbortSignal; timeoutMs?: number }): Promise<KernelResponse> {
+    const timeoutMs = opts?.timeoutMs ?? WORKER_TIMEOUT_MS;
+    const child = this.ensure();
+    if (!child.stdin) throw new Error("kernel worker spawn failed");
+    const id = String((this.nextId += 1));
+    return new Promise<KernelResponse>((resolve, reject) => {
+      const timer = setTimeout(() => {
         try {
           child.kill();
         } catch {
           // Already gone; rejection below carries the error.
         }
-        reject(err);
-      });
-    };
-    const onAbort = (): void => fail(new Error("worker aborted"));
-    timer = setTimeout(() => fail(new Error(`kernel worker timeout; stderr tail: ${stderrTail || "(empty)"}`)), opts.timeoutMs);
-    if (opts.signal?.aborted) {
-      fail(new Error("worker aborted"));
-      return;
-    }
-    opts.signal?.addEventListener("abort", onAbort, { once: true });
-    child.stderr?.on("data", (d: Buffer) => {
-      const s = d.toString();
-      stderrTail = (stderrTail + s).slice(-2000);
-      process.stderr.write(s.startsWith("[kernel-worker]") ? s : `[kernel-worker] ${s}`);
-    });
-    child.on("error", (err) => fail(err instanceof Error ? err : new Error(String(err))));
-    child.on("exit", () => fail(new Error(`kernel worker exited; stderr tail: ${stderrTail || "(empty)"}`)));
-    child.stdout?.on("data", (d: Buffer) => {
-      buf += d.toString();
-      let i = buf.indexOf("\n");
-      while (i >= 0) {
-        const line = buf.slice(0, i).trim();
-        buf = buf.slice(i + 1);
-        if (line) {
-          let msg: unknown;
-          try {
-            msg = JSON.parse(line);
-          } catch {
-            // Non-JSON bridge noise; keep scanning.
-          }
-          if (typeof msg === "object" && msg !== null && (!("id" in msg) || msg.id === body.id)) {
-            // boundary: JSONL line from our own worker; every field is defaulted where read below.
-            const res: KernelResponse = msg as KernelResponse;
-            done(() => {
-              try {
-                child.kill();
-              } catch {
-                // One-shot worker; nothing to reuse.
-              }
-              resolve(res);
-            });
-            return;
-          }
-        }
-        i = buf.indexOf("\n");
+        this.child = null;
+        this.failAll(new Error(`kernel worker timeout; stderr tail: ${this.workerStderrTail || "(empty)"}`));
+      }, timeoutMs);
+      const cancel = (): void => {
+        clearTimeout(timer);
+        opts?.signal?.removeEventListener("abort", onAbort);
+      };
+      const onAbort = (): void => {
+        const p = this.pending[id];
+        if (!p) return;
+        delete this.pending[id];
+        p.cancel();
+        p.reject(new Error("worker aborted"));
+      };
+      this.pending[id] = { resolve, reject, cancel };
+      if (opts?.signal?.aborted) {
+        onAbort();
+        return;
       }
+      opts?.signal?.addEventListener("abort", onAbort, { once: true });
+      void this.ready.then(() => {
+        if (!this.pending[id]) return;
+        child.stdin?.write(`${JSON.stringify({ ...body, id })}\n`, (err) => {
+          if (!err) return;
+          const p = this.pending[id];
+          if (!p) return;
+          delete this.pending[id];
+          p.cancel();
+          p.reject(err instanceof Error ? err : new Error(String(err)));
+        });
+      });
     });
-    if (!child.stdin) {
-      fail(new Error("kernel worker spawn failed"));
-      return;
+  }
+
+  close(): void {
+    const child = this.child;
+    this.child = null;
+    this.failAll(new Error("kernel router closed"));
+    if (!child || child.exitCode !== null) return;
+    try {
+      child.kill();
+    } catch {
+      // Already gone; failAll above carries the error.
     }
-    child.stdin.write(`${JSON.stringify(body)}\n`, (err) => {
-      if (err) fail(err instanceof Error ? err : new Error(String(err)));
-    });
-  });
+  }
+}
+
+const kernelRouter = new KernelRouter();
+
+for (const sig of ["SIGINT", "SIGTERM"] as const) {
+  process.on(sig, () => kernelRouter.close());
 }
 
 function graphSection(title: string, lines: string[]): string {
@@ -249,11 +338,16 @@ export async function runKernelAgent(
 ): Promise<void> {
   const t0 = performance.now();
   const deps = opts?.deps ?? {};
-  const spawnFn = deps.spawnFn ?? defaultSpawn;
   const reasonFn = deps.reason ?? reason;
   const timeoutMs = deps.timeoutMs ?? opts?.deadlineMs ?? WORKER_TIMEOUT_MS;
-  const python = deps.python ?? (existsSync(REPO_PYTHON) ? REPO_PYTHON : existsSync(VENV_PYTHON) ? VENV_PYTHON : "python3");
-  const workerPath = deps.workerPath ?? WORKER;
+  const hasWorkerDeps = deps.spawnFn !== undefined || deps.python !== undefined || deps.workerPath !== undefined;
+  const router = hasWorkerDeps
+    ? new KernelRouter({
+      ...(deps.python ? { python: deps.python } : {}),
+      ...(deps.workerPath ? { workerPath: deps.workerPath } : {}),
+      ...(deps.spawnFn ? { spawnFn: deps.spawnFn } : {}),
+    })
+    : kernelRouter;
 
   const buildMetrics = (
     decisions: number,
@@ -278,7 +372,7 @@ export async function runKernelAgent(
   let res: KernelResponse;
   const workerStart = performance.now();
   try {
-    res = await callWorker({ id: "1", op: "run", prompt, deadlineMs: timeoutMs }, { signal: opts?.signal, timeoutMs, python, workerPath, spawnFn });
+    res = await router.call({ op: "run", prompt, deadlineMs: timeoutMs }, { signal: opts?.signal, timeoutMs });
   } catch (err) {
     // ponytail: needle-down shape — worker failure still ends at done, never throws to the route.
     const msg = err instanceof Error ? err.message : String(err);

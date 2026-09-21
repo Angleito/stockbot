@@ -7,6 +7,7 @@
 // path in run.ts untouched).
 //
 // Protocol, one JSON object per line:
+//   {"id": str, "op": "ping"} -> {"id": str, "ready": true}
 //   {"id": str, "op": "decide", "state": unknown, "questions": Record<string, unknown>,
 //    "choiceOptions"?: Record<string, Record<string, string>>}
 //     -> {"id": str, "raw": unknown, "decisions": Record<string, DecisionResult>}
@@ -52,7 +53,8 @@ export type DecideRequest = {
 
 export type DecideOk = { id: string; raw: unknown; decisions: Record<string, DecisionResult> };
 export type DecideErr = { id: string; error: string };
-export type DecideResponse = DecideOk | DecideErr;
+export type PingOk = { id: string; ready: true };
+export type DecideResponse = DecideOk | DecideErr | PingOk;
 
 // Typed decide without filesystem writes: same validation + parser dispatch
 // as askDecisions, minus request/raw/policy files.
@@ -99,6 +101,7 @@ export async function handleDecide(req: unknown, systemOne: SystemOneFn): Promis
   if (!isObj(req)) return badId();
   const id = req.id;
   if (typeof id !== "string" || !id) return badId();
+  if (req.op === "ping") return { id, ready: true };
   if (req.op !== "decide") return { id, error: "unknown_op" };
   if (!isObj(req.questions)) return { id, error: "decide: missing_questions" };
   const questions = req.questions as Record<string, unknown>;
