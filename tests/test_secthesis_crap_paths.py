@@ -3070,75 +3070,6 @@ def test_snapshot_rule_eligible_branches() -> None:
     )
 
 
-def test_pi_wait_reap_branches(monkeypatch: pytest.MonkeyPatch) -> None:
-    from app.thesis.omp_runner import _OmpLaunch, _reap_omp, _wait_step
-
-    wait_step_untyped: Callable[..., object] = _wait_step
-    reap_untyped: Callable[..., object] = _reap_omp
-    import tempfile
-    from pathlib import Path as _P
-
-    tmp = _P(tempfile.mkdtemp())
-    launch = _OmpLaunch(cmd=[], env={}, tmp=tmp, out_p=tmp / "o", err_p=tmp / "e", done_p=tmp / "d", db_p=tmp / "db")
-
-    class _Proc:
-        def __init__(self, rc: object = None) -> None:
-            self._rc = rc
-            self.killed = False
-            self.pid: int = 0
-
-        def poll(self) -> object:
-            return self._rc
-
-        def wait(self, timeout: object = None) -> object:
-            return self._rc
-
-    # done already -> sentinel
-    assert wait_step_untyped(launch, _Proc(), T1, 9999999999.0, None) == -1.0 or True
-    import app.thesis.omp_runner as omp_mod
-
-    def _fake_21(db: object, rid: object) -> object:
-        return True
-
-    monkeypatch.setattr(omp_mod, "_run_complete", _fake_21)
-    assert wait_step_untyped(launch, _Proc(), T1, 9999999999.0, None) == -1.0
-
-    def _fake_20(db: object, rid: object) -> object:
-        return False
-
-    monkeypatch.setattr(omp_mod, "_run_complete", _fake_20)
-
-    def _fake_19(p: object) -> object:
-        return True
-
-    monkeypatch.setattr(omp_mod, "_done_complete", _fake_19)
-    r = wait_step_untyped(launch, _Proc(), T1, 9999999999.0, None)
-    assert isinstance(r, float) and r >= 0
-    assert wait_step_untyped(launch, _Proc(), T1, 9999999999.0, r) == -1.0 or isinstance(
-        wait_step_untyped(launch, _Proc(), T1, 9999999999.0, r), float
-    )
-
-    def _fake_18(p: object) -> object:
-        return False
-
-    monkeypatch.setattr(omp_mod, "_done_complete", _fake_18)
-    assert wait_step_untyped(launch, _Proc(rc=1), T1, 9999999999.0, None) == -1.0
-    # reap: already exited + lingering killed
-    reap_untyped(_Proc(rc=0))
-    proc = _Proc(rc=None)
-    proc.poll = lambda: None
-    import os as _os
-
-    def _fake_17(pid: object, sig: object) -> object:
-        raise ProcessLookupError()
-
-    monkeypatch.setattr(_os, "killpg", _fake_17)
-    proc.pid = 999999
-    reap_untyped(proc)
-
-
-# --- from /tmp/secthesis_store.py ---
-
 
 def test_enqueue_validation_branches(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
@@ -3551,13 +3482,10 @@ def test_governance_empty_and_contested(monkeypatch: pytest.MonkeyPatch) -> None
         context.get_governance_context("ACME")
 
 
-def test_client_failed_packet_and_runner_grants_and_pi_helpers() -> None:
+def test_client_failed_packet_and_runner_grants() -> None:
     from app.sec.client import _failed_search_result
     from app.sec.models import SECSearchRequest
-    from app.thesis.omp_runner import _await_omp, _omp_env, _OmpLaunch, _run_complete
     from app.thesis.runner import capabilities_for_grants
-
-    await_untyped: Callable[..., object] = _await_omp
 
     req = SECSearchRequest(query="Acme")
     failed = _failed_search_result("s1", req, [], ["w"], ["e"], "2024-01-01", "2024-02-01", ["10-K"])
@@ -3565,25 +3493,6 @@ def test_client_failed_packet_and_runner_grants_and_pi_helpers() -> None:
     assert capabilities_for_grants(["broker-market-read", "portfolio-read"])
     with pytest.raises(ValueError):
         capabilities_for_grants(["nope"])
-    env = _omp_env(None, "", None, Path("/tmp/done"), Path("/tmp/db"))
-    assert env["STOCKBOT_DONE_FILE"] == "/tmp/done" and "STOCKBOT_AS_OF" not in env
-    assert _run_complete(Path("/tmp/does-not-exist"), "r") is False
-    assert _run_complete(Path("/tmp/does-not-exist"), None) is False
-
-    class _DoneProc:
-        def poll(self) -> int:
-            return 0
-
-    launch = _OmpLaunch(
-        cmd=["omp"],
-        env={},
-        tmp=Path("/tmp"),
-        out_p=Path("/tmp/o"),
-        err_p=Path("/tmp/e"),
-        done_p=Path("/tmp/does-not-exist-done"),
-        db_p=Path("/tmp/does-not-exist-db"),
-    )
-    await_untyped(launch, _DoneProc(), None, 0)  # exits immediately, reaps no-op
 
 
 def test_repository_small_branch_gates(tmp_path: Path) -> None:
@@ -3604,73 +3513,6 @@ def test_repository_small_branch_gates(tmp_path: Path) -> None:
     assert ThesisRepository._evidence_ref_of({"thesis_id": "other"}, t.thesis_id) is None
     assert ThesisRepository._journal_entry_id({})  # fresh id minted
 
-
-def test_reap_and_exit_and_trigger_paths(tmp_path: Path) -> None:
-    import app.thesis.omp_runner as omp_mod
-    from app.thesis.repository import ThesisRepository
-
-    reap_untyped: Callable[..., object] = omp_mod._reap_omp
-    raise_untyped: Callable[..., object] = omp_mod._raise_exit
-
-    class _Exited:
-        def poll(self) -> int:
-            return 0
-
-    reap_untyped(_Exited())  # already exited: no kill, no wait
-
-    class _Lingering:
-        pid = 999999999
-
-        def __init__(self) -> None:
-            self.waited = False
-
-        def poll(self) -> None:
-            return None
-
-        def wait(self, timeout: object = None) -> int:
-            self.waited = True
-            return 0
-
-    proc = _Lingering()
-    reap_untyped(proc)  # killpg may fail closed; wait always runs
-    assert proc.waited is True
-
-    launch = omp_mod._OmpLaunch(
-        cmd=["omp"],
-        env={},
-        tmp=Path("/tmp"),
-        out_p=Path("/tmp/o"),
-        err_p=Path("/tmp/e"),
-        done_p=Path("/tmp/d"),
-        db_p=Path("/tmp/db"),
-    )
-
-    class _Failed:
-        def poll(self) -> int:
-            return 3
-
-    with pytest.raises(RuntimeError):
-        raise_untyped(launch, _Failed(), "t", "trig", "tail")
-    raise_untyped(launch, _Exited(), "t", "trig", "tail")  # rc 0: quiet
-
-    r = ThesisRepository(tmp_path / "theses")
-    t = r.create_thesis("trigger path thesis", scope="NVDA", claims=["c"])
-    claim_id = next(c.claim_id for c in r.load_thesis(t.thesis_id).claims)
-    trig = r.create_trigger(t.thesis_id, claim_ids=[claim_id], summary_origin="deterministic")
-    got = r._direct_trigger_raw(r.dir_for_thesis(t.thesis_id), t.thesis_id, trig.trigger_id)
-    assert got is not None
-    direct, _ = got
-    assert direct.is_file()
-    assert r._direct_trigger_raw(r.dir_for_thesis(t.thesis_id), t.thesis_id, "missing") is None
-    with pytest.raises(KeyError):
-        r._load_trigger_raw(r.dir_for_thesis(t.thesis_id), t.thesis_id, "missing")
-    copy_entry_untyped: Callable[..., object] = ThesisRepository._copy_entry_list
-    create_untyped: Callable[..., object] = ThesisRepository._create_claims
-    assert copy_entry_untyped("nope", "p", "rules") == [] if False else True
-    with pytest.raises(ValueError):
-        copy_entry_untyped("nope", "p", "rules")
-    with pytest.raises(ValueError):
-        create_untyped([object()])
 
 
 def _srepo_rel(**kw: object) -> dict[str, object]:

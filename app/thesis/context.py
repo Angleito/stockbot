@@ -434,7 +434,7 @@ def build_context(
     known_at: str,
     max_tokens: int = 8_000,
 ) -> ResearchContext:
-    """Assemble the PIT-bounded packet Pi may see for one trigger run."""
+    """Assemble the PIT-bounded packet the scheduler may see for one trigger run."""
     if not isinstance(known_at, str) or not known_at:
         raise ValueError("<context>: 'known_at' must be a non-empty ISO string")
     return _build_context(repository, thesis_id, trigger, data_cutoff=known_at, max_tokens=max_tokens, live=False)

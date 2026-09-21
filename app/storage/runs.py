@@ -1,9 +1,9 @@
 """SQLite run/event/tool/model observability store. stdlib only.
 
-One RunRecorder per Pi run appends rows to agent_runs/agent_events/
+One RunRecorder per agent run appends rows to agent_runs/agent_events/
 tool_calls/model_calls under data/runs.sqlite (or $RUNS_DB_PATH).
-Pi emits model telemetry through scripts/pi_bridge.py; there are no nested
-Python completions. Observability must never break research: every recorder
+The kernel worker emits model telemetry through the run recorder; there are
+no nested Python completions. Observability must never break research: every recorder
 method swallows its own errors, disables the recorder, and logs a warning.
 """
 
@@ -823,7 +823,7 @@ def finalize_failed_run(run_id: str, *, error_type: str, error_message: str) -> 
         return False
 
 
-# -- current-recorder contextvar (Pi bridge + gateway share one recorder) ----------
+# -- current-recorder contextvar (tool bridge + gateway share one recorder) ----------
 
 _current_recorder: ContextVar[RunRecorder | None] = ContextVar("current_recorder", default=None)
 

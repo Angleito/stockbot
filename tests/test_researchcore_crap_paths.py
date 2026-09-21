@@ -493,13 +493,13 @@ def test_dispatch_unknown_session_raises_not_found(tmp_path: Path, monkeypatch: 
         svc.authorize_and_consume_dispatch("rs:nope", "job:nope", "get_sec_filing", repo=repo)
 
 
-# -- decide_wave2 (unc 857-858 no-freeze, 897-900 targeted transition) --
+# -- decide_next_wave (unc 857-858 no-freeze, 897-900 targeted transition) --
 
 
 def test_decide_no_freeze_builds_empty_wave1(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     repo = _repo(tmp_path, monkeypatch)
     sid, _ = _sid(repo)
-    out = svc.decide_wave2(sid, repo=repo)
+    out = svc.decide_next_wave(sid, repo=repo)
     assert out == {
         "authorized": False,
         "stop_reason": "no_questions",
@@ -517,7 +517,7 @@ def test_decide_authorized_moves_analyzing_to_targeted(tmp_path: Path, monkeypat
     _freeze1(repo, sid, src, eid)
     _trio(repo, sid, eid, follow_ups=[FOLLOW])
     assert repo.get_session(sid).status == "analyzing"
-    out = svc.decide_wave2(sid, repo=repo)
+    out = svc.decide_next_wave(sid, repo=repo)
     assert out["authorized"] is True
     assert out["targeted_question"] == FOLLOW
     assert out["targeted_domain"] == "SEC"
@@ -532,7 +532,7 @@ def test_decide_stop_moves_analyzing_to_synthesizing(tmp_path: Path, monkeypatch
     eid = f"{sid}:ev:1"
     _freeze1(repo, sid, src, eid)
     _trio(repo, sid, eid)
-    out = svc.decide_wave2(sid, repo=repo)
+    out = svc.decide_next_wave(sid, repo=repo)
     assert out["authorized"] is False
     assert out["stop_reason"] == "no_questions"
     assert repo.get_session(sid).status == "synthesizing"
@@ -1291,7 +1291,7 @@ def test_freeze_wave2_from_targeted_research(tmp_path: Path, monkeypatch: pytest
     eid = f"{sid}:ev:1"
     _freeze1(repo, sid, src, eid)
     _trio(repo, sid, eid, follow_ups=[FOLLOW])
-    svc.decide_wave2(sid, repo=repo)
+    svc.decide_next_wave(sid, repo=repo)
     assert repo.get_session(sid).status == "targeted_research"
     src2_raw = svc.start_job(sid, "source_agent", budget={"wave_id": 2}, repo=repo)["job_id"]
     assert isinstance(src2_raw, str)
@@ -1445,7 +1445,7 @@ def test_finalize_terminal_on_repeat(tmp_path: Path, monkeypatch: pytest.MonkeyP
     sid, src = _sid(repo)
     eid = f"{sid}:ev:1"
     _full_trio(repo, sid, src, eid)
-    svc.decide_wave2(sid, repo=repo)
+    svc.decide_next_wave(sid, repo=repo)
     out = svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=repo)
     assert out["status"] == "completed"
     with pytest.raises(ValueError, match="terminal"):
@@ -2354,7 +2354,7 @@ def test_create_deadline_ok_and_defaults() -> None:
     assert j3.deadline is not None  # explicit configured deadline_seconds still enforced
 
 
-# ---- decide_wave2 arms ----
+# ---- decide_next_wave arms ----
 def _deps() -> tuple[DirectorDeps, list[tuple[str, str]]]:
     seen: list[tuple[str, str]] = []
 

@@ -1299,7 +1299,7 @@ def test_restart_after_e1_resume_completes(tmp_path: Path, monkeypatch: pytest.M
     fresh = ResearchRepository()
     assert _svc.resume_research(sid, repo=fresh)["session"] is not None
     _svc_trio(fresh, sid, eid)
-    _svc.decide_wave2(sid, repo=fresh)
+    _svc.decide_next_wave(sid, repo=fresh)
     out = _svc.finalize_session(sid, "answer", [{"text": "finding", "evidence_ids": [eid]}], repo=fresh)
     assert out["freeze_id"] == f"{sid}:1:freeze"
 
@@ -1555,17 +1555,17 @@ def test_job_fail_cancel_transitions(tmp_path: Path, monkeypatch: pytest.MonkeyP
         _svc.cancel_job("nope", repo=repo)
 
 
-def test_start_job_owner_override_records_omp(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
-    """Existing budget.owner seam records OMP-created jobs as owner=omp; default stays pi."""
+def test_start_job_owner_override_records_caller(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
+    """Existing budget.owner seam records caller jobs; default stays kernel."""
     from app.research import service as _svc
 
     monkeypatch.setenv("RESEARCH_DB_PATH", str(tmp_path / "r.sqlite"))
     repo = ResearchRepository()
     sid, src = _svc_sid(repo)
-    assert repo.get_job(src).owner == "pi"
-    created = _svc.start_job(sid, "source_agent", budget={"owner": "omp"}, repo=repo)
-    assert created["owner"] == "omp"
-    assert ResearchRepository().get_job(str(created["job_id"])).owner == "omp"
+    assert repo.get_job(src).owner == "kernel"
+    created = _svc.start_job(sid, "source_agent", budget={"owner": "thesis"}, repo=repo)
+    assert created["owner"] == "thesis"
+    assert ResearchRepository().get_job(str(created["job_id"])).owner == "thesis"
 
 
 def test_record_evidence_rejects_bad_metadata(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
@@ -3105,7 +3105,7 @@ def test_reg_freeze_director_finalize_or_wave(tmp_path: Path, monkeypatch: pytes
     for role in ("stockbot", "bullbot", "bearbot"):
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
         _svc.record_committee_analysis(sid, jid, role, _committee_analysis(eid), repo=repo)
-    out = _svc.decide_wave2(sid, repo=repo)
+    out = _svc.decide_next_wave(sid, repo=repo)
     # §3: director gate set has no budget_exhausted (deleted); runtime_exceeded stays.
     assert out["stop_reason"] in (
         "no_questions",
@@ -3575,7 +3575,7 @@ def test_eval_finalize_renders_answer_same_turn(tmp_path: Path, monkeypatch: pyt
         _svc.record_committee_analysis(
             sid, jid, role, _committee_analysis(eid, claim_text="MSFT Azure exposure"), repo=repo
         )
-    _svc.decide_wave2(sid, repo=repo)
+    _svc.decide_next_wave(sid, repo=repo)
     out = _svc.finalize_session(
         sid,
         "MSFT Azure exposure is filing-backed.",
@@ -4433,7 +4433,7 @@ def test_invariant_finalize_card_never_duplicates_the_answer(tmp_path: Path, mon
     for role in ("stockbot", "bullbot", "bearbot"):
         jid = str(_svc.start_job(sid, role, repo=repo, wave_id=1)["job_id"])
         _svc.record_committee_analysis(sid, jid, role, _committee_analysis(eid), repo=repo)
-    _svc.decide_wave2(sid, repo=repo)
+    _svc.decide_next_wave(sid, repo=repo)
     answer = "MSFT Azure exposure is filing-backed and the agreement terms stay undisclosed."
     out = _svc.finalize_session(sid, answer, [{"text": "MSFT Azure exposure", "evidence_ids": [eid]}], repo=repo)
     final = repo.get_session(sid).final_result
@@ -5517,25 +5517,6 @@ def test_hf_multisource_freeze_hash_stable(tmp_path: Path, monkeypatch: pytest.M
     assert _freeze.freeze_content_hash(recs) == frozen.content_hash
 
 
-def test_hf_wave1_batch_shape_three_desks() -> None:
-    """Wave1 contract: one OMP task batch, three desks (sec-agent + finra-agent + exa-agent)."""
-    from pathlib import Path as _Path
-
-    agents = _Path(".stockbot/omp/agents")
-    front: dict[str, str] = {}
-    for name in ("sec-agent", "finra-agent", "exa-agent"):
-        text = (agents / f"{name}.md").read_text()
-        head = text.split("---")[1]
-        tools = next(line for line in head.splitlines() if line.startswith("tools:"))
-        front[name] = tools
-        assert "research_submit_source_result" in tools
-        assert "research_freeze" not in tools and "research_finalize" not in tools
-    assert (agents / "sec-scout.md").exists()
-    assert (agents / "finra-scout.md").exists()
-    assert (agents / "exa-scout.md").exists()
-    assert len(front) == 3
-
-
 def test_hf_finra_only_followup_single_desk(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     """Targeted FINRA-only follow-up: only a FINRA job is opened; SEC/WEB stay denied."""
     from app.research import service as _svc
@@ -5707,24 +5688,6 @@ def test_hf_provenance_vocab_closed() -> None:
     assert validate_provenance(dict(web))["kind"] == "web_source"
     with pytest.raises(ValueError, match="kind"):
         validate_provenance({"kind": "carrier_pigeon"})
-
-
-def test_hf_committee_integrity_labels_pinned() -> None:
-    """Committee desks cite kernel-assigned integrity labels (md contract, read-only pin)."""
-    from pathlib import Path as _Path
-
-    for name in ("stockbot", "bullbot", "bearbot"):
-        text = (_Path(".stockbot/omp/agents") / f"{name}.md").read_text()
-        assert "PRIMARY_DOCUMENT" in text and "CANONICAL_STRUCTURED" in text and "EXTERNAL_SOURCE" in text
-
-
-def test_hf_stockbot_yml_stays_sync_no_bg() -> None:
-    """OMP runtime stays task-only: async off, task depth 3 (no background spawning)."""
-    from pathlib import Path as _Path
-
-    text = (_Path(".stockbot/omp/stockbot.yml")).read_text()
-    assert "enabled: false" in text
-    assert "maxRecursionDepth: 3" in text
 
 
 def _hf_persist_finra(

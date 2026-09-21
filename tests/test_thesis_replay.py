@@ -36,31 +36,21 @@ class _ReplaySource:
         return [e for e in self.events if e.known_at <= known_at]
 
 
-class _ReplayOmp:
-    """Fake run_thesis_omp: each launch applies the repository writes OMP's tool
-    calls would have made for that tick's event."""
+class _ReplayKernel:
+    """Fake _RUN_KERNEL: each launch applies the repository writes the kernel's
+    tool calls would have made for that tick's event."""
 
     def __init__(self, repository: ThesisRepository) -> None:
         self.repository = repository
         self.calls = 0
 
-    def __call__(
-        self,
-        *,
-        thesis_id: str,
-        trigger_id: str,
-        prompt: str,
-        data_root: Path | str | None,
-        timeout_s: int = 170,
-        as_of: str | None = None,
-        run_id: str | None = None,
-    ) -> None:
-        import re as _re
-
+    def __call__(self, prompt: str, **kwargs: object) -> None:
         self.calls += 1
         n = self.calls
-        m = _re.search(r"^run_id:\s*(.+)$", prompt, _re.MULTILINE)
-        rid = run_id or (m.group(1).strip() if m else f"run:fallback-{n}")
+        rid = str(kwargs.get("run_id", "") or f"run:fallback-{n}")
+        trigger_id = str(kwargs.get("trigger_id", ""))
+        thesis_id = str(kwargs.get("thesis_id", ""))
+        _ = prompt
         if n == 1:  # T3 relevant filing
             self.repository.apply_research_result(
                 thesis_id,
@@ -83,7 +73,7 @@ class _ReplayOmp:
                     },
                 },
                 rid,
-                effective_at=as_of or T3,
+                effective_at=T3,
             )
         elif n == 2:  # T4 contradictory
             self.repository.apply_research_result(
@@ -107,7 +97,7 @@ class _ReplayOmp:
                     },
                 },
                 rid,
-                effective_at=as_of or T4,
+                effective_at=T4,
             )
         else:  # T5 major change
             self.repository.apply_research_result(
@@ -131,13 +121,13 @@ class _ReplayOmp:
                     },
                 },
                 rid,
-                effective_at=as_of or T5,
+                effective_at=T5,
             )
 
 
-def _replay_omp(monkeypatch: pytest.MonkeyPatch, repository: ThesisRepository) -> _ReplayOmp:
-    fake = _ReplayOmp(repository)
-    monkeypatch.setattr(runner_mod, "run_thesis_omp", fake)
+def _replay_omp(monkeypatch: pytest.MonkeyPatch, repository: ThesisRepository) -> _ReplayKernel:
+    fake = _ReplayKernel(repository)
+    monkeypatch.setattr(runner_mod, "_RUN_KERNEL", fake)
     return fake
 
 

@@ -1,7 +1,7 @@
 """User-idea intake: normalize a natural-language thesis into a validated proposal.
 
 # ponytail: deterministic local read covering the plan's showcase + intake-table
-# phrases; Pi-facing tools validate through IntakeProposal.from_dict instead.
+# phrases; kernel tools validate through IntakeProposal.from_dict instead.
 """
 
 from __future__ import annotations

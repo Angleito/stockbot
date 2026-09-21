@@ -1,5 +1,5 @@
 """Sandbox hardening regressions: no host Pi-auth mount, exact egress allowlist,
-single-provider docs, and the Pi tool gate (see plan)."""
+single-provider docs, and the kernel tool gate (see plan)."""
 
 import json
 import os
@@ -9,8 +9,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-
-from app.thesis import omp_runner
 
 ROOT = Path(__file__).resolve().parents[2]
 COMPOSE = ROOT / "docker-compose.yml"
@@ -150,51 +148,11 @@ def test_egress_allowlist_no_forbidden():
 
 def test_tool_gate_flags():
     stockbot = json.loads(PACKAGE_JSON.read_text())["scripts"]["stockbot"]
-    assert stockbot.split()[0] == "omp", "stockbot script must launch the OMP binary"
-    for flag in (
-        "--config",
-        ".stockbot/omp/stockbot.yml",
-        "--no-extensions",
-        "--no-skills",
-        "--no-rules",
-        "--no-lsp",
-        "--tools=task",
-        "-e .stockbot/omp",
-    ):
-        assert flag in stockbot, f"missing from stockbot script: {flag}"
-    assert ".stockbot/omp/index.ts" not in stockbot, f"file-path extension root drops agents/ surface: {stockbot!r}"
-    assert "--provider" in stockbot, f"missing provider passthrough in stockbot script: {stockbot!r}"
-    assert "${STOCKBOT_PROVIDER:+--provider" in stockbot, f"missing provider expansion in stockbot script: {stockbot!r}"
-    assert "${STOCKBOT_MODEL:+--model" in stockbot, f"missing model expansion in stockbot script: {stockbot!r}"
-    for stale in (
-        "--no-builtin-tools",
-        "--no-prompt-templates",
-        "--no-context-files",
-        "STOCKBOT_PI_",
-    ):
-        assert stale not in stockbot, f"stale Pi flag in stockbot script: {stale}"
-    # Barebones yml: --tools=task gates the registry but goal/hub/memory/learn/
-    # checkpoint/MCP re-add tools outside the allowlist, so the overlay must
-    # pin every bypass key. Typo'd keys fail silent — assert exact YAML text.
-    overlay = (ROOT / ".stockbot" / "omp" / "stockbot.yml").read_text()
-    for key in (
-        "goal:\n  enabled: false",
-        "todo:\n  enabled: false",
-        'backend: "off"',
-        "autolearn:\n  enabled: false",
-        "checkpoint:\n  enabled: false",
-        "enableProjectConfig: false",
-        "ttsr:\n  enabled: false",
-        "web_search:\n  enabled: false",
-        "security:\n  enabled: false",
-        "ask:\n  enabled: false",
-        "bash:\n  enabled: false",
-        "browser:\n  enabled: false",
-        "computer:\n  enabled: false",
-        "eval:\n  js: false",
-        "github:\n  enabled: false",
-    ):
-        assert key in overlay, f"missing from .stockbot/omp/stockbot.yml: {key!r}"
+    assert stockbot.split()[:2] == ["bun", "needle-harness/scripts/needle.ts"], (
+        f"stockbot script must launch the needle harness entry: {stockbot!r}"
+    )
+    assert "omp" not in stockbot.split()[0]
+    assert ".stockbot/omp" not in stockbot
 
 
 def test_kit_create_docs():
@@ -228,16 +186,16 @@ def test_opencode_secret_rejects_indirection(tmp_path: Path) -> None:
 
 def test_stockbot_runtime_lives_in_private_package() -> None:
     """Namespace boundary: ambient `.omp/` carries no Stockbot runtime; the
-    stockbot script and the thesis launcher point at `.stockbot/omp/`."""
+    stockbot script launches the needle harness entry and the thesis monitor
+    runs the kernel scheduler in-process."""
     assert sorted(p.relative_to(ROOT / ".omp").as_posix() for p in (ROOT / ".omp").rglob("*") if p.is_file()) == [
         "RULES.md"
     ]
     stockbot = json.loads(PACKAGE_JSON.read_text())["scripts"]["stockbot"]
-    assert "-e .stockbot/omp" in stockbot or "--extension .stockbot/omp" in stockbot
-    assert ".stockbot/omp/index.ts" not in stockbot
-    assert ".stockbot/omp/stockbot.yml" in stockbot
+    assert stockbot.split()[:2] == ["bun", "needle-harness/scripts/needle.ts"]
+    assert ".stockbot/omp" not in stockbot
     assert ".omp/extensions/" not in stockbot
-    assert omp_runner._EXTENSION == ".stockbot/omp"
-    cmd = omp_runner._omp_cmd("probe")
-    assert cmd[cmd.index("--config") + 1] == ".stockbot/omp/stockbot.yml"
-    assert cmd[cmd.index("--extension") + 1] == ".stockbot/omp"
+    assert not (ROOT / ".stockbot" / "omp").exists()
+    from app.thesis import runner as thesis_runner
+
+    assert hasattr(thesis_runner, "run_trigger") and hasattr(thesis_runner, "_run_kernel")

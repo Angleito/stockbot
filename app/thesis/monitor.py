@@ -3,7 +3,7 @@
 A tick queries canonical Stockbot sources from persisted checkpoints, normalizes
 hits to stable canonical events, persists one pending trigger per new meaningful
 event, then runs each pending trigger oldest-first via ``run_trigger`` (one
-OMP launch each). Ticks with nothing new make zero OMP calls.
+kernel scheduler run each). Ticks with nothing new make zero kernel runs.
 
 No broker, price, Greeks, or options monitoring exists here on purpose: rules
 without a reliable canonical backing stay ``enabled: false``/``unsupported``
@@ -150,7 +150,7 @@ def _thesis_blob(thesis: Thesis) -> str:
 def _relevant(event: CanonicalEvent, targets: tuple[str, ...], blob: str) -> bool:
     """Keep events that name the thesis; drop clearly irrelevant entities.
 
-    An empty entity carries no signal either way, so it stays (Pi decides).
+    An empty entity carries no signal either way, so it stays (the scheduler decides).
     """
     ent = (event.entity or "").strip()
     if not ent:

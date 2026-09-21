@@ -70,7 +70,6 @@ __all__ = [
     "create_node",
     "create_research",
     "decide_next_wave",
-    "decide_wave2",
     "fail_job",
     "finalize_session",
     "freeze_session",
@@ -312,7 +311,7 @@ def create_research(
         as_of=as_of,
         policy=policy if policy is not None else default_policy(),
     )
-    updated, job = _jobs.create_job(new_session, [], job_type="source_agent", owner="pi", source_domain=None)
+    updated, job = _jobs.create_job(new_session, [], job_type="source_agent", owner="kernel", source_domain=None)
     running = _jobs.start_job(job)
     store.save_session_and_job(updated, running)
     _emit(store, updated.session_id, "job.started", {"job_id": running.job_id})
@@ -338,7 +337,7 @@ def run_research(
                 store.save_job(running)
                 return running.to_dict()
         return existing[0].to_dict()
-    updated, job = _jobs.create_job(found, [], job_type="source_agent", owner="pi", source_domain=None)
+    updated, job = _jobs.create_job(found, [], job_type="source_agent", owner="kernel", source_domain=None)
     running = _jobs.start_job(job)
     store.save_session_and_job(updated, running)
     return running.to_dict()
@@ -417,11 +416,11 @@ def start_job(
     budget: dict[str, object] | None = None,
     *,
     repo: ResearchRepository | Path | str | None = None,
-    owner: str = "pi",
+    owner: str = "kernel",
     wave_id: int = 1,
     model: str | None = None,
 ) -> dict[str, JSONValue]:
-    """Create a queued job for Pi to run, then mark it running. Returns the job."""
+    """Create a queued job for the kernel scheduler to run, then mark it running. Returns the job."""
     store = _repo(repo)
     found = _require_session(store, session_id)
     existing = store.list_jobs(session_id)
@@ -2902,7 +2901,9 @@ def _ensure_committee_roles(
             if role in by_role:
                 created.append(by_role[role])
                 continue
-            cur, job = _jobs.create_job(cur, store.list_jobs(session_id), job_type=role, owner="pi", wave_id=wave_id)
+            cur, job = _jobs.create_job(
+                cur, store.list_jobs(session_id), job_type=role, owner="kernel", wave_id=wave_id
+            )
             store.save_session(cur)
             started = _jobs.start_job(job)
             store.save_job(started)
@@ -3379,15 +3380,6 @@ def decide_next_wave(
         "targeted_question": decision.targeted_question,
         "targeted_domain": decision.targeted_domain,
     }
-
-
-def decide_wave2(
-    session_id: str,
-    *,
-    repo: ResearchRepository | Path | str | None = None,
-) -> dict[str, object]:
-    """Wire-name alias for decide_next_wave; scripts/pi_bridge.py dispatch only."""
-    return decide_next_wave(session_id, repo=repo)
 
 
 def _finalize_trio(store: ResearchRepository, session_id: str, found: ResearchSession):

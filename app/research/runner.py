@@ -1,8 +1,8 @@
 """Retired live-research loop (deterministic test helper only).
 
-Production research runs the OMP path: omp binary + Stockbot extension +
-ResearchDirector task batches + Python kernel verification
-(see scripts/verify_agent_scenarios.py). This module's sequential
+Production research runs the kernel scheduler path: needle harness +
+runKernelAgent + kernel_worker + scheduler.run_node (see
+scripts/verify_agent_scenarios.py). This module's sequential
 in-process loop (source job -> fetch -> freeze -> trio -> gate) stays only
 because deterministic unit tests pin its step behavior; it must not gain new
 production callers.
@@ -82,7 +82,6 @@ from app.research.synthesis.committee import CommitteeDisagreement, compute_disa
 
 if TYPE_CHECKING:
     from app.research.service import MaterializedEvidenceSource
-
 
 
 # Tool-*reported* errors (a result dict carrying "error") are agent-visible by
@@ -1140,7 +1139,9 @@ class _LiveRun:
             claim_text=claim_text,
             content=content,
             content_hash=evidence_content_hash(content),
-            retrieved_at=materialized.retrieved_at if materialized is not None and materialized.retrieved_at else utcnow(),
+            retrieved_at=materialized.retrieved_at
+            if materialized is not None and materialized.retrieved_at
+            else utcnow(),
             source_uri=(materialized.source_url if materialized is not None else None) or uri,
             source_record_id=_record_ref(is_evidence, ref, search_id, accession),
             published_at=materialized.filed_at if materialized is not None else None,
@@ -2364,7 +2365,6 @@ class _LiveRun:
         except Exception:
             pass
 
-
     def _bundle_evidence_entries(self, session_id: str) -> tuple[list[object], list[str]]:
         """Bundle evidence entries + selective artifact names for substantive rows only."""
         from app.research.evidence import evidence_bundle_entry as _entry
@@ -2782,6 +2782,7 @@ def _wave_summary(wave: Mapping[str, object]) -> dict[str, object]:
         "disagreement": wave.get("disagreement"),
     }
 
+
 def write_session_bundle(run: _LiveRun, session_id: str) -> Path:
     """Per-session bundle writer: delegates to the run's bundle writer (thin seam)."""
     return run.write_bundle(session_id)
@@ -2919,8 +2920,8 @@ def run_live(
 ) -> dict[str, object]:
     """Retired production entrypoint (deterministic test helper only).
 
-    Live evals run the production OMP path (omp + extension + Director + task
-    subagents + kernel; see scripts/verify_agent_scenarios.py). This in-process
+    Live evals run the production kernel path (kernel scheduler + JEV +
+    Needle + tool runtime; see scripts/verify_agent_scenarios.py). This in-process
     loop must not gain new callers. Waves run sequentially while
     ``decide_next_wave`` authorizes them; ``interrupt_after`` stops early at a
     named boundary.
@@ -3345,7 +3346,9 @@ def resume_live(
             bundle_dir = run.write_bundle(session_id)
         except Exception:
             bundle_dir = None
-        empty_out = _empty_terminal_result(session_id, wave, eids, _first_dossier_id(run), "complete:empty-with-limitations")
+        empty_out = _empty_terminal_result(
+            session_id, wave, eids, _first_dossier_id(run), "complete:empty-with-limitations"
+        )
         empty_out["bundle_dir"] = str(bundle_dir) if bundle_dir is not None else None
         return empty_out
     return _close_resumed_wave(run, store, session_id, wave, eids)
