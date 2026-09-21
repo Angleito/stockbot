@@ -596,6 +596,7 @@ async def _attempt_tool(
     except Exception:
         job_id = f"job:{uuid.uuid4()}"
     arguments: dict[str, Any] = {}
+    needle_reasoning = ""
     try:
         try:
             kernel.heartbeat_job(job_id)
@@ -622,7 +623,7 @@ async def _attempt_tool(
                 }
             )
         )
-        needle_tool, generated_args = _split_generated(tool_name, generated)
+        needle_tool, generated_args, needle_reasoning = _split_generated(tool_name, generated)
         _validate_needle_tool(tool_name, needle_tool)
         if not isinstance(generated_args, dict):
             raise ValueError(f"needle arguments for {tool_name!r} must be a mapping")
@@ -653,6 +654,7 @@ async def _attempt_tool(
             "outcome_summary": _outcome_summary(outcome),
             "error": None if outcome_error is None else str(outcome_error)[:500],
             "error_type": _f(outcome, "error_type"),
+            "reasoning": needle_reasoning[:2000],
             "job_id": job_id,
             "evidence_id": None,
             "tool_result_ref": _tool_result_ref(result, outcome),
@@ -669,6 +671,7 @@ async def _attempt_tool(
             "outcome_summary": "",
             "error": str(exc)[:500],
             "error_type": "tool_error",
+            "reasoning": needle_reasoning[:2000],
             "job_id": job_id,
             "evidence_id": None,
             "tool_result_ref": None,
@@ -683,10 +686,19 @@ def _needle_takes_kwargs(fn: Any) -> bool:
     return any(p.kind in (p.VAR_KEYWORD, p.KEYWORD_ONLY) or p.name in ("tool", "schema") for p in params.values())
 
 
-def _split_generated(jev_tool: str, generated: Any) -> tuple[Any, Any]:
+def _split_generated(jev_tool: str, generated: Any) -> tuple[Any, Any, str]:
     if isinstance(generated, dict):
-        return generated.get("tool", jev_tool), generated.get("arguments", {})
-    return _f(generated, "tool", default=jev_tool), _f(generated, "arguments", default={})
+        reasoning = generated.get("reasoning")
+        return (
+            generated.get("tool", jev_tool),
+            generated.get("arguments", {}),
+            reasoning if isinstance(reasoning, str) else "",
+        )
+    return (
+        _f(generated, "tool", default=jev_tool),
+        _f(generated, "arguments", default={}),
+        (_f(generated, "reasoning", default="") if isinstance(_f(generated, "reasoning", default=""), str) else ""),
+    )
 
 
 # ---------------------------------------------------------------------------
@@ -933,6 +945,7 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                             "error",
                             "error_type",
                             "confidence",
+                            "reasoning",
                             "job_id",
                             "evidence_id",
                             "tool_result_ref",
@@ -975,6 +988,7 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                             if isinstance(attempt.get("outcome_summary"), str)
                             else "",
                             "error": f"admit failed: {exc}"[:500],
+                            "reasoning": attempt.get("reasoning") if isinstance(attempt.get("reasoning"), str) else "",
                             "job_id": attempt.get("job_id"),
                             "evidence_id": None,
                             "tool_result_ref": attempt.get("tool_result_ref"),
@@ -992,6 +1006,7 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                     "error": None if outcome_error is None else str(outcome_error)[:500],
                     "error_type": _f(outcome, "error_type"),
                     "confidence": _f(decision, "confidence"),
+                    "reasoning": attempt.get("reasoning") if isinstance(attempt.get("reasoning"), str) else "",
                     "job_id": attempt.get("job_id"),
                     "evidence_id": evidence_id,
                     "tool_result_ref": attempt.get("tool_result_ref"),

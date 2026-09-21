@@ -256,14 +256,42 @@ def _jev_admit(sid: str, objective: str, proposals: list[dict[str, object]]) -> 
         return list(proposals)
 
 
+def _registry_portfolio_hit() -> list[str]:
+    """Fail-closed HDA: portfolio/order tools must not be runnable from research."""
+    from app.research import scheduler
+
+    try:
+        reg = scheduler.build_registry()
+    except Exception:
+        return []
+    try:
+        from app.tools import PORTFOLIO_AUTHORIZED_TOOLS as _PORT
+
+        forbidden: set[str] = set(_PORT)
+    except Exception:
+        forbidden = {"evaluate_mandate", "get_portfolio_snapshot", "get_scans", "run_scan"}
+    names: set[str] = set()
+    if isinstance(reg, list):
+        for entry in reg:
+            if isinstance(entry, dict):
+                name = entry.get("name")
+                if isinstance(name, str) and name:
+                    names.add(name)
+    return sorted(n for n in names if n in forbidden)
+
+
 def run_graph_prompt(prompt: str, as_of: str | None = None) -> str:
     """Shared graph fan-out: session + decompose/admit/topo nodes. Returns sid.
 
     Both the JSONL bridge (_run) and the thesis trigger runner import this so
     the two entry points cannot drift into separate single-node paths.
+    Fail-closed: a forbidden registry raises before creating anything.
     """
     from app.research import service
 
+    hit = _registry_portfolio_hit()
+    if hit:
+        raise RuntimeError(f"registry guard forbids portfolio tools: {hit}")
     objective = prompt.strip()
     sid = service.create_research(objective, objective, as_of=as_of)
     try:
@@ -313,29 +341,12 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
     raw_as_of = req.get("asOf")
     as_of = raw_as_of if isinstance(raw_as_of, str) else None
     objective = prompt.strip()
-    # Fail-closed HDA: research gathers only; portfolio/order tools must not be runnable here.
-    try:
-        reg = scheduler.build_registry()
-    except Exception:
-        reg = []
-    try:
-        from app.tools import PORTFOLIO_AUTHORIZED_TOOLS as _PORT
-
-        forbidden: set[str] = set(_PORT)
-    except Exception:
-        forbidden = {"evaluate_mandate", "get_portfolio_snapshot", "get_scans", "run_scan"}
-    names: set[str] = set()
-    if isinstance(reg, list):
-        for entry in reg:
-            if isinstance(entry, dict):
-                name = entry.get("name")
-                if isinstance(name, str) and name:
-                    names.add(name)
-    hit = sorted(n for n in names if n in forbidden)
-    if hit:
-        return _terminal(rid, "provider_error", f"registry guard forbids portfolio tools: {hit}")
     try:
         sid = run_graph_prompt(objective, as_of)
+    except RuntimeError as exc:
+        if "registry guard forbids" in str(exc):
+            return _terminal(rid, "provider_error", str(exc))
+        return _terminal(rid, "provider_error", f"session setup failed: {exc}")
     except Exception as exc:
         return _terminal(rid, "provider_error", f"session setup failed: {exc}")
     try:

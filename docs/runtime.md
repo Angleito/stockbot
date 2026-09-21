@@ -14,8 +14,8 @@ the whole registry every round, Needle fills arguments only, tools execute
 via `app/tool_runtime.py` against canonical `app/tools.py`). Thesis
 monitoring runs the same scheduler in-process via
 `app/thesis/runner.py run_trigger` (injectable `_RUN_KERNEL` seam; the
-default runs one single-node trigger pass). No OMP/Pi entry or superseded
-loop remains.
+default runs the shared graph fan-out via `run_graph_prompt` +
+`scheduler.run`). No OMP/Pi entry or superseded loop remains.
 
 `app/research/runner.py` is a deterministic eval harness only (retired live
 loop kept as a test helper): the scheduler owns orchestration, the kernel

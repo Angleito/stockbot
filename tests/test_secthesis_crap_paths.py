@@ -342,8 +342,6 @@ def _disc_job(
     return job
 
 
-
-
 def test_backfill_partial_retry_current_feed(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import client
 
@@ -381,7 +379,8 @@ def test_backfill_provider_failure_retryable(tmp_path: Path, monkeypatch: pytest
     def _boom(*a: object, **k: object) -> object:
         raise RuntimeError("provider down")
 
-    monkeypatch.setattr(store, "query_filings", _boom)
+    monkeypatch.setattr(client, "get_global_filings", _boom)
+    monkeypatch.setattr(client, "get_current_filings", _boom)
     assert disc.run_backfill_job(job, tmp_path) is False
 
 
@@ -844,6 +843,7 @@ def test_classify_and_record_branches() -> None:
     assert disc._party_entity_id(None) is None
     assert disc._verify_conflict(None, True, None) is False
 
+
 def test_rel_workflow_row_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import store
 
@@ -869,7 +869,6 @@ def test_rel_workflow_row_branches(tmp_path: Path, monkeypatch: pytest.MonkeyPat
 
 
 # --- wave 5: cover final survivors' uncovered branches ---
-
 
 
 def test_backfill_write_typed_skipped_and_failed(tmp_path: Path) -> None:
@@ -1626,6 +1625,8 @@ def test_resolve_in_primary_raises() -> None:
 
     with pytest.raises(ValueError):
         resolve_untyped(_Boom(), "a", None)
+
+
 def test_stored_candidates_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import store
     from app.sec.models import Filing
@@ -1651,6 +1652,8 @@ def test_stored_candidates_branches(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(store, "query_filings", _fake_filings)
     got_filing, rows = documents._stored_candidates("a", None, None, None)
     assert got_filing is not None and rows == []
+
+
 def test_stored_candidates_store_failure(monkeypatch: pytest.MonkeyPatch) -> None:
     from app.sec import store
 
@@ -3070,7 +3073,6 @@ def test_snapshot_rule_eligible_branches() -> None:
     )
 
 
-
 def test_enqueue_validation_branches(tmp_path: Path) -> None:
     with pytest.raises(ValueError):
         enqueue_backfill_job("", "10-K", "2024-01-01", "2024-03-31", root=tmp_path)
@@ -3512,7 +3514,6 @@ def test_repository_small_branch_gates(tmp_path: Path) -> None:
     assert ThesisRepository._retained_ids("nope", "claim_id") == set()
     assert ThesisRepository._evidence_ref_of({"thesis_id": "other"}, t.thesis_id) is None
     assert ThesisRepository._journal_entry_id({})  # fresh id minted
-
 
 
 def _srepo_rel(**kw: object) -> dict[str, object]:
