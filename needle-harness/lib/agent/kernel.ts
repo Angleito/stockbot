@@ -4,7 +4,10 @@ import { homedir } from "node:os";
 import { join } from "node:path";
 import { reason, type MuseUsage } from "../muse/client";
 import { redactArgs } from "./types";
-import type { AgentEvent, Evidence, FailureCategory, Metrics } from "./types";
+import type { AgentEvent, EvaluationTrace, Evidence, FailureCategory, Metrics } from "./types";
+
+// KernelTrace is nominal so structural mismatches surface in typecheck rather than SSE runtime.
+export type KernelTrace = EvaluationTrace & { readonly __kernelTraceBrand?: never };
 
 // ponytail: one-shot worker per request (no persistent bridge); spawn/exit/stderr handling mirrors lib/needle/client.ts.
 const MUSE_MODEL = "muse-spark-1.3-contributor";
@@ -65,12 +68,23 @@ export type KernelReasonInput = {
 export type KernelResponse = {
   id?: string;
   objective?: string;
+  session?: Record<string, unknown> | null;
+  sessionId?: string;
+  asOf?: string | null;
   evidence: KernelEvidence[];
+  evidenceRecords?: Record<string, unknown>[];
+  jobs?: Record<string, unknown>[];
+  events?: Record<string, unknown>[];
+  dossiers?: Record<string, unknown>[];
+  coverageArtifacts?: Record<string, unknown>[];
+  toolResults?: Record<string, unknown>[];
   nodes?: KernelGraphNode[];
+  nodeRecords?: Record<string, unknown>[];
   decisions?: Record<string, unknown>[];
   unresolved?: string[];
   incompleteGuard?: boolean;
   incomplete_guard?: boolean;
+  attempts?: Record<string, unknown>[];
   toolExecutions?: KernelNeedleDecision[];
   needleDecisions: KernelNeedleDecision[];
   toolCalls: KernelToolCall[];
@@ -100,6 +114,14 @@ export type RunKernelDeps = {
   python?: string;
   workerPath?: string;
   timeoutMs?: number;
+};
+export type RunKernelOpts = {
+  signal?: AbortSignal;
+  deadlineMs?: number;
+  asOf?: string | null;
+  includeTrace?: boolean;
+  onTrace?: (trace: KernelTrace) => void;
+  deps?: RunKernelDeps;
 };
 
 function defaultSpawn(cmd: string, args: string[], opts: { env: NodeJS.ProcessEnv }): KernelChild {
@@ -245,7 +267,7 @@ function graphProjection(input: {
 export async function runKernelAgent(
   prompt: string,
   emit: (e: AgentEvent) => void,
-  opts?: { signal?: AbortSignal; deadlineMs?: number; deps?: RunKernelDeps },
+  opts?: RunKernelOpts,
 ): Promise<void> {
   const t0 = performance.now();
   const deps = opts?.deps ?? {};
@@ -254,7 +276,8 @@ export async function runKernelAgent(
   const timeoutMs = deps.timeoutMs ?? opts?.deadlineMs ?? WORKER_TIMEOUT_MS;
   const python = deps.python ?? (existsSync(REPO_PYTHON) ? REPO_PYTHON : existsSync(VENV_PYTHON) ? VENV_PYTHON : "python3");
   const workerPath = deps.workerPath ?? WORKER;
-
+  const wantTrace = opts?.includeTrace ?? opts?.onTrace !== undefined;
+  const asOf = typeof opts?.asOf === "string" && opts.asOf.trim() ? opts.asOf : null;
   const buildMetrics = (
     decisions: number,
     calls: number,
@@ -274,11 +297,10 @@ export async function runKernelAgent(
   });
 
   emit({ type: "agent_start", prompt });
-
   let res: KernelResponse;
   const workerStart = performance.now();
   try {
-    res = await callWorker({ id: "1", op: "run", prompt, deadlineMs: timeoutMs }, { signal: opts?.signal, timeoutMs, python, workerPath, spawnFn });
+    res = await callWorker({ id: "1", op: "run", prompt, asOf, deadlineMs: timeoutMs }, { signal: opts?.signal, timeoutMs, python, workerPath, spawnFn });
   } catch (err) {
     // ponytail: needle-down shape — worker failure still ends at done, never throws to the route.
     const msg = err instanceof Error ? err.message : String(err);
@@ -321,11 +343,90 @@ export async function runKernelAgent(
   const countFailure = (c: FailureCategory): void => {
     failures[c] = (failures[c] ?? 0) + 1;
   };
+  // ponytail: one trace helper over the live worker fields; no field-specific builders.
+  const traceOf = (
+    objective: string,
+    evidence: Evidence[],
+    unresolved: string[],
+    incompleteGuard: boolean,
+    escalated: boolean,
+    failures: Partial<Record<FailureCategory, number>>,
+  ): KernelTrace => {
+    const fullEvidence =
+      Array.isArray(res.evidenceRecords) && res.evidenceRecords.length > 0
+        ? res.evidenceRecords.map((r) => ({ ...r }))
+        : evidence.map((e) => ({ ...e }));
+    const fullNodes =
+      Array.isArray(res.nodeRecords) && res.nodeRecords.length > 0
+        ? res.nodeRecords.map((n) => ({ ...n }))
+        : nodes.map((n) => ({ ...n }));
+    const attempts = (Array.isArray(res.attempts) ? res.attempts : []).map((a) => {
+      const rec = { ...a };
+      const args = rec.arguments;
+      // Worker attempt arguments are JSON objects by construction.
+      const argsRecord = args as Record<string, unknown>;
+      if (typeof args === "object" && args !== null && !Array.isArray(args)) rec.arguments = redactArgs(argsRecord);
+      return rec;
+    });
+    const claims: Record<string, unknown>[] = [];
+    for (const d of Array.isArray(res.dossiers) ? res.dossiers : []) {
+      for (const key of ["findings", "claims", "relationships"] as const) {
+        const arr = d[key];
+        if (Array.isArray(arr)) {
+          for (const c of arr) {
+            if (typeof c === "object" && c !== null && !Array.isArray(c)) claims.push({ ...c });
+          }
+        }
+      }
+    }
+    const failureCounts: Record<string, number> = {};
+    for (const [k, v] of Object.entries(failures)) if (typeof v === "number") failureCounts[k] = v;
+    return {
+      session: res.session !== undefined ? res.session : null,
+      sessionId: typeof res.sessionId === "string" && res.sessionId ? res.sessionId : "",
+      asOf: typeof res.asOf === "string" ? res.asOf : asOf,
+      objective,
+      evidence: fullEvidence,
+      nodes: fullNodes,
+      nodeRecords: fullNodes,
+      decisions: persisted.map((d) => ({ ...d })),
+      unresolved: [...unresolved],
+      incompleteGuard,
+      guardState: { incompleteGuard, escalated },
+      attempts,
+      toolExecutions: decisions.map((d) => ({ ...d, arguments: redactArgs(d.arguments ?? {}) })),
+      toolCalls: calls.map((c) => ({ ...c })),
+      failures: failureCounts,
+      escalations: res.escalations ?? 0,
+      escalated,
+      jobs: Array.isArray(res.jobs) ? res.jobs : [],
+      events: Array.isArray(res.events) ? res.events : [],
+      dossiers: Array.isArray(res.dossiers) ? res.dossiers : [],
+      claims,
+      coverageArtifacts: Array.isArray(res.coverageArtifacts) ? res.coverageArtifacts : [],
+      toolResults: Array.isArray(res.toolResults) ? res.toolResults : [],
+      modelPrompt: { objective, nodes: nodes.length, decisions: persisted.length, unresolved: unresolved.length },
+    };
+  };
+  const emitTrace = (
+    objective: string,
+    evidence: Evidence[],
+    unresolved: string[],
+    incompleteGuard: boolean,
+    escalated: boolean,
+    failures: Partial<Record<FailureCategory, number>>,
+  ): void => {
+    if (!wantTrace) return;
+    const trace = traceOf(objective, evidence, unresolved, incompleteGuard, escalated, failures);
+    opts?.onTrace?.(trace);
+    emit({ type: "evaluation_trace", trace });
+  };
 
   if (typeof res.error === "string" && res.error) {
     countFailure("provider_error");
     emit({ type: "tool_failed", tool: "needle", category: "provider_error", preview: res.error.slice(0, 160) });
     emit({ type: "failed", category: "provider_error", message: res.error.slice(0, 160) });
+    emitTrace(objective, evidence, unresolved, incompleteGuard, true, failures);
     emit({ type: "done", metrics: buildMetrics(decisions.length, calls.length, evidence, workerMs, (res.escalations ?? 0) + 1, failures, { calls: 0, totalMs: 0 }) });
     return;
   }
@@ -359,6 +460,7 @@ export async function runKernelAgent(
       emit({ type: "tool_failed", tool: calls.length > 0 ? calls[calls.length - 1].tool : "worker", category, preview: message.slice(0, 160) });
     }
     emit({ type: "failed", category, message: message.slice(0, 160) });
+    emitTrace(objective, evidence, unresolved, incompleteGuard, true, failures);
     emit({ type: "done", metrics: buildMetrics(decisions.length, calls.length, evidence, workerMs, (res.escalations ?? 0) + 1, failures, { calls: 0, totalMs: 0 }) });
     return;
   }
@@ -386,8 +488,10 @@ export async function runKernelAgent(
     countFailure("provider_error");
     emit({ type: "tool_failed", tool: "muse", category: "provider_error", preview: msg.slice(0, 160) });
     emit({ type: "failed", category: "provider_error", message: msg.slice(0, 160) });
+    emitTrace(objective, evidence, unresolved, incompleteGuard, res.escalated ?? false, failures);
     emit({ type: "error", message: msg });
     return;
   }
+  emitTrace(objective, evidence, unresolved, incompleteGuard, res.escalated ?? false, failures);
   emit({ type: "done", metrics: buildMetrics(decisions.length, calls.length, evidence, workerMs, res.escalations ?? 0, failures, { calls: 1, totalMs: performance.now() - tm, ...usage }) });
 }

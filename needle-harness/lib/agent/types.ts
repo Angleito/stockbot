@@ -77,10 +77,38 @@ export type AgentEvent =
   | { type: "tool_result"; tool: string; evidenceId?: string; preview: string }
   | { type: "reasoning_start"; model: string }
   | { type: "answer_delta"; text: string }
+  | { type: "evaluation_trace"; trace: EvaluationTrace }
   | { type: "done"; metrics: Metrics }
   | { type: "error"; message: string }
   | { type: "tool_failed"; tool: string; category: FailureCategory; preview: string }
   | { type: "failed"; category: FailureCategory; message: string };
+
+export type EvaluationTrace = {
+  session: Record<string, unknown> | null;
+  sessionId: string;
+  asOf: string | null;
+  objective: string;
+  evidence: Record<string, unknown>[];
+  nodes: Record<string, unknown>[];
+  nodeRecords: Record<string, unknown>[];
+  decisions: Record<string, unknown>[];
+  unresolved: string[];
+  incompleteGuard: boolean;
+  guardState: { incompleteGuard: boolean; escalated: boolean };
+  attempts: Record<string, unknown>[];
+  toolExecutions: Record<string, unknown>[];
+  toolCalls: Record<string, unknown>[];
+  failures: Record<string, number>;
+  escalations: number;
+  escalated: boolean;
+  jobs: Record<string, unknown>[];
+  events: Record<string, unknown>[];
+  dossiers: Record<string, unknown>[];
+  claims: Record<string, unknown>[];
+  coverageArtifacts: Record<string, unknown>[];
+  toolResults: Record<string, unknown>[];
+  modelPrompt: { objective: string; nodes: number; decisions: number; unresolved: number };
+};
 
 export type Metrics = {
   totalMs: number;

@@ -1744,6 +1744,33 @@ def _unsubstantiated_values(
     return bad
 
 
+def unsubstantiated_values_strict(
+    answer: str, prompt: str, texts: list[str], args_texts: list[str] | None = None, id_pool: set[str] | None = None
+) -> list[str]:
+    """Strict numeric support over the mature normalization/scales/rounding logic.
+
+    Same pools as `_unsubstantiated_values` (prompt echo, normalized compare,
+    0.5% tolerance, scaled peers, derived equations, percent pairs/changes,
+    header peers, ratio backing, single-digit immaterial) but hedged/framed
+    values are never excused: a `derived/estimated/about/roughly` marker or an
+    illustrative-example frame does not back an otherwise unsupported figure.
+    """
+    ctx = _ValueContext(answer, prompt, texts, args_texts, id_pool)
+    pct_norms = _answer_pct_norms(answer)
+    bad: list[str] = []
+    for norm, start, end in _answer_values(answer):
+        if _value_supplied(norm, ctx):
+            continue
+        if _value_numeric_backed(norm, ctx):
+            continue
+        if _value_derived_backed(norm, ctx):
+            continue
+        if _value_ratio_backed(norm, ctx, pct_norms):
+            continue
+        bad.append(norm)
+    return bad
+
+
 def _telemetry_count(telemetry: dict[str, object], key: str) -> int:
     """One telemetry counter narrowed to int."""
     value = telemetry.get(key, 0)

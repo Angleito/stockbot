@@ -1,14 +1,20 @@
 """Kernel worker: stdin-JSONL bridge from the TS route to the Python scheduler.
 
 Request:  {"id", "op": "run", "prompt", "asOf"?, "deadlineMs"?}
-Response: {"id", "objective", "evidence": [{id, content}],
-           "nodes": [{node_id, question, status, depends_on}],
+Response: {"id", "objective", "evidence": [{id, content}] (preview for prose),
+           "evidenceRecords": [full accepted evidence dicts],
+           "session": session.to_dict() | None, "jobs": [job.to_dict()],
+           "events": [journal event.to_dict()], "dossiers": [...],
+           "coverageArtifacts": [...], "toolResults": [...],
+           "nodes": [{node_id, question, status, depends_on}] (compat),
+           "nodeRecords": [full node.to_dict()],
            "decisions": [...persisted JEV records...], "unresolved": [node_ids],
-           "incomplete_guard": bool,
+           "incomplete_guard": bool, "attempts": [raw scheduler attempts],
            "toolExecutions": [...] (canonical),
            "needleDecisions": [...] (legacy alias, same items),
            "toolCalls": [...], "failures": {}, "escalations": n,
-           "escalated": bool, "error"?, "terminal"?}
+           "escalated": bool, "asOf": str | None, "sessionId": str,
+           "error"?, "terminal"?}
 Never raises out of the worker: failures report as terminal provider_error.
 
 Human Decision Authority (code, not prose): the objective is persisted verbatim
@@ -29,7 +35,7 @@ from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent.parent))
 
-from app.research.models import JSONValue
+from app.research.models import JSONValue, validate_json_value
 
 # Mirror of decision/jev.ts DISPOSITION_OPTIONS (choice labels are the contract).
 # run.ts relevance semantics: analyze/gather_evidence admit a node, reject is artifact-only.
@@ -40,15 +46,51 @@ _DISPOSITION_OPTIONS = {
 }
 
 
+def _await_in_fresh_loop(coro: object) -> dict[str, JSONValue]:
+    """Drive one scheduler coroutine without reentering a running test/worker loop."""
+    import threading
+
+    box: dict[str, object] = {}
+
+    def _target() -> None:
+        try:
+            box["result"] = asyncio.run(coro)  # type: ignore[arg-type]
+        except Exception as exc:  # propagate worker terminal below
+            box["error"] = exc
+
+    worker = threading.Thread(target=_target, daemon=True)
+    worker.start()
+    worker.join(timeout=600)
+    if worker.is_alive():
+        raise TimeoutError("kernel run timed out")
+    if "error" in box:
+        raise box["error"]  # type: ignore[throw-requires-exception-type]
+    result = box.get("result")
+    if not isinstance(result, dict):
+        raise ValueError("kernel run failed: malformed result")
+    return result
+
+
 def _terminal(rid: str, category: str, message: str) -> dict[str, JSONValue]:
     out: dict[str, JSONValue] = {
         "id": rid,
         "objective": "",
         "evidence": [],
+        "evidenceRecords": [],
+        "session": None,
+        "sessionId": "",
+        "asOf": None,
+        "jobs": [],
+        "events": [],
+        "dossiers": [],
+        "coverageArtifacts": [],
+        "toolResults": [],
         "nodes": [],
+        "nodeRecords": [],
         "decisions": [],
         "unresolved": [],
         "incomplete_guard": False,
+        "attempts": [],
         "toolExecutions": [],
         "needleDecisions": [],
         "toolCalls": [],
@@ -350,7 +392,16 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
     except Exception as exc:
         return _terminal(rid, "provider_error", f"session setup failed: {exc}")
     try:
-        run_result: dict[str, JSONValue] = asyncio.run(scheduler.run(sid))
+        maybe_result = scheduler.run(sid)
+        if asyncio.iscoroutine(maybe_result):
+            try:
+                asyncio.get_running_loop()
+            except RuntimeError:
+                run_result = asyncio.run(maybe_result)
+            else:
+                run_result = _await_in_fresh_loop(maybe_result)
+        else:
+            run_result = maybe_result
     except Exception as exc:
         return _terminal(rid, "provider_error", f"kernel run failed: {exc}")
     if not isinstance(run_result, dict):
@@ -371,14 +422,51 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
         if isinstance(raw_att, list):
             attempts.extend([a for a in raw_att if isinstance(a, Mapping)])
     try:
+        from app.research.models import DecisionRecord, ResearchNode
+
         store = ResearchRepository()
         records: list[dict[str, JSONValue]] = store.list_evidence(sid)
-        node_rows = store.list_nodes(sid)
-        decision_rows = store.list_decisions(sid)
+        node_rows: list[ResearchNode] | list[object] = store.list_nodes(sid)
+        decision_rows: list[DecisionRecord] | list[object] = store.list_decisions(sid)
     except Exception:
+        store = None  # type: ignore[assignment]
         records = []
         node_rows = []
         decision_rows = []
+    # ponytail: each full-record read degrades independently; the prose
+    # preview above keeps its all-or-nothing shape, the trace below stays complete.
+    session_payload: JSONValue = None
+    jobs_payload: list[JSONValue] = []
+    events_payload: list[JSONValue] = []
+    dossiers_payload: list[JSONValue] = []
+    coverage_payload: list[JSONValue] = []
+    tool_results_payload: list[JSONValue] = []
+    if store is not None:
+        try:
+            session_payload = store.get_session(sid).to_dict()
+        except Exception:
+            session_payload = None
+        try:
+            jobs_payload = [j.to_dict() for j in store.list_jobs(sid)]
+        except Exception:
+            jobs_payload = []
+        try:
+            events_payload = [e.to_dict() for e in store.list_events(sid)]
+        except Exception:
+            events_payload = []
+        try:
+            dossiers_payload = [dict(d) for d in store.list_dossiers(sid)]
+        except Exception:
+            dossiers_payload = []
+        try:
+            coverage_payload = [dict(c) for c in store.list_coverage_artifacts(sid)]
+        except Exception:
+            coverage_payload = []
+        try:
+            tool_results_payload = [dict(t) for t in store.list_tool_results(sid)]
+        except Exception:
+            tool_results_payload = []
+    evidence_records: list[JSONValue] = [dict(rec) for rec in records]
     evidence: list[JSONValue] = []
     # ponytail: success linkage is FIFO over unclaimed admitted ids (scheduler
     # admits sequentially in attempt order); an explicit attempt evidence_id wins.
@@ -429,14 +517,22 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
             failures[category] = failures.get(category, 0) + 1
         tool_calls.append(call)
     nodes_payload: list[JSONValue] = []
+    node_records: list[JSONValue] = []
     for n in node_rows:
+        to_dict = getattr(n, "to_dict", None)
+        if not callable(to_dict):
+            continue
         try:
-            d = n.to_dict()
+            raw_node = to_dict()
         except Exception:
             continue
+        if not isinstance(raw_node, dict):
+            continue
+        d: dict[str, object] = dict(raw_node)
         nid = d.get("node_id")
         if not isinstance(nid, str) or not nid:
             continue
+        node_records.append(validate_json_value(dict(d), "<kernel-worker>: 'node'"))
         raw_node_deps = d.get("depends_on")
         node_deps: list[JSONValue] = (
             [x for x in raw_node_deps if isinstance(x, str)] if isinstance(raw_node_deps, list) else []
@@ -451,11 +547,16 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
         )
     decisions_payload: list[JSONValue] = []
     for dec in decision_rows:
+        decision_to_dict = getattr(dec, "to_dict", None)
+        if not callable(decision_to_dict):
+            continue
         try:
-            dd = dec.to_dict()
+            raw_decision = decision_to_dict()
         except Exception:
             continue
-        decisions_payload.append(dd)
+        if not isinstance(raw_decision, dict):
+            continue
+        decisions_payload.append(validate_json_value(dict(raw_decision), "<kernel-worker>: 'decision'"))
     unresolved: list[JSONValue] = [
         str(n["node_id"]) for n in nodes_payload if isinstance(n, dict) and n.get("status") != "resolved"
     ]
@@ -465,10 +566,21 @@ def _run(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
         "id": rid,
         "objective": objective,
         "evidence": evidence,
+        "evidenceRecords": evidence_records,
+        "session": session_payload,
+        "sessionId": sid,
+        "asOf": as_of,
+        "jobs": jobs_payload,
+        "events": events_payload,
+        "dossiers": dossiers_payload,
+        "coverageArtifacts": coverage_payload,
+        "toolResults": tool_results_payload,
         "nodes": nodes_payload,
+        "nodeRecords": node_records,
         "decisions": decisions_payload,
         "unresolved": unresolved,
         "incomplete_guard": incomplete_guard,
+        "attempts": [dict(a) for a in attempts],
         "toolExecutions": tool_executions,
         "needleDecisions": tool_executions,
         "toolCalls": tool_calls,
