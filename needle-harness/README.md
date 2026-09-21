@@ -24,10 +24,10 @@ See ../.env.example (single repo-root .env). Shell exports override .env. OPENCO
 
 ```bash
 cp ../.env.example ../.env  # once from repo root, then fill values
-bun run needle  # from repo root (or needle-harness/) → http://localhost:3000
+bun run stockbot  # from repo root (or needle-harness/) → http://localhost:3000
 # staged logs per step; browser misbehaves? first check: curl -s localhost:3000/api/health
 bun run lint && bun run typecheck && bun run build
-BENCHMARK=1 bun run needle   # write benchmarks/*.json per run
+BENCHMARK=1 bun run stockbot   # write benchmarks/*.json per run
 ```
 
 ## 5. Architecture

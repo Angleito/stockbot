@@ -173,7 +173,7 @@ process.stdout.write("needle [web]: next dev output follows â€” wait for Readyâ€
 const dev = spawn("bun", ["run", "dev"], {
   cwd: HARNESS_DIR,
   stdio: "inherit",
-  env: { ...process.env, PORT },
+  env: { ...process.env, PORT, STOCKBOT_REPO_ROOT: ROOT_DIR },
 });
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => dev.kill(sig));

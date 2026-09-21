@@ -1,6 +1,7 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
 import { homedir } from "node:os";
+import { join } from "node:path";
 import { reason, type MuseUsage } from "../muse/client";
 import { redactArgs } from "./types";
 import type { AgentEvent, Evidence, FailureCategory, Metrics } from "./types";
@@ -9,9 +10,12 @@ import type { AgentEvent, Evidence, FailureCategory, Metrics } from "./types";
 const MUSE_MODEL = "muse-spark-1.3-contributor";
 const WORKER_TIMEOUT_MS = 10 * 60 * 1000;
 
-const ROOT = process.env.STOCKBOT_REPO_ROOT ?? process.cwd();
-const WORKER = `${ROOT}/app/research/kernel_worker.py`;
+// next dev runs with cwd=needle-harness; the repo root is its parent.
+const ROOT = process.env.STOCKBOT_REPO_ROOT ?? join(process.cwd(), "..");
+const WORKER = join(ROOT, "app/research/kernel_worker.py");
 const VENV_PYTHON = `${homedir()}/.cache/needle-harness/.needle/bin/python`;
+// Stockbot kernel needs repo deps (dotenv, app.*); the needle-only venv lacks them.
+const REPO_PYTHON = join(ROOT, "venv/bin/python");
 
 export type KernelEvidence = {
   id: string;
@@ -173,7 +177,7 @@ export async function runKernelAgent(
   const spawnFn = deps.spawnFn ?? defaultSpawn;
   const reasonFn = deps.reason ?? reason;
   const timeoutMs = deps.timeoutMs ?? opts?.deadlineMs ?? WORKER_TIMEOUT_MS;
-  const python = deps.python ?? (existsSync(VENV_PYTHON) ? VENV_PYTHON : "python3");
+  const python = deps.python ?? (existsSync(REPO_PYTHON) ? REPO_PYTHON : existsSync(VENV_PYTHON) ? VENV_PYTHON : "python3");
   const workerPath = deps.workerPath ?? WORKER;
 
   const buildMetrics = (
