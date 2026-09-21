@@ -27,6 +27,7 @@ from dataclasses import dataclass, field
 from typing import Any, Protocol
 
 from app.tool_runtime import RuntimeToolSession, execute_agent_tool, outcome_from_result
+
 _contract_outcome_from_result = outcome_from_result
 
 try:
@@ -109,9 +110,7 @@ _MAX_TOOL_ROUNDS = 10
 # Meta/ranking-layer tools: never in front of JEV (no search_tools, no ranking
 # layer). JEV sees every canonical tool directly; these five are the discovery
 # mechanism itself, not research actions.
-_JEV_REGISTRY_EXCLUDED = frozenset(
-    {"call_tool", "browse_tools", "search_tools", "list_tool_domains", "describe_tool"}
-)
+_JEV_REGISTRY_EXCLUDED = frozenset({"call_tool", "browse_tools", "search_tools", "list_tool_domains", "describe_tool"})
 
 # Required params that name an upstream handle (a prior tool's output) rather
 # than fresh node input — surfaced as manifest prerequisites.
@@ -350,16 +349,25 @@ def build_registry() -> list[dict[str, Any]]:
 
     JEV sees this whole registry on EVERY selection including post-tool
     transitions. Fields match decision/jev.ts ToolManifestEntry: name +
-    description required; purpose/evidence/domain/keyInputs/outputKind/
-    prerequisites/pitSupport are budget aids, never a filter — every
-    canonical tool stays visible. ``parameters`` rides along for Needle
-    (single selected tool schema in).
+    description required; the catalog detail (use/when-NOT/conflicts/next)
+    comes from TOOL_DISCOVERY_REGISTRY so JEV picks the best tool with
+    highest probability; prerequisites/pitSupport are budget aids, never a
+    filter — every canonical tool stays visible. ``parameters`` rides along
+    for Needle (single selected tool schema in). Catalog intent/useWhen/
+    avoidWhen/conflicts/nextTools ride along for JEV probability.
     """
     from app.policy import Capability
     from app.security.action_policy import TOOL_DOMAINS
     from app.tools import TOOL_DISCOVERY_REGISTRY, tools_for_capabilities
 
     manifests: list[dict[str, Any]] = []
+
+    def _semi(items):
+        return "; ".join(items) if items else ""
+
+    def _comma(items):
+        return ", ".join(items) if items else ""
+
     for tool in tools_for_capabilities(frozenset({Capability.RESEARCH})):
         fn = tool.get("function") if isinstance(tool, dict) else None
         if not isinstance(fn, dict):
@@ -384,6 +392,11 @@ def build_registry() -> list[dict[str, Any]]:
                 "prerequisites": _manifest_prerequisites(required),
                 # ponytail: default true; only confirmed-blind session-local tools opt out.
                 "pitSupport": "PIT-blind: current state only" if name in _PIT_BLIND_TOOLS else "PIT-scoped",
+                "intent": meta.intent if meta is not None else "",
+                "useWhen": _semi(meta.choose_when) if meta is not None else "",
+                "avoidWhen": _semi(meta.reject_when) if meta is not None else "",
+                "conflicts": _comma(meta.conflicts_with) if meta is not None else "",
+                "nextTools": _comma(meta.related_tools) if meta is not None else "",
                 "parameters": params,
             }
         )
@@ -627,13 +640,9 @@ def _selection_tools(decision: Any) -> list[str]:
             selected = decision.selected_tools() if callable(decision.selected_tools) else decision.selected_tools
             names = list(selected)
         except Exception:
-            names = _as_list(
-                _f(decision, "tool_name", "tool", "tool_names", "tools", "selected", default=[])
-            )
+            names = _as_list(_f(decision, "tool_name", "tool", "tool_names", "tools", "selected", default=[]))
     else:
-        names = _as_list(
-            _f(decision, "tool_name", "tool", "tool_names", "tools", "selected", default=[])
-        )
+        names = _as_list(_f(decision, "tool_name", "tool", "tool_names", "tools", "selected", default=[]))
     return [str(n) for n in names if isinstance(n, str) and n and n not in _REASON_SENTINELS | _RESOLVED_SENTINELS]
 
 

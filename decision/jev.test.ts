@@ -252,11 +252,16 @@ test("tool selection covers the whole registry plus sentinels; enriched manifest
       description: "Bounded text window of one filing document.",
       domain: "sec",
       purpose: "Read a known accession section.",
+      intent: "read_filing_section",
       keyInputs: "req(accession_no) opt(section, cursor, limit)",
       outputKind: "text window + source_refs",
       evidence: "filing text with accession citations",
       prerequisites: "accession_no from a prior search",
       pitSupport: "as_of",
+      useWhen: "reading a known section; following a search hit",
+      avoidWhen: "do not use for discovery search",
+      conflicts: "search_sec_filings",
+      nextTools: "diff_sec_filings",
     },
   ];
   const q = buildToolSelectionQuestion(
@@ -271,7 +276,7 @@ test("tool selection covers the whole registry plus sentinels; enriched manifest
   );
   expect(q.options.search_sec_filings).toBe("Full-text filing search.");
   const doc = q.options.get_sec_document;
-  for (const bit of ["[sec]", "Inputs:", "Output:", "Evidence:", "Needs:", "PIT:"]) expect(doc).toContain(bit);
+  for (const bit of ["[sec]", "Intent:", "Inputs:", "Output:", "Evidence:", "Needs:", "PIT:", "Use:", "Avoid:", "Conflicts:", "Next:"]) expect(doc).toContain(bit);
   expect(q.prompt).toContain("n1");
   expect(q.prompt).toContain("search_sec_filings");
   expect(TOOL_SELECTION_SENTINELS.reasoning_required.length).toBeGreaterThan(0);

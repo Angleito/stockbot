@@ -311,6 +311,9 @@ def _manifest_line(entry: Mapping[str, JSONValue]) -> str:
     purpose = opt(entry.get("purpose"))
     if purpose and purpose != line:
         line += f" Purpose: {purpose}."
+    intent = opt(entry.get("intent"))
+    if intent:
+        line += f" Intent: {intent}."
     inputs = opt(entry.get("keyInputs"))
     if inputs:
         line += f" Inputs: {inputs}."
@@ -326,6 +329,18 @@ def _manifest_line(entry: Mapping[str, JSONValue]) -> str:
     pit = opt(entry.get("pitSupport"))
     if pit:
         line += f" PIT: {pit}."
+    use = opt(entry.get("useWhen"))
+    if use:
+        line += f" Use: {use}."
+    avoid = opt(entry.get("avoidWhen"))
+    if avoid:
+        line += f" Avoid: {avoid}."
+    conflicts = opt(entry.get("conflicts"))
+    if conflicts:
+        line += f" Conflicts: {conflicts}."
+    nxt = opt(entry.get("nextTools"))
+    if nxt:
+        line += f" Next: {nxt}."
     domain = opt(entry.get("domain"))
     if domain:
         line = f"[{domain}] {line}"
@@ -422,6 +437,11 @@ def _auto_registry() -> list[dict[str, JSONValue]]:
                 else "",
                 # ponytail: degraded path (scheduler unimportable); blind list best-effort.
                 "pitSupport": "PIT-blind: current state only" if name in _BLIND else "PIT-scoped",
+                "intent": meta.intent if meta is not None else "",
+                "useWhen": "; ".join(meta.choose_when) if meta is not None else "",
+                "avoidWhen": "; ".join(meta.reject_when) if meta is not None else "",
+                "conflicts": ", ".join(meta.conflicts_with) if meta is not None else "",
+                "nextTools": ", ".join(meta.related_tools) if meta is not None else "",
                 "parameters": params,
             }
         )

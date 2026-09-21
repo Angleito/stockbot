@@ -245,11 +245,16 @@ export type ToolManifestEntry = {
   description: string;
   domain?: string;
   purpose?: string;
+  intent?: string;
   keyInputs?: string;
   outputKind?: string;
   evidence?: string;
   prerequisites?: string;
   pitSupport?: string;
+  useWhen?: string;
+  avoidWhen?: string;
+  conflicts?: string;
+  nextTools?: string;
 };
 
 export type ToolSelectionNode = {
@@ -265,6 +270,8 @@ function manifestLine(entry: ToolManifestEntry): string {
   let line = entry.description.replace(/\s+/g, " ").trim();
   const purpose = opt(entry.purpose);
   if (purpose && purpose !== line) line += ` Purpose: ${purpose}.`;
+  const intent = opt(entry.intent);
+  if (intent) line += ` Intent: ${intent}.`;
   const inputs = opt(entry.keyInputs);
   if (inputs) line += ` Inputs: ${inputs}.`;
   const output = opt(entry.outputKind);
@@ -275,6 +282,14 @@ function manifestLine(entry: ToolManifestEntry): string {
   if (prereq) line += ` Needs: ${prereq}.`;
   const pit = opt(entry.pitSupport);
   if (pit) line += ` PIT: ${pit}.`;
+  const useWhen = opt(entry.useWhen);
+  if (useWhen) line += ` Use: ${useWhen}.`;
+  const avoidWhen = opt(entry.avoidWhen);
+  if (avoidWhen) line += ` Avoid: ${avoidWhen}.`;
+  const conflicts = opt(entry.conflicts);
+  if (conflicts) line += ` Conflicts: ${conflicts}.`;
+  const nextTools = opt(entry.nextTools);
+  if (nextTools) line += ` Next: ${nextTools}.`;
   const domain = opt(entry.domain);
   if (domain) line = `[${domain}] ${line}`;
   return line;
