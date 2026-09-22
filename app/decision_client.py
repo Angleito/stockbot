@@ -63,8 +63,8 @@ _SENTINEL_DESCRIPTIONS = {
 
 # Entry routing (JEV-before-kernel): fast-path + research sentinels framing the whole canonical registry.
 _ENTRY_OPTIONS = {
-    REASON_SENTINEL: "The prompt is conversational chitchat answerable directly without research.",
-    "research_required": "The prompt needs reasoning over evidence, lookup, or research to answer.",
+    REASON_SENTINEL: "Answerable by reasoning/explanation from user-supplied context without new external evidence.",
+    "research_required": "Needs current/external facts, evidence retrieval, source verification, or tool execution.",
 }
 # Opt-in parallel fan-out: runner-up joins only when close to the winner and above floor (cap keeps blast radius small).
 _PARALLEL_MIN_PROB = 0.35
@@ -784,7 +784,7 @@ class JevClient:
         questions: dict[str, JSONValue] = {
             "entry": {
                 "type": "choice",
-                "instructions": f"Route this entry prompt with exactly one winner: {text} reasoning_required answers directly with no tool; a registry tool runs single-shot first when it fits; otherwise research_required.",
+                "instructions": f"Route this entry prompt with exactly one winner: {text} reasoning_required answers from user-supplied context with no new external evidence and no tool; a registry tool runs single-shot first when it fits; otherwise research_required.",
                 "criteria": validate_json_mapping(options, "<decision_client>: 'criteria'"),
             }
         }

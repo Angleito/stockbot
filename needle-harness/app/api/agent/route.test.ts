@@ -100,6 +100,20 @@ describe("agent entry route", () => {
     expect(needleCalls.length).toBe(0);
     expect(reasonCalls[0].evidence).toEqual([]);
   });
+  test("reasoning-style prompts answer direct when routed reasoning_required", async () => {
+    for (const prompt of [
+      "Explain DCF valuation in simple terms",
+      "What does share dilution mean for existing holders?",
+      "Explain calls vs puts",
+    ]) {
+      reset();
+      const types = (await eventsFor(prompt)).map((e) => e.type);
+      expect(types).toEqual(["agent_start", "reasoning_start", "answer_delta", "done"]);
+      expect(runCalls.length).toBe(0);
+      expect(needleCalls.length).toBe(0);
+      expect(reasonCalls[0].evidence).toEqual([]);
+    }
+  });
 
   test("exact local tool executes once then answers with evidence", async () => {
     reset();

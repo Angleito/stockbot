@@ -152,6 +152,17 @@ def test_admit_before_complete_with_finra_domain() -> None:
     assert any(str(candidate["record_identity"]) in t for t in replay)
 
 
+def test_sec_candidate_needs_handle_and_text() -> None:
+    """SEC boundary pins: missing handle or empty window/content stays uncitable."""
+    good_handle = {"tool_result_id": "s1:tr:sec"}
+    good_result = {"source_handle": good_handle, "text": "window words"}
+    assert sched._sec_locator(sched._persisted_shapes(good_result)) == "window words"
+    assert sched._outcome_summary(_outcome("words")) == "words"
+    assert sched._sec_evidence_candidate(good_result, _outcome("words")) is not None
+    assert sched._sec_evidence_candidate({"text": "window words"}, _outcome("words")) is None
+    assert sched._sec_evidence_candidate({"source_handle": good_handle}, _outcome("")) is None
+
+
 def test_insufficient_evidence_state_skips_admission() -> None:
     class _JevWeak(_JevAdmit):
         async def assess_result(self, *a: Any, **k: Any) -> dict[str, Any]:
@@ -268,3 +279,191 @@ def test_expansion_is_fail_closed_on_jev_outage() -> None:
     proposal = {"proposals": [{"question": "Follow-up?", "whyItMatters": "Why"}]}
     n = asyncio.run(sched._expand_graph(_JDown(), _K(), "s1", "Objective?", "n0", proposal))
     assert n == 0 and created == []
+
+
+def test_reason_path_calls_analyze_then_expand() -> None:
+    """Production reason path: analyze shape (no proposals) -> expand supplies proposals."""
+    created: list[str] = []
+    calls: list[str] = []
+
+    class _K:
+        def create_node(self, sid: str, q: str, w: str, depends_on: Any = None) -> SimpleNamespace:
+            created.append(q)
+            return SimpleNamespace(node_id=f"n-{len(created)}")
+
+        def get_session(self, sid: str) -> dict[str, Any]:
+            return {"session_id": sid, "objective": "Objective?", "query": "", "as_of": None}
+
+        def record_decision(self, sid: str, t: str, **kw: Any) -> None:
+            pass
+
+        def start_job(self, sid: str, **kw: Any) -> dict[str, str]:
+            return {"job_id": "job-0"}
+
+        def heartbeat_job(self, jid: str) -> None:
+            pass
+
+        def complete_job(self, jid: str, out: Any = None) -> None:
+            pass
+
+        def block_node(self, sid: str, nid: str, reason: str = "") -> None:
+            pass
+
+    class _J:
+        async def select_tool(self, *a: Any, **k: Any) -> SimpleNamespace:
+            return SimpleNamespace(tool_name="reasoning_required", probabilities={}, confidence=1.0)
+
+        async def adjudicate(self, proposal: Any, *a: Any, **k: Any) -> SimpleNamespace:
+            assert isinstance(proposal, dict) and "analyses" in proposal and "proposals" not in proposal
+            calls.append("adjudicate")
+            return SimpleNamespace(tool_name="query_finra", probabilities={}, confidence=1.0)
+
+        async def decide(self, state: Any, questions: Any, decision_type: Any = None, **kw: Any) -> dict[str, Any]:
+            return {qid: {"choice": "admit"} for qid in questions}
+
+        async def assess_result(self, *a: Any, **k: Any) -> dict[str, Any]:
+            return {
+                "probabilities": {},
+                "confidence": 1.0,
+                "continuation": "continue_research",
+                "continue": "continue_research",
+                "action": "continue_research",
+                "evidence_state": "insufficient",
+                "decision": "insufficient",
+            }
+
+    class _R:
+        async def analyze(self, prompt: Any) -> dict[str, Any]:
+            calls.append("analyze")
+            assert isinstance(prompt, str) and "CONTEXT" in prompt
+            return {"analyses": [{"nodeId": "n1"}], "evidenceRequests": []}
+
+        async def expand(self, prompt: Any, objective_id: str, prior_ids: Any) -> dict[str, Any]:
+            calls.append("expand")
+            assert isinstance(prompt, str) and "n1" in prompt
+            assert objective_id == "s1" and "n1" in prior_ids
+            return {"proposals": [{"question": "Follow-up?", "whyItMatters": "Why"}]}
+
+    orig = sched._record
+    orig_rounds = sched._MAX_TOOL_ROUNDS
+    try:
+        sched._record = lambda k, sid, dtype, **kw: None  # type: ignore[assignment]
+        sched._MAX_TOOL_ROUNDS = 1
+        out = asyncio.run(
+            sched._run_node(
+                _node(),
+                session_id="s1",
+                kernel=_K(),
+                jev=_J(),
+                reasoner=_R(),
+                repo=None,
+                needle_generate=lambda **kw: {"tool": "query_finra", "arguments": {}, "reasoning": "r"},
+                invoke=lambda *a, **k: {"tool_result_id": None},
+                to_outcome=lambda name, result: _outcome(),
+                registry=[{"name": "query_finra", "parameters": {}}],
+                tool_session=SimpleNamespace(),
+            )
+        )
+    finally:
+        sched._record = orig  # type: ignore[assignment]
+        sched._MAX_TOOL_ROUNDS = orig_rounds
+    assert calls[0] == "analyze" and "expand" in calls
+    assert calls.index("analyze") < calls.index("adjudicate") < calls.index("expand")
+    assert created == ["Follow-up?"]
+    assert out["admitted"] == 0
+
+
+def test_other_no_resolve_without_admitted_evidence() -> None:
+    """OTHER tool success + sufficient_support but no admitted evidence MUST NOT resolve."""
+    resolved: list[str] = []
+    assess_calls: list[str] = []
+
+    class _K(_Kernel):
+        def resolve_node(self, sid: str, nid: str) -> None:
+            resolved.append(nid)
+
+        def get_session(self, sid: str) -> dict[str, Any]:
+            return {"session_id": sid, "objective": "q?", "query": "", "as_of": None}
+
+    class _J(_JevAdmit):
+        async def select_tool(self, *a: Any, **k: Any) -> SimpleNamespace:
+            return SimpleNamespace(tool_name="mystery_tool", probabilities={}, confidence=1.0)
+
+        async def assess_result(self, *a: Any, **k: Any) -> dict[str, Any]:
+            assess_calls.append("assess")
+            return await super().assess_result(*a, **k)
+
+    with mock.patch.object(sched, "_MAX_TOOL_ROUNDS", 1):
+        out = asyncio.run(
+            sched._run_node(
+                _node(),
+                session_id="s1",
+                kernel=_K(),
+                jev=_J(),
+                repo=None,
+                needle_generate=lambda **kw: {"tool": "mystery_tool", "arguments": {}, "reasoning": "r"},
+                invoke=lambda *a, **k: {"note": "uncitable bytes"},
+                to_outcome=lambda name, result: _outcome(),
+                registry=[{"name": "mystery_tool", "parameters": {}}],
+                tool_session=SimpleNamespace(),
+            )
+        )
+    assert resolved == []
+    assert out["status"] == "blocked" and out["admitted"] == 0
+
+
+def test_source_fallback_returns_other() -> None:
+    with mock.patch.dict("sys.modules", {"app.research.agents.source_agent": None}):
+        import builtins
+
+        real_import = builtins.__import__
+
+        def _boom(name: str, *a: Any, **k: Any) -> Any:
+            if name == "app.research.agents.source_agent":
+                raise ImportError("no source_agent")
+            return real_import(name, *a, **k)
+
+        with mock.patch.object(builtins, "__import__", _boom):
+            assert sched._source_for_tool("mystery_tool") == "OTHER"
+
+
+def test_failed_outcome_never_reaches_assess() -> None:
+    assess_calls: list[str] = []
+    failed: list[str] = []
+
+    class _K(_Kernel):
+        def fail_job(self, jid: str, cat: str, msg: str) -> None:
+            failed.append(jid)
+            super().fail_job(jid, cat, msg)
+
+        def get_session(self, sid: str) -> dict[str, Any]:
+            return {"session_id": sid, "objective": "q?", "query": "", "as_of": None}
+
+    class _J(_JevAdmit):
+        async def assess_result(self, *a: Any, **k: Any) -> dict[str, Any]:
+            assess_calls.append("assess")
+            return await super().assess_result(*a, **k)
+
+    def _bad_outcome(name: str, result: Any) -> SimpleNamespace:
+        out = _outcome()
+        out.error = "provider blew up"
+        return out
+
+    with mock.patch.object(sched, "_MAX_TOOL_ROUNDS", 1):
+        out = asyncio.run(
+            sched._run_node(
+                _node(),
+                session_id="s1",
+                kernel=_K(),
+                jev=_J(),
+                repo=None,
+                needle_generate=lambda **kw: {"tool": "query_finra", "arguments": {}, "reasoning": "r"},
+                invoke=lambda *a, **k: {"tool_result_id": "s1:tr:x"},
+                to_outcome=_bad_outcome,
+                registry=[{"name": "query_finra", "parameters": {}}],
+                tool_session=SimpleNamespace(),
+            )
+        )
+    assert assess_calls == []
+    assert failed != []
+    assert out["admitted"] == 0
