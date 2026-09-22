@@ -13,7 +13,11 @@ class FakeChild implements KernelChild {
       const body: unknown = JSON.parse(data);
       if (body && typeof body === "object" && "id" in body && typeof body.id === "string") {
         const id = body.id;
-        queueMicrotask(() => this.emitStdout(`${JSON.stringify({ id, marker: `res-${id}` })}\n`));
+        // test-only: { hold: true } suppresses the auto-reply so the test drives timing.
+        const held = "hold" in body && body.hold === true;
+        if (!held) {
+          queueMicrotask(() => this.emitStdout(`${JSON.stringify({ id, marker: `res-${id}` })}\n`));
+        }
       }
       cb?.(null);
     },
@@ -134,6 +138,41 @@ describe("KernelRouter", () => {
       router.close();
     }
   });
+  test("timed-out call rejects alone while sibling still resolves", async () => {
+    const { router, children } = setup();
+    try {
+      // Real 20ms timer: the timeout firing is the behavior under test, fake clocks cannot drive it.
+      const slow = router.call({ op: "run", hold: true }, { timeoutMs: 20 });
+      const fast = router.call({ op: "run", hold: true }, { timeoutMs: 1000 });
+      // Observe both upfront so the sibling rejection (old failAll bug) cannot go unhandled.
+      const slowSettled = slow.then((): null => null, (e: unknown): unknown => e);
+      const fastSettled = fast.then(
+        (r) => ({ ok: true as const, r }),
+        (e: unknown) => ({ ok: false as const, e }),
+      );
+      const slowErr = await slowSettled;
+      if (!(slowErr instanceof Error)) throw new Error("expected timeout rejection");
+      expect(slowErr.message).toMatch("timeout");
+      const first = children[0];
+      if (!first) throw new Error("expected one spawned child");
+      expect(first.killCalls).toBe(0);
+      expect(children.length).toBe(1);
+      // Sibling was still pending across the timeout: drive its reply now.
+      first.emitStdout('{"id":"2","marker":"res-2"}\n');
+      const fastRes = await fastSettled;
+      if (!fastRes.ok) {
+        const detail = fastRes.e instanceof Error ? fastRes.e.message : String(fastRes.e);
+        throw new Error(`sibling rejected: ${detail}`);
+      }
+      expect(markerOf(fastRes.r)).toBe("res-2");
+      expect(first.killCalls).toBe(0);
+      expect(children.length).toBe(1);
+      expect(writtenIds(first)).toEqual(["1", "2"]);
+    } finally {
+      router.close();
+    }
+  });
+
 
   test("prewarm resolves only after the worker ready message is observed", async () => {
     const children: FakeChild[] = [];

@@ -1,4 +1,4 @@
-import type { AgentEvent } from "@/lib/agent/types";
+import { redactArgs, type AgentEvent } from "@/lib/agent/types";
 
 function conf(c: number | null): string {
   return c === null ? "n/a" : `${Math.round(c * 100)}%`;
@@ -18,7 +18,7 @@ export function AgentEventView({ event }: { event: AgentEvent }) {
           </span>
           {event.tool && (
             <div className="pl-4 text-zinc-500">
-              ├─ {event.tool}({JSON.stringify(event.arguments)})
+              ├─ {event.tool}({JSON.stringify(redactArgs(event.arguments))})
             </div>
           )}
         </div>

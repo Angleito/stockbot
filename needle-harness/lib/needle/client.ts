@@ -22,8 +22,10 @@ export function validateNeedleTool(jevTool: string, needleTool: string | null): 
   return needleTool;
 }
 
-const ROOT = process.cwd();
-const SERVER = `${ROOT}/lib/needle/server.py`;
+const REPO_ROOT =
+  process.env.STOCKBOT_REPO_ROOT ??
+  (process.cwd().endsWith("needle-harness") ? process.cwd().replace(/\/needle-harness$/, "") : process.cwd());
+const SERVER = `${REPO_ROOT}/needle-harness/lib/needle/server.py`;
 const VENV_PYTHON = `${homedir()}/.cache/needle-harness/.needle/bin/python`;
 
 type Pending = {
@@ -144,17 +146,15 @@ export class NeedleRouter {
     }
   }
 
-  private call(body: Record<string, unknown>): Promise<NeedleRouteResult> {
+  private call(body: Record<string, unknown>, timeoutMs = TOOL_TIMEOUT_MS): Promise<NeedleRouteResult> {
     const child = this.ensure();
     if (!child.stdin) throw new Error("needle spawn failed");
     const id = String((this.nextId += 1));
     return new Promise<NeedleRouteResult>((resolve, reject) => {
       const timer = setTimeout(() => {
         delete this.pending[id];
-        child.kill();
-        this.child = null;
         reject(new Error(`needle route timeout; stderr tail: ${this.bridgeStderrTail || "(empty)"}`));
-      }, TOOL_TIMEOUT_MS);
+      }, timeoutMs);
       this.pending[id] = { resolve, reject, cancel: () => clearTimeout(timer) };
       child.stdin?.write(JSON.stringify({ id, ...body }) + "\n", (err) => {
         if (err) {
@@ -181,9 +181,14 @@ export class NeedleRouter {
     context?: unknown;
   }): Promise<NeedleRouteResult> {
     if (!req.tool) throw new Error("generateArguments: tool must be a nonempty tool name");
-    const r = await this.call({ action: "arguments.generate", ...req });
-    validateNeedleTool(req.tool, r.tool);
-    return r;
+    const release = await acquireNeedle();
+    try {
+      const r = await this.call({ action: "arguments.generate", ...req });
+      validateNeedleTool(req.tool, r.tool);
+      return r;
+    } finally {
+      release();
+    }
   }
   async close(): Promise<void> {
     const child = this.child;

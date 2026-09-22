@@ -32,35 +32,42 @@ function formatEvidence(evidence: Evidence[]): string {
   return kept.join("\n\n");
 }
 
-function harvest(ev: unknown, acc: { text: string; usage: MuseUsage }, onDelta: (t: string) => void): void {
+// Exported for tests: a chunk matching both delta shapes appends once.
+export function harvest(ev: unknown, acc: { text: string; usage: MuseUsage }, onDelta: (t: string) => void): void {
   if (!ev || typeof ev !== "object") return;
   const rec = ev as Record<string, unknown>;
   if (typeof rec["delta"] === "string" && /delta/i.test(typeof rec["type"] === "string" ? rec["type"] : "")) {
     acc.text += rec["delta"] as string;
     onDelta(rec["delta"] as string);
-  }
-  const first = Array.isArray(rec["choices"]) ? rec["choices"][0] : undefined;
-  const delta = first && typeof first === "object" ? (first as Record<string, unknown>)["delta"] : undefined;
-  const content = delta && typeof delta === "object" ? (delta as Record<string, unknown>)["content"] : undefined;
-  if (typeof content === "string" && content) {
-    acc.text += content;
-    onDelta(content);
+  } else {
+    const first = Array.isArray(rec["choices"]) ? rec["choices"][0] : undefined;
+    const delta = first && typeof first === "object" ? (first as Record<string, unknown>)["delta"] : undefined;
+    const content = delta && typeof delta === "object" ? (delta as Record<string, unknown>)["content"] : undefined;
+    if (typeof content === "string" && content) {
+      acc.text += content;
+      onDelta(content);
+    }
   }
   const response = rec["response"];
   const nested = response && typeof response === "object" ? (response as Record<string, unknown>)["usage"] : undefined;
   const rawUsage = rec["usage"] ?? nested;
   if (!rawUsage || typeof rawUsage !== "object") return;
   const u = rawUsage as Record<string, unknown>;
-  if (typeof u["input_tokens"] === "number") acc.usage.inputTokens = u["input_tokens"];
-  if (typeof u["output_tokens"] === "number") acc.usage.outputTokens = u["output_tokens"];
+  // Usage accumulates across SSE chunks: keep the max, never last-write-wins.
+  if (typeof u["input_tokens"] === "number")
+    acc.usage.inputTokens = Math.max(acc.usage.inputTokens ?? 0, u["input_tokens"]);
+  if (typeof u["output_tokens"] === "number")
+    acc.usage.outputTokens = Math.max(acc.usage.outputTokens ?? 0, u["output_tokens"]);
   const inDetails = u["input_tokens_details"];
   const promptDetails = u["prompt_tokens_details"];
   const inCached = inDetails && typeof inDetails === "object" ? (inDetails as Record<string, unknown>)["cached_tokens"] : undefined;
   const promptCached = promptDetails && typeof promptDetails === "object" ? (promptDetails as Record<string, unknown>)["cached_tokens"] : undefined;
   const cached = u["cached_tokens"] ?? inCached ?? promptCached;
-  if (typeof cached === "number") acc.usage.cachedTokens = cached;
-  if (typeof u["prompt_tokens"] === "number") acc.usage.inputTokens ??= u["prompt_tokens"];
-  if (typeof u["completion_tokens"] === "number") acc.usage.outputTokens ??= u["completion_tokens"];
+  if (typeof cached === "number") acc.usage.cachedTokens = Math.max(acc.usage.cachedTokens ?? 0, cached);
+  if (typeof u["prompt_tokens"] === "number")
+    acc.usage.inputTokens = Math.max(acc.usage.inputTokens ?? 0, u["prompt_tokens"]);
+  if (typeof u["completion_tokens"] === "number")
+    acc.usage.outputTokens = Math.max(acc.usage.outputTokens ?? 0, u["completion_tokens"]);
 }
 
 async function readSse(
@@ -94,13 +101,15 @@ async function readSse(
   }
   const u = acc.usage;
   if (u.inputTokens !== undefined || u.outputTokens !== undefined) {
-    u.cost =
-      (u.inputTokens ?? 0) / 1e6 * INPUT_PER_M +
-      (u.outputTokens ?? 0) / 1e6 * OUTPUT_PER_M +
-      (u.cachedTokens ?? 0) / 1e6 * CACHE_PER_M;
+    // cachedTokens are a subset of inputTokens: bill them at the cache rate, not on top.
+    const cached = u.cachedTokens ?? 0;
+    const uncachedInput = Math.max(0, (u.inputTokens ?? 0) - cached);
+    u.cost = uncachedInput / 1e6 * INPUT_PER_M + cached / 1e6 * CACHE_PER_M + (u.outputTokens ?? 0) / 1e6 * OUTPUT_PER_M;
   }
   return acc;
 }
+
+const FETCH_TIMEOUT_MS = 120_000;
 
 async function post(
   apiKey: string,
@@ -118,6 +127,7 @@ async function post(
       "x-opencode-session": session,
     },
     body: JSON.stringify(body),
+    signal: AbortSignal.timeout(FETCH_TIMEOUT_MS),
   });
   if (!res.ok) throw new Error(`muse ${path} ${res.status}: ${(await res.text()).slice(0, 300)}`);
   return readSse(res, onDelta);
@@ -155,7 +165,7 @@ export async function reason(opts: {
     return { ...r, missingEvidence: /^Missing-Evidence:\s*(.+)$/m.exec(r.text)?.[1] };
   } catch (err) {
     const msg = err instanceof Error ? err.message : String(err);
-    if (!/(404|405|500)/.test(msg)) throw err;
+    if (!/(404|405|429|500|502|503|504)/.test(msg)) throw err;
     const r = await post(
       apiKey,
       session,

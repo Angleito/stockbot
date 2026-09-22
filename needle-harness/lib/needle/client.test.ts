@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { acquireNeedle, validateNeedleTool } from "./client";
+import { NeedleRouter, acquireNeedle, validateNeedleTool } from "./client";
 
 describe("acquireNeedle", () => {
   test("concurrent holders serialize", async () => {
@@ -47,5 +47,28 @@ describe("validateNeedleTool", () => {
     expect(() => validateNeedleTool("search_sec_filings", "get_sec_document")).toThrow("mismatch");
     expect(() => validateNeedleTool("search_sec_filings", null)).toThrow("mismatch");
     expect(() => validateNeedleTool("", "search_sec_filings")).toThrow("nonempty");
+  });
+});
+
+describe("timeout isolation", () => {
+  test("timeout rejects only the timed-out call while a sibling still resolves", async () => {
+    const router = new NeedleRouter();
+    let killed = false;
+    const fakeChild = { kill: () => { killed = true; }, stdin: { write: () => { } } };
+    type RouterSeam = {
+      ensure: () => unknown;
+      call: (b: Record<string, unknown>, t: number) => Promise<unknown>;
+      onLine: (l: string) => void;
+    };
+    // Unchecked cast: private members have no public seam; structural read only.
+    const seam: RouterSeam = router as unknown as RouterSeam;
+    seam.ensure = () => fakeChild;
+    const slow = seam.call({ action: "slow" }, 20);
+    const sibling = seam.call({ action: "sibling" }, 1000);
+    await expect(slow).rejects.toThrow("timeout");
+    expect(killed).toBe(false);
+    seam.onLine(JSON.stringify({ id: "2", tool: null, arguments: {}, confidence: null, reasoning: "" }));
+    await expect(sibling).resolves.toEqual({ tool: null, arguments: {}, confidence: null, reasoning: "" });
+    await router.close();
   });
 });

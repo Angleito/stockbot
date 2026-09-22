@@ -19,7 +19,14 @@ export async function POST(req: Request): Promise<Response> {
   const stream = new ReadableStream({
     async start(controller) {
       const enc = new TextEncoder();
-      const send = (e: AgentEvent) => controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+      const send = (e: AgentEvent) => {
+        if (req.signal.aborted) return;
+        try {
+          controller.enqueue(enc.encode(`data: ${JSON.stringify(e)}\n\n`));
+        } catch {
+          // Client disconnected mid-stream; remaining sends no-op, close below ends it.
+        }
+      };
       // ponytail: JEV owns routing; this answers direct with zero session/DB.
       const answerDirect = async (): Promise<boolean> => {
         const t0 = performance.now();
@@ -29,7 +36,10 @@ export async function POST(req: Request): Promise<Response> {
           const r = await reason({ prompt, evidence: [], escalated: false, direct: true, onDelta: (text) => send({ type: "answer_delta", text }) });
           send({ type: "done", metrics: { totalMs: performance.now() - t0, needle: { calls: 0, totalMs: 0, escalations: 0 }, tools: { calls: 0, totalMs: 0 }, muse: { calls: 1, totalMs: performance.now() - t0, ...r.usage }, evidence: { count: 0, characters: 0 }, failures: {} } });
         } catch (err) {
-          send({ type: "error", message: err instanceof Error ? err.message : String(err) });
+          const msg = err instanceof Error ? err.message : String(err);
+          // ponytail: muse-down shape mirrors kernel.ts — failed + error, never a silent close.
+          send({ type: "failed", category: "provider_error", message: msg.slice(0, 160) });
+          send({ type: "error", message: msg });
         }
         return true;
       };

@@ -38,7 +38,11 @@ yarn-error.log*
 
 next-env.d.ts
 
-# local benchmark output (never committed)
-/benchmarks/
+# local benchmark output (never committed; keep the dir)
+/benchmarks/*.json
 # generated at warmup via tool_bridge describe (never committed)
 /.needle-catalog.json
+# tsc incremental build info (never committed)
+tsconfig.tsbuildinfo
+# bun coverage output (never committed)
+/coverage-ts/

@@ -18,13 +18,14 @@ export function makeEvidence(
 ): Evidence {
   const fullHash = createHash("sha256").update(content).digest("hex");
   const id = `ev:${createHash("sha256").update(`${source}\n${stable(opts?.sourceHandle ?? opts?.sourceRefs ?? null)}\n${fullHash}`).digest("hex").slice(0, 16)}`;
+  const truncated = content.length > DISPLAY_CONTENT_LIMIT;
   return {
     id,
     source,
     title: opts?.title,
     url: opts?.url,
     retrievedAt: new Date().toISOString(),
-    content: content.slice(0, DISPLAY_CONTENT_LIMIT),
+    content: truncated ? `${content.slice(0, DISPLAY_CONTENT_LIMIT)}\n…[truncated]` : content,
     ...(opts?.sourceHandle !== undefined ? { sourceHandle: opts.sourceHandle } : {}),
     ...(opts?.sourceRefs !== undefined ? { sourceRefs: opts.sourceRefs } : {}),
   };

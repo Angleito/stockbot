@@ -7,8 +7,9 @@ import { fileURLToPath } from "node:url";
 
 const HARNESS_DIR = dirname(dirname(fileURLToPath(import.meta.url)));
 const ROOT_DIR = dirname(HARNESS_DIR);
+const SERVER = join(HARNESS_DIR, "lib/needle/server.py");
 
-if (!existsSync(join(HARNESS_DIR, "lib/needle/server.py"))) {
+if (!existsSync(SERVER)) {
   process.stderr.write(`needle: harness not found at ${HARNESS_DIR}\n`);
   process.exit(1);
 }
@@ -18,7 +19,6 @@ const dotenvLoaded = typeof process.loadEnvFile === "function" && existsSync(DOT
 if (dotenvLoaded) process.loadEnvFile(DOTENV);
 
 const VENV_PYTHON = `${homedir()}/.cache/needle-harness/.needle/bin/python`;
-const SERVER = join(HARNESS_DIR, "lib/needle/server.py");
 const WARMUP_TIMEOUT_MS = 120_000;
 const PORT = process.env.PORT ?? "3000";
 const CATALOG = process.env.NEEDLE_CATALOG ?? join(HARNESS_DIR, ".needle-catalog.json");
@@ -82,10 +82,20 @@ async function fetchCatalog(): Promise<void> {
   const timer = setTimeout(() => reject(new Error("timeout")), WARMUP_TIMEOUT_MS);
   bridge.stdout?.on("data", (d: Buffer) => {
     buf += d.toString();
-    const i = buf.indexOf("\n");
-    if (i >= 0) {
-      clearTimeout(timer);
-      resolve(buf.slice(0, i));
+    let i: number;
+    while ((i = buf.indexOf("\n")) >= 0) {
+      const line = buf.slice(0, i);
+      buf = buf.slice(i + 1);
+      try {
+        const parsed = JSON.parse(line) as { tools?: unknown };
+        if (parsed && typeof parsed === "object" && "tools" in parsed) {
+          clearTimeout(timer);
+          resolve(line);
+          break;
+        }
+      } catch {
+        // Non-JSON log line before the describe reply — skip.
+      }
     }
   });
   bridge.on("error", reject);
@@ -164,15 +174,16 @@ const dev = spawn("bun", ["run", "dev"], {
 for (const sig of ["SIGINT", "SIGTERM"] as const) {
   process.on(sig, () => dev.kill(sig));
 }
-const { promise: exited, resolve: onExit } = Promise.withResolvers<number>();
-dev.on("close", onExit);
-const code = await exited;
-if (code === 0) {
-  process.stdout.write(`needle [web]: next dev exited with code ${code}\n`);
+const { promise: exited, resolve: onExit } = Promise.withResolvers<{ code: number | null; signal: NodeJS.Signals | null }>();
+dev.on("close", (code, signal) => onExit({ code, signal }));
+const { code, signal } = await exited;
+const exitCode = code ?? 1;
+if (exitCode === 0) {
+  process.stdout.write(`needle [web]: next dev exited with code ${exitCode}\n`);
 } else {
-  const detail = typeof code === "number" ? `code ${code}` : "signal exit";
+  const detail = typeof code === "number" ? `code ${code}` : signal ? `signal ${signal}` : "signal exit";
   await writeFile(WEB_UNHEALTHY_MARKER, `unhealthy ${detail} at ${new Date().toISOString()}\n`);
   process.stderr.write(`needle [web]: unhealthy web child (${detail}); marker ${WEB_UNHEALTHY_MARKER}\n`);
-  process.stderr.write(`needle [web]: next dev exited with code ${code}\n`);
+  process.stderr.write(`needle [web]: next dev exited with code ${exitCode}\n`);
 }
-process.exit(code);
+process.exit(exitCode);

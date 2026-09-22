@@ -1,6 +1,7 @@
 import json
 import os
 import sys
+import threading
 from datetime import datetime, timezone
 
 os.environ["NEEDLE_TELEMETRY"] = "0"
@@ -71,22 +72,39 @@ def resolve_weights():
     return None
 
 
-now = datetime.now(timezone.utc).strftime("%a %Y-%m-%d")
+def _today():
+    """UTC date fact, computed per request so long-lived servers never go stale."""
+    return datetime.now(timezone.utc).strftime("%a %Y-%m-%d")
+
+
+def _legacy_system():
+    return (
+        f"date: {_today()} UTC; locale: en-US; "
+        "Route retrieval only: call a tool only with entities/terms from the request or prior results. "
+        "SEC questions: prefer find_sec_entities then search_sec_filings then get_sec_document chains. "
+        "Return no call when evidence suffices."
+    )
+
+
+def _bound_system():
+    return f"date: {_today()} UTC; locale: en-US;"
+
+
 weights = resolve_weights()
 kwargs = {
     "tools": TOOLS,
     # Binding args-only rule lives per-request in _arguments_prompt (kernel path); shared system stays legacy until loop.ts cutover removes start/step.
-    "system": (
-        f"date: {now} UTC; locale: en-US; "
-        "Route retrieval only: call a tool only with entities/terms from the request or prior results. "
-        "SEC questions: prefer find_sec_entities then search_sec_filings then get_sec_document chains. "
-        "Return no call when evidence suffices."
-    ),
+    "system": _legacy_system(),
     "buffer_size": 65536,
 }
 if weights is not None:
     kwargs["weights"] = weights
 agent = needle.Needle(**kwargs)
+
+# Legacy start/step share the module-global agent; reset/complete are not
+# reentrant, so serialize them. Oversize lines are rejected in handle().
+_agent_lock = threading.Lock()
+MAX_LINE_CHARS = 1_000_000
 
 
 def _tool_triggers(tool):
@@ -123,7 +141,7 @@ def _bound_agent(tool, schema):
     # ("route retrieval only", chain preferences, "no call when evidence
     # suffices") withhold the call on multi-hop objectives (docs: system =
     # facts never instructions). Shared agent keeps legacy system for start/step.
-    bound_kwargs["system"] = f"date: {now} UTC; locale: en-US;"
+    bound_kwargs["system"] = _bound_system()
     return needle.Needle(**bound_kwargs)
 
 
@@ -178,6 +196,9 @@ def _arguments_prompt(tool, schema, objective, node, context):
 
 
 def handle(line):
+    # Bound stdin memory: a huge prompt never reaches json/model work.
+    if len(line) > MAX_LINE_CHARS:
+        return {"id": "?", "error": "bad_request"}
     try:
         req = json.loads(line)
         rid = req["id"]
@@ -195,10 +216,12 @@ def handle(line):
             prompt = req["prompt"]
             if not isinstance(prompt, str):
                 raise ValueError("bad prompt")
-            agent.reset()
-            r = agent.complete(prompt, max_new_tokens=256)
+            with _agent_lock:
+                agent.reset()
+                r = agent.complete(prompt, max_new_tokens=256)
         elif action == "step":
-            r = agent.complete(json.dumps(req.get("result")), max_new_tokens=256)
+            with _agent_lock:
+                r = agent.complete(json.dumps(req.get("result")), max_new_tokens=256)
         elif action == "arguments.generate":
             # Narrow execution worker: exactly one JEV-selected tool. No
             # registry inspection, no tool choice, no chaining, no
@@ -229,8 +252,38 @@ def handle(line):
         return {"id": rid, "error": str(e)}
 
 
+def _read_line():
+    """Next stdin line, capped at MAX_LINE_CHARS. Returns (line, overlong)."""
+    # Chunked reads so one huge prompt cannot balloon memory before handle()
+    # ever sees it; the excess is drained and answered once as bad_request.
+    parts = []
+    total = 0
+    while True:
+        chunk = sys.stdin.readline(65536)
+        if not chunk:
+            break
+        total += len(chunk)
+        if total > MAX_LINE_CHARS + 1:  # +1: trailing newline is not content
+            while not chunk.endswith("\n"):
+                chunk = sys.stdin.readline(65536)
+                if not chunk:
+                    break
+            return None, True
+        parts.append(chunk)
+        if chunk.endswith("\n"):
+            break
+    return "".join(parts), False
+
+
 def main():
-    for line in sys.stdin:
+    while True:
+        line, overlong = _read_line()
+        if overlong:
+            sys.stdout.write(json.dumps({"id": "?", "error": "bad_request"}) + "\n")
+            sys.stdout.flush()
+            continue
+        if not line:
+            break  # EOF
         line = line.strip()
         if not line:
             continue

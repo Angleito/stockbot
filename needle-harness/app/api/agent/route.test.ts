@@ -7,6 +7,7 @@ import type { Evidence } from "@/lib/agent/types";
 let winner: unknown = "reasoning_required";
 let routeDown = false;
 let argsDown = false;
+let reasonDown = false;
 let verdicts: string[] = ["node_resolved"];
 const runCalls: unknown[][] = [];
 type ReasonCall = { prompt: string; evidence: Evidence[]; onDelta?: (t: string) => void };
@@ -40,6 +41,7 @@ mock.module("@/lib/agent/kernel", () => ({
 mock.module("@/lib/muse/client", () => ({
   reason: async (opts: ReasonCall) => {
     reasonCalls.push(opts);
+    if (reasonDown) throw new Error("muse down");
     opts.onDelta?.("hi");
     return { text: "hi", usage: {} };
   },
@@ -60,6 +62,7 @@ function reset(): void {
   winner = "reasoning_required";
   routeDown = false;
   argsDown = false;
+  reasonDown = false;
   verdicts = ["node_resolved"];
   runCalls.length = 0;
   reasonCalls.length = 0;
@@ -196,5 +199,13 @@ describe("agent entry route", () => {
     routeDown = true;
     await eventsFor("hello");
     expect(runCalls.length).toBe(1);
+  });
+
+  test("direct-answer failure ends the stream with a terminal event", async () => {
+    reset();
+    reasonDown = true;
+    const events = await eventsFor("hello");
+    expect(events.map((e) => e.type)).toEqual(["agent_start", "reasoning_start", "failed", "error"]);
+    expect(runCalls.length).toBe(0);
   });
 });

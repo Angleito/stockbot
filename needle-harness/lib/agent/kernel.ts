@@ -249,13 +249,11 @@ export class KernelRouter {
     const id = String((this.nextId += 1));
     return new Promise<KernelResponse>((resolve, reject) => {
       const timer = setTimeout(() => {
-        try {
-          child.kill();
-        } catch {
-          // Already gone; rejection below carries the error.
-        }
-        this.child = null;
-        this.failAll(new Error(`kernel worker timeout; stderr tail: ${this.workerStderrTail || "(empty)"}`));
+        const p = this.pending[id];
+        if (!p) return;
+        delete this.pending[id];
+        p.cancel();
+        p.reject(new Error(`kernel worker timeout; stderr tail: ${this.workerStderrTail || "(empty)"}`));
       }, timeoutMs);
       const cancel = (): void => {
         clearTimeout(timer);
@@ -536,7 +534,7 @@ export async function runKernelAgent(
       countFailure("provider_error");
       emit({ type: "tool_failed", tool: "muse", category: "provider_error", preview: msg.slice(0, 160) });
       emit({ type: "failed", category: "provider_error", message: msg.slice(0, 160) });
-      emit({ type: "error", message: msg });
+      emit({ type: "done", metrics: buildMetrics(0, 0, evidence, workerMs, (res.escalations ?? 0) + 1, failures, { calls: 0, totalMs: 0 }) });
     }
     return;
   }
@@ -564,7 +562,7 @@ export async function runKernelAgent(
     countFailure("provider_error");
     emit({ type: "tool_failed", tool: "muse", category: "provider_error", preview: msg.slice(0, 160) });
     emit({ type: "failed", category: "provider_error", message: msg.slice(0, 160) });
-    emit({ type: "error", message: msg });
+    emit({ type: "done", metrics: buildMetrics(decisions.length, calls.length, evidence, workerMs, (res.escalations ?? 0) + 1, failures, { calls: 0, totalMs: 0 }) });
     return;
   }
   emit({ type: "done", metrics: buildMetrics(decisions.length, calls.length, evidence, workerMs, res.escalations ?? 0, failures, { calls: 1, totalMs: performance.now() - tm, ...usage }) });

@@ -118,12 +118,18 @@ class StockbotBridge {
 
 const bridge = new StockbotBridge();
 // ponytail: keyword ladder over verbatim kernel/gateway text; bridge error_type wins when known. Add branches for new distinct refusals, never collapse to one string.
-function categorizeFailure(message: string, errorType?: unknown): { category: FailureCategory; retryable: boolean } {
+// Precedence: explicit error_type, then explicit deadline/timeout signals, then substring traps
+// (duplicate/provider/budget/policy). Deadline/timeout stay first because a timed-out call is
+// often re-reported with "duplicate"/"budget"/"provider" wording attached — the timeout is the cause.
+export function categorizeFailure(message: string, errorType?: unknown): { category: FailureCategory; retryable: boolean } {
   if (errorType === "deadline_exceeded") return { category: "deadline_exceeded", retryable: false };
   if (errorType === "run_budget_exceeded") return { category: "tool_budget_exhausted", retryable: false };
   if (errorType === "evidence_budget_exceeded") return { category: "token_budget_exhausted", retryable: false };
   if (errorType === "invalid_research_context") return { category: "policy_denied", retryable: false };
   const low = message.toLowerCase();
+  if (low.includes("deadline")) return { category: "deadline_exceeded", retryable: false };
+  if (low.includes("timeout") || low.includes("timed out") || low.includes("timed_out") || low.includes("expired"))
+    return { category: "timeout", retryable: true };
   if (low.includes("research_loop_detected") || low.includes("repeats an action") || low.includes("already ran"))
     return { category: "research_loop_detected", retryable: false };
   if (low.includes("duplicate")) return { category: "duplicate_research_action", retryable: false };
@@ -133,9 +139,6 @@ function categorizeFailure(message: string, errorType?: unknown): { category: Fa
     if (low.includes("wave")) return { category: "wave_budget_exhausted", retryable: false };
     return { category: "tool_budget_exhausted", retryable: false };
   }
-  if (low.includes("deadline")) return { category: "deadline_exceeded", retryable: false };
-  if (low.includes("timeout") || low.includes("timed out") || low.includes("timed_out") || low.includes("expired"))
-    return { category: "timeout", retryable: true };
   if (
     low.includes("policy") ||
     low.includes("denied") ||
