@@ -6,18 +6,29 @@ import type { Evidence } from "@/lib/agent/types";
 // modules before the mocks install (module-loading boundary test).
 let winner: unknown = "reasoning_required";
 let routeDown = false;
+let argsDown = false;
+let verdicts: string[] = ["node_resolved"];
 const runCalls: unknown[][] = [];
 type ReasonCall = { prompt: string; evidence: Evidence[]; onDelta?: (t: string) => void };
 const reasonCalls: ReasonCall[] = [];
-type NeedleCall = { tool: string; schema?: unknown; objective?: unknown };
-const needleCalls: NeedleCall[] = [];
+type KernelCall = { op?: unknown; tool?: unknown };
+const kernelCalls: KernelCall[] = [];
 const invoked: unknown[][] = [];
 const ended: string[] = [];
 
 mock.module("@/lib/agent/kernel", () => ({
   kernelRouter: {
-    call: async () => {
+    call: async (body: KernelCall) => {
+      kernelCalls.push(body);
       if (routeDown) throw new Error("worker down");
+      if (body.op === "arguments") {
+        if (argsDown) throw new Error("needle down");
+        return { tool: body.tool, arguments: { q: "x" }, confidence: 1, reasoning: "t" };
+      }
+      if (body.op === "assess_entry") {
+        const verdict = verdicts.length > 1 ? verdicts.shift()! : verdicts[0];
+        return { verdict };
+      }
       return { route: winner };
     },
   },
@@ -31,15 +42,6 @@ mock.module("@/lib/muse/client", () => ({
     reasonCalls.push(opts);
     opts.onDelta?.("hi");
     return { text: "hi", usage: {} };
-  },
-}));
-
-mock.module("@/lib/needle/client", () => ({
-  needleRouter: {
-    generateArguments: async (req: NeedleCall) => {
-      needleCalls.push(req);
-      return { tool: req.tool, arguments: { q: "x" }, confidence: 1, reasoning: "t" };
-    },
   },
 }));
 
@@ -57,9 +59,11 @@ mock.module("@/lib/tools/stockbot", () => ({
 function reset(): void {
   winner = "reasoning_required";
   routeDown = false;
+  argsDown = false;
+  verdicts = ["node_resolved"];
   runCalls.length = 0;
   reasonCalls.length = 0;
-  needleCalls.length = 0;
+  kernelCalls.length = 0;
   invoked.length = 0;
   ended.length = 0;
 }
@@ -97,7 +101,7 @@ describe("agent entry route", () => {
     const types = (await eventsFor("hello")).map((e) => e.type);
     expect(types).toEqual(["agent_start", "reasoning_start", "answer_delta", "done"]);
     expect(runCalls.length).toBe(0);
-    expect(needleCalls.length).toBe(0);
+    expect(kernelCalls.filter((c) => c.op === "arguments").length).toBe(0);
     expect(reasonCalls[0].evidence).toEqual([]);
   });
   test("reasoning-style prompts answer direct when routed reasoning_required", async () => {
@@ -110,7 +114,7 @@ describe("agent entry route", () => {
       const types = (await eventsFor(prompt)).map((e) => e.type);
       expect(types).toEqual(["agent_start", "reasoning_start", "answer_delta", "done"]);
       expect(runCalls.length).toBe(0);
-      expect(needleCalls.length).toBe(0);
+      expect(kernelCalls.filter((c) => c.op === "arguments").length).toBe(0);
       expect(reasonCalls[0].evidence).toEqual([]);
     }
   });
@@ -123,7 +127,7 @@ describe("agent entry route", () => {
     expect(types).toEqual(["agent_start", "needle_decision", "tool_start", "tool_result", "reasoning_start", "answer_delta", "done"]);
     expect(events.filter((e) => e.type === "tool_start").length).toBe(1);
     expect(runCalls.length).toBe(0);
-    expect(needleCalls[0].tool).toBe("get_current_time");
+    expect(kernelCalls.filter((c) => c.op === "arguments").map((c) => c.tool)).toEqual(["get_current_time"]);
     expect(reasonCalls[0].evidence.length).toBe(1);
     expect(ended).toEqual(["sess-test"]);
     expect(metricCalls(events, "tools")).toBe(1);
@@ -138,6 +142,37 @@ describe("agent entry route", () => {
     expect(invoked[0][0]).toBe("query_finra");
     expect(runCalls.length).toBe(0);
     expect(reasonCalls[0].evidence.length).toBe(1);
+  });
+
+  test("shared-needle failure never invokes and falls through to research", async () => {
+    reset();
+    winner = "search_sec_filings";
+    argsDown = true;
+    await eventsFor("NVDA filings?");
+    expect(invoked.length).toBe(0);
+    expect(reasonCalls.length).toBe(0);
+    expect(runCalls.length).toBe(1);
+  });
+
+  test("assess research_required verdict falls through to research", async () => {
+    reset();
+    winner = "query_finra";
+    verdicts = ["research_required"];
+    await eventsFor("short interest?");
+    expect(invoked.length).toBe(1);
+    expect(reasonCalls.length).toBe(0);
+    expect(runCalls.length).toBe(1);
+  });
+
+  test("chained tool verdict runs the next tool then resolves", async () => {
+    reset();
+    winner = "search_sec_filings";
+    verdicts = ["get_sec_document", "node_resolved"];
+    const events = await eventsFor("NVDA risk factors?");
+    expect(events.filter((e) => e.type === "tool_start").length).toBe(2);
+    expect(invoked.map((c) => c[0])).toEqual(["search_sec_filings", "get_sec_document"]);
+    expect(runCalls.length).toBe(0);
+    expect(reasonCalls[0].evidence.length).toBe(2);
   });
 
   test("research_required runs the kernel agent", async () => {

@@ -440,6 +440,94 @@ def _route(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[s
         return {"id": rid, "route": "research_required"}
 
 
+def _arguments(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
+    """Shared-Needle arguments op: grounded args for the exact JEV-selected tool.
+
+    Runs on the already-warmed kernel-owned Needle (no second spawn). Never
+    raises: failures report as {"id", "error"} and the TS caller fail-opens to
+    research without invoking the tool. Accepts schema inline, else falls back
+    to the scheduler registry schema for the named tool.
+    """
+    from app.research.models import validate_json_mapping, validate_json_value
+
+    raw_id = req.get("id")
+    rid = raw_id if isinstance(raw_id, str) else "?"
+    tool = req.get("tool")
+    if not isinstance(tool, str) or not tool:
+        return {"id": rid, "error": "tool required"}
+    try:
+        objective = req.get("objective")
+        if objective is None:
+            objective = req.get("prompt")
+        prompt = objective if isinstance(objective, str) and objective.strip() else ""
+        schema_raw = req.get("schema")
+        schema: JSONValue = validate_json_value(schema_raw if schema_raw is not None else {}, "<arguments>: 'schema'")
+        if not isinstance(schema, dict) or not schema:
+            try:
+                from app.research import scheduler
+
+                schema = scheduler._schema_for(tool, scheduler.build_registry())
+            except Exception:
+                fallback: JSONValue = {}
+                schema = fallback
+        node_raw = req.get("node")
+        node: JSONValue = validate_json_value(node_raw, "<arguments>: 'node'") if node_raw is not None else None
+        context_raw = req.get("context")
+        context: JSONValue = (
+            validate_json_value(context_raw, "<arguments>: 'context'") if context_raw is not None else None
+        )
+        generated = _shared_needle_generate()(tool=tool, schema=schema, objective=prompt, node=node, context=context)
+        needle_tool: object = generated.get("tool", tool) if isinstance(generated, dict) else tool
+        from app.needle_client import validate_needle_tool
+
+        validate_needle_tool(tool, needle_tool)
+        raw_args: object = generated.get("arguments", {}) if isinstance(generated, dict) else {}
+        arguments = validate_json_mapping(
+            dict(raw_args) if isinstance(raw_args, dict) else {}, "<arguments>: 'arguments'"
+        )
+        out: dict[str, JSONValue] = {"id": rid, "tool": tool, "arguments": arguments}
+        if isinstance(generated, dict):
+            confidence = generated.get("confidence")
+            if isinstance(confidence, (int, float)) and not isinstance(confidence, bool):
+                out["confidence"] = float(confidence)
+            else:
+                out["confidence"] = None
+            reasoning = generated.get("reasoning")
+            out["reasoning"] = str(reasoning) if isinstance(reasoning, str) else ""
+        return out
+    except Exception as exc:
+        return {"id": rid, "error": str(exc)[:500] or "needle arguments failed"}
+
+
+def _assess_entry(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[str, JSONValue]:
+    """Post-tool entry verdict: JEV assesses one tool result without a session.
+
+    Returns {"id", "verdict"} where verdict is node_resolved /
+    reasoning_required / research_required / a registry tool name. Fail-open to
+    research_required on any error or blank input (never raises).
+    """
+    raw_id = req.get("id")
+    rid = raw_id if isinstance(raw_id, str) else "?"
+    prompt = req.get("prompt")
+    tool = req.get("tool")
+    if not isinstance(prompt, str) or not prompt.strip():
+        return {"id": rid, "verdict": "research_required"}
+    if not isinstance(tool, str) or not tool:
+        return {"id": rid, "verdict": "research_required"}
+    try:
+        raw_args = req.get("arguments")
+        args_map: Mapping[str, JSONValue] = raw_args if isinstance(raw_args, dict) else {}
+        raw_result = req.get("result")
+        result_map: Mapping[str, JSONValue] = raw_result if isinstance(raw_result, dict) else {}
+        client = jev if jev is not None else _shared_jev()
+        verdict = asyncio.run(client.assess_entry_tool(prompt.strip(), tool, args_map, result_map))
+        if not isinstance(verdict, str) or not verdict:
+            return {"id": rid, "verdict": "research_required"}
+        return {"id": rid, "verdict": verdict}
+    except Exception:
+        return {"id": rid, "verdict": "research_required"}
+
+
 def _run(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[str, JSONValue]:
     from app.research import scheduler
     from app.research.repository import ResearchRepository
@@ -648,14 +736,25 @@ def main() -> None:
                 except ValueError:
                     _emit(_terminal("?", "invalid_params", "invalid JSON"))
                     continue
-                if not isinstance(parsed, dict) or parsed.get("op") not in ("run", "route"):
+                if not isinstance(parsed, dict) or parsed.get("op") not in (
+                    "run",
+                    "route",
+                    "arguments",
+                    "assess_entry",
+                ):
                     rid = parsed.get("id") if isinstance(parsed, dict) and isinstance(parsed.get("id"), str) else "?"
-                    _emit(_terminal(rid, "invalid_params", "op must be 'run' or 'route'"))
+                    _emit(_terminal(rid, "invalid_params", "op must be 'run', 'route', 'arguments', or 'assess_entry'"))
                     continue
                 req: Mapping[str, JSONValue] = parsed
-                if req.get("op") == "route":
+                if req.get("op") in ("route", "arguments", "assess_entry"):
+                    # Main-thread ops: fast JEV/Needle rounds never queue behind a long run.
                     try:
-                        _emit(_route(req, jev=jev))
+                        if req.get("op") == "route":
+                            _emit(_route(req, jev=jev))
+                        elif req.get("op") == "arguments":
+                            _emit(_arguments(req))
+                        else:
+                            _emit(_assess_entry(req, jev=jev))
                     except Exception as exc:  # never raise out of the worker
                         raw_rid = req.get("id")
                         rid = raw_rid if isinstance(raw_rid, str) else "?"

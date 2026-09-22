@@ -78,6 +78,11 @@ export type KernelResponse = {
   escalations: number;
   escalated: boolean;
   route?: string;
+  tool?: string;
+  arguments?: Record<string, unknown>;
+  confidence?: number | null;
+  reasoning?: string;
+  verdict?: string;
   error?: string;
   terminal?: { category: FailureCategory; message: string };
 };

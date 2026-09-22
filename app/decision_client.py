@@ -795,6 +795,72 @@ class JevClient:
             raise ValueError(f"route_entry: winner {winner!r} not in options")
         return winner
 
+    async def assess_entry_tool(
+        self,
+        prompt: str,
+        tool: str,
+        arguments: Mapping[str, JSONValue] | None = None,
+        result: Mapping[str, JSONValue] | None = None,
+    ) -> str:
+        """Non-persisted post-tool verdict for the direct single-shot path.
+
+        One choice over reasoning_required + research_required + node_resolved
+        + the whole canonical registry: the sentinels stop (resolve/reason/
+        research), a registry tool name chains one more round. Uses _invoke
+        directly (never decide: nothing persists); raises on bad input or a
+        winner outside the options — the worker fail-opens to research_required.
+        """
+        text = prompt.strip() if isinstance(prompt, str) else ""
+        if not text:
+            raise ValueError("assess_entry_tool: blank prompt")
+        if not isinstance(tool, str) or not tool:
+            raise ValueError("assess_entry_tool: tool required")
+        reg = _auto_registry()
+        if not reg:
+            raise ValueError("assess_entry_tool: empty registry")
+        options: dict[str, str] = dict(_ENTRY_OPTIONS)
+        if RESOLVED_SENTINEL not in options:
+            options[RESOLVED_SENTINEL] = _SENTINEL_DESCRIPTIONS[RESOLVED_SENTINEL]
+        for entry in reg:
+            name = entry.get("name") if isinstance(entry, dict) else None
+            if not isinstance(name, str) or not name:
+                raise ValueError("assess_entry_tool: registry entry needs a name")
+            if name in options:
+                raise ValueError(f"assess_entry_tool: duplicate tool {name}")
+            options[name] = _manifest_line(entry)
+        args = validate_json_mapping(
+            dict(arguments) if isinstance(arguments, dict) else {}, "<decision_client>: 'arguments'"
+        )
+        res = validate_json_mapping(dict(result) if isinstance(result, dict) else {}, "<decision_client>: 'result'")
+        ok = res.get("ok")
+        content = res.get("content") if isinstance(res.get("content"), str) else ""
+        error = res.get("error") if isinstance(res.get("error"), str) else ""
+        category = res.get("category") if isinstance(res.get("category"), str) else ""
+        outcome = f"tool {tool} ok={ok!r} category={category!r} content={content[:1500]!r} error={error[:500]!r}"
+        questions: dict[str, JSONValue] = {
+            "assess": {
+                "type": "choice",
+                "instructions": (
+                    f"Assess this single-shot tool result for the entry prompt: {text} "
+                    f"Arguments: {json.dumps(args, default=str)[:2000]} Outcome: {outcome} "
+                    "node_resolved when the result answers the prompt; reasoning_required when no "
+                    "further tool helps; research_required when a full session is needed; otherwise "
+                    "the one registry tool to run next."
+                ),
+                "criteria": validate_json_mapping(options, "<decision_client>: 'criteria'"),
+            }
+        }
+        decisions, _raw, _via = await self._invoke(
+            {"prompt": text, "tool": tool, "arguments": args, "outcome": outcome},
+            questions,
+            {"assess": options},
+        )
+        d = decisions.get("assess")
+        winner = d.get("choice") if isinstance(d, dict) else None
+        if not isinstance(winner, str) or winner not in options:
+            raise ValueError(f"assess_entry_tool: winner {winner!r} not in options")
+        return winner
+
     async def adjudicate(
         self,
         proposal: object,

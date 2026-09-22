@@ -53,7 +53,8 @@ if (pinned) {
   process.stderr.write("weights not pinned — falling back to HF cache\n");
 }
 
-const ALLOWLIST = ["search_web", "find_sec_entities", "search_sec_filings", "get_sec_document"];
+// Mirror of scheduler._JEV_REGISTRY_EXCLUDED: JEV meta tools, never a Needle tool.
+const META_EXCLUDED: Record<string, true> = { call_tool: true, browse_tools: true, search_tools: true, list_tool_domains: true, describe_tool: true };
 
 type DescribeEntry = { function?: { name?: unknown; description?: unknown; parameters?: unknown } };
 
@@ -104,21 +105,26 @@ async function fetchCatalog(): Promise<void> {
   for (const entry of tools as DescribeEntry[]) {
     const fn = entry?.function;
     if (!fn || typeof fn.name !== "string") continue;
-    if (!ALLOWLIST.includes(fn.name)) continue;
+    if (META_EXCLUDED[fn.name]) continue;
     catalog.push({
       name: fn.name,
       description: typeof fn.description === "string" ? fn.description : fn.name,
       parameters: fn.parameters && typeof fn.parameters === "object" ? fn.parameters : { type: "object" },
     });
   }
-  for (const name of ALLOWLIST) {
+  if (catalog.length === 0) {
+    fail("needle catalog failed: describe returned no usable tools");
+  }
+  for (const name of ["search_web", "find_sec_entities", "search_sec_filings", "get_sec_document"]) {
     if (!catalog.some((c) => c.name === name)) {
-      fail(`needle catalog failed: allowlisted tool "${name}" missing from describe output`);
+      fail(`needle catalog failed: required tool "${name}" missing from describe output`);
     }
   }
-  catalog.push(
-    { name: "get_current_time", description: "Get the current UTC date and time", parameters: { type: "object", properties: {} } },
-  );
+  if (!catalog.some((c) => c.name === "get_current_time")) {
+    catalog.push(
+      { name: "get_current_time", description: "Get the current UTC date and time", parameters: { type: "object", properties: {} } },
+    );
+  }
   await writeFile(CATALOG, JSON.stringify(catalog, null, 2));
   process.stdout.write(`needle [ai]: catalog ok ${CATALOG} (${catalog.map((c) => c.name).join(",")})\n`);
 }

@@ -8,6 +8,8 @@ replace — these tests.
 
 from unittest import mock
 
+import pytest
+
 from app.research import kernel_worker as kw
 
 
@@ -111,3 +113,70 @@ def test_route_blank_prompt_needs_no_jev() -> None:
 def test_route_tool_winner_returns_exact_tool() -> None:
     out = kw._route({"id": "r1", "op": "route", "prompt": "what time is it?"}, jev=_JevRoute("get_current_time"))  # type: ignore[arg-type]
     assert out == {"id": "r1", "route": "get_current_time"}
+
+
+class _FailGenerate:
+    def __init__(self, payload: object) -> None:
+        self.payload = payload
+        self.seen: list[object] = []
+
+    def __call__(self, **kwargs: object) -> object:
+        self.seen.append(kwargs)
+        return self.payload
+
+
+def test_arguments_uses_shared_needle_and_schema_fallback(monkeypatch: pytest.MonkeyPatch) -> None:
+    gen = _FailGenerate({"tool": "query_finra", "arguments": {"ticker": "NVDA"}, "confidence": 0.9, "reasoning": "r"})
+    monkeypatch.setattr(kw, "_shared_needle_generate", lambda: gen)
+    monkeypatch.setattr(
+        "app.research.scheduler.build_registry", lambda: [{"name": "query_finra", "parameters": {"type": "object"}}]
+    )
+    monkeypatch.setattr("app.research.scheduler._schema_for", lambda name, reg: {"type": "object"})
+    out = kw._arguments({"id": "a1", "op": "arguments", "tool": "query_finra", "objective": "short interest?"})
+    assert out == {
+        "id": "a1",
+        "tool": "query_finra",
+        "arguments": {"ticker": "NVDA"},
+        "confidence": 0.9,
+        "reasoning": "r",
+    }
+    seen = gen.seen[0]
+    assert isinstance(seen, dict) and seen["schema"] == {"type": "object"}
+
+
+def test_arguments_mismatch_is_error_never_raise(monkeypatch: pytest.MonkeyPatch) -> None:
+    monkeypatch.setattr(kw, "_shared_needle_generate", lambda: _FailGenerate({"tool": "other", "arguments": {}}))
+    out = kw._arguments({"id": "a2", "op": "arguments", "tool": "query_finra"})
+    assert out["id"] == "a2" and "error" in out
+    assert "error" in kw._arguments({"id": "a3"})
+
+
+class _JevAssess:
+    def __init__(self, verdict: str | None = None, fail: bool = False) -> None:
+        self.verdict = verdict
+        self.fail = fail
+        self.seen: list[object] = []
+
+    async def assess_entry_tool(
+        self, prompt: str, tool: str, arguments: object = None, result: object = None
+    ) -> str | None:
+        if self.fail:
+            raise RuntimeError("jev down")
+        self.seen.append((prompt, tool, arguments, result))
+        return self.verdict or "node_resolved"
+
+
+def test_assess_entry_returns_verdict() -> None:
+    jev = _JevAssess("get_sec_document")
+    out = kw._assess_entry(
+        {"id": "s1", "prompt": "risk?", "tool": "search_sec_filings", "arguments": {}, "result": {"ok": True}},
+        jev=jev,  # type: ignore[arg-type]
+    )
+    assert out == {"id": "s1", "verdict": "get_sec_document"}
+
+
+def test_assess_entry_outage_and_blank_fail_open_to_research() -> None:
+    out = kw._assess_entry({"id": "s2", "prompt": "p", "tool": "t", "result": {}}, jev=_JevAssess(fail=True))  # type: ignore[arg-type]
+    assert out == {"id": "s2", "verdict": "research_required"}
+    out = kw._assess_entry({"id": "s3", "prompt": "  ", "tool": "t"}, jev=_JevAssess("node_resolved"))  # type: ignore[arg-type]
+    assert out == {"id": "s3", "verdict": "research_required"}

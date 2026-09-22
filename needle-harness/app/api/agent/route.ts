@@ -1,10 +1,8 @@
 import { reason } from "@/lib/muse/client";
 import { kernelRouter, runKernelAgent } from "@/lib/agent/kernel";
-import { needleRouter } from "@/lib/needle/client";
 import { tools } from "@/lib/tools";
 import { endSession, invoke, newSessionId } from "@/lib/tools/stockbot";
 import { redactArgs, type AgentEvent, type Evidence, type FailureCategory } from "@/lib/agent/types";
-
 export async function POST(req: Request): Promise<Response> {
   let prompt: unknown;
   try {
@@ -35,54 +33,86 @@ export async function POST(req: Request): Promise<Response> {
         }
         return true;
       };
-      // ponytail: JEV-selected exact tool — Needle args-only, one execution, Muse direct.
+      // ponytail: JEV selects; shared kernel Needle fills args; every post-tool verdict returns to JEV (max 3 rounds).
       const answerSingleShot = async (toolName: string): Promise<boolean> => {
         const t0 = performance.now();
-        send({ type: "agent_start", prompt });
-        let args: Record<string, unknown> = {};
-        let needleCalls = 0;
-        try {
-          const gen = await needleRouter.generateArguments({ tool: toolName, schema: tools[toolName]?.parameters, objective: prompt });
-          if (gen.arguments && typeof gen.arguments === "object") args = gen.arguments;
-          needleCalls = 1;
-          send({ type: "needle_decision", step: 0, tool: toolName, arguments: redactArgs(args), confidence: gen.confidence ?? null });
-        } catch {
-          // Needle down — execute once with empty args.
-        }
-        send({ type: "tool_start", tool: toolName });
         const toolT0 = performance.now();
-        const sessionId = newSessionId();
-        let evidence: Evidence[] = [];
-        let failure: FailureCategory | null = null;
-        try {
-          const entry = tools[toolName];
-          const res = entry?.execute ? await entry.execute(args, { sessionId }) : await invoke(toolName, args, sessionId);
-          if (res.ok) {
-            evidence = [res.evidence];
-            send({ type: "tool_result", tool: toolName, evidenceId: res.evidence.id, preview: res.evidence.content.slice(0, 160) });
-          } else {
-            failure = res.category;
-            send({ type: "tool_result", tool: toolName, preview: res.error.slice(0, 160) });
-            send({ type: "tool_failed", tool: toolName, category: res.category, preview: res.error.slice(0, 160) });
-          }
-        } catch (err) {
-          const msg = err instanceof Error ? err.message : String(err);
-          failure = "tool_error";
-          send({ type: "tool_failed", tool: toolName, category: "tool_error", preview: msg.slice(0, 160) });
-        } finally {
-          await endSession(sessionId);
-        }
+        send({ type: "agent_start", prompt });
+        const evidence: Evidence[] = [];
         const failures: Partial<Record<FailureCategory, number>> = {};
-        if (failure) failures[failure] = 1;
-        send({ type: "reasoning_start", model: "muse-spark-1.3-contributor" });
-        try {
-          const m0 = performance.now();
-          const r = await reason({ prompt, evidence, escalated: false, direct: evidence.length === 0, onDelta: (text) => send({ type: "answer_delta", text }) });
-          send({ type: "done", metrics: { totalMs: performance.now() - t0, needle: { calls: needleCalls, totalMs: 0, escalations: 0 }, tools: { calls: 1, totalMs: performance.now() - toolT0 }, muse: { calls: 1, totalMs: performance.now() - m0, ...r.usage }, evidence: { count: evidence.length, characters: evidence.reduce((n, e) => n + e.content.length, 0) }, failures } });
-        } catch (err) {
-          send({ type: "error", message: err instanceof Error ? err.message : String(err) });
+        let needleCalls = 0;
+        let toolCalls = 0;
+        let current: string | null = toolName;
+        for (let step = 0; step < 3 && current; step++) {
+          const tool = current;
+          current = null;
+          let args: Record<string, unknown>;
+          let confidence: number | null = null;
+          try {
+            const gen = await kernelRouter.call({ op: "arguments", tool, objective: prompt }, { signal: req.signal });
+            if (typeof gen.error === "string" && gen.error) return false;
+            if (gen.tool !== tool || typeof gen.arguments !== "object" || gen.arguments === null) return false;
+            args = gen.arguments as Record<string, unknown>;
+            confidence = typeof gen.confidence === "number" ? gen.confidence : null;
+          } catch {
+            // Shared-Needle failure — never fabricate args; fall through to research.
+            return false;
+          }
+          needleCalls += 1;
+          send({ type: "needle_decision", step, tool, arguments: redactArgs(args), confidence });
+          send({ type: "tool_start", tool });
+          const sessionId = newSessionId();
+          let outcome: { ok: boolean; content?: string; error?: string; category?: string };
+          try {
+            const entry = tools[tool];
+            const res = entry?.execute ? await entry.execute(args, { sessionId }) : await invoke(tool, args, sessionId);
+            toolCalls += 1;
+            if (res.ok) {
+              evidence.push(res.evidence);
+              send({ type: "tool_result", tool, evidenceId: res.evidence.id, preview: res.evidence.content.slice(0, 160) });
+              outcome = { ok: true, content: res.evidence.content.slice(0, 1500) };
+            } else {
+              failures[res.category] = (failures[res.category] ?? 0) + 1;
+              send({ type: "tool_result", tool, preview: res.error.slice(0, 160) });
+              send({ type: "tool_failed", tool, category: res.category, preview: res.error.slice(0, 160) });
+              outcome = { ok: false, error: res.error.slice(0, 500), category: res.category };
+            }
+          } catch (err) {
+            const msg = err instanceof Error ? err.message : String(err);
+            failures.tool_error = (failures.tool_error ?? 0) + 1;
+            send({ type: "tool_failed", tool, category: "tool_error", preview: msg.slice(0, 160) });
+            outcome = { ok: false, error: msg.slice(0, 500), category: "tool_error" };
+          } finally {
+            await endSession(sessionId);
+          }
+          let verdict: string;
+          try {
+            const assessed = await kernelRouter.call(
+              { op: "assess_entry", prompt, tool, arguments: args, result: outcome },
+              { signal: req.signal },
+            );
+            verdict = typeof assessed.verdict === "string" && assessed.verdict ? assessed.verdict : "research_required";
+          } catch {
+            return false;
+          }
+          if (verdict === "node_resolved" || verdict === "reasoning_required") {
+            send({ type: "reasoning_start", model: "muse-spark-1.3-contributor" });
+            try {
+              const m0 = performance.now();
+              const r = await reason({ prompt, evidence, escalated: false, direct: evidence.length === 0, onDelta: (text) => send({ type: "answer_delta", text }) });
+              send({ type: "done", metrics: { totalMs: performance.now() - t0, needle: { calls: needleCalls, totalMs: 0, escalations: 0 }, tools: { calls: toolCalls, totalMs: performance.now() - toolT0 }, muse: { calls: 1, totalMs: performance.now() - m0, ...r.usage }, evidence: { count: evidence.length, characters: evidence.reduce((n, e) => n + e.content.length, 0) }, failures } });
+            } catch (err) {
+              send({ type: "error", message: err instanceof Error ? err.message : String(err) });
+            }
+            return true;
+          }
+          if (verdict === "research_required") return false;
+          // ponytail: worker output is untrusted — only identifier-shaped tool names chain; anything else researches.
+          current = /^[A-Za-z_][A-Za-z0-9_]*$/.test(verdict) ? verdict : null;
+          if (!current) return false;
         }
-        return true;
+        // Cap reached with another tool pending — research owns the longer chain.
+        return false;
       };
       try {
         // ponytail: JEV-first entry — one route round; reason/research/tool winners branch here.
@@ -95,9 +125,10 @@ export async function POST(req: Request): Promise<Response> {
         }
         // ponytail: worker output is untrusted — only identifier-shaped names single-shot; anything else researches.
         if (winner !== "research_required" && /^[A-Za-z_][A-Za-z0-9_]*$/.test(winner)) {
-          await answerSingleShot(winner);
-          controller.close();
-          return;
+          if (await answerSingleShot(winner)) {
+            controller.close();
+            return;
+          }
         }
       } catch {
         // Route unavailable — fail open to research below.
