@@ -202,42 +202,109 @@ def _case_get(case: object, name: str) -> object:
 
 
 def _evidence_items(trace: Mapping[str, object]) -> list[dict[str, str]]:
-    raw = trace.get("accepted_evidence", trace.get("evidence", []))
-    if not isinstance(raw, list):
-        return []
+    raw: list[object] = []
+    for key in ("accepted_evidence", "acceptedEvidence", "evidenceRecords", "evidence_records", "evidence"):
+        val = trace.get(key)
+        if isinstance(val, list):
+            raw = val
+            break
     items: list[dict[str, str]] = []
     for entry in raw:
         if not isinstance(entry, Mapping):
             continue
-        content = entry.get("content", entry.get("text", entry.get("body", "")))
+        eid = ""
+        for ikey in ("id", "evidence_id", "evidenceId"):
+            ival = entry.get(ikey)
+            if isinstance(ival, str) and ival.strip():
+                eid = ival.strip()
+                break
+        source = ""
+        for skey in ("source", "source_name"):
+            sval = entry.get(skey)
+            if isinstance(sval, str) and sval.strip():
+                source = sval.strip()
+                break
+        if not source:
+            prov = entry.get("provenance")
+            if isinstance(prov, str) and prov.strip():
+                source = prov.strip()
+            elif isinstance(prov, Mapping):
+                for pkey in ("source", "source_name", "domain"):
+                    pval = prov.get(pkey)
+                    if isinstance(pval, str) and pval.strip():
+                        source = pval.strip()
+                        break
+        content = ""
+        for ckey in ("content", "text", "passage", "fact", "body"):
+            cval = entry.get(ckey)
+            if isinstance(cval, str) and cval.strip():
+                content = cval
+                break
+        title = entry.get("title", "")
         items.append(
             {
-                "id": str(entry.get("id", entry.get("evidence_id", ""))),
-                "source": str(entry.get("source", "")),
-                "title": str(entry.get("title", "")),
-                "content": content if isinstance(content, str) else "",
+                "id": eid,
+                "source": source,
+                "title": title if isinstance(title, str) else "",
+                "content": content,
             }
         )
     return items
 
 
 def _limitations(trace: Mapping[str, object]) -> list[str]:
+    out: list[str] = []
+    seen: set[str] = set()
+
+    def _add(value: object) -> None:
+        if isinstance(value, str):
+            text = value.strip()
+            if text and text not in seen:
+                seen.add(text)
+                out.append(text)
+        elif isinstance(value, Mapping):
+            for key in ("text", "description", "limitation"):
+                item = value.get(key)
+                if isinstance(item, str) and item.strip():
+                    _add(item)
+                    break
+        elif isinstance(value, list):
+            for item in value:
+                _add(item)
+
     for key in ("known_limitations", "limitations"):
-        raw = trace.get(key, [])
-        if not isinstance(raw, list) or not raw:
-            continue
-        out: list[str] = []
-        for item in raw:
-            if isinstance(item, str):
-                if item.strip():
-                    out.append(item.strip())
-            elif isinstance(item, Mapping):
-                text = item.get("text", item.get("description", ""))
-                if isinstance(text, str) and text.strip():
-                    out.append(text.strip())
-        if out:
-            return out
-    return []
+        raw = trace.get(key)
+        if isinstance(raw, list) and raw:
+            for item in raw:
+                _add(item)
+            if out:
+                return out
+    for key in ("dossiers", "claims", "coverageArtifacts", "coverage_artifacts"):
+        val = trace.get(key)
+        if isinstance(val, list):
+            for entry in val:
+                if isinstance(entry, Mapping):
+                    for lkey in ("limitations", "limitation", "source_limitations", "gaps"):
+                        _add(entry.get(lkey))
+                    coverage = entry.get("coverage")
+                    if isinstance(coverage, Mapping):
+                        for ckey in ("source_limitations", "gaps", "limitations"):
+                            _add(coverage.get(ckey))
+    if out:
+        return out
+    for key in (
+        "unresolved",
+        "unresolved_questions",
+        "unresolvedQuestions",
+        "open_questions",
+        "openQuestions",
+        "unknowns",
+    ):
+        val = trace.get(key)
+        if isinstance(val, list):
+            for item in val:
+                _add(item)
+    return out
 
 
 def _build_prompts(

@@ -173,10 +173,22 @@ def _post_one_case(
     as_of: object,
     timeout_s: float,
     http_post: HttpPost | None,
+    case: object = None,
 ) -> tuple[list[dict[str, object]], float]:
     url = base_url.rstrip("/") + AGENT_PATH
     headers = {"Content-Type": "application/json", "Authorization": f"Bearer {token}"}
     payload: dict[str, object] = {"prompt": prompt, "asOf": as_of, "includeTrace": True}
+    seed = _case_get(case, "eval_seed_evidence", None)
+    if isinstance(seed, (list, tuple)) and seed:
+        items: list[dict[str, object]] = []
+        for entry in seed:
+            raw = entry.as_dict() if hasattr(entry, "as_dict") else entry
+            if isinstance(raw, Mapping):
+                rec = {str(k): raw[k] for k in ("id", "source", "content", "title") if k in raw}
+                if isinstance(rec.get("id"), str) and isinstance(rec.get("content"), str):
+                    items.append(rec)
+        if items:
+            payload["evalSeedEvidence"] = items
     post = http_post or _default_http_post
     start = time.monotonic()
     try:
@@ -427,6 +439,70 @@ def _git_sha() -> str:
         return "unknown"
 
 
+def _sha256_text(text: str) -> str:
+    import hashlib
+
+    return hashlib.sha256(text.encode("utf-8")).hexdigest()
+
+
+def _production_model_actual(results: Sequence[CaseResult] | None = None) -> str:
+    """Runtime-resolved model: first reasoning_start model across cases, else PRODUCTION_MODEL."""
+    try:
+        for result in results or ():
+            for event in result.events:
+                if (
+                    isinstance(event, Mapping)
+                    and event.get("type") == "reasoning_start"
+                    and isinstance(event.get("model"), str)
+                    and str(event.get("model")).strip()
+                ):
+                    return str(event.get("model")).strip()
+    except Exception:
+        pass
+    return PRODUCTION_MODEL
+
+
+def _case_set_sha256(cases: Sequence[object]) -> str:
+    try:
+        parts: list[str] = []
+        for case in cases:
+            as_dict = getattr(case, "as_dict", None)
+            if callable(as_dict):
+                parts.append(json.dumps(as_dict(), sort_keys=True, default=str))
+            elif isinstance(case, Mapping):
+                parts.append(json.dumps(dict(case), sort_keys=True, default=str))
+            else:
+                parts.append(str(case))
+        return _sha256_text("\n".join(parts))
+    except Exception:
+        return "unknown"
+
+
+def _judge_rubric_sha256() -> str:
+    try:
+        from app.research.evals.quality_judge import _DIMENSION_RUBRIC
+
+        return _sha256_text(json.dumps(_DIMENSION_RUBRIC, sort_keys=True, default=str))
+    except Exception:
+        return "unknown"
+
+
+def _production_prompt_sha256() -> str:
+    """Best-effort hash of the production writer prompt (Muse SYSTEM); unknown when unreadable."""
+    try:
+        from pathlib import Path as _Path
+
+        for candidate in (
+            _Path("needle-harness/lib/muse/client.ts"),
+            _Path(__file__).resolve().parent.parent.parent.parent / "needle-harness" / "lib" / "muse" / "client.ts",
+        ):
+            if candidate.exists():
+                return _sha256_text(candidate.read_text(encoding="utf-8"))
+        return "unknown"
+    except Exception:
+        return "unknown"
+
+
 @dataclass
 class CaseResult:
     case_id: str
@@ -513,7 +589,7 @@ def run_one_case(
     question = _case_question(case)
     if not question.strip():
         raise LiveEvalInfraError(f"case {_case_id(case)!r} has an empty question")
-    events, latency_ms = _post_one_case(base_url, token, question, _case_get(case, "as_of"), timeout_s, http_post)
+    events, latency_ms = _post_one_case(base_url, token, question, _case_get(case, "as_of"), timeout_s, http_post, case)
     answer, trace, done_metrics = _extract_completed(events)
     gates_raw = _evaluate_gates(case, answer, trace)
     hard_gates: dict[str, object] = {}
@@ -644,7 +720,11 @@ def run_live_suite(
         "git_sha": _git_sha(),
         "started_at_utc": started,
         "production_model": PRODUCTION_MODEL,
+        "production_model_actual": _production_model_actual(results),
         "judge_model": os.environ.get("STOCKBOT_EVAL_JUDGE_MODEL", "unknown"),
+        "judge_rubric_sha256": _judge_rubric_sha256(),
+        "production_prompt_sha256": _production_prompt_sha256(),
+        "case_set_sha256": _case_set_sha256(cases),
         "prompt_version": PROMPT_VERSION,
         "case_version": CASE_VERSION,
         "case_count": len(results),
@@ -733,4 +813,5 @@ def format_report(artifact: RunArtifact) -> str:
         f"tools={int(_report_num(ops_map.get('total_tool_calls')))} "
         f"evidence={int(_report_num(ops_map.get('total_evidence')))}"
     )
+    lines.append("Coverage (diagnostic, not a gate): lexical task/branch rates only.")
     return "\n".join(lines) + "\n"

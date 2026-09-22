@@ -49,7 +49,7 @@ _REQUIRED_FIELDS = frozenset(
     }
 )
 
-_ALLOWED_FIELDS = frozenset({*_REQUIRED_FIELDS, "prompt_injection_markers", "out_of_scope"})
+_ALLOWED_FIELDS = frozenset({*_REQUIRED_FIELDS, "prompt_injection_markers", "out_of_scope", "eval_seed_evidence"})
 
 
 @dataclass(frozen=True)
@@ -68,6 +68,7 @@ class LiveEvalCase:
     applicable_dimensions: tuple[str, ...]
     prompt_injection_markers: tuple[str, ...] = ()
     out_of_scope: bool = False
+    eval_seed_evidence: tuple[dict[str, object], ...] = ()
 
     def as_dict(self) -> dict[str, object]:
         """JSON-compatible mapping with the contract field names."""
@@ -84,6 +85,7 @@ class LiveEvalCase:
             "applicable_dimensions": list(self.applicable_dimensions),
             "prompt_injection_markers": list(self.prompt_injection_markers),
             "out_of_scope": self.out_of_scope,
+            "eval_seed_evidence": [dict(e) for e in self.eval_seed_evidence],
         }
 
 
@@ -154,6 +156,34 @@ def _opt_markers(d: Mapping[str, object], key: str, where: str) -> tuple[str, ..
     return tuple(v)
 
 
+def _opt_seed_evidence(d: Mapping[str, object], key: str, where: str) -> tuple[dict[str, object], ...]:
+    if key not in d:
+        return ()
+    v = d.get(key)
+    if not isinstance(v, list):
+        raise ValueError(f"{where}.{key}: must be a list of {{id, source, content}} objects, got {v!r}")
+    out: list[dict[str, object]] = []
+    for i, item in enumerate(v):
+        if not isinstance(item, dict):
+            raise ValueError(f"{where}.{key}[{i}]: must be an object, got {item!r}")
+        for req in ("id", "source", "content"):
+            val = item.get(req)
+            if not isinstance(val, str) or not val.strip():
+                raise ValueError(f"{where}.{key}[{i}].{req}: must be a non-empty string, got {val!r}")
+        title = item.get("title")
+        if title is not None and (not isinstance(title, str) or not title.strip()):
+            raise ValueError(f"{where}.{key}[{i}].title: must be a non-empty string, got {title!r}")
+        rec: dict[str, object] = {
+            "id": str(item["id"]).strip(),
+            "source": str(item["source"]).strip(),
+            "content": str(item["content"]),
+        }
+        if title is not None:
+            rec["title"] = str(title).strip()
+        out.append(rec)
+    return tuple(out)
+
+
 def _opt_out_of_scope(d: Mapping[str, object], key: str, where: str) -> bool:
     if key not in d:
         return False
@@ -187,6 +217,7 @@ def _validate_case_dict(d: object, index: int, path: Path) -> LiveEvalCase:
         applicable_dimensions=_field_dimensions(m, "applicable_dimensions", where),
         prompt_injection_markers=_opt_markers(m, "prompt_injection_markers", where),
         out_of_scope=_opt_out_of_scope(m, "out_of_scope", where),
+        eval_seed_evidence=_opt_seed_evidence(m, "eval_seed_evidence", where),
     )
 
 

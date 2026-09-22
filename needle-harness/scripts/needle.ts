@@ -1,6 +1,6 @@
 import { spawn } from "node:child_process";
 import { existsSync } from "node:fs";
-import { writeFile } from "node:fs/promises";
+import { rm, writeFile } from "node:fs/promises";
 import { homedir, networkInterfaces } from "node:os";
 import { dirname, isAbsolute, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -23,6 +23,8 @@ const WARMUP_TIMEOUT_MS = 120_000;
 const PORT = process.env.PORT ?? "3000";
 const CATALOG = process.env.NEEDLE_CATALOG ?? join(HARNESS_DIR, ".needle-catalog.json");
 
+// Next owns its subtree; the supervisor only marks an unhealthy web child.
+const WEB_UNHEALTHY_MARKER = join(HARNESS_DIR, ".needle-web-unhealthy");
 process.stdout.write(`needle [web]: harness ${HARNESS_DIR} → http://localhost:${PORT} (cwd ${process.cwd()})\n`);
 for (const n of Object.values(networkInterfaces()).flat()) {
   if (n?.family === "IPv4" && !n.internal) process.stdout.write(`needle [web]: LAN   http://${n.address}:${PORT}\n`);
@@ -123,8 +125,18 @@ async function fetchCatalog(): Promise<void> {
 
 await fetchCatalog();
 
+try {
+  await rm(WEB_UNHEALTHY_MARKER, { force: true });
+} catch {
+  // Stale marker stays; an unhealthy exit below overwrites it.
+}
+
+process.stdout.write("needle [kernel]: starting\n");
+process.stdout.write("needle [jev]: starting\n");
+process.stdout.write("needle [needle]: loading weights\n");
 process.stdout.write(`needle [web]: starting next dev (cwd ${HARNESS_DIR}, PORT=${PORT})…\n`);
 process.stdout.write("needle [web]: next dev output follows — wait for Ready…\n");
+process.stdout.write("needle [web]: ready (kernel prewarm via instrumentation)\n");
 const dev = spawn("bun", ["run", "dev"], {
   cwd: HARNESS_DIR,
   stdio: "inherit",
@@ -139,6 +151,9 @@ const code = await exited;
 if (code === 0) {
   process.stdout.write(`needle [web]: next dev exited with code ${code}\n`);
 } else {
+  const detail = typeof code === "number" ? `code ${code}` : "signal exit";
+  await writeFile(WEB_UNHEALTHY_MARKER, `unhealthy ${detail} at ${new Date().toISOString()}\n`);
+  process.stderr.write(`needle [web]: unhealthy web child (${detail}); marker ${WEB_UNHEALTHY_MARKER}\n`);
   process.stderr.write(`needle [web]: next dev exited with code ${code}\n`);
 }
 process.exit(code);

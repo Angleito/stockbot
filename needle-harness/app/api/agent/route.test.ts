@@ -50,10 +50,15 @@ const FULL_TRACE: EvaluationTrace = {
   claims: [{ text: "f" }],
   coverageArtifacts: [{ artifact_id: "cov:1" }],
   toolResults: [{ tool_result_id: "tr:1" }],
+  limitations: [],
+  known_limitations: [],
   modelPrompt: { objective: "q?", nodes: 1, decisions: 1, unresolved: 0 },
 };
 
-mock.module("@/lib/agent/kernel", () => ({ runKernelAgent: kernelMock }));
+mock.module("@/lib/agent/kernel", () => ({
+  runKernelAgent: kernelMock,
+  kernelRouter: { call: async () => ({ route: "research_required" }) },
+}));
 // Exception: mock.module only affects subsequent imports, so the route under
 // test is loaded dynamically after mocking (module-loading boundary test).
 const { POST } = await import("@/app/api/agent/route");

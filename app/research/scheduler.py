@@ -158,6 +158,132 @@ _PIT_BLIND_TOOLS = frozenset(
     }
 )
 
+
+# ponytail: allowlist-derived via source_agent (covers all 7 FINRA evidence
+# tools + search_web + SEC allowlist); unknown tools map OTHER and run with
+# source=None (no provenance lane until per-domain adapters land) so the default SEC-only policy never denies them.
+def _source_for_tool(tool_name: str) -> str:
+    """Job source_domain owning one canonical tool: WEB, FINRA, SEC, else OTHER."""
+    try:
+        from app.research.agents.source_agent import source_domain_for_tool
+    except ImportError:
+        return "SEC"
+    return source_domain_for_tool(tool_name)
+
+
+# ponytail: kernel builds the candidate from persisted-shaped tool bytes; JEV
+# only gates relevance/state (assess_result returns candidate/admit=None).
+# FINRA cites canonical row JSON (matches replay), WEB cites the persisted
+# highlight verbatim, SEC cites the handle window text the kernel materializes.
+def _persisted_shapes(result: Any) -> dict[str, Any]:
+    """Persisted payload (tool_result.result or result) for replay-shaped locators."""
+    if isinstance(result, dict):
+        inner = result.get("result")
+        if isinstance(inner, dict):
+            return inner
+        return result
+    return {}
+
+
+def _finra_locator(payload: dict[str, Any]) -> str | None:
+    """First citable FINRA text: canonical row JSON (matches replay), else briefing/metrics."""
+    import json as _json
+
+    records = payload.get("records")
+    if isinstance(records, list):
+        for row in records:
+            if isinstance(row, dict):
+                text = " ".join(_json.dumps(row, sort_keys=True, default=str).split())
+                if text:
+                    return text[:2000]
+    for key in ("briefing", "briefing_source"):
+        value = payload.get(key)
+        if isinstance(value, str) and value.strip():
+            return " ".join(value.split())[:2000]
+    metrics = payload.get("metrics")
+    if isinstance(metrics, dict):
+        text = " ".join(_json.dumps(metrics, sort_keys=True, default=str).split())
+        if text:
+            return text[:2000]
+    return None
+
+
+def _web_locator(payload: dict[str, Any]) -> tuple[str | None, str | None]:
+    """(url, highlight) of the first persisted web row with both set."""
+    rows = payload.get("evidence")
+    if not isinstance(rows, list):
+        return None, None
+    for row in rows:
+        if not isinstance(row, dict):
+            continue
+        url = row.get("url")
+        highlight = row.get("highlight")
+        if isinstance(url, str) and url.strip() and isinstance(highlight, str) and highlight.strip():
+            return url.strip(), " ".join(highlight.split())[:2000]
+    return None, None
+
+
+def _sec_locator(payload: dict[str, Any]) -> str | None:
+    """First window text of the SEC document result (the handle's window)."""
+    text = payload.get("text")
+    if isinstance(text, str) and text.strip():
+        return " ".join(text.split())[:2000]
+    return None
+
+
+def _evidence_candidate(tool_name: str, domain: str, result: Any, outcome: Any) -> dict[str, Any] | None:
+    """Kernel-side evidence candidate from persisted-shaped tool bytes; None when uncitable."""
+    if domain not in ("FINRA", "WEB", "SEC"):
+        return None
+    if domain in ("FINRA", "WEB"):
+        ref = _tool_result_ref(result, outcome)
+        if ref is None:
+            return None
+        payload = _persisted_shapes(result)
+        content = _outcome_summary(outcome)
+        if not content:
+            return None
+        if domain == "FINRA":
+            locator = _finra_locator(payload)
+            if locator is None:
+                return None
+            return {
+                "tool_result_id": ref,
+                "content": content,
+                "record_identity": locator,
+                "matching_passage": locator,
+            }
+        url, highlight = _web_locator(payload)
+        if url is None or highlight is None:
+            return None
+        return {
+            "tool_result_id": ref,
+            "content": content,
+            "url": url,
+            "excerpt": highlight,
+            "matching_passage": highlight,
+        }
+    handle = _f(result, "source_handle", default=None)
+    if handle is None:
+        handle = _f(outcome, "source_handle", "source_refs", default=None)
+    if not isinstance(handle, dict) or not handle:
+        return None
+    locator = _sec_locator(_persisted_shapes(result))
+    if locator is None:
+        locator = _outcome_summary(outcome)[:2000]
+    if not locator:
+        return None
+    content = _outcome_summary(outcome)
+    if not content:
+        return None
+    return {"source_handle": handle, "content": content, "matching_passage": locator}
+
+
+_ADMITTABLE_EVIDENCE_STATES = frozenset({"sufficient_support", "sufficient_contradiction", "conflicted"})
+
+# ponytail: one expansion per reason round, JEV-admitted only. JEV outage
+# expands nothing (fail-closed); the tool path below still runs.
+_EXPAND_CAP = 3
 _REASON_SENTINELS = frozenset({"reasoning_required", "reason"})
 _RESOLVED_SENTINELS = frozenset({"node_resolved", "resolved"})
 
@@ -279,6 +405,9 @@ def _default_kernel(repo: Any = None) -> Any:
 
         def fail_job(self, job_id: str, category: str, message: str) -> None:
             _svc.fail_job(job_id, category, message, repo=repo)
+
+        def create_node(self, session_id: str, question: str, why_it_matters: str, depends_on: Any = None) -> Any:
+            return _svc.create_node(session_id, question, why_it_matters, depends_on=depends_on, repo=repo)
 
     return _Kernel()
 
@@ -522,10 +651,9 @@ def _load_evidence(session_id: str, kernel: Any, repo: Any) -> list[Any]:
         get = getattr(kernel, method, None)
         if get is not None:
             try:
-                out = get(session_id)
-                return list(out) if isinstance(out, (list, tuple)) else []
+                return list(get(session_id))
             except Exception:
-                return []
+                continue
     try:
         from app.research.repository import ResearchRepository
 
@@ -589,9 +717,10 @@ async def _attempt_tool(
         needle_generate = _default_needle_generate()  # raises a clear gap error when no client exists
     session_id = str(session.get("session_id"))
     node_id = str(_f(node, "node_id", "id"))
-    job_id: str | None = None
+    domain = _source_for_tool(tool_name)
+    job_source = None if domain == "OTHER" else domain
     try:
-        job = kernel.start_job(session_id, type="source_agent", owner="kernel-scheduler")
+        job = kernel.start_job(session_id, type="source_agent", owner="kernel-scheduler", source=job_source)
         job_id = str(_f(job, "job_id", default=f"job:{uuid.uuid4()}"))
     except Exception:
         job_id = f"job:{uuid.uuid4()}"
@@ -642,15 +771,13 @@ async def _attempt_tool(
         if not isinstance(result, dict):
             raise ValueError(f"tool runtime for {tool_name!r} must return a mapping")
         outcome = await _awaited(to_outcome(tool_name, result))
-        try:
-            kernel.complete_job(job_id, {"tool": tool_name})
-        except Exception:
-            pass
         outcome_error = _f(outcome, "error")
         return {
             "tool": tool_name,
             "arguments": arguments,
             "outcome": outcome,
+            "result": result,
+            "domain": domain,
             "outcome_summary": _outcome_summary(outcome),
             "error": None if outcome_error is None else str(outcome_error)[:500],
             "error_type": _f(outcome, "error_type"),
@@ -722,6 +849,100 @@ async def _reasoner_propose(
     if callable(reasoner):
         return await _awaited(reasoner(prompt))
     raise RuntimeError("reasoner has no reason/analyze/decompose/expand entrypoint")
+
+
+def _expansion_proposals(proposal: Any) -> list[dict[str, Any]]:
+    """Reasoner-discovered follow-ups (non-authoritative until JEV admits)."""
+    if not isinstance(proposal, dict):
+        return []
+    raw = proposal.get("proposals")
+    if not isinstance(raw, list):
+        return []
+    out: list[dict[str, Any]] = []
+    for item in raw:
+        if not isinstance(item, dict):
+            continue
+        question = item.get("question")
+        if not isinstance(question, str) or not question.strip():
+            continue
+        why = item.get("whyItMatters")
+        out.append(
+            {
+                "question": question.strip(),
+                "whyItMatters": why if isinstance(why, str) and why.strip() else "Route question.",
+            }
+        )
+        if len(out) >= _EXPAND_CAP:
+            break
+    return out
+
+
+async def _expand_graph(jev: Any, kernel: Any, sid: str, objective: str, node_id: str, proposal: Any) -> int:
+    """Admit reasoner follow-ups via one JEV disposition round; create admitted nodes."""
+    candidates = _expansion_proposals(proposal)
+    if not candidates:
+        return 0
+    create = getattr(kernel, "create_node", None)
+    if create is None:
+        return 0
+    try:
+        decide = getattr(jev, "decide", None)
+        if decide is None:
+            return 0
+        questions: dict[str, Any] = {}
+        options: dict[str, dict[str, str]] = {}
+        criteria = {
+            "admit": "The follow-up materially contributes to resolving the objective.",
+            "reject": "The follow-up does not materially contribute to resolving the objective.",
+        }
+        for i, cand in enumerate(candidates):
+            qid = f"expand-{i}"
+            questions[qid] = {
+                "type": "choice",
+                "instructions": (
+                    "Does this follow-up question materially contribute to resolving the objective? "
+                    f"Objective: {objective} Question: {cand['question']}"
+                ),
+                "criteria": criteria,
+            }
+            options[qid] = dict(criteria)
+        state = {"objective": objective, "node_id": node_id, "proposals": candidates}
+        decisions = await _awaited(
+            decide(
+                state,
+                questions,
+                decision_type="graph_expansion",
+                session_id=sid,
+                choice_options=options,
+            )
+        )
+    except Exception:  # noqa: BLE001, S110 - JEV outage expands nothing; tool path below still runs
+        return 0
+    if not isinstance(decisions, dict):
+        return 0
+    created = 0
+    for i, cand in enumerate(candidates):
+        verdict = decisions.get(f"expand-{i}")
+        choice = verdict.get("choice") if isinstance(verdict, dict) else None
+        if choice == "reject":
+            continue
+        try:
+            await _awaited(create(sid, str(cand["question"]), str(cand["whyItMatters"]), depends_on=[node_id]))
+            created += 1
+        except Exception:  # noqa: BLE001, S112 - one bad follow-up never blocks its siblings
+            continue
+    _record(
+        kernel,
+        sid,
+        "graph_expansion",
+        candidates={str(i): c["question"] for i, c in enumerate(candidates)},
+        probabilities={},
+        selected={"created": created, "proposed": len(candidates)},
+        node_id=node_id or None,
+        job_id=None,
+        confidence=None,
+    )
+    return created
 
 
 # ---------------------------------------------------------------------------
@@ -858,6 +1079,7 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
         if action == "reason":
             active_reasoner = reasoner if reasoner is not None else _default_reasoner()
             proposal = await _reasoner_propose(active_reasoner, session, node, ctx_evidence, attempts)
+            await _expand_graph(jev, kernel, sid, session.get("objective") or session.get("query") or "", nid, proposal)
             verdict = await _awaited(jev.adjudicate(proposal, node, session_id=sid, job_id=None))
             _record(
                 kernel,
@@ -935,6 +1157,10 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
         for attempt in results:
             tool = attempt["tool"]
             if attempt["error"] is not None and attempt["outcome"] is None:
+                try:
+                    kernel.fail_job(attempt["job_id"], "tool_error", str(attempt["error"])[:2000])
+                except Exception:  # noqa: BLE001, S110 - terminal already recorded; attempt log carries the error
+                    pass
                 attempts.append(
                     {
                         k: attempt.get(k)
@@ -970,9 +1196,41 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                 job_id=attempt["job_id"],
                 confidence=_f(assessment, "confidence"),
             )
-            candidate = _f(assessment, "evidence", "candidate", "admit", default=None)
+            outcome_error = _f(outcome, "error")
+            if outcome_error is not None:
+                try:
+                    kernel.fail_job(attempt["job_id"], "tool_error", str(outcome_error)[:2000])
+                except Exception:  # noqa: BLE001, S110 - terminal already recorded; attempt log carries the error
+                    pass
+                attempts.append(
+                    {
+                        k: attempt.get(k)
+                        for k in (
+                            "tool",
+                            "arguments",
+                            "outcome_summary",
+                            "error",
+                            "error_type",
+                            "confidence",
+                            "reasoning",
+                            "job_id",
+                            "evidence_id",
+                            "tool_result_ref",
+                        )
+                    }
+                )
+                continue
+            # Kernel builds the candidate from tool bytes; JEV gates relevance/state only.
             evidence_id = None
-            if isinstance(candidate, dict) and candidate:
+            ev_state = _f(assessment, "evidence_state", "decision", default=None)
+            domain = attempt.get("domain") if isinstance(attempt.get("domain"), str) else _source_for_tool(tool)
+            candidate = _evidence_candidate(tool, domain, attempt.get("result"), outcome)
+            if (
+                isinstance(ev_state, str)
+                and ev_state in _ADMITTABLE_EVIDENCE_STATES
+                and candidate is not None
+                and _f(outcome, "error") is None
+            ):
                 try:
                     admitted_ret = kernel.admit_evidence(sid, attempt["job_id"], candidate)
                     eid = _f(admitted_ret, "evidence_id", default=None)
@@ -980,6 +1238,10 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                     admitted += 1
                     progressed = True
                 except Exception as exc:
+                    try:
+                        kernel.complete_job(attempt["job_id"], {"tool": tool})
+                    except Exception:  # noqa: BLE001, S110 - admit outcome recorded; attempt log carries the state
+                        pass
                     attempts.append(
                         {
                             "tool": tool,
@@ -995,7 +1257,10 @@ async def _run_node(node: Any, session_id: str | None = None, **hooks: Any) -> d
                         }
                     )
                     continue
-            outcome_error = _f(outcome, "error")
+            try:
+                kernel.complete_job(attempt["job_id"], {"tool": tool})
+            except Exception:  # noqa: BLE001, S110 - terminal already recorded; attempt log carries the state
+                pass
             attempts.append(
                 {
                     "tool": tool,
@@ -1079,12 +1344,34 @@ async def run(session_id: str, **hooks: Any) -> dict[str, Any]:
             *(run_node(node, session_id, **{**hooks, "kernel": kernel}) for node in nodes)
         )
         node_results.extend(round_results)
-        if any(r.get("incomplete_guard") for r in round_results):
+        round_guard = any(r.get("incomplete_guard") for r in round_results)
+        if round_guard:
             incomplete_guard = True
         if not any(r.get("status") == "resolved" or r.get("admitted") for r in round_results):
-            break
+            if incomplete_guard:
+                reason = (
+                    guard_reason
+                    if guard_reason is not None
+                    else "incomplete: node guard trip stalled the session (no resolved nodes, no admitted evidence)"
+                )
+                return {
+                    "session_id": session_id,
+                    "status": "incomplete_guard",
+                    "rounds": rounds,
+                    "nodes": node_results,
+                    "incomplete_guard": True,
+                    "reason": reason,
+                }
+            return {
+                "session_id": session_id,
+                "status": "stalled",
+                "rounds": rounds,
+                "nodes": node_results,
+                "incomplete_guard": False,
+                "reason": "stalled: session round made no progress (no resolved nodes, no admitted evidence)",
+            }
     status = "complete" if not incomplete_guard else "incomplete_guard"
-    out: dict[str, Any] = {
+    out = {
         "session_id": session_id,
         "status": status,
         "rounds": rounds,

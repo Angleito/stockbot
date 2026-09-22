@@ -98,17 +98,21 @@ def _run_ok(
     """Run _run against the seeded session: no model calls, no network."""
     import app.research.scheduler as sched
 
-    async def _ok(_sid: str) -> dict[str, object]:
+    async def _ok(_sid: str, **hooks: object) -> dict[str, object]:
         return {"session_id": _sid, "status": "complete", "nodes": []}
 
     monkeypatch.setattr(sched, "run", _ok)
     if patch_graph:
 
-        def _fake_graph(objective: str, as_of: object = None) -> str:
+        def _fake_graph(objective: str, as_of: object = None, jev: object = None) -> str:
             return sid
 
         monkeypatch.setattr(kernel_worker, "run_graph_prompt", _fake_graph)
-    out = kernel_worker._run(req)  # type: ignore[arg-type]
+
+    class _StubJev:
+        pass
+
+    out = kernel_worker._run(req, jev=_StubJev())  # type: ignore[arg-type]
     assert isinstance(out, dict)
     return out
 
@@ -155,7 +159,7 @@ def test_asof_non_string_stays_null(tmp_path: Path, monkeypatch: pytest.MonkeyPa
     sid = service.create_research("q?", "q?")
     seen: list[object] = []
 
-    def _capture(_objective: str, _as_of: object = None) -> str:
+    def _capture(_objective: str, _as_of: object = None, jev: object = None) -> str:
         seen.append(_as_of)
         return sid
 

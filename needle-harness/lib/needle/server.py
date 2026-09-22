@@ -120,6 +120,9 @@ def handle(line):
     except Exception:
         return {"id": "?", "error": "bad_request"}
     try:
+        # Ping-only gate: answers after imports load weights; never touches the model.
+        if action == "ping":
+            return {"id": rid, "ready": True}
         # Legacy non-kernel path: kernel path uses arguments.generate only; JEV owns transitions (start/step stay until loop.ts cutover).
         if action == "start":
             prompt = req["prompt"]

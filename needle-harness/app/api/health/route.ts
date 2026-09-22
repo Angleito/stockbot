@@ -13,5 +13,8 @@ export async function GET(): Promise<Response> {
     needleWeights,
     weightsPresent,
     venvPresent: existsSync(`${homedir()}/.cache/needle-harness/.needle/bin/python`),
+    // Best-effort: set by instrumentation register() after prewarmKernel().
+    // Env-only so health never pulls the kernel singleton into its module graph.
+    kernelPrewarmed: process.env.KERNEL_PREWARMED === "1",
   });
 }

@@ -107,6 +107,9 @@ export type EvaluationTrace = {
   claims: Record<string, unknown>[];
   coverageArtifacts: Record<string, unknown>[];
   toolResults: Record<string, unknown>[];
+  // Eval-only: dossier/claim/coverage limits flattened by traceOf; known_limitations is the display list.
+  limitations?: Array<{ source: string; text: string; branch?: string }>;
+  known_limitations?: string[];
   modelPrompt: { objective: string; nodes: number; decisions: number; unresolved: number };
 };
 
