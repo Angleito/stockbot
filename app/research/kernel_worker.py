@@ -70,9 +70,14 @@ def _startup() -> JevClient:
     _SHUTDOWN_DONE = False
     jev = _shared_jev()
     jev.start()
-    needle_mod = importlib.import_module("app.needle_client")
-    start_fn = needle_mod.start
-    start_fn()
+    try:
+        needle_mod = importlib.import_module("app.needle_client")
+        start_fn = needle_mod.start
+        start_fn()
+    except Exception as exc:
+        # Needle down: stay live so ready still emits; JEV route/assess_entry
+        # keep serving while arguments/run fail open per-request below.
+        print(f"[kernel-worker] needle start failed: {exc}", file=sys.stderr)
     return jev
 
 
@@ -456,6 +461,32 @@ def _arguments(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
     if not isinstance(tool, str) or not tool:
         return {"id": rid, "error": "tool required"}
     try:
+        sid_hint: object = None
+        raw_args_hint = req.get("arguments")
+        if isinstance(raw_args_hint, dict):
+            sid_hint = raw_args_hint.get("session_id")
+        if not isinstance(sid_hint, str) or not sid_hint.strip():
+            node_hint = req.get("node")
+            if isinstance(node_hint, dict):
+                maybe_sid = node_hint.get("session_id")
+                if isinstance(maybe_sid, str) and maybe_sid.strip():
+                    sid_hint = maybe_sid
+        # ponytail: resume/status/cancel/read tools carry only a session_id
+        # the prompt never grounds — shortcut without Needle (docs: every
+        # argument is a span of input; a bare question has no sid span).
+        if (
+            tool in ("research_resume", "research_status", "research_cancel", "research_read_search")
+            and isinstance(sid_hint, str)
+            and sid_hint.strip()
+        ):
+            out_sid: dict[str, JSONValue] = {
+                "id": rid,
+                "tool": tool,
+                "arguments": {"session_id": sid_hint.strip()},
+                "confidence": 1.0,
+                "reasoning": "session_id carried from caller; no Needle grounding needed",
+            }
+            return out_sid
         objective = req.get("objective")
         if objective is None:
             objective = req.get("prompt")

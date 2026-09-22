@@ -33,6 +33,8 @@ export async function POST(req: Request): Promise<Response> {
         }
         return true;
       };
+      // ponytail: single-shot evidence must survive research fallback (risk SSE dropped ev:58f5).
+      const singleShotEvidence: Evidence[] = [];
       // ponytail: JEV selects; shared kernel Needle fills args; every post-tool verdict returns to JEV (max 3 rounds).
       const answerSingleShot = async (toolName: string): Promise<boolean> => {
         const t0 = performance.now();
@@ -69,6 +71,7 @@ export async function POST(req: Request): Promise<Response> {
             toolCalls += 1;
             if (res.ok) {
               evidence.push(res.evidence);
+              singleShotEvidence.push(res.evidence);
               send({ type: "tool_result", tool, evidenceId: res.evidence.id, preview: res.evidence.content.slice(0, 160) });
               outcome = { ok: true, content: res.evidence.content.slice(0, 1500) };
             } else {
@@ -134,7 +137,7 @@ export async function POST(req: Request): Promise<Response> {
         // Route unavailable — fail open to research below.
       }
       try {
-        await runKernelAgent(prompt, send, { signal: req.signal });
+        await runKernelAgent(prompt, send, { signal: req.signal, seedEvidence: singleShotEvidence });
       } catch (err) {
         console.error(`[web] [agent-api] runKernelAgent error: ${err instanceof Error ? err.message : String(err)}`);
         send({ type: "error", message: err instanceof Error ? err.message : String(err) });

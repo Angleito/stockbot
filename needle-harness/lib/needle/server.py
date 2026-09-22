@@ -9,6 +9,15 @@ os.environ["DO_NOT_TRACK"] = "1"
 import needle  # noqa: E402
 
 
+def _strip_descriptions(node):
+    """Drop every `description` key from a tool-parameter schema tree, keep structure."""
+    if isinstance(node, dict):
+        return {k: _strip_descriptions(v) for k, v in node.items() if k != "description"}
+    if isinstance(node, list):
+        return [_strip_descriptions(v) for v in node]
+    return node
+
+
 def load_catalog():
     env = os.environ.get("NEEDLE_CATALOG")
     if env:
@@ -25,7 +34,27 @@ def load_catalog():
     if not isinstance(tools, list) or not tools:
         sys.stderr.write(f"needle server: tool catalog at {path} is empty or invalid\n")
         sys.exit(1)
-    return tools
+    # ponytail: full describe text (~58KB catalog) exceeds the Needle init
+    # budget (needle_init code -1); truncated top-level descriptions ground
+    # routing (name-only misroutes, e.g. clock->insider), stripped params fit.
+    slim = []
+    for tool in tools:
+        if not isinstance(tool, dict) or not isinstance(tool.get("name"), str):
+            continue
+        params = tool.get("parameters")
+        raw_desc = tool.get("description")
+        desc = raw_desc if isinstance(raw_desc, str) and raw_desc.strip() else tool["name"]
+        slim.append(
+            {
+                "name": tool["name"],
+                "description": desc[:150],
+                "parameters": _strip_descriptions(params) if isinstance(params, dict) else {"type": "object"},
+            }
+        )
+    if not slim:
+        sys.stderr.write(f"needle server: tool catalog at {path} is empty or invalid\n")
+        sys.exit(1)
+    return slim
 
 
 TOOLS = load_catalog()
@@ -58,6 +87,44 @@ kwargs = {
 if weights is not None:
     kwargs["weights"] = weights
 agent = needle.Needle(**kwargs)
+
+
+def _tool_triggers(tool):
+    """Trigger gate: data tools must call; control tools must withhold when ungrounded."""
+    # ponytail: universal [".+"] forces a call on any input — proven to
+    # fabricate session_id from question text for research_resume
+    # ({"session_id": "NVDA revenue last quarter"}). Control/session tools
+    # carry caller sid via kernel_worker shortcut; Needle must withhold here.
+    if tool.startswith(("research_", "thesis_")):
+        return []
+    return [".+"]
+
+
+def _tool_entry(tool, schema):
+    """Single-tool binding for one arguments.generate call: grammar admits exactly this tool."""
+    params = schema if isinstance(schema, dict) else {}
+    desc = next((t.get("description") for t in TOOLS if isinstance(t, dict) and t.get("name") == tool), tool)
+    entry = {
+        "name": tool,
+        "description": desc if isinstance(desc, str) and desc.strip() else tool,
+        "parameters": _strip_descriptions(params) if params else {"type": "object"},
+    }
+    triggers = _tool_triggers(tool)
+    if triggers:
+        entry["triggers"] = triggers
+    return entry
+
+
+def _bound_agent(tool, schema):
+    """Fresh Needle bound to exactly the JEV-selected tool (docs: one tool per action)."""
+    bound_kwargs = dict(kwargs)
+    bound_kwargs["tools"] = [_tool_entry(tool, schema)]
+    # ponytail: bound call is args-only — facts-only system. Instructions
+    # ("route retrieval only", chain preferences, "no call when evidence
+    # suffices") withhold the call on multi-hop objectives (docs: system =
+    # facts never instructions). Shared agent keeps legacy system for start/step.
+    bound_kwargs["system"] = f"date: {now} UTC; locale: en-US;"
+    return needle.Needle(**bound_kwargs)
 
 
 def _decision(r):
@@ -139,11 +206,19 @@ def handle(line):
             tool = req.get("tool")
             if not isinstance(tool, str) or not tool:
                 raise ValueError("bad tool")
-            agent.reset()
-            r = agent.complete(
-                _arguments_prompt(tool, req.get("schema"), req.get("objective"), req.get("node"), req.get("context")),
-                max_new_tokens=256,
-            )
+            bound = _bound_agent(tool, req.get("schema"))
+            try:
+                r = bound.complete(
+                    req.get("objective")
+                    if isinstance(req.get("objective"), str) and req.get("objective").strip()
+                    else json.dumps({"tool": tool, "schema": req.get("schema")}),
+                    max_new_tokens=512,
+                )
+            finally:
+                try:
+                    bound.close()
+                except Exception:
+                    pass
             validate_needle_tool(tool, _decision(r)["tool"])
         else:
             return {"id": rid, "error": "bad_action"}

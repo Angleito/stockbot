@@ -9,6 +9,7 @@ import type { AgentEvent, Evidence, FailureCategory, Metrics } from "./types";
 // ponytail: persistent worker bridge (spawn-once, ready-gated); spawn/exit/stderr handling mirrors lib/needle/client.ts.
 const MUSE_MODEL = "muse-spark-1.3-contributor";
 const WORKER_TIMEOUT_MS = 10 * 60 * 1000;
+const PREWARM_TIMEOUT_MS = 30_000;
 
 // next dev runs with cwd=needle-harness; the repo root is its parent.
 const ROOT = process.env.STOCKBOT_REPO_ROOT ?? join(process.cwd(), "..");
@@ -126,7 +127,8 @@ export class KernelRouter {
   private exited = false;
   private workerStderrTail = "";
   private ready: Promise<void> = Promise.resolve();
-  private resolveReady!: () => void;
+  private resolveReady: () => void = () => { };
+  private rejectReady: (err: Error) => void = () => { };
   private readonly python: string;
   private readonly workerPath: string;
   private readonly spawnFn: KernelSpawn;
@@ -145,21 +147,34 @@ export class KernelRouter {
       env: { ...process.env, NEEDLE_TELEMETRY: "0", DO_NOT_TRACK: "1" },
     });
     this.child = child;
-    const { promise, resolve } = Promise.withResolvers<void>();
+    const { promise, resolve, reject } = Promise.withResolvers<void>();
     this.ready = promise;
     this.resolveReady = resolve;
+    this.rejectReady = reject;
+    void promise.catch(() => {
+      // Exit/timeout rejections are observed via prewarm()/call(); a spawn
+      // with no waiter yet must not surface as unhandled.
+    });
     child.stdout?.on("data", (d: Buffer) => this.onData(d.toString()));
     child.stderr?.on("data", (d: Buffer) => {
       const s = d.toString();
       this.workerStderrTail = (this.workerStderrTail + s).slice(-2000);
       process.stderr.write(s.startsWith("[kernel-worker]") ? s : `[kernel-worker] ${s}`);
     });
-    child.on("error", (err) => this.failAll(err instanceof Error ? err : new Error(String(err))));
+    child.on("error", (err) => {
+      const e = err instanceof Error ? err : new Error(String(err));
+      this.rejectReady(e);
+      this.failAll(e);
+    });
     child.on("exit", () => {
       this.exited = true;
+      const err = new Error(`kernel worker exited; stderr tail: ${this.workerStderrTail || "(empty)"}`);
       if (Object.keys(this.pending).length > 0) {
-        this.failAll(new Error(`kernel worker exited; stderr tail: ${this.workerStderrTail || "(empty)"}`));
+        this.failAll(err);
       }
+      // Worker died before hello: reject the ready gate so prewarm()/call()
+      // fail fast instead of hanging; no-op once ready already resolved.
+      this.rejectReady(err);
       if (this.child === child) this.child = null;
     });
     console.error(`[ai] kernel worker spawn ${this.python} (${this.workerPath})`);
@@ -259,17 +274,27 @@ export class KernelRouter {
         return;
       }
       opts?.signal?.addEventListener("abort", onAbort, { once: true });
-      void this.ready.then(() => {
-        if (!this.pending[id]) return;
-        child.stdin?.write(`${JSON.stringify({ ...body, id })}\n`, (err) => {
-          if (!err) return;
+      void this.ready.then(
+        () => {
+          if (!this.pending[id]) return;
+          child.stdin?.write(`${JSON.stringify({ ...body, id })}\n`, (err) => {
+            if (!err) return;
+            const p = this.pending[id];
+            if (!p) return;
+            delete this.pending[id];
+            p.cancel();
+            p.reject(err instanceof Error ? err : new Error(String(err)));
+          });
+        },
+        (err: unknown) => {
+          // Worker exited before hello: fail fast instead of hanging until timeoutMs.
           const p = this.pending[id];
           if (!p) return;
           delete this.pending[id];
           p.cancel();
           p.reject(err instanceof Error ? err : new Error(String(err)));
-        });
-      });
+        },
+      );
     });
   }
 
@@ -277,6 +302,8 @@ export class KernelRouter {
     const child = this.child;
     this.child = null;
     this.failAll(new Error("kernel router closed"));
+    // Ready reject is a no-op once resolved; failAll above carries the error.
+    this.rejectReady(new Error("kernel router closed"));
     if (!child || child.exitCode !== null) return;
     try {
       child.kill();
@@ -285,9 +312,28 @@ export class KernelRouter {
     }
   }
 
-  async prewarm(): Promise<void> {
+  async prewarm(timeoutMs = PREWARM_TIMEOUT_MS): Promise<void> {
     this.ensure();
-    await this.ready;
+    let timer: NodeJS.Timeout | undefined;
+    try {
+      await Promise.race([
+        this.ready,
+        new Promise<never>((_, reject) => {
+          timer = setTimeout(() => {
+            try {
+              this.child?.kill();
+            } catch {
+              // Already gone; rejection below carries the error.
+            }
+            this.child = null;
+            reject(new Error(`kernel worker prewarm timeout after ${timeoutMs}ms; stderr tail: ${this.workerStderrTail || "(empty)"}`));
+          }, timeoutMs);
+        }),
+      ]);
+      process.env.KERNEL_PREWARMED = "1";
+    } finally {
+      clearTimeout(timer);
+    }
   }
 }
 
@@ -352,7 +398,7 @@ function graphProjection(input: {
 export async function runKernelAgent(
   prompt: string,
   emit: (e: AgentEvent) => void,
-  opts?: { signal?: AbortSignal; deadlineMs?: number; deps?: RunKernelDeps },
+  opts?: { signal?: AbortSignal; deadlineMs?: number; deps?: RunKernelDeps; seedEvidence?: Evidence[] },
 ): Promise<void> {
   const t0 = performance.now();
   const deps = opts?.deps ?? {};
@@ -418,14 +464,15 @@ export async function runKernelAgent(
   const unresolved: string[] = Array.isArray(res.unresolved) ? res.unresolved.map(String) : [];
   const incompleteGuard = res.incompleteGuard ?? res.incomplete_guard ?? false;
   const objective = typeof res.objective === "string" && res.objective ? res.objective : prompt;
-  const evidence: Evidence[] = (Array.isArray(res.evidence) ? res.evidence : []).map((e) => ({
+  const seed = Array.isArray(opts?.seedEvidence) ? opts.seedEvidence : [];
+  const evidence: Evidence[] = [...seed, ...(Array.isArray(res.evidence) ? res.evidence : []).map((e) => ({
     id: String(e.id),
     source: e.source ?? "kernel",
     ...(e.title !== undefined ? { title: e.title } : {}),
     ...(e.url !== undefined ? { url: e.url } : {}),
     retrievedAt: e.retrievedAt ?? new Date().toISOString(),
     content: String(e.content ?? ""),
-  }));
+  }))];
   const byId: Record<string, Evidence> = {};
   for (const e of evidence) byId[e.id] = e;
   const failures: Partial<Record<FailureCategory, number>> = {};
