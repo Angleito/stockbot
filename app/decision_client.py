@@ -503,6 +503,51 @@ def _arm_atexit() -> None:
     atexit.register(_teardown)
 
 
+def _trunc200(value: object) -> str:
+    """Compact single-line truncation for prompts/objectives; never raises (logging only)."""
+    try:
+        s = value if isinstance(value, str) else ("" if value is None else str(value))
+        return " ".join(s.split())[:200]
+    except Exception:  # noqa: BLE001 - logging-only helper, never raises
+        return "?"
+
+
+def _rank_prob(item: tuple[str, float]) -> float:
+    return item[1]
+
+
+def _choice_summary(decision: object) -> str:
+    """Winner + confidence + top-3 + margin one-liner; never raises (logging only)."""
+    try:
+        if not isinstance(decision, dict):
+            return "winner=- conf=- top3=[] margin=0.00"
+        winner = decision.get("choice")
+        w = winner if isinstance(winner, str) and winner else "-"
+        conf = decision.get("confidence")
+        c = f"{float(conf):.2f}" if isinstance(conf, (int, float)) and not isinstance(conf, bool) else "-"
+        probs = decision.get("probabilities")
+        floats: dict[str, float] = {}
+        if isinstance(probs, dict):
+            for k, v in probs.items():
+                if _is_prob(v):
+                    floats[str(k)] = float(v)  # type: ignore[arg-type]
+        ranked = sorted(floats.items(), key=_rank_prob, reverse=True)
+        top = ",".join(f"{k}:{v:.2f}" for k, v in ranked[:3])
+        margin = ranked[0][1] - ranked[1][1] if len(ranked) >= 2 else 0.0
+        return f"winner={w} conf={c} top3=[{top}] margin={margin:.2f}"
+    except Exception:  # noqa: BLE001 - logging-only helper, never raises
+        return "winner=? conf=? top3=[] margin=?"
+
+
+def _args_summary(args: Mapping[str, JSONValue]) -> str:
+    """Arg keys + byte size only; values never logged (may carry secrets)."""
+    try:
+        size = len(json.dumps(dict(args), default=str))
+        return f"argkeys=[{','.join(sorted(str(k) for k in args))}] argbytes={size}"
+    except Exception:  # noqa: BLE001 - logging-only helper, never raises
+        return "argkeys=[] argbytes=?"
+
+
 class JevClient:
     """JEV bridge: typed decide over the sidecar, multi-tool-aware select, persistence."""
 
@@ -648,6 +693,9 @@ class JevClient:
             raw = self._transport(state, dict(questions))
             if inspect.isawaitable(raw):
                 raw = await raw
+            logger.debug(
+                "toolflow invoke_detail sid=- nid=- via=stub qids=[%s]", ",".join(sorted(str(k) for k in questions))
+            )
             return parse_decisions(questions, raw, choice_options), validate_json_value(raw, "<raw>"), "stub"
         payload: dict[str, JSONValue] = {
             "id": f"jev:{uuid.uuid4().hex[:12]}",
@@ -663,6 +711,9 @@ class JevClient:
             )
         except _SidecarUnavailable:
             raw = await asyncio.to_thread(self._http_system_one, state, questions)
+            logger.debug(
+                "toolflow invoke_detail sid=- nid=- via=http qids=[%s]", ",".join(sorted(str(k) for k in questions))
+            )
             return parse_decisions(questions, raw, choice_options), raw, "http"
         except TimeoutError as exc:
             self.close()
@@ -680,6 +731,9 @@ class JevClient:
                 raise RuntimeError("decide: malformed sidecar response")
             typed[qid] = validate_json_mapping(val, "<decision_client>: 'decision'")
         raw_out: object = response.get("raw")
+        logger.debug(
+            "toolflow invoke_detail sid=- nid=- via=sidecar qids=[%s]", ",".join(sorted(str(k) for k in questions))
+        )
         return typed, validate_json_value(raw_out, "<raw>"), "sidecar"
 
     async def decide(
@@ -706,7 +760,18 @@ class JevClient:
             raise ValueError(f"decide: unserializable request: {exc}") from exc
         started_at = _now()
         start = time.perf_counter()
-        decisions, raw, via = await self._invoke(state, questions, choice_options)
+        try:
+            decisions, raw, via = await self._invoke(state, questions, choice_options)
+        except Exception as exc:
+            logger.warning(
+                "toolflow decide_defect sid=%s nid=%s type=%s err=%s: %s",
+                session_id,
+                node_id if isinstance(node_id, str) and node_id else "-",
+                decision_type,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            raise
         completed_at = _now()
         latency_ms = (time.perf_counter() - start) * 1000.0
         self._persist(
@@ -721,6 +786,24 @@ class JevClient:
             latency_ms=latency_ms,
             started_at=started_at,
             completed_at=completed_at,
+        )
+        logger.info(
+            "toolflow decide_exit sid=%s nid=%s type=%s qids=[%s] via=%s latency_ms=%.1f",
+            session_id,
+            node_id if isinstance(node_id, str) and node_id else "-",
+            decision_type,
+            ",".join(sorted(str(k) for k in decisions)),
+            via,
+            latency_ms,
+        )
+        logger.debug(
+            "toolflow decide_detail sid=%s nid=%s type=%s options=%s",
+            session_id,
+            node_id if isinstance(node_id, str) and node_id else "-",
+            decision_type,
+            {str(k): (len(v) if isinstance(v, Mapping) else -1) for k, v in choice_options.items()}
+            if isinstance(choice_options, Mapping)
+            else "-",
         )
         return decisions
 
@@ -739,7 +822,35 @@ class JevClient:
         reg = list(registry) if registry else _auto_registry()
         node_d = _node_dict(node)
         nid = node_d.get("node_id") or node_d.get("id")
-        options, prompt = _tool_options_prompt(reg, node_d, evidence, attempts)
+        nid_s = nid if isinstance(nid, str) and nid else "-"
+        try:
+            options, prompt = _tool_options_prompt(reg, node_d, evidence, attempts)
+        except Exception as exc:
+            logger.warning(
+                "toolflow select_defect sid=%s nid=%s registry=%d err=%s: %s",
+                session_id,
+                nid_s,
+                len(reg),
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            raise
+        logger.info(
+            "toolflow select_entry sid=%s nid=%s registry=%d options=%d objective=%r",
+            session_id,
+            nid_s,
+            len(reg),
+            len(options),
+            _trunc200(objective),
+        )
+        logger.debug(
+            "toolflow select_detail sid=%s nid=%s question=%r evidence=%d attempts=%d",
+            session_id,
+            nid_s,
+            _trunc200(node_d.get("question")),
+            len(evidence) if isinstance(evidence, (list, dict)) else 0,
+            len(attempts) if isinstance(attempts, (list, dict)) else 0,
+        )
         questions: dict[str, JSONValue] = {
             "tool_selection": {
                 "type": "choice",
@@ -758,7 +869,12 @@ class JevClient:
             choice_options={"tool_selection": options},
         )
         return self._to_tool_decision(
-            decisions.get("tool_selection"), options, set_of_registry={o for o in options} - set(_SENTINEL_DESCRIPTIONS)
+            decisions.get("tool_selection"),
+            options,
+            set_of_registry={o for o in options} - set(_SENTINEL_DESCRIPTIONS),
+            sid=session_id,
+            nid=nid if isinstance(nid, str) else None,
+            event="select",
         )
 
     async def route_entry(
@@ -769,18 +885,34 @@ class JevClient:
         """JEV-first entry route: one choice over reasoning_required + whole canonical registry + research_required. Uses _invoke directly so nothing persists (never decide); raises on blank prompt, empty registry, or any JEV outage — the caller fail-opens to research_required."""
         text = prompt.strip() if isinstance(prompt, str) else ""
         if not text:
+            logger.warning("toolflow route_defect sid=- nid=- err=blank_prompt")
             raise ValueError("route_entry: blank prompt")
         reg = list(registry) if registry else _auto_registry()
-        if not reg:
-            raise ValueError("route_entry: empty registry")
-        options: dict[str, str] = dict(_ENTRY_OPTIONS)
-        for entry in reg:
-            name = entry.get("name") if isinstance(entry, dict) else None
-            if not isinstance(name, str) or not name:
-                raise ValueError("route_entry: registry entry needs a name")
-            if name in options:
-                raise ValueError(f"route_entry: duplicate tool {name}")
-            options[name] = _manifest_line(entry)
+        try:
+            if not reg:
+                raise ValueError("route_entry: empty registry")
+            options: dict[str, str] = dict(_ENTRY_OPTIONS)
+            for entry in reg:
+                name = entry.get("name") if isinstance(entry, dict) else None
+                if not isinstance(name, str) or not name:
+                    raise ValueError("route_entry: registry entry needs a name")
+                if name in options:
+                    raise ValueError(f"route_entry: duplicate tool {name}")
+                options[name] = _manifest_line(entry)
+        except Exception as exc:
+            logger.warning(
+                "toolflow route_defect sid=- nid=- registry=%d err=%s: %s",
+                len(reg),
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            raise
+        logger.info(
+            "toolflow route_entry sid=- nid=- registry=%d options=%d prompt=%r",
+            len(reg),
+            len(options),
+            _trunc200(text),
+        )
         questions: dict[str, JSONValue] = {
             "entry": {
                 "type": "choice",
@@ -788,11 +920,28 @@ class JevClient:
                 "criteria": validate_json_mapping(options, "<decision_client>: 'criteria'"),
             }
         }
-        decisions, _raw, _via = await self._invoke({"prompt": text}, questions, {"entry": options})
+        start = time.perf_counter()
+        try:
+            decisions, _raw, _via = await self._invoke({"prompt": text}, questions, {"entry": options})
+        except Exception as exc:
+            logger.warning("toolflow route_defect sid=- nid=- err=%s: %s", type(exc).__name__, str(exc)[:200])
+            raise
+        latency_ms = (time.perf_counter() - start) * 1000.0
         d = decisions.get("entry")
         winner = d.get("choice") if isinstance(d, dict) else None
         if not isinstance(winner, str) or winner not in options:
+            logger.warning(
+                "toolflow route_defect sid=- nid=- winner=%r err=winner_not_in_options %s",
+                winner,
+                _choice_summary(d),
+            )
             raise ValueError(f"route_entry: winner {winner!r} not in options")
+        logger.info(
+            "toolflow route_exit sid=- nid=- %s via=%s latency_ms=%.1f",
+            _choice_summary(d),
+            _via,
+            latency_ms,
+        )
         return winner
 
     async def assess_entry_tool(
@@ -812,31 +961,56 @@ class JevClient:
         """
         text = prompt.strip() if isinstance(prompt, str) else ""
         if not text:
+            logger.warning(
+                "toolflow assess_defect sid=- nid=- tool=%s err=blank_prompt",
+                tool if isinstance(tool, str) and tool else "-",
+            )
             raise ValueError("assess_entry_tool: blank prompt")
         if not isinstance(tool, str) or not tool:
+            logger.warning("toolflow assess_defect sid=- nid=- err=tool_required")
             raise ValueError("assess_entry_tool: tool required")
         reg = _auto_registry()
-        if not reg:
-            raise ValueError("assess_entry_tool: empty registry")
-        options: dict[str, str] = dict(_ENTRY_OPTIONS)
-        if RESOLVED_SENTINEL not in options:
-            options[RESOLVED_SENTINEL] = _SENTINEL_DESCRIPTIONS[RESOLVED_SENTINEL]
-        for entry in reg:
-            name = entry.get("name") if isinstance(entry, dict) else None
-            if not isinstance(name, str) or not name:
-                raise ValueError("assess_entry_tool: registry entry needs a name")
-            if name in options:
-                raise ValueError(f"assess_entry_tool: duplicate tool {name}")
-            options[name] = _manifest_line(entry)
-        args = validate_json_mapping(
-            dict(arguments) if isinstance(arguments, dict) else {}, "<decision_client>: 'arguments'"
-        )
-        res = validate_json_mapping(dict(result) if isinstance(result, dict) else {}, "<decision_client>: 'result'")
+        try:
+            if not reg:
+                raise ValueError("assess_entry_tool: empty registry")
+            options: dict[str, str] = dict(_ENTRY_OPTIONS)
+            if RESOLVED_SENTINEL not in options:
+                options[RESOLVED_SENTINEL] = _SENTINEL_DESCRIPTIONS[RESOLVED_SENTINEL]
+            for entry in reg:
+                name = entry.get("name") if isinstance(entry, dict) else None
+                if not isinstance(name, str) or not name:
+                    raise ValueError("assess_entry_tool: registry entry needs a name")
+                if name in options:
+                    raise ValueError(f"assess_entry_tool: duplicate tool {name}")
+                options[name] = _manifest_line(entry)
+            args = validate_json_mapping(
+                dict(arguments) if isinstance(arguments, dict) else {}, "<decision_client>: 'arguments'"
+            )
+            res = validate_json_mapping(dict(result) if isinstance(result, dict) else {}, "<decision_client>: 'result'")
+        except Exception as exc:
+            logger.warning(
+                "toolflow assess_defect sid=- nid=- tool=%s registry=%d err=%s: %s",
+                tool,
+                len(reg),
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            raise
         ok = res.get("ok")
         content = res.get("content") if isinstance(res.get("content"), str) else ""
         error = res.get("error") if isinstance(res.get("error"), str) else ""
         category = res.get("category") if isinstance(res.get("category"), str) else ""
         outcome = f"tool {tool} ok={ok!r} category={category!r} content={content[:1500]!r} error={error[:500]!r}"
+        logger.info(
+            "toolflow assess_entry sid=- nid=- tool=%s registry=%d options=%d prompt=%r %s ok=%r category=%r",
+            tool,
+            len(reg),
+            len(options),
+            _trunc200(text),
+            _args_summary(args),
+            ok,
+            category,
+        )
         questions: dict[str, JSONValue] = {
             "assess": {
                 "type": "choice",
@@ -850,15 +1024,39 @@ class JevClient:
                 "criteria": validate_json_mapping(options, "<decision_client>: 'criteria'"),
             }
         }
-        decisions, _raw, _via = await self._invoke(
-            {"prompt": text, "tool": tool, "arguments": args, "outcome": outcome},
-            questions,
-            {"assess": options},
-        )
+        start = time.perf_counter()
+        try:
+            decisions, _raw, _via = await self._invoke(
+                {"prompt": text, "tool": tool, "arguments": args, "outcome": outcome},
+                questions,
+                {"assess": options},
+            )
+        except Exception as exc:
+            logger.warning(
+                "toolflow assess_defect sid=- nid=- tool=%s err=%s: %s",
+                tool,
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            raise
+        latency_ms = (time.perf_counter() - start) * 1000.0
         d = decisions.get("assess")
         winner = d.get("choice") if isinstance(d, dict) else None
         if not isinstance(winner, str) or winner not in options:
+            logger.warning(
+                "toolflow assess_defect sid=- nid=- tool=%s winner=%r err=winner_not_in_options %s",
+                tool,
+                winner,
+                _choice_summary(d),
+            )
             raise ValueError(f"assess_entry_tool: winner {winner!r} not in options")
+        logger.info(
+            "toolflow assess_exit sid=- nid=- tool=%s %s via=%s latency_ms=%.1f",
+            tool,
+            _choice_summary(d),
+            _via,
+            latency_ms,
+        )
         return winner
 
     async def adjudicate(
@@ -874,7 +1072,33 @@ class JevClient:
         reg = list(registry) if registry else _auto_registry()
         node_d = _node_dict(node)
         nid = node_d.get("node_id") or node_d.get("id")
-        options, prompt = _tool_options_prompt(reg, node_d, None, None)
+        nid_s = nid if isinstance(nid, str) and nid else "-"
+        try:
+            options, prompt = _tool_options_prompt(reg, node_d, None, None)
+        except Exception as exc:
+            logger.warning(
+                "toolflow adjudicate_defect sid=%s nid=%s registry=%d err=%s: %s",
+                session_id,
+                nid_s,
+                len(reg),
+                type(exc).__name__,
+                str(exc)[:200],
+            )
+            raise
+        logger.info(
+            "toolflow adjudicate_entry sid=%s nid=%s registry=%d options=%d question=%r",
+            session_id,
+            nid_s,
+            len(reg),
+            len(options),
+            _trunc200(node_d.get("question")),
+        )
+        logger.debug(
+            "toolflow adjudicate_detail sid=%s nid=%s proposal=%r",
+            session_id,
+            nid_s,
+            _trunc200(proposal),
+        )
         questions: dict[str, JSONValue] = {
             "tool_selection": {
                 "type": "choice",
@@ -893,7 +1117,12 @@ class JevClient:
             choice_options={"tool_selection": options},
         )
         return self._to_tool_decision(
-            decisions.get("tool_selection"), options, set_of_registry={o for o in options} - set(_SENTINEL_DESCRIPTIONS)
+            decisions.get("tool_selection"),
+            options,
+            set_of_registry={o for o in options} - set(_SENTINEL_DESCRIPTIONS),
+            sid=session_id,
+            nid=nid if isinstance(nid, str) else None,
+            event="adjudicate",
         )
 
     async def assess_result(
@@ -959,15 +1188,33 @@ class JevClient:
         }
 
     @staticmethod
-    def _to_tool_decision(decision: object, options: Mapping[str, str], set_of_registry: set[str]) -> ToolDecision:
+    def _to_tool_decision(
+        decision: object,
+        options: Mapping[str, str],
+        set_of_registry: set[str],
+        *,
+        sid: str | None = None,
+        nid: str | None = None,
+        event: str = "choice",
+    ) -> ToolDecision:
+        sid_s = sid if isinstance(sid, str) and sid else "-"
+        nid_s = nid if isinstance(nid, str) and nid else "-"
         if not isinstance(decision, dict) or decision.get("kind") != "choice":
+            logger.warning("toolflow %s_defect sid=%s nid=%s err=malformed_decision", event, sid_s, nid_s)
             raise ValueError("decide: malformed tool_selection decision")
         winner = decision.get("choice")
         probs = decision.get("probabilities")
         conf = decision.get("confidence")
         if not isinstance(winner, str) or not isinstance(probs, dict):
+            logger.warning("toolflow %s_defect sid=%s nid=%s err=malformed_decision", event, sid_s, nid_s)
             raise ValueError("decide: malformed tool_selection decision")
-        floats: dict[str, float] = {str(k): float(v) for k, v in probs.items()}
+        try:
+            floats: dict[str, float] = {str(k): float(v) for k, v in probs.items()}
+        except Exception:
+            logger.warning(
+                "toolflow %s_defect sid=%s nid=%s winner=%r err=malformed_probabilities", event, sid_s, nid_s, winner
+            )
+            raise
         probabilities = validate_json_mapping(floats, "<decision_client>: 'probabilities'")
         confidence = float(conf) if isinstance(conf, (int, float)) and not isinstance(conf, bool) else None
         if winner == REASON_SENTINEL:
@@ -976,6 +1223,14 @@ class JevClient:
             out = ToolDecision(action="resolved", probabilities=probabilities, confidence=confidence)
         else:
             if winner not in set_of_registry:
+                logger.warning(
+                    "toolflow %s_defect sid=%s nid=%s winner=%r err=winner_not_in_registry %s",
+                    event,
+                    sid_s,
+                    nid_s,
+                    winner,
+                    _choice_summary(decision),
+                )
                 raise ValueError(f"decide: tool_selection winner {winner!r} not in registry")
             winner_prob = floats.get(winner, 0.0)
 
@@ -1000,6 +1255,24 @@ class JevClient:
                 confidence=confidence,
             )
         out.validate("<decision_client>")
+        if out.action in ("reason", "resolved"):
+            logger.info(
+                "toolflow %s_sentinel sid=%s nid=%s sentinel=%s %s",
+                event,
+                sid_s,
+                nid_s,
+                out.action,
+                _choice_summary(decision),
+            )
+        else:
+            logger.info(
+                "toolflow %s_exit sid=%s nid=%s %s fanout=[%s]",
+                event,
+                sid_s,
+                nid_s,
+                _choice_summary(decision),
+                ",".join(out.tool_names),
+            )
         return out
 
     def _persist(

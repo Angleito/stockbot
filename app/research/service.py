@@ -3692,10 +3692,25 @@ def finalize_session(
     return _finalize_persist(store, session_id, fid, synth.answer, grounded, synth)
 
 
+def _dispatch_unknown_job_detail(store: ResearchRepository, session_id: str, detail: str) -> str:
+    """Actionable unknown-job detail: live ids + likely never-persisted attempt job."""
+    import sqlite3
+
+    try:
+        live: list[str] = [j.job_id for j in store.list_jobs(session_id) if j.status in ("queued", "running")][:8]
+    except (sqlite3.Error, ValueError, KeyError, OSError):
+        live = []
+    return f"{detail} hint: attempt job not persisted — check source_policy/source_domain on start_job live_jobs={live}"
+
+
 def _dispatch_live_job(store: ResearchRepository, session_id: str, job_id: str):
     """Load session + job with cross-session ownership enforced."""
     found = _require_session(store, session_id)
-    job = _require_job(store, job_id)
+    try:
+        job = _require_job(store, job_id)
+    except ResearchNotFound as exc:
+        detail = str(exc.args[0]) if exc.args else str(exc)
+        raise ResearchNotFound(_dispatch_unknown_job_detail(store, session_id, detail)) from None
     if job.session_id != found.session_id:
         raise ValueError(f"dispatch: job {job_id!r} belongs to {job.session_id!r}")
     return found, job
@@ -3831,7 +3846,10 @@ def authorize_and_consume_dispatch(
     try:
         billed, spent = store.consume_dispatch_budget(session_id, job_id)
     except KeyError as exc:
-        raise ResearchNotFound(exc.args[0] if exc.args else str(exc)) from None
+        detail = str(exc.args[0]) if exc.args else str(exc)
+        if "unknown job_id" in detail:
+            detail = _dispatch_unknown_job_detail(store, session_id, detail)
+        raise ResearchNotFound(detail) from None
     # Budget first, repeat gate second (the runner's order), so an exhausted
     # budget keeps its own refusal verbatim.
     _dispatch_loop_gate(store, found, spent, tool_name, arguments)

@@ -11,6 +11,7 @@ from __future__ import annotations
 
 import atexit
 import json
+import logging
 import os
 import select
 import subprocess
@@ -21,6 +22,8 @@ from pathlib import Path
 from typing import IO
 
 from app.research.models import JSONValue, validate_json_mapping, validate_json_value
+
+logger = logging.getLogger(__name__)
 
 __all__ = ["close", "generate_arguments", "start", "validate_needle_tool"]
 
@@ -41,8 +44,20 @@ def validate_needle_tool(jev_tool: str, needle_tool: object) -> str:
     if not isinstance(jev_tool, str) or not jev_tool:
         raise ValueError("jev_tool must be a nonempty tool name")
     if not isinstance(needle_tool, str) or needle_tool != jev_tool:
+        logger.warning("toolflow needle_tool_mismatch jev_tool=%s needle_tool=%.50s", jev_tool, str(needle_tool))
         raise ValueError(f"needle tool mismatch: jev selected {jev_tool!r}, needle emitted {needle_tool!r}")
     return needle_tool
+
+
+def _sid_hint(req_dict: dict[str, object]) -> str:
+    """Best-effort sid for toolflow logs: node/context session_id, else '-'."""
+    for key in ("node", "context"):
+        raw = req_dict.get(key)
+        if isinstance(raw, dict):
+            sid = raw.get("session_id")
+            if isinstance(sid, str) and sid.strip():
+                return sid.strip()
+    return "-"
 
 
 def _server() -> Path:
@@ -275,10 +290,23 @@ def generate_arguments(*args: object, **kwargs: object) -> dict[str, JSONValue]:
     tool = req_dict.get("tool")
     if not isinstance(tool, str) or not tool:
         raise ValueError("generate_arguments: tool must be a nonempty tool name")
+    sid_hint = _sid_hint(req_dict)
+    logger.info("toolflow needle_gen_entry sid=%s tool=%s", sid_hint, tool)
+    logger.debug(
+        "toolflow needle_gen_objective sid=%s tool=%s objective=%.200s",
+        sid_hint,
+        tool,
+        str(req_dict.get("objective") or ""),
+    )
     server = _server()
     if not server.exists():
+        logger.warning("toolflow needle_gen_error sid=%s tool=%s err_type=missing-server", sid_hint, tool)
         raise RuntimeError(f"needle arguments.generate unavailable (gap: server missing: {server})")
-    _ensure_weights()
+    try:
+        _ensure_weights()
+    except Exception as exc:
+        logger.warning("toolflow needle_gen_error sid=%s tool=%s err_type=%s", sid_hint, tool, type(exc).__name__)
+        raise
     where = "<needle_client>"
     payload: dict[str, JSONValue] = {
         "id": f"needle:{uuid.uuid4().hex[:12]}",
@@ -293,9 +321,10 @@ def generate_arguments(*args: object, **kwargs: object) -> dict[str, JSONValue]:
         attempt = 0
         while True:
             try:
-                return _exchange_locked(_ensure_locked(), tool, payload)
+                out = _exchange_locked(_ensure_locked(), tool, payload)
             except TimeoutError as exc:
                 _kill_locked()
+                logger.warning("toolflow needle_gen_error sid=%s tool=%s err_type=TimeoutError", sid_hint, tool)
                 raise RuntimeError(
                     f"needle arguments.generate timed out after {_TIMEOUT_S:g}s for {tool!r}; "
                     f"stderr tail: {_tail_text() or '(empty)'}"
@@ -304,7 +333,24 @@ def generate_arguments(*args: object, **kwargs: object) -> dict[str, JSONValue]:
                 # One bounded restart on BrokenPipe/EOF (ConnectionError rides via OSError).
                 _kill_locked()
                 if attempt >= 1:
+                    logger.warning(
+                        "toolflow needle_gen_error sid=%s tool=%s err_type=%s", sid_hint, tool, type(exc).__name__
+                    )
                     raise RuntimeError(
                         f"needle arguments.generate failed for {tool!r}: server unavailable ({exc})"
                     ) from exc
                 attempt += 1
+            except Exception as exc:
+                logger.warning(
+                    "toolflow needle_gen_error sid=%s tool=%s err_type=%s", sid_hint, tool, type(exc).__name__
+                )
+                raise
+            else:
+                conf = out.get("confidence")
+                logger.info(
+                    "toolflow needle_gen_ok sid=%s tool=%s conf=%s",
+                    sid_hint,
+                    tool,
+                    "yes" if isinstance(conf, (int, float)) and not isinstance(conf, bool) else "no",
+                )
+                return out

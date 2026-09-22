@@ -24,6 +24,7 @@ import asyncio
 import concurrent.futures
 import importlib
 import json
+import logging
 import os
 import signal
 import sys
@@ -39,6 +40,8 @@ from app.research.models import JSONValue
 if TYPE_CHECKING:
     from app.decision_client import JevClient
     from app.research.models import DecisionRecord, ResearchNode
+
+logger = logging.getLogger(__name__)
 
 # Process-lifetime shared runtime: one JevClient + one Needle worker per kernel
 # process. Lazily created so import has no side effects (thesis/script callers
@@ -436,12 +439,16 @@ def _route(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[s
     rid = raw_id if isinstance(raw_id, str) else "?"
     prompt = req.get("prompt")
     if not isinstance(prompt, str) or not prompt.strip():
+        logger.info("toolflow route rid=%s route=research_required reason=blank-prompt", rid)
         return {"id": rid, "route": "research_required"}
+    logger.debug("toolflow route_entry rid=%s prompt=%.200s", rid, prompt.strip())
     try:
         client = jev if jev is not None else _shared_jev()
         winner = asyncio.run(client.route_entry(prompt.strip()))
+        logger.info("toolflow route rid=%s route=%s", rid, winner)
         return {"id": rid, "route": winner}
-    except Exception:
+    except Exception as exc:
+        logger.warning("toolflow route_fail_open rid=%s route=research_required err_type=%s", rid, type(exc).__name__)
         return {"id": rid, "route": "research_required"}
 
 
@@ -459,6 +466,7 @@ def _arguments(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
     rid = raw_id if isinstance(raw_id, str) else "?"
     tool = req.get("tool")
     if not isinstance(tool, str) or not tool:
+        logger.warning("toolflow arguments_deny rid=%s reason=tool-required", rid)
         return {"id": rid, "error": "tool required"}
     try:
         sid_hint: object = None
@@ -471,11 +479,17 @@ def _arguments(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
                 maybe_sid = node_hint.get("session_id")
                 if isinstance(maybe_sid, str) and maybe_sid.strip():
                     sid_hint = maybe_sid
-        # ponytail: resume/status/cancel/read tools carry only a session_id
-        # the prompt never grounds — shortcut without Needle (docs: every
-        # argument is a span of input; a bare question has no sid span).
+        logger.info(
+            "toolflow arguments_entry rid=%s sid=%s tool=%s",
+            rid,
+            sid_hint if isinstance(sid_hint, str) and sid_hint.strip() else "-",
+            tool,
+        )
+        # ponytail: resume/status/cancel carry only a session_id — the prompt
+        # never grounds, so shortcut without Needle (docs: every argument is
+        # a span of input; a bare question has no sid span).
         if (
-            tool in ("research_resume", "research_status", "research_cancel", "research_read_search")
+            tool in ("research_resume", "research_status", "research_cancel")
             and isinstance(sid_hint, str)
             and sid_hint.strip()
         ):
@@ -486,7 +500,33 @@ def _arguments(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
                 "confidence": 1.0,
                 "reasoning": "session_id carried from caller; no Needle grounding needed",
             }
+            logger.info("toolflow arguments rid=%s sid=%s tool=%s conf=yes shortcut=sid-carry", rid, sid_hint, tool)
             return out_sid
+        if tool == "research_read_search":
+            search_hint: object = None
+            if isinstance(raw_args_hint, dict):
+                search_hint = raw_args_hint.get("search_id")
+            if isinstance(sid_hint, str) and sid_hint.strip() and isinstance(search_hint, str) and search_hint.strip():
+                sid_clean = sid_hint.strip()
+                search_clean = search_hint.strip()
+                out_read: dict[str, JSONValue] = {
+                    "id": rid,
+                    "tool": tool,
+                    "arguments": {"session_id": sid_clean, "search_id": search_clean},
+                    "confidence": 1.0,
+                    "reasoning": "session_id+search_id carried from caller; no Needle grounding needed",
+                }
+                logger.info(
+                    "toolflow arguments rid=%s sid=%s tool=%s conf=yes shortcut=sid-carry", rid, sid_clean, tool
+                )
+                return out_read
+            logger.warning(
+                "toolflow arguments_deny rid=%s sid=%s tool=%s reason=search-id-required",
+                rid,
+                sid_hint if isinstance(sid_hint, str) and sid_hint.strip() else "-",
+                tool,
+            )
+            return {"id": rid, "error": "research_read_search needs search_id from a prior search_sec_filings result"}
         objective = req.get("objective")
         if objective is None:
             objective = req.get("prompt")
@@ -525,8 +565,16 @@ def _arguments(req: Mapping[str, JSONValue]) -> dict[str, JSONValue]:
                 out["confidence"] = None
             reasoning = generated.get("reasoning")
             out["reasoning"] = str(reasoning) if isinstance(reasoning, str) else ""
+        logger.info(
+            "toolflow arguments rid=%s sid=%s tool=%s conf=%s",
+            rid,
+            sid_hint if isinstance(sid_hint, str) and sid_hint.strip() else "-",
+            tool,
+            "yes" if isinstance(out.get("confidence"), float) else "no",
+        )
         return out
     except Exception as exc:
+        logger.warning("toolflow arguments_fail_open rid=%s tool=%s err_type=%s", rid, tool, type(exc).__name__)
         return {"id": rid, "error": str(exc)[:500] or "needle arguments failed"}
 
 
@@ -542,9 +590,12 @@ def _assess_entry(req: Mapping[str, JSONValue], jev: JevClient | None = None) ->
     prompt = req.get("prompt")
     tool = req.get("tool")
     if not isinstance(prompt, str) or not prompt.strip():
+        logger.info("toolflow assess rid=%s verdict=research_required reason=blank-prompt", rid)
         return {"id": rid, "verdict": "research_required"}
     if not isinstance(tool, str) or not tool:
+        logger.info("toolflow assess rid=%s verdict=research_required reason=tool-required", rid)
         return {"id": rid, "verdict": "research_required"}
+    logger.debug("toolflow assess_entry rid=%s tool=%s prompt=%.200s", rid, tool, prompt.strip())
     try:
         raw_args = req.get("arguments")
         args_map: Mapping[str, JSONValue] = raw_args if isinstance(raw_args, dict) else {}
@@ -553,9 +604,19 @@ def _assess_entry(req: Mapping[str, JSONValue], jev: JevClient | None = None) ->
         client = jev if jev is not None else _shared_jev()
         verdict = asyncio.run(client.assess_entry_tool(prompt.strip(), tool, args_map, result_map))
         if not isinstance(verdict, str) or not verdict:
+            logger.warning(
+                "toolflow assess_fail_open rid=%s tool=%s verdict=research_required reason=blank-verdict", rid, tool
+            )
             return {"id": rid, "verdict": "research_required"}
+        logger.info("toolflow assess rid=%s tool=%s verdict=%s", rid, tool, verdict)
         return {"id": rid, "verdict": verdict}
-    except Exception:
+    except Exception as exc:
+        logger.warning(
+            "toolflow assess_fail_open rid=%s tool=%s verdict=research_required err_type=%s",
+            rid,
+            tool,
+            type(exc).__name__,
+        )
         return {"id": rid, "verdict": "research_required"}
 
 
@@ -724,6 +785,15 @@ def _run(req: Mapping[str, JSONValue], jev: JevClient | None = None) -> dict[str
 
 
 def main() -> None:
+    level_name: str = os.environ.get("STOCKBOT_LOG_LEVEL", "WARNING").upper()
+    level_map: dict[str, int] = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+    }
+    level: int = level_map.get(level_name, logging.WARNING)
+    logging.basicConfig(format="%(asctime)s %(levelname)s %(name)s: %(message)s", level=level)
     jev = _startup()
     sys.stdout.write(json.dumps({"type": "ready"}) + "\n")
     sys.stdout.flush()

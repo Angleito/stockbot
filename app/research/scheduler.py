@@ -23,9 +23,50 @@ frozen import paths live in the ``_default_*`` resolvers.
 
 import asyncio
 import inspect
+import logging
 import uuid
 from dataclasses import dataclass, field
 from typing import Any, Protocol
+
+logger = logging.getLogger(__name__)
+
+_TOOLFLOW_TRUNC = 200
+
+
+def _toolflow_trunc(value: object, limit: int = _TOOLFLOW_TRUNC) -> str:
+    """Collapsed, truncated text for objectives/prompts (never full payloads)."""
+    text = value if isinstance(value, str) else str(value)
+    return " ".join(text.split())[:limit]
+
+
+def _toolflow_prob_summary(probs: object) -> tuple[str, str, str]:
+    """Compact (winner, top3, margin); the full map stays in the DecisionRecord."""
+    if not isinstance(probs, dict) or not probs:
+        return "-", "-", "-"
+    try:
+        ranked = sorted(probs.items(), key=lambda kv: float(kv[1]), reverse=True)
+    except (TypeError, ValueError):
+        return "-", "-", "-"
+    winner = str(ranked[0][0])
+    top3 = ",".join(f"{k}={v}" for k, v in ranked[:3])
+    margin = "-"
+    if len(ranked) > 1:
+        try:
+            margin = f"{float(ranked[0][1]) - float(ranked[1][1]):.3f}"
+        except (TypeError, ValueError):
+            margin = "-"
+    return winner, top3, margin
+
+
+def _toolflow_args_summary(args: object) -> tuple[str, int]:
+    """Arg keys + byte size (never values)."""
+    keys = ",".join(sorted(str(k) for k in args)) if isinstance(args, dict) else "-"
+    try:
+        size = len(repr(args))
+    except Exception:
+        size = -1
+    return keys or "-", size
+
 
 from app.tool_runtime import RuntimeToolSession, execute_agent_tool, outcome_from_result
 
@@ -113,6 +154,13 @@ _MAX_TOOL_ROUNDS = 10
 # layer). JEV sees every canonical tool directly; these five are the discovery
 # mechanism itself, not research actions.
 _JEV_REGISTRY_EXCLUDED = frozenset({"call_tool", "browse_tools", "search_tools", "list_tool_domains", "describe_tool"})
+
+# research_start creates a NEW session so it can never advance the current
+# node (10x start/None loop in toolflow logs); research_read_search's handler
+# always returns unknown_search with no persisted universe (9x read_search/None
+# loop in toolflow logs). Both stay in build_registry so entry/assess paths
+# are untouched; only the in-node context filters them.
+_NODE_INVALID_CONTROL_TOOLS = frozenset({"research_start", "research_read_search"})
 
 # Required params that name an upstream handle (a prior tool's output) rather
 # than fresh node input — surfaced as manifest prerequisites.
@@ -534,6 +582,8 @@ def build_registry() -> list[dict[str, Any]]:
     def _comma(items):
         return ", ".join(items) if items else ""
 
+    seen = 0
+    excluded = 0
     for tool in tools_for_capabilities(frozenset({Capability.RESEARCH})):
         fn = tool.get("function") if isinstance(tool, dict) else None
         if not isinstance(fn, dict):
@@ -541,7 +591,9 @@ def build_registry() -> list[dict[str, Any]]:
         name = fn.get("name")
         if not isinstance(name, str) or not name:
             continue
+        seen += 1
         if name in _JEV_REGISTRY_EXCLUDED:
+            excluded += 1
             continue
         params, required = _manifest_params(fn)
         meta = TOOL_DISCOVERY_REGISTRY.get(name)
@@ -566,6 +618,8 @@ def build_registry() -> list[dict[str, Any]]:
                 "parameters": params,
             }
         )
+    logger.info("toolflow registry sid=- nid=- size=%s excluded=%s seen=%s", len(manifests), excluded, seen)
+    logger.debug("toolflow registry_detail sid=- nid=- tools=%s", ",".join(m.get("name", "?") for m in manifests))
     return manifests
 
 
@@ -735,12 +789,26 @@ def _block(kernel: Any, session_id: str, node_id: str, reason: str) -> Any:
 
 
 def _attempt_job(kernel: Any, session_id: str, domain: str) -> str:
-    """Start one source_agent job; synthesized id when the kernel cannot start."""
+    """Start one source_agent job; domain-neutral retry on policy denial; synthesized id when the kernel cannot start."""
+    # Policy-denied lanes (FINRA/WEB under the SEC-only default) must still persist a row:
+    # swallowing the denial into a synthetic id breaks dispatch lookup (`unknown job_id`).
+    # Provenance rides the per-attempt domain; stage/domain checks still run at dispatch.
     job_source = None if domain == "OTHER" else domain
     try:
         job = kernel.start_job(session_id, type="source_agent", owner="kernel-scheduler", source=job_source)
         return str(_f(job, "job_id", default=f"job:{uuid.uuid4()}"))
+    except ValueError:
+        if job_source is None:
+            logger.warning("toolflow attempt_job_synth sid=%s domain=%s", session_id, domain)
+            return f"job:{uuid.uuid4()}"
+        try:
+            job = kernel.start_job(session_id, type="source_agent", owner="kernel-scheduler", source=None)
+            return str(_f(job, "job_id", default=f"job:{uuid.uuid4()}"))
+        except Exception:
+            logger.warning("toolflow attempt_job_synth sid=%s domain=%s", session_id, domain)
+            return f"job:{uuid.uuid4()}"
     except Exception:
+        logger.warning("toolflow attempt_job_synth sid=%s domain=%s", session_id, domain)
         return f"job:{uuid.uuid4()}"
 
 
@@ -770,10 +838,29 @@ async def _generate_tool_arguments(
     attempts: list[dict[str, Any]],
     as_of: str | None,
 ) -> tuple[dict[str, Any], str]:
-    """Needle args-only generation for the JEV-selected tool; raises on mismatch."""
     schema = _schema_for(tool_name, registry)
     objective = session.get("objective") or session.get("query") or ""
     context = {"evidence": evidence, "attempts": attempts, "as_of": as_of}
+    sid = str(session.get("session_id") or "-")
+    nid = str(_f(node, "node_id", "id", default="-"))
+    schema_empty = not bool(schema)
+    if schema_empty:
+        logger.warning("toolflow args_empty_schema sid=%s nid=%s tool=%s", sid, nid, tool_name)
+    if tool_name in {"research_resume", "research_status", "research_cancel"}:
+        raw_sid = session.get("session_id")
+        if isinstance(raw_sid, str) and raw_sid.strip():
+            carried = {"session_id": raw_sid.strip()}
+            keys, size = _toolflow_args_summary(carried)
+            logger.info(
+                "toolflow args_ok sid=%s nid=%s tool=%s schema_empty=%s match=exact arg_keys=%s arg_bytes=%s shortcut=sid-carry",
+                sid,
+                nid,
+                tool_name,
+                schema_empty,
+                keys,
+                size,
+            )
+            return carried, "session_id carried from scheduler session; no Needle grounding needed"
     if _needle_takes_kwargs(needle_generate):
         generated = await _awaited(
             needle_generate(tool=tool_name, schema=schema, objective=objective, node=_node_dict(node), context=context)
@@ -792,9 +879,44 @@ async def _generate_tool_arguments(
             )
         )
     needle_tool, generated_args, needle_reasoning = _split_generated(tool_name, generated)
-    _validate_needle_tool(tool_name, needle_tool)
+    try:
+        _validate_needle_tool(tool_name, needle_tool)
+    except ValueError:
+        logger.info(
+            "toolflow args_needle_mismatch sid=%s nid=%s tool=%s needle_tool=%s schema_empty=%s",
+            sid,
+            nid,
+            tool_name,
+            needle_tool,
+            schema_empty,
+        )
+        raise
     if not isinstance(generated_args, dict):
+        logger.info(
+            "toolflow args_not_mapping sid=%s nid=%s tool=%s schema_empty=%s",
+            sid,
+            nid,
+            tool_name,
+            schema_empty,
+        )
         raise ValueError(f"needle arguments for {tool_name!r} must be a mapping")
+    keys, size = _toolflow_args_summary(generated_args)
+    logger.info(
+        "toolflow args_ok sid=%s nid=%s tool=%s schema_empty=%s match=exact arg_keys=%s arg_bytes=%s",
+        sid,
+        nid,
+        tool_name,
+        schema_empty,
+        keys,
+        size,
+    )
+    logger.debug(
+        "toolflow args_detail sid=%s nid=%s tool=%s objective=%s",
+        sid,
+        nid,
+        tool_name,
+        _toolflow_trunc(objective),
+    )
     return dict(generated_args), needle_reasoning
 
 
@@ -902,9 +1024,26 @@ async def _attempt_tool(
         result, outcome = await _invoke_attempt_tool(
             invoke, to_outcome, tool_name, arguments, tool_session, node_id, session_id, as_of, job_id
         )
-        return _success_attempt(tool_name, arguments, outcome, result, domain, needle_reasoning, job_id)
+        record = _success_attempt(tool_name, arguments, outcome, result, domain, needle_reasoning, job_id)
+        logger.info(
+            "toolflow attempt sid=%s nid=%s tool=%s ok=%s err_type=%s retryable=%s",
+            session_id,
+            node_id,
+            tool_name,
+            record.get("error") is None,
+            record.get("error_type"),
+            _f(outcome, "retryable"),
+        )
+        return record
     except Exception as exc:
         _fail_attempt_job(kernel, job_id, str(exc))
+        logger.info(
+            "toolflow attempt_fail sid=%s nid=%s tool=%s err_type=tool_error error=%.200s",
+            session_id,
+            node_id,
+            tool_name,
+            exc,
+        )
         return _failed_attempt(tool_name, arguments, needle_reasoning, job_id, exc)
 
 
@@ -1274,7 +1413,30 @@ async def _select_round(
         job_id=None,
         confidence=_f(decision, "confidence"),
     )
-    return _selection_action(decision), decision
+    action = _selection_action(decision)
+    tools = _selection_tools(decision)
+    probs = _f(decision, "probabilities", default={}) or {}
+    winner, top3, margin = _toolflow_prob_summary(probs)
+    resolved = _f(decision, "tool_name", "tool", "selected")
+    conf = _f(decision, "confidence")
+    logger.info(
+        "toolflow select sid=%s nid=%s action=%s invoke=%s resolved=%s selected_n=%s winner=%s margin=%s conf=%s",
+        sid,
+        nid,
+        action,
+        tools[0] if tools else "-",
+        resolved,
+        len(tools),
+        winner,
+        margin,
+        conf,
+    )
+    logger.debug("toolflow select_probs sid=%s nid=%s top3=%s", sid, nid, top3)
+    known = {e.get("name") for e in registry}
+    unknown = [t for t in tools if t not in known]
+    if unknown:
+        logger.warning("toolflow select_unknown_tool sid=%s nid=%s tools=%s", sid, nid, ",".join(unknown))
+    return action, decision
 
 
 async def _adjudicate_analysis(
@@ -1345,6 +1507,9 @@ async def _invoke_phase(
     as_of_str: str | None,
 ) -> list[dict[str, Any]]:
     """Parallel multi-tool select: gather over the whole selected set."""
+    sid = str(session.get("session_id") or "-")
+    nid = str(_f(node, "node_id", "id", default="-"))
+    logger.info("toolflow invoke sid=%s nid=%s selected_n=%s tools=%s", sid, nid, len(tools), ",".join(tools) or "-")
     return await asyncio.gather(
         *(
             _attempt_tool(
@@ -1396,10 +1561,22 @@ def _failed_generation_attempt(attempt: dict[str, Any]) -> dict[str, Any]:
 def _settle_attempt(
     kernel: Any,
     attempt: dict[str, Any],
+    sid: str = "-",
+    nid: str = "-",
 ) -> tuple[dict[str, Any] | None, bool]:
     """Record generation/outcome failures; returns (settle_attempt, settled)."""
+    tool = attempt.get("tool")
     if attempt["error"] is not None and attempt["outcome"] is None:
         _record_generation_failure(kernel, attempt)
+        logger.info(
+            "toolflow settle sid=%s nid=%s tool=%s ok=%s err_type=%s retryable=%s",
+            sid,
+            nid,
+            tool,
+            False,
+            attempt.get("error_type", "tool_error"),
+            False,
+        )
         return _failed_generation_attempt(attempt), True
     outcome = attempt["outcome"]
     if _f(outcome, "error") is not None:
@@ -1408,7 +1585,25 @@ def _settle_attempt(
             kernel.fail_job(attempt["job_id"], "tool_error", str(_f(outcome, "error"))[:2000])
         except Exception:  # noqa: BLE001, S110 - terminal already recorded; attempt log carries the error
             pass
+        logger.info(
+            "toolflow settle sid=%s nid=%s tool=%s ok=%s err_type=%s retryable=%s",
+            sid,
+            nid,
+            tool,
+            False,
+            _f(outcome, "error_type"),
+            _f(outcome, "retryable"),
+        )
         return _failed_generation_attempt(attempt), True
+    logger.info(
+        "toolflow settle sid=%s nid=%s tool=%s ok=%s err_type=%s retryable=%s",
+        sid,
+        nid,
+        tool,
+        True,
+        _f(outcome, "error_type"),
+        _f(outcome, "retryable"),
+    )
     return None, False
 
 
@@ -1592,7 +1787,7 @@ async def _settle_round(
     """Settle every tool result: failures recorded, successes assessed/admitted; returns round signals."""
     progressed = False
     for attempt in results:
-        settled, done = _settle_attempt(kernel, attempt)
+        settled, done = _settle_attempt(kernel, attempt, sid, nid)
         if done:
             attempts.append(settled)
             continue
@@ -1635,6 +1830,22 @@ def _node_context(node: Any, session_id: str | None, kernel: Any, repo: Any, hoo
             registry = build_registry()
         except Exception:
             registry = []
+    if isinstance(registry, list):
+        dropped = sorted(
+            str(e.get("name")) for e in registry if isinstance(e, dict) and e.get("name") in _NODE_INVALID_CONTROL_TOOLS
+        )
+        if dropped:
+            registry = [
+                e for e in registry if not (isinstance(e, dict) and e.get("name") in _NODE_INVALID_CONTROL_TOOLS)
+            ]
+            logger.info(
+                "toolflow registry_filter sid=%s nid=%s size=%s excluded=%s tools=%s",
+                sid,
+                nid,
+                len(registry),
+                len(dropped),
+                ",".join(dropped),
+            )
     return {
         "sid": sid,
         "nid": nid,
@@ -1731,6 +1942,7 @@ async def _run_round(
         decision = reason_out["decision"]
     tools = _selection_tools(decision)
     if not tools:
+        logger.info("toolflow select_empty sid=%s nid=%s action=%s selected_n=0", sid, nid, action)
         attempts.append(_reselect_attempt("selection named no tool; re-selecting"))
         return {"terminal": None, "continue": True, "decision": decision, "admitted": admitted}
     return await _invoke_and_settle(
@@ -1796,10 +2008,25 @@ async def _drive_rounds(
     evidence = _load_evidence(sid, kernel, repo)
     attempts: list[dict[str, Any]] = []
     admitted = 0
-    for _ in range(_MAX_TOOL_ROUNDS):
+    for round_no in range(1, _MAX_TOOL_ROUNDS + 1):
         # Working state: admitted evidence + recent unadmitted observations, never dropped.
         ctx_evidence = _context_evidence(evidence, attempts)
-        action, decision = await _select_round(jev, kernel, sid, nid, session, node, registry, ctx_evidence, attempts)
+        select_registry = registry
+        if len(attempts) >= 3:
+            # Loop-breaker: 3 straight failures on one tool means JEV re-picks
+            # it forever; drop it for this round only (hardcoded 3, no knob).
+            tail = attempts[-3:]
+            candidate = tail[0].get("tool")
+            if (
+                isinstance(candidate, str)
+                and candidate
+                and all(a.get("tool") == candidate and a.get("error") is not None for a in tail)
+            ):
+                select_registry = [e for e in registry if not (isinstance(e, dict) and e.get("name") == candidate)]
+                logger.info("toolflow select_drop sid=%s nid=%s tool=%s fails=3", sid, nid, candidate)
+        action, decision = await _select_round(
+            jev, kernel, sid, nid, session, node, select_registry, ctx_evidence, attempts
+        )
         step = await _run_round(
             action,
             decision,
@@ -1823,15 +2050,39 @@ async def _drive_rounds(
         )
         admitted = step["admitted"]
         if step.get("terminal") is not None:
+            logger.info(
+                "toolflow drive sid=%s nid=%s rounds_used=%s stop=%s admitted=%s",
+                sid,
+                nid,
+                round_no,
+                step["terminal"].get("status", "terminal"),
+                admitted,
+            )
             return step["terminal"]
         if step.get("continue"):
             continue
         if step.get("fresh_round"):
+            logger.info(
+                "toolflow drive sid=%s nid=%s rounds_used=%s stop=%s admitted=%s",
+                sid,
+                nid,
+                round_no,
+                "fresh_round",
+                admitted,
+            )
             evidence = _load_evidence(sid, kernel, repo)
             break  # fresh select round; JEV re-escalates if reasoning is still needed.
         evidence = _load_evidence(sid, kernel, repo)
         if not step.get("progressed"):
             continue
+    logger.info(
+        "toolflow drive sid=%s nid=%s rounds_used=%s stop=%s admitted=%s",
+        sid,
+        nid,
+        _MAX_TOOL_ROUNDS,
+        "runtime_guard",
+        admitted,
+    )
     _block(kernel, sid, nid, f"incomplete: runtime guard ({_MAX_TOOL_ROUNDS} rounds without resolution)")
     return _blocked_terminal(nid, admitted, attempts)
 

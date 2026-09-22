@@ -88,6 +88,25 @@ _THESIS_LOCAL_TOOLS = frozenset(
 
 logger = logging.getLogger(__name__)
 
+
+def _toolflow_sid(session: RuntimeToolSession, staged: _StagedContext | None = None) -> str:
+    """Linkable sid for toolflow logs: staged research id, else the runtime session id."""
+    if staged is not None and isinstance(staged.session_id, str) and staged.session_id:
+        return staged.session_id
+    sid = getattr(session, "session_id", None)
+    return sid if isinstance(sid, str) and sid else "-"
+
+
+def _toolflow_args_summary(arguments: object) -> tuple[list[str], int]:
+    """Arg keys + byte size for toolflow logs; never values (no secrets)."""
+    keys = sorted(str(k) for k in arguments) if isinstance(arguments, dict) else []
+    try:
+        nbytes = len(json.dumps(arguments, sort_keys=True, default=str))
+    except Exception:  # noqa: BLE001 - size probe never breaks the tool call
+        nbytes = -1
+    return keys, nbytes
+
+
 # Model label recorded for runtime-driven tool calls. Handlers ignore it
 # (no nested completions remain on the runtime path); it exists for provenance.
 RUNTIME_MODEL = "runtime"
@@ -560,7 +579,7 @@ def _try_company_to_ticker(raw_cname: str) -> str | None:
         return None
 
 
-def _resolve_company_arguments(name: str, arguments: dict[str, object]) -> dict[str, object]:
+def _resolve_company_arguments(name: str, arguments: dict[str, object], sid: str | None = None) -> dict[str, object]:
     """Fill a missing ticker/entity identifier from company_name when the schema allows."""
     id_key, prop_names = _company_id_key(name)
     if id_key is None or "company_name" not in prop_names:
@@ -570,6 +589,7 @@ def _resolve_company_arguments(name: str, arguments: dict[str, object]) -> dict[
         return arguments
     resolved = _try_company_to_ticker(raw_cname)
     if resolved:
+        logger.info("toolflow company_resolve sid=%s tool=%s id_key=%s", sid or "-", name, id_key)
         return {**arguments, id_key: resolved}
     return arguments
 
@@ -647,6 +667,7 @@ def _check_staged_session(name: str, staged: _StagedContext) -> dict[str, object
         found: object | None = staged.store.get_session(sid)
     except KeyError:
         if not staged.sid_from_explicit:
+            logger.warning("toolflow deny sid=%s tool=%s gate=stage reason=unknown-session", sid, name)
             return {"error": f"Unknown research session '{sid}'", "error_type": "invalid_research_context"}
         return None
     if name not in DISCOVERY_TOOLS:
@@ -654,6 +675,7 @@ def _check_staged_session(name: str, staged: _StagedContext) -> dict[str, object
         try:
             check_stage_tool(stage, name)
         except ValueError as exc:
+            logger.warning("toolflow deny sid=%s tool=%s gate=stage reason=%.200s", sid, name, str(exc))
             return {"error": str(exc)}
     return None
 
@@ -663,15 +685,32 @@ def _check_permit_and_schema(
     arguments: dict[str, object],
     session: RuntimeToolSession,
     args_for_hash: str,
+    sid: str | None = None,
 ) -> dict[str, object] | None:
     """Gate 1 permit filter + Gate 2 schema validation and arg-bytes cap."""
     if name not in RESEARCH_TOOL_NAMES or not tool_is_permitted(name, LOCAL_CONTEXT):
         _record_security(session, name, args_for_hash, "action_blocked", f"tool not permitted: {name}")
+        logger.warning(
+            "toolflow deny sid=%s tool=%s gate=permit reason=not-permitted", sid or _toolflow_sid(session), name
+        )
         return {"error": f"Tool is not permitted: {name}"}
     invalid = _validate_tool_arguments(name, arguments)
     if invalid is not None:
+        logger.warning(
+            "toolflow deny sid=%s tool=%s gate=schema reason=invalid-args err=%.200s",
+            sid or _toolflow_sid(session),
+            name,
+            invalid,
+        )
         return _invalid_args_error(name, invalid)
-    if len(json.dumps(arguments)) > LOCAL_CONTEXT.tool_policy.max_arguments_bytes:
+    arg_bytes = len(json.dumps(arguments))
+    if arg_bytes > LOCAL_CONTEXT.tool_policy.max_arguments_bytes:
+        logger.warning(
+            "toolflow deny sid=%s tool=%s gate=schema reason=args-too-large bytes=%d",
+            sid or _toolflow_sid(session),
+            name,
+            arg_bytes,
+        )
         return {
             "error": (
                 "Tool arguments exceed the maximum size "
@@ -698,11 +737,15 @@ def _consume_dispatch_budget(
     if name not in DISPATCH_TOOLS or staged.store is None:
         return False, None
     if not isinstance(staged.job_id, str) or not staged.job_id:
+        logger.warning(
+            "toolflow deny sid=%s tool=%s gate=dispatch-budget reason=no-job", staged.session_id or "-", name
+        )
         return False, {
             "error": f"Active research job is required for tool '{name}'",
             "error_type": "invalid_research_context",
         }
     if not isinstance(staged.session_id, str) or not staged.session_id:
+        logger.warning("toolflow deny tool=%s gate=dispatch-budget reason=no-session", name)
         return False, {
             "error": f"Active research session is required for tool '{name}'",
             "error_type": "invalid_research_context",
@@ -714,8 +757,14 @@ def _consume_dispatch_budget(
             staged.session_id, staged.job_id, name, arguments=arguments, repo=staged.store
         )
     except ValueError as exc:
+        logger.warning(
+            "toolflow deny sid=%s tool=%s gate=dispatch-budget reason=%.200s", staged.session_id, name, str(exc)
+        )
         return False, _dispatch_value_error(exc)
     except KeyError as exc:
+        logger.warning(
+            "toolflow deny sid=%s tool=%s gate=dispatch-budget reason=%.200s", staged.session_id, name, str(exc)
+        )
         return False, {"error": str(exc), "error_type": "invalid_research_context"}
     return True, None
 
@@ -830,12 +879,16 @@ def _check_intent_and_egress(
     if not intent_allowed:
         if TOOL_DOMAINS.get(name) == "portfolio_read":
             _record_security(session, name, args_for_hash, "action_blocked", intent_reason)
+            logger.warning(
+                "toolflow deny sid=%s tool=%s gate=intent reason=portfolio-denied", _toolflow_sid(session), name
+            )
             return {
                 "error": "Portfolio access is not authorized for this session",
                 "error_type": "authorization_denied",
                 "soft": True,
             }
         _record_security(session, name, args_for_hash, "action_blocked", intent_reason)
+        logger.warning("toolflow deny sid=%s tool=%s gate=intent reason=intent-denied", _toolflow_sid(session), name)
         return {
             "error": "Tool call exceeds original user intent",
             "error_type": "intent_denied",
@@ -860,6 +913,7 @@ def _check_egress_or_private(
     hit = private_pattern_hit(args_for_hash)
     if hit:
         _record_security(session, name, args_for_hash, "action_blocked", hit)
+        logger.warning("toolflow deny sid=%s tool=%s gate=egress reason=private-args", _toolflow_sid(session), name)
         return {
             "error": "Tool arguments contain private data that must not be transmitted",
             "error_type": "private_args_denied",
@@ -879,6 +933,7 @@ def _check_search_egress(
     if decision.allowed:
         return None
     _record_security(session, name, args_for_hash, "egress_blocked", decision.reason)
+    logger.warning("toolflow deny sid=%s tool=%s gate=egress reason=egress-denied", _toolflow_sid(session), name)
     return {
         "error": "Egress blocked: private data must not leave Stockbot",
         "error_type": "egress_denied",
@@ -1339,7 +1394,8 @@ def _run_pre_gates(
         return staged_error
     # Gate 1: RESEARCH-only permit filter; unlisted tools are denied.
     # Gate 2: schema validation + 8KB arg-bytes cap.
-    permit_error = _check_permit_and_schema(name, arguments, session, args_for_hash)
+    pre_sid = staged.session_id or active_research_session_id or session.session_id
+    permit_error = _check_permit_and_schema(name, arguments, session, args_for_hash, pre_sid)
     if permit_error is not None:
         return permit_error
     # Gate 8 (reserve): attached staged data dispatches consume one persisted
@@ -1355,7 +1411,14 @@ def _run_pre_gates(
     # search_web draws from its dedicated pool, not the generic tool pool.
     # Session lock held only for the reserve; the handler below runs unlocked.
     if not _reserve_run_budget(name, session, dispatch_consumed):
-        return _run_budget_refusal(name, session)
+        refusal = _run_budget_refusal(name, session)
+        logger.warning(
+            "toolflow deny sid=%s tool=%s gate=run-budget reason=%s",
+            _toolflow_sid(session, staged),
+            name,
+            refusal.get("error_type"),
+        )
+        return refusal
     return staged, args_for_hash, dispatch_consumed
 
 
@@ -1372,6 +1435,14 @@ def _execute_agent_tool(
     active_research_session_id: str | None = None,
     active_research_job_id: str | None = None,
 ) -> dict[str, object]:
+    t0 = time.perf_counter()
+    logger.info("toolflow entry sid=%s tool=%s", active_research_session_id or session.session_id, name)
+    logger.debug(
+        "toolflow entry_args sid=%s tool=%s keys=%s bytes=%s",
+        active_research_session_id or session.session_id,
+        name,
+        *_toolflow_args_summary(arguments),
+    )
     # Generic dispatch: call_tool validates then tail-calls the inner tool once.
     # The outer wrapper consumes no budget slot and writes no recorder row.
     tail = _dispatch_inner_call(
@@ -1394,7 +1465,7 @@ def _execute_agent_tool(
     # identifier required (visible signal) while name-only dispatches
     # still execute; tools without company_name are untouched.
     if isinstance(arguments, dict):
-        arguments = _resolve_company_arguments(name, arguments)
+        arguments = _resolve_company_arguments(name, arguments, active_research_session_id or session.session_id)
     pre = _run_pre_gates(
         name,
         arguments,
@@ -1445,10 +1516,24 @@ def _execute_agent_tool(
     )
 
     failed_map = _failed_dict(result)
+    sid = staged.session_id or session.session_id
     if failed_map is not None:
         _failed, soft, _denied, _status2, failed_error_type, _msg2 = _failure_outcome(failed_map)
+        logger.warning(
+            "toolflow handler_error sid=%s tool=%s err_type=%s dur_ms=%.1f",
+            sid,
+            name,
+            failed_error_type,
+            (time.perf_counter() - t0) * 1000.0,
+        )
         return _failed_result_response(name, failed_map, failed_error_type, soft)
     if not isinstance(result, dict):
+        logger.warning(
+            "toolflow handler_error sid=%s tool=%s err_type=tool_error dur_ms=%.1f",
+            sid,
+            name,
+            (time.perf_counter() - t0) * 1000.0,
+        )
         return {
             "error": _unavailable_data_response([(name, {"error": "empty tool result"})]),
             "error_type": "tool_error",
@@ -1459,7 +1544,7 @@ def _execute_agent_tool(
     # results are withheld from the agent with a fixed placeholder.
     # Gate 7 (success path): DLP over what the agent receives, then record evidence.
     # Session lock covers guard_response + label/budget mutations only.
-    return _finalize_success(
+    out = _finalize_success(
         name,
         result,
         session,
@@ -1469,6 +1554,14 @@ def _execute_agent_tool(
         status=status,
         meta=meta,
     )
+    dur_ms = (time.perf_counter() - t0) * 1000.0
+    if isinstance(out, dict) and out.get("error"):
+        logger.warning(
+            "toolflow deny sid=%s tool=%s gate=%s dur_ms=%.1f", sid, name, out.get("error_type") or "ingress", dur_ms
+        )
+    else:
+        logger.info("toolflow success sid=%s tool=%s dur_ms=%.1f", sid, name, dur_ms)
+    return out
 
 
 # ponytail: alias shim, drop once callers use RuntimeToolSession directly.
