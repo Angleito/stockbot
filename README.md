@@ -17,6 +17,21 @@ Stockbot is a local-first AI investment research system designed to give individ
 
 Stockbot keeps raw source data and normalized analytical data separate, preserves when data became knowable, and favors deterministic calculations over model arithmetic. The LLM selects bounded tools and explains evidence; it is not the primary database or calculator.
 
+## Grounded hypothetical reasoning
+
+Hypotheticals ("what if X does terrible?") are model-invented assumptions, each declared with an `assumptionId` — never cited as evidence.
+Every impact number must cite exact evidence ids in `evidenceRefs` plus a `numbers[]` entry `{value, evidenceId, quote}`.
+Each `numbers[]` quote reproduces the source bytes verbatim; live traces prove the run reasoned on exact bytes, not summaries.
+The model never multiplies: it states the formula in words ("exposure times haircut, divided by 100").
+Code attaches `computed_impact` (`exposure_pct x haircut_pct / 100`) to each kept analysis via
+`attach_scenario_impact` in `app/research/grounding.py` (fail-open: unparseable pairs ride unchanged).
+Unknown refs and non-verbatim quotes fail closed: the validator raises `ValueError` and the caller drops the analysis, never accepts it.
+Live traces (`cli.py inspect`) show the exact GROUNDED bytes the run reasoned on.
+`reason_adjudication` DecisionRecords persist `evidence_refs` + `numbers` + `assumptions` + `computed_impact` in `selected`, so inspect links each interpretation back to its source rows.
+Example: "If the OpenAI IPO does terrible, how does NVDA move?"
+-> assumption `openai-ipo-terrible` (invented, labeled) carries the 30% haircut; it needs no evidence ref.
+NVDA's 12.5% OpenAI exposure is quoted verbatim from `ev-nvda-10k`; code computes `12.5 x 30% = 3.75`, the model does not.
+
 ## Requirements
 
 - Python 3.14
